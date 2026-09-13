@@ -155,6 +155,8 @@ targets:
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
+      - Mac/CaptureLifecycle.swift
+      - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
     settings:
       base:
