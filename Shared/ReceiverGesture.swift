@@ -8,9 +8,11 @@ enum ReceiverGesture: String, CaseIterable {
     case previousSpace
     case showDesktop
     case launchpad
+    case spotlight
 
     static let swipeMinimumDistance = 80.0
     static let swipeDominanceRatio = 1.5
+    static let threeFingerTapMaximumMovement = 12.0
     static let spreadMinimumChange = 36.0
     static let spreadMinimumRatio = 1.2
 
@@ -24,6 +26,14 @@ enum ReceiverGesture: String, CaseIterable {
             return translationX < 0 ? .nextSpace : .previousSpace
         }
         return nil
+    }
+
+    static func threeFingerTap(touchCount: Int, maximumMovement: Double) -> Self? {
+        guard touchCount == 3,
+              maximumMovement.isFinite,
+              maximumMovement >= 0,
+              maximumMovement <= threeFingerTapMaximumMovement else { return nil }
+        return .spotlight
     }
 
     static func spreadGesture(start: Double, current: Double) -> Self? {

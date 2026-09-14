@@ -643,6 +643,12 @@ struct VideoLayerView: UIViewRepresentable {
         view.threeFingerPanRecognizer = threeFingerPan
         view.addGestureRecognizer(threeFingerPan)
 
+        let threeFingerTap = ThreeFingerTapGestureRecognizer(
+            target: view, action: #selector(VideoView.didThreeFingerSystemTap(_:)))
+        threeFingerTap.delegate = view
+        view.threeFingerTapRecognizer = threeFingerTap
+        view.addGestureRecognizer(threeFingerTap)
+
         let pinchSpreadGesture = PinchSpreadSystemGestureRecognizer(
             target: view, action: #selector(VideoView.didPinchSpreadSystemGesture(_:)))
         pinchSpreadGesture.delegate = view
@@ -679,6 +685,7 @@ struct VideoLayerView: UIViewRepresentable {
         let inputEngine = InputCaptureEngine()
         fileprivate var twoFingerPanRecognizer: UIPanGestureRecognizer?
         fileprivate var threeFingerPanRecognizer: UIPanGestureRecognizer?
+        fileprivate var threeFingerTapRecognizer: ThreeFingerTapGestureRecognizer?
         fileprivate var pinchSpreadGestureRecognizer: PinchSpreadSystemGestureRecognizer?
 
         private let cursorLayer: CALayer = {
@@ -843,6 +850,14 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
+        @objc func didThreeFingerSystemTap(_ recognizer: ThreeFingerTapGestureRecognizer) {
+            guard recognizer.state == .recognized,
+                  let gesture = ReceiverGesture.threeFingerTap(
+                    touchCount: recognizer.recognizedTouchCount,
+                    maximumMovement: recognizer.maximumMovement) else { return }
+            takeGestureOwnershipAndSend(gesture)
+        }
+
         @objc func didPinchSpreadSystemGesture(_ recognizer: PinchSpreadSystemGestureRecognizer) {
             switch recognizer.state {
             case .began:
@@ -866,6 +881,9 @@ struct VideoLayerView: UIViewRepresentable {
             if gestureRecognizer === threeFingerPanRecognizer {
                 return gestureRecognizer.numberOfTouches == 3
             }
+            if gestureRecognizer === threeFingerTapRecognizer {
+                return threeFingerTapRecognizer?.recognizedTouchCount == 3
+            }
             if gestureRecognizer === pinchSpreadGestureRecognizer {
                 return (4...5).contains(gestureRecognizer.numberOfTouches)
             }
@@ -877,7 +895,9 @@ struct VideoLayerView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            if gestureRecognizer === threeFingerPanRecognizer || gestureRecognizer === pinchSpreadGestureRecognizer {
+            if gestureRecognizer === threeFingerPanRecognizer
+                || gestureRecognizer === threeFingerTapRecognizer
+                || gestureRecognizer === pinchSpreadGestureRecognizer {
                 return touch.type == .direct
             }
             return true
@@ -1065,6 +1085,82 @@ struct VideoLayerView: UIViewRepresentable {
         }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
             routeTouches("cancelled", touches, event, ended: true)
+        }
+    }
+}
+
+/// Recognizes a three-finger tap and fails as soon as any contact moves beyond
+/// the shared threshold, allowing the existing three-finger pan to take over.
+final class ThreeFingerTapGestureRecognizer: UIGestureRecognizer {
+    private var initialLocations: [ObjectIdentifier: CGPoint] = [:]
+    private var activeTouches = Set<ObjectIdentifier>()
+    private(set) var maximumMovement = 0.0
+    var recognizedTouchCount: Int { initialLocations.count }
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        cancelsTouchesInView = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard state == .possible,
+              touches.allSatisfy({ $0.type == .direct }),
+              let view else {
+            state = .failed
+            return
+        }
+        for touch in touches {
+            let identifier = ObjectIdentifier(touch)
+            initialLocations[identifier] = touch.location(in: view)
+            activeTouches.insert(identifier)
+        }
+        if initialLocations.count > 3 { state = .failed }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard state == .possible, let view else { return }
+        updateMovement(for: touches, in: view)
+        if maximumMovement > ReceiverGesture.threeFingerTapMaximumMovement {
+            state = .failed
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard state == .possible, let view else { return }
+        updateMovement(for: touches, in: view)
+        guard maximumMovement <= ReceiverGesture.threeFingerTapMaximumMovement else {
+            state = .failed
+            return
+        }
+        for touch in touches { activeTouches.remove(ObjectIdentifier(touch)) }
+        guard activeTouches.isEmpty else { return }
+        if ReceiverGesture.threeFingerTap(touchCount: initialLocations.count,
+                                          maximumMovement: maximumMovement) != nil {
+            state = .recognized
+        } else {
+            state = .failed
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        state = .cancelled
+    }
+
+    override func reset() {
+        super.reset()
+        initialLocations.removeAll()
+        activeTouches.removeAll()
+        maximumMovement = 0
+    }
+
+    private func updateMovement(for touches: Set<UITouch>, in view: UIView) {
+        for touch in touches {
+            guard let start = initialLocations[ObjectIdentifier(touch)] else { continue }
+            let current = touch.location(in: view)
+            let dx = Double(current.x - start.x)
+            let dy = Double(current.y - start.y)
+            maximumMovement = max(maximumMovement, (dx * dx + dy * dy).squareRoot())
         }
     }
 }

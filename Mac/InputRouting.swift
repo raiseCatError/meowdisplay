@@ -66,6 +66,9 @@ enum SystemGestureShortcutMapping {
                 return SystemGestureShortcut(keyCode: 0, flags: [.maskShift, .maskSecondaryFn])
             }
             return SystemGestureShortcut(keyCode: 118, flags: [])
+        case .spotlight:
+            // Command-Space opens Spotlight.
+            return SystemGestureShortcut(keyCode: 49, flags: .maskCommand)
         }
     }
 }

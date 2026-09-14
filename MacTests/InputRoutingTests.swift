@@ -13,6 +13,30 @@ final class InputRoutingTests: XCTestCase {
         XCTAssertNil(ReceiverGesture.swipe(translationX: 75, translationY: 70))
     }
 
+    func testThreeFingerTapRecognizesWithinMovementThreshold() {
+        XCTAssertEqual(ReceiverGesture.threeFingerTap(touchCount: 3, maximumMovement: 0), .spotlight)
+        XCTAssertEqual(ReceiverGesture.threeFingerTap(
+            touchCount: 3, maximumMovement: ReceiverGesture.threeFingerTapMaximumMovement), .spotlight)
+    }
+
+    func testThreeFingerTapRejectsMovementBeyondThreshold() {
+        XCTAssertNil(ReceiverGesture.threeFingerTap(
+            touchCount: 3, maximumMovement: ReceiverGesture.threeFingerTapMaximumMovement + 0.1))
+        XCTAssertNil(ReceiverGesture.threeFingerTap(touchCount: 3, maximumMovement: .infinity))
+    }
+
+    func testThreeFingerSwipeWinsWhenMovementExceedsTapThreshold() {
+        XCTAssertNil(ReceiverGesture.threeFingerTap(touchCount: 3, maximumMovement: 80))
+        XCTAssertEqual(ReceiverGesture.swipe(translationX: 0, translationY: -80), .missionControl)
+    }
+
+    func testThreeFingerTapDoesNotMatchFourOrFiveFingerGestures() {
+        XCTAssertNil(ReceiverGesture.threeFingerTap(touchCount: 4, maximumMovement: 0))
+        XCTAssertNil(ReceiverGesture.threeFingerTap(touchCount: 5, maximumMovement: 0))
+        XCTAssertEqual(classifySpread(touchCount: 4, from: 100, to: 140), .showDesktop)
+        XCTAssertEqual(classifySpread(touchCount: 5, from: 100, to: 140), .showDesktop)
+    }
+
     func testFourFingerSpreadAndPinchRequireMeaningfulChange() {
         XCTAssertNil(ReceiverGesture.spreadGesture(start: 100, current: 119))
         XCTAssertNil(ReceiverGesture.spreadGesture(start: 100, current: 130))
@@ -119,6 +143,8 @@ final class InputRoutingTests: XCTestCase {
             XCTAssertFalse(ReceiverGesture.shouldRoute(name: gesture.rawValue, inputAllowed: false))
         }
         XCTAssertFalse(ReceiverGesture.shouldRoute(name: "unknownGesture", inputAllowed: true))
+        XCTAssertTrue(ReceiverGesture.shouldRoute(name: ReceiverGesture.spotlight.rawValue, inputAllowed: true))
+        XCTAssertFalse(ReceiverGesture.shouldRoute(name: ReceiverGesture.spotlight.rawValue, inputAllowed: false))
     }
 
     func testGestureEmissionGateAllowsOnlyOneMessagePerGesture() {
@@ -158,6 +184,10 @@ final class InputRoutingTests: XCTestCase {
         XCTAssertEqual(legacyLaunchpad.keyCode, 118)
         XCTAssertEqual(legacyLaunchpad.flags, [])
         XCTAssertEqual(SystemGestureShortcutMapping.shortcut(for: .launchpad, macOSMajorVersion: 26).keyCode, 0)
+
+        let spotlight = SystemGestureShortcutMapping.shortcut(for: .spotlight)
+        XCTAssertEqual(spotlight.keyCode, 49)
+        XCTAssertEqual(spotlight.flags, .maskCommand)
     }
 
     func testNormalizedCoordinatesMapIntoBoundsWithNegativeOrigin() {
