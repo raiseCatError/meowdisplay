@@ -105,10 +105,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Fired when the receiver announces the app is quitting: deliberate,
     // so the controller ends the session without arming a reconnect.
     @MainActor var onPeerClosed: (() -> Void)?
-    // Fired once a TCP connection is live, with whether it runs over a
-    // wired path (Thunderbolt Bridge / Ethernet) rather than WiFi — the UI
-    // labels the row so the user can see the cable is actually in use.
-    @MainActor var onTransportPath: ((_ wired: Bool) -> Void)?
+    // Fired when an established connection's actual Network.framework path
+    // changes. Nil while disconnected; the UI never infers a route from the
+    // requested target.
+    @MainActor var onTransportPath: ((ConnectionRoute?) -> Void)?
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
@@ -930,6 +930,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.disconnectedSince = Date()
             self.connectionReady = false
             self.currentPathDirectLink = false   // the new transport re-classifies
+            Task { @MainActor in self.onTransportPath?(nil) }
             self.dialGeneration += 1   // a dial still in flight must not adopt
             self.connection?.cancel()
             self.connection = nil
@@ -992,6 +993,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             interfaceNames: path.availableInterfaces.map(\.name))
         currentPathDirectLink = wired
             && Self.endpointIsLinkLocal(path.remoteEndpoint ?? conn.endpoint)
+    }
+
+    private func reportRoute(for conn: NWConnection, path: NWPath) {
+        guard connection === conn, connectionReady else { return }
+        refreshDirectLinkClassification(for: conn)
+
+        let names = path.availableInterfaces.map(\.name)
+        let isUSBTransport: Bool
+        if case .usb = transport {
+            isUSBTransport = true
+        } else {
+            isUSBTransport = false
+        }
+        let route = ConnectionRoute.classify(
+            isUSB: isUSBTransport,
+            interfaceNames: names,
+            remoteEndpointDescription: String(describing: path.remoteEndpoint ?? conn.endpoint))
+        // AWDL is wireless even on systems where its NWPath does not report
+        // `.wifi`; keep the existing wired-upgrade probe eligible there.
+        currentPathUsesWiFi = path.usesInterfaceType(.wifi) || route == .awdl
+
+        Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
+            + " route=\(route.rawValue) direct=\(currentPathDirectLink)")
+        Task { @MainActor in self.onTransportPath?(route) }
     }
 
     /// True when the far end of a connection is a link-local address
@@ -1287,18 +1312,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   self.currentPathDirectLink else { return }
             self.linkDied("path no longer viable")
         }
+        conn.pathUpdateHandler = { [weak self] path in
+            guard let self, self.connection === conn else { return }
+            self.reportRoute(for: conn, path: path)
+        }
         receiveControl(on: conn)
-        refreshDirectLinkClassification(for: conn)
         if let path = conn.currentPath {
-            let wired = TransportSafety.isWiredDirectLinkPath(
-                usesWiFi: path.usesInterfaceType(.wifi),
-                usesLoopback: path.usesInterfaceType(.loopback),
-                usesCellular: path.usesInterfaceType(.cellular),
-                interfaceNames: path.availableInterfaces.map(\.name))
-            currentPathUsesWiFi = path.usesInterfaceType(.wifi)
-            let names = path.availableInterfaces.map(\.name).joined(separator: ",")
-            Log.info("connection path to \(endpointName): \(names) wired=\(wired) direct=\(currentPathDirectLink)")
-            Task { @MainActor in self.onTransportPath?(wired) }
+            reportRoute(for: conn, path: path)
         }
         // -forceUpgradeProbe YES: dev knob — loopback runs never look like
         // WiFi, so this is the only way to exercise probe+migrate on one Mac.
@@ -1307,7 +1327,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             stopUpgradeProbing()   // already off WiFi — nothing better to find
         }
-        Task { await self.status("Connected to \(self.endpointName)") }
+        Task { await self.status("Connected") }
     }
 
     // MARK: - Cable upgrade (PROTOCOL.md 6.4)
@@ -1509,6 +1529,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // pre-dial was tried and only ever hung until its timeout, adding 2s
         // to every connect. becomeReady reports which path won.
         let params = NWParameters(tls: nil, tcp: options)
+        params.includePeerToPeer = true
         let conn = NWConnection(to: endpoint, using: params)
         connection = conn
         // A dial to a withdrawn Bonjour service (receiver asleep or app
@@ -1634,6 +1655,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // an ordinary reconnecting session now. A stale direct-link flag here
         // would let the first dial hiccup end the session via linkDied.
         currentPathDirectLink = false
+        Task { @MainActor in self.onTransportPath?(nil) }
         dialGeneration += 1   // a USB dial still in flight must not adopt
         let generation = dialGeneration
         connection?.cancel()
@@ -1811,6 +1833,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         closeCursorChannel()
         let params = NWParameters.udp
+        params.includePeerToPeer = true
         params.serviceClass = .responsiveData
         let udp = NWConnection(host: host, port: udpPort, using: params)
         cursorConnection = udp

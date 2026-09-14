@@ -337,7 +337,7 @@ struct SettingsView: View {
                 Section("Status") {
                     LabeledContent("Listening", value: "Port 9000")
                     LabeledContent("Connection",
-                                   value: receiver.connected ? "Connected" : "Waiting for Mac")
+                                   value: receiver.connected ? receiver.status : "Waiting for Mac")
                     if receiver.videoSize != .zero {
                         LabeledContent("Stream",
                                        value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")

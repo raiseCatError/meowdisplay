@@ -37,7 +37,7 @@ struct PerfStats: Equatable {
     var encodeP50 = 0.0          // Mac-side capture→socket (encode + queue)
     var rttMs = 0.0              // control-channel round trip
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
-    var transport = "—"          // USB (loopback via usbmux) or WiFi
+    var transport = "—"          // USB, AWDL, or LAN from the live NWPath
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // UDP cursor datagrams missing or reordered (this window)
     var macDrops = 0             // enc + net drops (legacy total)
@@ -577,6 +577,7 @@ final class StreamReceiver: ObservableObject {
             tcp.noDelay = true
             let params = NWParameters(tls: nil, tcp: tcp)
             params.allowLocalEndpointReuse = true
+            params.includePeerToPeer = true
             params.serviceClass = .interactiveVideo
             newListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
@@ -596,11 +597,6 @@ final class StreamReceiver: ObservableObject {
                 return
             }
             Log.info("new connection from \(String(describing: conn.endpoint))")
-            // usbmux-forwarded (cable) connections arrive from loopback;
-            // anything else came over the network.
-            let peer = String(describing: conn.endpoint)
-            self.transport = (peer.hasPrefix("127.0.0.1") || peer.hasPrefix("::1")
-                              || peer.hasPrefix("localhost")) ? "USB" : "WiFi"
             // A Bonjour dial races IPv6 and IPv4 and both handshakes can
             // complete; the sender cancels its loser within milliseconds.
             // Adopting every newcomer at once evicted the winner for a
@@ -696,8 +692,18 @@ final class StreamReceiver: ObservableObject {
         let onReady: () -> Void = { [weak self] in
             guard let self else { return }
             self.lastDataReceived = Date()
+            if let path = conn.currentPath {
+                self.updateTransport(for: conn, path: path)
+            }
             self.setConnected(true)
             if !greeted { self.sendHello(on: conn) }
+        }
+        conn.pathUpdateHandler = { [weak self] path in
+            guard let self, conn === self.connection else { return }
+            self.updateTransport(for: conn, path: path)
+            if conn.state == .ready {
+                self.setStatus("Connected · \(self.transport)")
+            }
         }
         conn.stateUpdateHandler = { [weak self] state in
             guard let self, conn === self.connection else { return }   // replaced: stay quiet
@@ -718,6 +724,19 @@ final class StreamReceiver: ObservableObject {
             drainFrames()
         }
         receive(on: conn)
+    }
+
+    private func updateTransport(for conn: NWConnection, path: NWPath) {
+        let peer = String(describing: path.remoteEndpoint ?? conn.endpoint)
+        let isLoopbackPeer = peer.hasPrefix("127.0.0.1") || peer.hasPrefix("::1")
+            || peer.hasPrefix("localhost") || peer.hasPrefix("[::1]")
+        let route = ConnectionRoute.classify(
+            isUSB: path.usesInterfaceType(.loopback) || isLoopbackPeer,
+            interfaceNames: path.availableInterfaces.map(\.name),
+            remoteEndpointDescription: peer)
+        transport = route.rawValue
+        let names = path.availableInterfaces.map(\.name).joined(separator: ",")
+        Log.info("connection path from \(peer): \(names) route=\(route.rawValue)")
     }
 
     private static func isFailed(_ state: NWConnection.State) -> Bool {
@@ -1428,9 +1447,12 @@ final class StreamReceiver: ObservableObject {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
             }
         }
-        if !value { setStatus("Listening on :9000") }
+        if !value {
+            transport = "—"
+            setStatus("Listening on :9000")
+        }
         else {
-            setStatus("Connected")
+            setStatus("Connected · \(transport)")
             // Remember the first ever successful connection to a Mac so the
             // first-run onboarding hint never reappears (issue #49).
             if !UserDefaults.standard.bool(forKey: "hasConnectedBefore") {

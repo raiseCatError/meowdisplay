@@ -56,6 +56,9 @@ final class TransportSafetyTests: XCTestCase {
         XCTAssertFalse(TransportSafety.isWiredDirectLinkPath(
             usesWiFi: false, usesLoopback: false, usesCellular: false,
             interfaceNames: ["awdl0"]))
+        XCTAssertFalse(TransportSafety.isWiredDirectLinkPath(
+            usesWiFi: false, usesLoopback: false, usesCellular: false,
+            interfaceNames: ["llw0"]))
         // A path reporting several interfaces is excluded if any of them
         // is AWDL.
         XCTAssertFalse(TransportSafety.isWiredDirectLinkPath(

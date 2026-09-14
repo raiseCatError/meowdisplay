@@ -20,13 +20,13 @@ enum TransportSafety {
     /// wired/cable direct link.
     ///
     /// The historical check was "not WiFi, not loopback, not cellular" —
-    /// wired by exclusion. AWDL interfaces (`awdl0`) do not report as
+    /// wired by exclusion. Peer-to-peer interfaces (`awdl*`/`llw*`) do not report as
     /// `NWInterface.InterfaceType.wifi` on macOS, so that exclusion alone
     /// would fold a future AWDL-carried path into "cable" classification and
     /// its unplug-ends-session semantics (see `MacSender.linkDied`), which is
     /// wrong for a radio hop. There is no public `NWInterface.InterfaceType`
     /// case for AWDL, so it is excluded by interface name instead — the same
-    /// `awdl*` prefix test already used in
+    /// peer-to-peer prefix test used for route reporting and by
     /// `MacSender.candidateInterfaceNames` and
     /// `StreamReceiver.reachableAddresses`.
     static func isWiredDirectLinkPath(
@@ -36,6 +36,6 @@ enum TransportSafety {
         interfaceNames: [String]
     ) -> Bool {
         guard !usesWiFi, !usesLoopback, !usesCellular else { return false }
-        return !interfaceNames.contains { $0.hasPrefix("awdl") }
+        return !interfaceNames.contains { ConnectionRoute.isPeerToPeerInterface($0) }
     }
 }

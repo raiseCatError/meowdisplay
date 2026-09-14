@@ -147,11 +147,14 @@ final class DeviceSession: ObservableObject, Identifiable {
     // and its service row.
     var wifiServiceName: String?
 
-    // The live TCP path runs over a cable (Thunderbolt Bridge / Ethernet)
-    // rather than WiFi — reported by the sender once connected.
-    @Published var wired = false
+    // The actual established route, reported from NWConnection.currentPath.
+    // Nil while dialing so the UI never presents a requested target as the
+    // route that Network.framework actually selected.
+    @Published var route: ConnectionRoute?
 
-    var transportLabel: String { onUSB ? "USB" : wired ? "Cable" : "WiFi" }
+    var statusWithRoute: String {
+        route.map { "\(status) · \($0.rawValue)" } ?? status
+    }
 
     init(id: String, target: ConnectionTarget, name: String, sender: MacSender) {
         self.id = id
@@ -264,7 +267,10 @@ final class SenderController: ObservableObject {
 
     private func startBrowsing() {
         // TXT records carry the receiver's install id (new receivers).
-        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_opensidecar._tcp", domain: nil), using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_opensidecar._tcp", domain: nil),
+                                using: parameters)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -650,8 +656,8 @@ final class SenderController: ObservableObject {
             Log.info("display identity for \(session.id) moved to offset \(totalOffset) — "
                 + "macOS saved hostile state for the old one")
         }
-        sender.onTransportPath = { [weak session] wired in
-            session?.wired = wired
+        sender.onTransportPath = { [weak session] route in
+            session?.route = route
         }
         sender.onPeerClosed = { [weak self, weak session] in
             // The receiver app quit — a deliberate goodbye, so no reconnect
@@ -1091,7 +1097,7 @@ struct SessionRow: View {
                 .frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                Text("\(session.transportLabel) · \(session.status)")
+                Text(session.statusWithRoute)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
