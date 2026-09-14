@@ -81,6 +81,7 @@ final class StreamReceiver: ObservableObject {
 
     private var listener: NWListener?
     private var listenerHealthy = false
+    private var listenerRestartState = StreamListenerRestartState()
     private var connection: NWConnection?
     // Cursor side channel: UDP on port+1. Cursor positions ride TCP behind
     // multi-hundred-KB video frames, so over WiFi one late frame stalls the
@@ -338,6 +339,10 @@ final class StreamReceiver: ObservableObject {
     func ensureListening() {
         queue.async {
             guard !self.listenerHealthy else { return }
+            guard !self.listenerRestartState.shouldDeferEnsureListening else {
+                Log.info("listener start/restart already in flight — letting it finish")
+                return
+            }
             Log.info("listener not healthy — restarting")
             self.restartListener()
         }
@@ -394,9 +399,12 @@ final class StreamReceiver: ObservableObject {
                 finished = true
                 self.connection?.cancel()
                 self.connection = nil
+                self.listener?.stateUpdateHandler = nil
+                self.listener?.newConnectionHandler = nil
                 self.listener?.cancel()
                 self.listener = nil
                 self.listenerHealthy = false
+                self.listenerRestartState.invalidate()
                 self.stopCursorListener()
                 self.setConnected(false)
                 self.setStatus(status)
@@ -421,11 +429,34 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    private func restartListener() {
-        listener?.cancel()
-        listener = nil
+    /// Re-arm the listener after cancellation has had time to release its
+    /// fixed port. Duplicate requests collapse into the already-pending bind.
+    private func restartListener(after delay: TimeInterval = 0) {
+        guard let restart = listenerRestartState.scheduleRestart(after: delay) else { return }
+        prepareListenerForRestart(restart)
+    }
+
+    private func scheduleListenerRetry() {
+        guard let restart = listenerRestartState.scheduleRetry() else { return }
+        Log.info("re-arming listener in \(restart.delay)s")
+        prepareListenerForRestart(restart)
+    }
+
+    private func prepareListenerForRestart(
+        _ restart: StreamListenerRestartState.ScheduledRestart
+    ) {
         listenerHealthy = false
-        startListener()
+        if let old = listener {
+            old.stateUpdateHandler = nil
+            old.newConnectionHandler = nil
+            old.cancel()
+        }
+        listener = nil
+        stopCursorListener()
+        queue.asyncAfter(deadline: .now() + restart.delay) { [weak self] in
+            guard let self, self.listenerRestartState.consume(restart) else { return }
+            self.startListener()
+        }
     }
 
     /// The UDP cursor listener follows the TCP listener's lifecycle: created
@@ -536,6 +567,8 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func startListener() {
+        guard listener == nil, listenerRestartState.beginStarting() else { return }
+        let newListener: NWListener
         do {
             // noDelay matters most in THIS direction: touch events are tiny
             // packets, and Nagle would hold each one until the previous is
@@ -545,16 +578,23 @@ final class StreamReceiver: ObservableObject {
             let params = NWParameters(tls: nil, tcp: tcp)
             params.allowLocalEndpointReuse = true
             params.serviceClass = .interactiveVideo
-            listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+            newListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
-            setStatus("Listener failed: \(error.localizedDescription)")
+            listenerRestartState.listenerStopped()
+            Log.info("listener could not be created: \(error)")
+            setStatus("Listener failed — restarting…")
+            scheduleListenerRetry()
             return
         }
+        listener = newListener
         // Advertise on the local network so the Mac can discover us for WiFi
         // mode (USB/usbmux connects straight to the port and ignores this).
-        listener?.service = advertisedService
-        listener?.newConnectionHandler = { [weak self] conn in
-            guard let self else { return }
+        newListener.service = advertisedService
+        newListener.newConnectionHandler = { [weak self] conn in
+            guard let self, self.listener === newListener else {
+                conn.cancel()
+                return
+            }
             Log.info("new connection from \(String(describing: conn.endpoint))")
             // usbmux-forwarded (cable) connections arrive from loopback;
             // anything else came over the network.
@@ -604,23 +644,30 @@ final class StreamReceiver: ObservableObject {
                 self.adopt(conn)
             }
         }
-        listener?.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+        newListener.stateUpdateHandler = { [weak self] state in
+            guard let self, self.listener === newListener else { return }
             switch state {
             case .ready:
+                self.listenerRestartState.listenerReady()
                 self.listenerHealthy = true
                 self.setStatus("Listening on :\(self.port)")
+            case .waiting(let error):
+                // Network.framework owns transient waiting states and may
+                // recover without releasing/rebinding the fixed port.
+                Log.info("listener waiting: \(error)")
             case .failed(let error):
-                Log.info("listener failed: \(error) — restarting in 1s")
+                Log.info("listener failed: \(error)")
+                self.listenerRestartState.listenerStopped()
                 self.listenerHealthy = false
                 self.setStatus("Listener failed — restarting…")
-                self.queue.asyncAfter(deadline: .now() + 1) { self.restartListener() }
+                self.scheduleListenerRetry()
             case .cancelled:
+                self.listenerRestartState.listenerStopped()
                 self.listenerHealthy = false
             default: break
             }
         }
-        listener?.start(queue: queue)
+        newListener.start(queue: queue)
         startCursorListener()
     }
 

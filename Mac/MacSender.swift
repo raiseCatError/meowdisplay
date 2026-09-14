@@ -1290,8 +1290,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         receiveControl(on: conn)
         refreshDirectLinkClassification(for: conn)
         if let path = conn.currentPath {
-            let wired = !path.usesInterfaceType(.wifi) && !path.usesInterfaceType(.loopback)
-                && !path.usesInterfaceType(.cellular)
+            let wired = TransportSafety.isWiredDirectLinkPath(
+                usesWiFi: path.usesInterfaceType(.wifi),
+                usesLoopback: path.usesInterfaceType(.loopback),
+                usesCellular: path.usesInterfaceType(.cellular),
+                interfaceNames: path.availableInterfaces.map(\.name))
             currentPathUsesWiFi = path.usesInterfaceType(.wifi)
             let names = path.availableInterfaces.map(\.name).joined(separator: ",")
             Log.info("connection path to \(endpointName): \(names) wired=\(wired) direct=\(currentPathDirectLink)")

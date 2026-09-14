@@ -269,6 +269,7 @@ final class SenderController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.discovered = Array(results)
+                self.failoverPendingSessions()
                 self.endSessionsWhoseServiceVanished()
                 self.autoConnect()
             }
@@ -400,6 +401,21 @@ final class SenderController: ObservableObject {
         }
     }
 
+    /// Re-evaluate a USB session still retrying inside its disconnect grace
+    /// when the equivalent WiFi Bonjour service appears after the detach.
+    private func failoverPendingSessions() {
+        guard autoConnectEnabled else { return }
+        let attachedUDIDs = Set(usbDevices.map(\.udid))
+        for session in sessions where session.onUSB {
+            guard let udid = session.usbUDID, !attachedUDIDs.contains(udid),
+                  let result = wifiService(for: session) else { continue }
+            Log.info("WiFi appeared for detached USB session \(session.id) — failing over")
+            session.onUSB = false
+            session.wifiServiceName = serviceName(of: result)
+            session.sender.switchTransport(to: .tcp(result.endpoint))
+        }
+    }
+
     /// A quit receiver app loses its Bonjour advertisement within ~1s, far
     /// faster than WiFi dial timeouts can notice (dials to a withdrawn
     /// service stall rather than getting refused). Report the withdrawal to
@@ -448,12 +464,28 @@ final class SenderController: ObservableObject {
         })
         for s in sessions {
             guard case .wifi(let result) = s.target else { continue }
-            let duplicate = (s.deviceID.map { usbSessionIDs.contains($0) } ?? false)
-                || (txtID(of: result).map { usbSessionIDs.contains($0) } ?? false)
-                || (serviceName(of: result).map { cabledNames.contains($0) } ?? false)
-            if duplicate {
-                Log.info("two sessions for one device — keeping the cable, dropping \(s.id)")
-                end(s)
+            let matchingUSB = usbDevices.first { device in
+                sameDevice(result, device) && !usbDisabled.contains("usb:\(device.udid)")
+            }
+            if let matchingUSB, !s.onUSB, !s.failed {
+                // A USB session may already have been created before its
+                // hello supplied the strong install-ID match. It is the
+                // disposable twin; preserve the older WiFi session and its
+                // capture, then move that session onto the cable.
+                if let usbTwin = session(for: "usb:\(matchingUSB.udid)"), usbTwin !== s {
+                    Log.info("ending newly matched USB twin \(usbTwin.id) before migration")
+                    end(usbTwin)
+                }
+                Log.info("cable attached for \(s.id) — preserving session while migrating to USB")
+                upgradeToUSB(s, device: matchingUSB)
+            } else {
+                let duplicate = (s.deviceID.map { usbSessionIDs.contains($0) } ?? false)
+                    || (txtID(of: result).map { usbSessionIDs.contains($0) } ?? false)
+                    || (serviceName(of: result).map { cabledNames.contains($0) } ?? false)
+                if duplicate {
+                    Log.info("two sessions for one device — keeping the cable, dropping \(s.id)")
+                    end(s)
+                }
             }
         }
     }
