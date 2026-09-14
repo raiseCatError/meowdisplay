@@ -157,6 +157,7 @@ targets:
       - Mac/LogPolicies.swift
       - Mac/CaptureLifecycle.swift
       - Mac/TransportSafety.swift
+      - Mac/AutoConnectPolicy.swift
       - Shared/ConnectionRoute.swift
       - Shared/StreamListenerRestartState.swift
       - Shared/DisplayState.swift

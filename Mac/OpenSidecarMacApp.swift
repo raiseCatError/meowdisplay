@@ -115,6 +115,8 @@ enum ConnectionTarget: Hashable {
 @MainActor
 final class DeviceSession: ObservableObject, Identifiable {
     nonisolated let id: String
+    let logicalID: String
+    let attempt: AutoConnectPolicy.Attempt
     let target: ConnectionTarget
     let name: String
     let sender: MacSender
@@ -156,8 +158,11 @@ final class DeviceSession: ObservableObject, Identifiable {
         route.map { "\(status) · \($0.rawValue)" } ?? status
     }
 
-    init(id: String, target: ConnectionTarget, name: String, sender: MacSender) {
+    init(id: String, logicalID: String, attempt: AutoConnectPolicy.Attempt,
+         target: ConnectionTarget, name: String, sender: MacSender) {
         self.id = id
+        self.logicalID = logicalID
+        self.attempt = attempt
         self.target = target
         self.name = name
         self.sender = sender
@@ -212,8 +217,8 @@ final class SenderController: ObservableObject {
     // Connection policy — one session per physical device, and the cable
     // wins whenever it's available (lower, steadier latency than WiFi):
     //
-    //  - USB devices connect on attach ("plug in and go") unless the user
-    //    explicitly disconnected them once (usbDisabled).
+    //  - Known devices connect whenever they become available. New devices
+    //    wait for an explicit Connect, which records trust for next time.
     //  - Plugging the cable in while the device streams over WiFi migrates
     //    the live session onto USB; unplugging it fails over to WiFi when
     //    the device's service is visible — otherwise the session ends after
@@ -221,15 +226,18 @@ final class SenderController: ObservableObject {
     //    the virtual display survives, so no screen flash, no window
     //    reshuffle — the earlier no-switching policy existed because
     //    migration used to mean destroying and recreating the session.
-    //  - WiFi devices the user connected before (wifiRemembered) reconnect
-    //    in a short window at LAUNCH only — never mid-session.
     // `-autostart NO` disables all auto-connecting, including migrations.
-    private var usbDisabled = Set(UserDefaults.standard.stringArray(forKey: "usbDisabled") ?? []) {
-        didSet { UserDefaults.standard.set(Array(usbDisabled), forKey: "usbDisabled") }
-    }
-    private var wifiRemembered = Set(UserDefaults.standard.stringArray(forKey: "wifiRemembered") ?? []) {
-        didSet { UserDefaults.standard.set(Array(wifiRemembered), forKey: "wifiRemembered") }
-    }
+    private var autoConnectPolicy = AutoConnectPolicy(knownIdentifiers: {
+        let defaults = UserDefaults.standard
+        let current = Set(defaults.stringArray(forKey: "knownReceiverIdentifiers") ?? [])
+        // Migrate the old WiFi-only preference without changing its contents.
+        let legacyWiFi = Set(defaults.stringArray(forKey: "wifiRemembered") ?? [])
+        let learnedInstallIDs = Set(
+            (defaults.dictionary(forKey: "installIDByUDID") as? [String: String] ?? [:])
+                .values.map { "install:\($0)" })
+        return current.union(legacyWiFi).union(learnedInstallIDs)
+    }())
+    private var autoConnectWorkItem: DispatchWorkItem?
     // Install id learned from each USB device's hello, persisted, so the
     // same hardware is recognized across transports even when the user
     // renamed the advertised service. @Published so the device list regroups
@@ -241,27 +249,15 @@ final class SenderController: ObservableObject {
     private let autoConnectEnabled = UserDefaults.standard.object(forKey: "autostart") == nil
         || UserDefaults.standard.bool(forKey: "autostart")
 
-    // Bonjour usually reports devices before usbmuxd does — WiFi reconnects
-    // wait out this window so a cabled device is dialed over USB first. The
-    // deadline closes the window for good: a remembered WiFi device that
-    // appears later was brought near the Mac mid-session, which is a user
-    // action to confirm, not auto-grab.
-    private var wifiAutoConnectArmed = false
-    private let wifiAutoConnectDeadline = Date().addingTimeInterval(12)
-
     init() {
+        persistKnownIdentifiers()
         startBrowsing()
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
             let detached = Set(self.usbDevices.map(\.udid)).subtracting(devices.map(\.udid))
             self.usbDevices = devices
             self.failover(detachedUDIDs: detached)
-            self.autoConnect()
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            self.wifiAutoConnectArmed = true
-            self.autoConnect()
+            self.scheduleAutoConnect()
         }
     }
 
@@ -277,7 +273,7 @@ final class SenderController: ObservableObject {
                 self.discovered = Array(results)
                 self.failoverPendingSessions()
                 self.endSessionsWhoseServiceVanished()
-                self.autoConnect()
+                self.scheduleAutoConnect()
             }
         }
         browser.start(queue: .main)
@@ -341,41 +337,108 @@ final class SenderController: ObservableObject {
 
     // MARK: - Connection policy
 
-    private func autoConnect() {
-        guard autoConnectEnabled else { return }
-        dedupeSessions()
-        // The -host/-port escape hatch is an explicit choice — dial it like
-        // the wired devices (it joins them, not replaces them).
-        if UserDefaults.standard.object(forKey: "host") != nil,
-           !usbDisabled.contains("usb:first"), session(for: "usb:first") == nil {
-            connect(to: .usb(udid: nil))
+    private func persistKnownIdentifiers() {
+        UserDefaults.standard.set(Array(autoConnectPolicy.knownIdentifiers),
+                                  forKey: "knownReceiverIdentifiers")
+    }
+
+    private struct AutoConnectCandidate {
+        let target: ConnectionTarget
+        let logicalID: String
+        let identifiers: Set<String>
+        let priority: Int
+    }
+
+    private func logicalID(for target: ConnectionTarget) -> String {
+        switch target {
+        case .usb(let udid?):
+            if let installID = installIDByUDID[udid] { return "install:\(installID)" }
+        case .wifi(let result):
+            if let installID = txtID(of: result) { return "install:\(installID)" }
+        default:
+            break
         }
-        for device in usbDevices {
-            if let covering = activeSession(coveringUSB: device) {
-                // usbDisabled gates auto-connecting a device, not the
-                // transport of a session the user deliberately has running —
-                // however it was started, the cable is better: take it.
-                upgradeToUSB(covering, device: device)
-            } else if !usbDisabled.contains("usb:\(device.udid)") {
-                connect(to: .usb(udid: device.udid))
-            }
+        return target.sessionID
+    }
+
+    private func identifiers(for target: ConnectionTarget) -> Set<String> {
+        [logicalID(for: target), target.sessionID]
+    }
+
+    private func identifiers(for session: DeviceSession) -> Set<String> {
+        var identifiers: Set<String> = [session.logicalID, session.target.sessionID]
+        if let id = session.deviceID { identifiers.insert("install:\(id)") }
+        if let udid = session.usbUDID { identifiers.insert("usb:\(udid)") }
+        if let name = session.wifiServiceName { identifiers.insert("wifi:\(name)") }
+        return identifiers
+    }
+
+    private var autoConnectCandidates: [AutoConnectCandidate] {
+        var candidates = usbDevices.map { device in
+            let target = ConnectionTarget.usb(udid: device.udid)
+            return AutoConnectCandidate(target: target, logicalID: logicalID(for: target),
+                                        identifiers: identifiers(for: target), priority: 0)
         }
-        guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline else { return }
-        for result in discovered {
+        candidates += discovered.map { result in
             let target = ConnectionTarget.wifi(result)
-            if wifiRemembered.contains(target.sessionID),
-               activeSession(coveringWiFi: result) == nil,
-               !cabled(result) {
-                connect(to: target)
-            }
+            return AutoConnectCandidate(target: target, logicalID: logicalID(for: target),
+                                        identifiers: identifiers(for: target), priority: 1)
+        }
+        return candidates.sorted {
+            ($0.priority, $0.target.sessionID) < ($1.priority, $1.target.sessionID)
         }
     }
 
-    /// An attached, auto-connectable USB device is (about to be) dialed over
-    /// the cable — its WiFi service must not be grabbed in the launch race.
-    private func cabled(_ result: NWBrowser.Result) -> Bool {
-        usbDevices.contains {
-            sameDevice(result, $0) && !usbDisabled.contains("usb:\($0.udid)")
+    /// Discovery is noisy. Coalescing it for half a second both prefers an
+    /// arriving USB route and makes disappearance/reappearance suppression
+    /// clearing correspond to a genuine availability cycle rather than an
+    /// mDNS flicker.
+    private func scheduleAutoConnect() {
+        autoConnectWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.autoConnect() }
+        autoConnectWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func autoConnect() {
+        guard autoConnectEnabled else { return }
+        dedupeSessions()
+        let candidates = autoConnectCandidates
+        autoConnectPolicy.updateAvailableIdentifiers(
+            candidates.reduce(into: Set<String>()) { $0.formUnion($1.identifiers) })
+        // The -host/-port escape hatch is an explicit choice — dial it like
+        // the wired devices (it joins them, not replaces them).
+        if UserDefaults.standard.object(forKey: "host") != nil,
+           session(for: "usb:first") == nil {
+            connect(to: .usb(udid: nil))
+        }
+        var consideredLogicalIDs = Set<String>()
+        for candidate in candidates where consideredLogicalIDs.insert(candidate.logicalID).inserted {
+            let covering: DeviceSession?
+            switch candidate.target {
+            case .usb(let udid?):
+                covering = usbDevices.first(where: { $0.udid == udid })
+                    .flatMap { activeSession(coveringUSB: $0) }
+            case .wifi(let result):
+                covering = activeSession(coveringWiFi: result)
+            default:
+                covering = nil
+            }
+            if let covering, case .usb(let udid?) = candidate.target,
+               let device = usbDevices.first(where: { $0.udid == udid }) {
+                // Trust gates creating a session, not improving a session the
+                // user deliberately has running. The cable is better: take it.
+                upgradeToUSB(covering, device: device)
+                continue
+            }
+            let hasOwner = covering != nil || sessions.contains {
+                !$0.failed && !identifiers(for: $0).isDisjoint(with: candidate.identifiers)
+            }
+            guard let attempt = autoConnectPolicy.beginAutomaticAttempt(
+                logicalID: candidate.logicalID, identifiers: candidate.identifiers,
+                hasSessionOwner: hasOwner) else { continue }
+            startSession(to: candidate.target, logicalID: candidate.logicalID,
+                         attempt: attempt)
         }
     }
 
@@ -470,9 +533,7 @@ final class SenderController: ObservableObject {
         })
         for s in sessions {
             guard case .wifi(let result) = s.target else { continue }
-            let matchingUSB = usbDevices.first { device in
-                sameDevice(result, device) && !usbDisabled.contains("usb:\(device.udid)")
-            }
+            let matchingUSB = usbDevices.first { sameDevice(result, $0) }
             if let matchingUSB, !s.onUSB, !s.failed {
                 // A USB session may already have been created before its
                 // hello supplied the strong install-ID match. It is the
@@ -534,11 +595,33 @@ final class SenderController: ObservableObject {
 
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
                  awaitingWake: Bool = false) {
+        if let existing = session(for: target.sessionID), !existing.failed { return }
+        let logicalID = logicalID(for: target)
+        let targetIdentifiers = identifiers(for: target)
+        let attempt: AutoConnectPolicy.Attempt
+        if userInitiated {
+            attempt = autoConnectPolicy.beginExplicitAttempt(
+                logicalID: logicalID, identifiers: targetIdentifiers)
+            persistKnownIdentifiers()
+        } else {
+            attempt = autoConnectPolicy.beginContinuationAttempt(logicalID: logicalID)
+        }
+        startSession(to: target, logicalID: logicalID, attempt: attempt,
+                     userInitiated: userInitiated, awaitingWake: awaitingWake)
+    }
+
+    private func startSession(to target: ConnectionTarget, logicalID: String,
+                              attempt: AutoConnectPolicy.Attempt,
+                              userInitiated: Bool = false,
+                              awaitingWake: Bool = false) {
         let id = target.sessionID
         if let existing = session(for: id) {
             // A failed session holds no pipeline — replace the corpse
             // instead of letting it swallow the fresh attempt.
-            guard existing.failed else { return }
+            guard existing.failed else {
+                autoConnectPolicy.finish(attempt)
+                return
+            }
             end(existing)
         }
 
@@ -558,21 +641,21 @@ final class SenderController: ObservableObject {
             covering = nil
         }
         if let covering {
-            guard userInitiated else { return }
+            guard userInitiated else {
+                autoConnectPolicy.finish(attempt)
+                return
+            }
             Log.info("user chose \(id) — taking over from \(covering.id)")
             end(covering)
-        }
-
-        // Connecting a device clears its "don't auto-connect" state.
-        switch target {
-        case .usb: usbDisabled.remove(id)
-        case .wifi: wifiRemembered.insert(id)
         }
 
         let transport: SenderTransport
         switch target {
         case .usb(let udid):
-            guard let portNum = UInt16(port) else { return }
+            guard let portNum = UInt16(port) else {
+                autoConnectPolicy.finish(attempt)
+                return
+            }
             if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
                 // Manual override: dial a plain TCP endpoint instead of usbmuxd.
                 transport = .tcp(.hostPort(host: NWEndpoint.Host(host),
@@ -589,7 +672,8 @@ final class SenderController: ObservableObject {
                                quality: quality, displaySerial: Self.displaySerial(for: id),
                                identityOffset: identityOffset(for: id),
                                awaitingWake: awaitingWake)
-        let session = DeviceSession(id: id, target: target, name: name, sender: sender)
+        let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
+                                    target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
             session.wifiServiceName = serviceName(of: result)
         }
@@ -604,28 +688,33 @@ final class SenderController: ObservableObject {
             session?.capturePhase = phase
         }
         sender.onHello = { [weak self, weak session] info in
-            guard let self, let session else { return }
+            guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            if let installID = info.id {
+                self.autoConnectPolicy.remember(["install:\(installID)"])
+                self.persistKnownIdentifiers()
+            }
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
             }
             self.dedupeSessions()
             // The learned identity may reveal that this WiFi session's device
             // is cabled — take the upgrade opportunity right away.
-            self.autoConnect()
+            self.scheduleAutoConnect()
         }
         sender.onStats = { [weak session] frames, mbps in
             session?.framesSent = frames
             session?.mbps = mbps
         }
         sender.onDisconnected = { [weak self, weak session] in
-            // Device unplugged / left the network and stayed gone: end this
-            // session fully (virtual display + capture + indicator). No
-            // transport fallback — reconnecting is the user's call.
-            guard let self, let session else { return }
+            // MacSender already exhausted its in-place reconnect grace. End
+            // the pipeline, then let current discovery start a fresh known-
+            // device attempt without waiting for another browse callback.
+            guard let self, let session, self.owns(session) else { return }
             Log.info("device disconnected — session \(session.id) stopped")
             self.end(session)
+            self.scheduleAutoConnect()
         }
         sender.onPeerSleeping = { [weak self, weak session] in
             // The device locked. Unlike a plain disconnect this is a
@@ -633,7 +722,7 @@ final class SenderController: ObservableObject {
             // the session (which frees the cursor from the now-invisible
             // display) is paired with a replacement session that dials
             // patiently until the device wakes and accepts again.
-            guard let self, let session else { return }
+            guard let self, let session, self.owns(session) else { return }
             let target = session.target
             Log.info("session \(session.id) asleep — display down, waiting for wake")
             self.end(session)
@@ -643,15 +732,15 @@ final class SenderController: ObservableObject {
             // The user stopped the capture in the system UI — same intent as
             // the in-app Disconnect, so it also opts the device out of
             // auto-connect (or the next browse event would resurrect it).
-            guard let self, let session else { return }
+            guard let self, let session, self.owns(session) else { return }
             Log.info("session \(session.id) capture stopped via the system UI — honoring as disconnect")
             self.disconnect(session)
         }
-        sender.onDisplayIdentityBumped = { [weak session] totalOffset in
+        sender.onDisplayIdentityBumped = { [weak self, weak session] totalOffset in
             // The sender reports the validated absolute offset — store it
             // as-is. Adding would double-count when a rotation rebuild
             // re-discovers the same poisoned identity within one session.
-            guard let session else { return }
+            guard let self, let session, self.owns(session) else { return }
             UserDefaults.standard.set(Int(totalOffset), forKey: Self.identityOffsetKey(for: session.id))
             Log.info("display identity for \(session.id) moved to offset \(totalOffset) — "
                 + "macOS saved hostile state for the old one")
@@ -663,8 +752,9 @@ final class SenderController: ObservableObject {
             // The receiver app quit — a deliberate goodbye, so no reconnect
             // waits around. Reopening the app is a fresh start handled by
             // the normal discovery/auto-connect paths.
-            guard let self, let session else { return }
+            guard let self, let session, self.owns(session) else { return }
             Log.info("session \(session.id) closed by the receiver — ending")
+            self.autoConnectPolicy.suppress(self.identifiers(for: session))
             self.end(session)
         }
         sessions.append(session)
@@ -674,6 +764,7 @@ final class SenderController: ObservableObject {
             } catch is CancellationError {
                 // stopped by the user while waiting — nothing to report
             } catch {
+                guard self.owns(session) else { return }
                 Log.info("sender failed to start: \(error)")
                 session.status = "Failed: \(error.localizedDescription)"
                 // Free the half-built pipeline: a leaked virtual display
@@ -687,14 +778,7 @@ final class SenderController: ObservableObject {
 
     /// User-initiated disconnect: also opt the device out of auto-connect.
     func disconnect(_ session: DeviceSession) {
-        switch session.target {
-        case .usb: usbDisabled.insert(session.id)
-        case .wifi: wifiRemembered.remove(session.id)
-        }
-        // A migrated session is also reachable the other way — opt that side
-        // out too, or auto-connect resurrects the device moments later.
-        if session.onUSB, let udid = session.usbUDID { usbDisabled.insert("usb:\(udid)") }
-        if let name = session.wifiServiceName { wifiRemembered.remove("wifi:\(name)") }
+        autoConnectPolicy.suppress(identifiers(for: session))
         end(session)
     }
 
@@ -712,8 +796,15 @@ final class SenderController: ObservableObject {
     }
 
     private func end(_ session: DeviceSession) {
+        autoConnectPolicy.finish(session.attempt)
         session.sender.stop()
-        sessions.removeAll { $0.id == session.id }
+        // Identity comparison prevents a late callback from an old attempt
+        // removing its newer replacement, which can have the same route id.
+        sessions.removeAll { $0 === session }
+    }
+
+    private func owns(_ session: DeviceSession) -> Bool {
+        sessions.contains { $0 === session } && autoConnectPolicy.isCurrent(session.attempt)
     }
 
     /// Mode/quality apply per-pipeline at construction — rebuild every session.
