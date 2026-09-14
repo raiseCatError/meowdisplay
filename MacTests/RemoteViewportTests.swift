@@ -472,4 +472,151 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertEqual(back.x, remotePoint.x, accuracy: 0.0005)
         XCTAssertEqual(back.y, remotePoint.y, accuracy: 0.0005)
     }
+
+    // MARK: - Manual viewport zoom/pan
+
+    func testIdentityManualStateReturnsBaseTransformUnchanged() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        let result = RemoteViewportCalculator.applyManualZoom(to: base, state: .identity)
+        XCTAssertEqual(result, base, "identity manual state must be an exact pass-through, not merely numerically equal")
+    }
+
+    func testManualZoomAboveOneMagnifiesTheDisplayedRect() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        let state = ManualViewportState(scale: 2, panX: 0, panY: 0)
+        let result = RemoteViewportCalculator.applyManualZoom(to: base, state: state)
+        XCTAssertEqual(result.displayedRect.width, base.displayedRect.width * 2, accuracy: 0.001)
+        XCTAssertEqual(result.displayedRect.height, base.displayedRect.height * 2, accuracy: 0.001)
+    }
+
+    func testManualScaleClampsBelowOneUpToOne() {
+        let clamped = ManualViewportState(scale: 0.3, panX: 0, panY: 0).clamped(against: squareBounds)
+        XCTAssertEqual(clamped.scale, 1)
+    }
+
+    func testManualScaleClampsAtMaximum() {
+        let clamped = ManualViewportState(scale: 10, panX: 0, panY: 0).clamped(against: squareBounds)
+        XCTAssertEqual(clamped.scale, ManualViewportState.maxScale)
+    }
+
+    func testReturningToMinimumScaleClearsPan() {
+        let clamped = ManualViewportState(scale: 1, panX: 999, panY: -999).clamped(against: squareBounds)
+        XCTAssertEqual(clamped.panX, 0)
+        XCTAssertEqual(clamped.panY, 0)
+    }
+
+    func testPanClampsSoScaledContentAlwaysCoversTheBase() {
+        let state = ManualViewportState(scale: 2, panX: 10_000, panY: -10_000)
+        let clamped = state.clamped(against: squareBounds)
+        let width = squareBounds.width * clamped.scale
+        let height = squareBounds.height * clamped.scale
+        let maxPanX = (width - squareBounds.width) / 2
+        let maxPanY = (height - squareBounds.height) / 2
+        XCTAssertEqual(clamped.panX, maxPanX, accuracy: 0.001)
+        XCTAssertEqual(clamped.panY, -maxPanY, accuracy: 0.001)
+    }
+
+    func testPinchZoomsAroundTheGestureMidpoint() {
+        let base = squareBounds   // 400x800
+        let midpoint = CGPoint(x: base.midX, y: base.midY)
+        let result = ManualViewportState.pinching(
+            from: .identity, initialBase: base,
+            initialMidpoint: midpoint, currentMidpoint: midpoint, scaleRatio: 2)
+        XCTAssertEqual(result.scale, 2, accuracy: 0.001)
+        // Pinching around dead-center keeps the content centered, i.e. no pan.
+        XCTAssertEqual(result.panX, 0, accuracy: 0.5)
+        XCTAssertEqual(result.panY, 0, accuracy: 0.5)
+    }
+
+    func testPinchKeepsContentUnderAnOffCenterMidpointApproximatelyFixed() {
+        let base = squareBounds
+        let anchor = CGPoint(x: base.minX + 100, y: base.minY + 200)   // off-center
+        let start = ManualViewportState.pinching(
+            from: .identity, initialBase: base,
+            initialMidpoint: anchor, currentMidpoint: anchor, scaleRatio: 1.8)
+        let baseTransform = RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: base)
+        let zoomed = RemoteViewportCalculator.applyManualZoom(
+            to: baseTransform, state: start)
+        // The content that sat under `anchor` before zooming should still be
+        // very close to `anchor` after, up to whatever clamping required.
+        guard let remoteUnderAnchorBefore = baseTransform.remotePoint(forView: anchor) else {
+            return XCTFail("expected a valid pre-zoom mapping")
+        }
+        let viewPointAfter = zoomed.viewPoint(forRemote: remoteUnderAnchorBefore)
+        XCTAssertEqual(viewPointAfter.x, anchor.x, accuracy: 1.0)
+        XCTAssertEqual(viewPointAfter.y, anchor.y, accuracy: 1.0)
+    }
+
+    func testPanWhileZoomedTranslatesTheDisplayedRect() {
+        let base = squareBounds
+        let zoomedIn = ManualViewportState(scale: 2, panX: 0, panY: 0)
+        let start = CGPoint(x: base.midX, y: base.midY)
+        let dragged = CGPoint(x: base.midX + 20, y: base.midY - 15)
+        let panned = ManualViewportState.pinching(
+            from: zoomedIn, initialBase: base,
+            initialMidpoint: start, currentMidpoint: dragged, scaleRatio: 1)
+        XCTAssertEqual(panned.scale, zoomedIn.scale, accuracy: 0.001, "a pure drag must not also change scale")
+        XCTAssertEqual(panned.panX, 20, accuracy: 0.5)
+        XCTAssertEqual(panned.panY, -15, accuracy: 0.5)
+    }
+
+    func testResetToIdentityReturnsExactlyToTheBaseTransform() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        var state = ManualViewportState(scale: 2.4, panX: 30, panY: -12)
+        XCTAssertNotEqual(RemoteViewportCalculator.applyManualZoom(to: base, state: state), base)
+        state = .identity
+        XCTAssertEqual(RemoteViewportCalculator.applyManualZoom(to: base, state: state), base)
+    }
+
+    func testManualZoomRecomputesValidlyAfterAnOrientationChange() {
+        // A state clamped/valid in portrait must still clamp to something
+        // finite and valid once the base rect changes shape (rotation).
+        let portrait = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let landscape = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let state = ManualViewportState(scale: 2.5, panX: 150, panY: 300).clamped(against: portrait)
+        let recomputed = state.clamped(against: landscape)
+        XCTAssertTrue(recomputed.scale.isFinite && recomputed.panX.isFinite && recomputed.panY.isFinite)
+        XCTAssertGreaterThanOrEqual(recomputed.scale, ManualViewportState.minScale)
+        XCTAssertLessThanOrEqual(recomputed.scale, ManualViewportState.maxScale)
+    }
+
+    func testManualZoomComposesOnTopOfTheKeyboardOpenPresentation() {
+        let visible = CGRect(x: 0, y: 0, width: 400, height: 500)
+        let base = RemoteViewportCalculator.keyboardOpen(
+            viewBounds: squareBounds, remoteAspectSize: squareAspect,
+            visibleRect: visible, anchor: CGPoint(x: 0.5, y: 0.9), zoomEnabled: false)
+        let manual = ManualViewportState(scale: 1.5, panX: 0, panY: 0)
+        let result = RemoteViewportCalculator.applyManualZoom(to: base, state: manual)
+        XCTAssertTrue(result.isValid)
+        XCTAssertEqual(result.displayedRect.width, base.displayedRect.width * 1.5, accuracy: 0.001,
+                       "manual zoom must magnify the keyboard-adjusted rect, not replace it")
+    }
+
+    func testManualZoomNeverProducesNaNOrInvalidGeometry() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        for scale: CGFloat in [-5, 0, 0.001, 1, 1.5, 3, 999] {
+            for pan: CGFloat in [-1e6, 0, 1e6] {
+                let state = ManualViewportState(scale: scale, panX: pan, panY: pan)
+                let result = RemoteViewportCalculator.applyManualZoom(to: base, state: state)
+                XCTAssertFalse(result.displayedRect.origin.x.isNaN)
+                XCTAssertFalse(result.displayedRect.origin.y.isNaN)
+                XCTAssertFalse(result.displayedRect.width.isNaN)
+                XCTAssertFalse(result.displayedRect.height.isNaN)
+            }
+        }
+    }
+
+    func testForwardAndInverseMappingRemainCorrectUnderManualZoomAndPan() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        let state = ManualViewportState(scale: 2, panX: 30, panY: -20).clamped(against: base.displayedRect)
+        let t = RemoteViewportCalculator.applyManualZoom(to: base, state: state)
+        for remotePoint in [CGPoint(x: 0.1, y: 0.2), CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.9, y: 0.8)] {
+            let viewPoint = t.viewPoint(forRemote: remotePoint)
+            guard let back = t.remotePoint(forView: viewPoint) else {
+                return XCTFail("expected a valid inverse mapping under manual zoom/pan")
+            }
+            XCTAssertEqual(back.x, remotePoint.x, accuracy: 0.0005)
+            XCTAssertEqual(back.y, remotePoint.y, accuracy: 0.0005)
+        }
+    }
 }

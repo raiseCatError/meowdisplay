@@ -356,3 +356,223 @@ enum RemoteViewportCalculator {
                       width: size.width, height: size.height)
     }
 }
+
+/// Local, receiver-only manual zoom/pan applied on top of whichever base
+/// presentation (`RemoteViewportCalculator.normal`/`.keyboardOpen`) is
+/// currently in effect — the user's own pinch-to-zoom/pan on the *displayed*
+/// video, never sent to the Mac and never affecting remote input semantics.
+/// `.identity` is the at-rest state: 1x, no pan, byte-for-byte equal to
+/// whatever the base presentation already computed.
+struct ManualViewportState: Equatable {
+    /// Manual zoom can never go below 1x (no such thing as "zoomed out"
+    /// of the normal fit) — see `clamped(against:)`.
+    static let minScale: CGFloat = 1
+    /// Initial cap on manual magnification (PRODUCT RULE: "approximately
+    /// 3x unless architecture suggests a better bound" — nothing here does).
+    static let maxScale: CGFloat = 3
+
+    var scale: CGFloat = minScale
+    /// Pan offset, in the host view's local points, applied to the scaled
+    /// base rect's center — see `RemoteViewportCalculator.applyManualZoom`.
+    var panX: CGFloat = 0
+    var panY: CGFloat = 0
+
+    static let identity = ManualViewportState()
+
+    var isIdentity: Bool { self == .identity }
+
+    /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` so that
+    /// `base`, scaled by the result, can never reveal blank space beyond
+    /// `base`'s own footprint — i.e. the scaled rect always fully contains
+    /// `base` (PRODUCT RULE: "cannot drag the remote display completely
+    /// away and reveal arbitrary blank space"). At `minScale`, pan is
+    /// forced to zero so returning to 1x always lands at exactly the
+    /// normal, unpanned presentation. The single source of truth for this
+    /// math — both `applyManualZoom` and the live pinch/pan policy
+    /// (`pinching(from:...)`) funnel through this rather than duplicating
+    /// clamp arithmetic, which also makes it the one place that re-derives
+    /// valid pan bounds whenever `base` changes (rotation, keyboard
+    /// open/close) — see the type's use from `VideoView.layoutSubviews`.
+    func clamped(against base: CGRect) -> ManualViewportState {
+        var copy = self
+        copy.scale = scale.isFinite ? min(max(scale, Self.minScale), Self.maxScale) : Self.minScale
+        guard base.width > 0, base.height > 0, copy.scale > Self.minScale else {
+            copy.panX = 0
+            copy.panY = 0
+            return copy
+        }
+        let width = base.width * copy.scale
+        let height = base.height * copy.scale
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else {
+            copy.panX = 0
+            copy.panY = 0
+            return copy
+        }
+        let maxPanX = max(0, (width - base.width) / 2)
+        let maxPanY = max(0, (height - base.height) / 2)
+        copy.panX = panX.isFinite ? min(max(panX, -maxPanX), maxPanX) : 0
+        copy.panY = panY.isFinite ? min(max(panY, -maxPanY), maxPanY) : 0
+        return copy
+    }
+
+    /// Pure pinch/pan policy for a live two-finger gesture: given the
+    /// manual state at gesture-start and the gesture's initial/current
+    /// two-finger midpoint and distance ratio, returns the manual state
+    /// that keeps the remote content under `initialMidpoint` anchored
+    /// under `currentMidpoint` as closely as `clamped(against:)` allows.
+    /// Combines zoom and pan into the single gesture users expect from a
+    /// pinch — when `scaleRatio` is ~1 but the midpoint moved, this
+    /// degrades to plain panning, which is exactly "two-finger pan while
+    /// zoomed" (PRODUCT RULE 2); no separate code path is needed for it.
+    ///
+    /// `initialBase` is the *unzoomed* base presentation's `displayedRect`
+    /// at gesture start (before this gesture's own manual zoom is
+    /// applied) — the same fixed reference frame `applyManualZoom` scales
+    /// from, so this stays a pure function of that one shared geometry
+    /// rather than a second transform system.
+    static func pinching(from initial: ManualViewportState,
+                         initialBase: CGRect,
+                         initialMidpoint: CGPoint,
+                         currentMidpoint: CGPoint,
+                         scaleRatio: CGFloat) -> ManualViewportState {
+        guard initialBase.width > 0, initialBase.height > 0,
+              scaleRatio.isFinite, scaleRatio > 0 else { return initial }
+        let start = initial.clamped(against: initialBase)
+        let width0 = initialBase.width * start.scale
+        let height0 = initialBase.height * start.scale
+        guard width0 > 0, height0 > 0 else { return initial }
+        let originX0 = initialBase.midX - width0 / 2 + start.panX
+        let originY0 = initialBase.midY - height0 / 2 + start.panY
+        // Which fraction of the *currently displayed* content sits under
+        // the gesture's starting midpoint — this is what stays anchored.
+        let fractionX = (initialMidpoint.x - originX0) / width0
+        let fractionY = (initialMidpoint.y - originY0) / height0
+        guard fractionX.isFinite, fractionY.isFinite else { return initial }
+
+        let newScale = min(max(start.scale * scaleRatio, Self.minScale), Self.maxScale)
+        let width1 = initialBase.width * newScale
+        let height1 = initialBase.height * newScale
+        guard width1.isFinite, height1.isFinite, width1 > 0, height1 > 0 else { return initial }
+        let originX1 = currentMidpoint.x - fractionX * width1
+        let originY1 = currentMidpoint.y - fractionY * height1
+        let result = ManualViewportState(
+            scale: newScale,
+            panX: originX1 - (initialBase.midX - width1 / 2),
+            panY: originY1 - (initialBase.midY - height1 / 2))
+        return result.clamped(against: initialBase)
+    }
+}
+
+/// A live two-finger touch sequence's local intent: whether it should
+/// drive remote Mac scrolling or local viewport zoom/pan. `.undecided`
+/// means "not enough data yet" — never sent to a caller as a final answer,
+/// only ever a `TwoFingerGestureClassifier.classify` return value pending
+/// more motion.
+enum TwoFingerGestureIntent: Equatable {
+    case undecided
+    case scroll
+    case viewportZoomPan
+}
+
+/// Pure decision logic for the three-way two-finger arbitration problem:
+/// ordinary remote scroll vs. local viewport pinch-zoom vs. (once a
+/// viewport session is already under way) viewport pan — see the PRODUCT
+/// discussion in `iOS/OpenSidecarPhoneApp.swift`'s `TwoFingerViewportGestureRecognizer`.
+///
+/// Deliberately stateless and UIKit-free: it answers "given this one live
+/// sample of a still-undecided two-finger gesture, what does it look
+/// like?" — the caller (the gesture recognizer) is what remembers a
+/// commitment once made and stops asking. Re-invoking this after a
+/// gesture has already committed to `.scroll` or `.viewportZoomPan` would
+/// defeat that "acquire ownership and keep it" contract, which is exactly
+/// the oscillation this replaces (see the type's git history: an earlier
+/// version re-decided every frame, including a rule that treated *any*
+/// small movement while already manually zoomed as pan — which starved
+/// ordinary scrolling while zoomed).
+enum TwoFingerGestureClassifier {
+    /// Minimum |distanceRatio - 1| before a still-undecided gesture is
+    /// confidently a pinch. Deliberately not hair-trigger: small natural
+    /// finger-spacing changes during an otherwise-parallel scroll drag
+    /// must not tip into zoom.
+    static let pinchIntentThreshold: CGFloat = 0.06
+    /// Minimum centroid (midpoint) movement, in points, before a
+    /// still-undecided gesture is confidently a scroll drag.
+    static let scrollIntentThreshold: CGFloat = 10
+
+    /// Classifies one live sample of an as-yet-undecided two-finger
+    /// gesture from its distance-ratio and centroid movement since the
+    /// gesture started. Whichever threshold is crossed by the larger
+    /// *relative* margin wins when both are crossed in the same sample
+    /// (the "dominance" check) — this is what keeps a diagonal, slightly
+    /// converging/diverging scroll drag from misfiring as a pinch just
+    /// because it happens to cross the (much smaller, percentage-based)
+    /// scale threshold a frame before the absolute movement threshold.
+    static func classify(initialDistance: CGFloat, currentDistance: CGFloat,
+                         initialMidpoint: CGPoint, currentMidpoint: CGPoint) -> TwoFingerGestureIntent {
+        guard initialDistance > 0, currentDistance.isFinite else { return .undecided }
+        let scaleDeviation = abs(currentDistance / initialDistance - 1)
+        let centroidMoved = hypot(currentMidpoint.x - initialMidpoint.x, currentMidpoint.y - initialMidpoint.y)
+        let scaleSignal = scaleDeviation / pinchIntentThreshold
+        let scrollSignal = centroidMoved / scrollIntentThreshold
+        if scaleSignal >= 1, scaleSignal >= scrollSignal { return .viewportZoomPan }
+        if scrollSignal >= 1 { return .scroll }
+        return .undecided
+    }
+}
+
+/// A pure, UIKit-free model of one two-finger touch sequence's commitment
+/// state: "decide once, via `TwoFingerGestureClassifier`, then hold that
+/// answer for the rest of the sequence" — the exact policy
+/// `TwoFingerViewportGestureRecognizer` needs, factored out so it is
+/// directly testable without a real touch/gesture-recognizer harness, and
+/// so the recognizer itself has nowhere to duplicate or drift from this
+/// logic. A fresh `TwoFingerGestureSession()` (one per touch-down sequence,
+/// discarded when fingers lift) is what "lifting fingers resets ownership"
+/// means in practice.
+struct TwoFingerGestureSession {
+    private(set) var intent: TwoFingerGestureIntent = .undecided
+
+    /// Feeds one live sample. Once `intent` has committed to `.scroll` or
+    /// `.viewportZoomPan`, this is a no-op — the whole point of the type —
+    /// so a caller can feed it every `touchesMoved` sample unconditionally
+    /// without checking whether it has already decided.
+    @discardableResult
+    mutating func update(initialDistance: CGFloat, currentDistance: CGFloat,
+                         initialMidpoint: CGPoint, currentMidpoint: CGPoint) -> TwoFingerGestureIntent {
+        guard intent == .undecided else { return intent }
+        let classified = TwoFingerGestureClassifier.classify(
+            initialDistance: initialDistance, currentDistance: currentDistance,
+            initialMidpoint: initialMidpoint, currentMidpoint: currentMidpoint)
+        if classified != .undecided { intent = classified }
+        return intent
+    }
+}
+
+extension RemoteViewportCalculator {
+    /// Applies local manual zoom/pan on top of `base` — reusing
+    /// `RemoteViewportTransform`'s existing "`displayedRect` may be larger
+    /// than the host view while magnified" convention (see its type doc)
+    /// rather than introducing a second transform/mapping system. Manual
+    /// zoom is expressed purely as a further scale+translate of
+    /// `base.displayedRect`; `viewPoint`/`remotePoint` need no changes to
+    /// stay each other's exact inverse under it.
+    ///
+    /// At `state.scale <= 1` (identity), returns `base` completely
+    /// unchanged — not merely numerically equal — so resetting manual zoom
+    /// always lands at exactly the normal/keyboard-adjusted presentation,
+    /// with no accumulated floating-point drift.
+    static func applyManualZoom(to base: RemoteViewportTransform,
+                                state: ManualViewportState) -> RemoteViewportTransform {
+        guard base.isValid else { return base }
+        let clamped = state.clamped(against: base.displayedRect)
+        guard clamped.scale > ManualViewportState.minScale else { return base }
+        let rect = base.displayedRect
+        let width = rect.width * clamped.scale
+        let height = rect.height * clamped.scale
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return base }
+        let scaled = CGRect(x: rect.midX - width / 2 + clamped.panX,
+                            y: rect.midY - height / 2 + clamped.panY,
+                            width: width, height: height)
+        return RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: scaled)
+    }
+}

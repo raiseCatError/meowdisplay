@@ -710,13 +710,6 @@ struct VideoLayerView: UIViewRepresentable {
         }
         view.inputEngine.install(on: view)
 
-        let pan = UIPanGestureRecognizer(target: view, action: #selector(VideoView.didTwoFingerPan(_:)))
-        pan.minimumNumberOfTouches = 2
-        pan.maximumNumberOfTouches = 2
-        pan.delegate = view
-        view.twoFingerPanRecognizer = pan
-        view.addGestureRecognizer(pan)
-
         let threeFingerPan = UIPanGestureRecognizer(
             target: view, action: #selector(VideoView.didThreeFingerSystemPan(_:)))
         threeFingerPan.minimumNumberOfTouches = 3
@@ -738,6 +731,32 @@ struct VideoLayerView: UIViewRepresentable {
         pinchSpreadGesture.delegate = view
         view.pinchSpreadGestureRecognizer = pinchSpreadGesture
         view.addGestureRecognizer(pinchSpreadGesture)
+
+        // The single owner of every two-finger gesture: remote scroll,
+        // local viewport pinch-zoom, and (once a pinch/zoom session is
+        // under way) local viewport pan — see the type doc for why this
+        // is one recognizer rather than two racing ones.
+        let twoFinger = TwoFingerViewportGestureRecognizer(
+            target: view, action: #selector(VideoView.didTwoFingerGesture(_:)))
+        twoFinger.delegate = view
+        view.twoFingerRecognizer = twoFinger
+        view.addGestureRecognizer(twoFinger)
+
+        // Two-finger double-tap resets manual zoom/pan. `require(toFail:)`
+        // isn't needed against the pan/pinch recognizer above — it needs
+        // real movement to begin, which a tap by definition doesn't have —
+        // but a *future* single two-finger tap (right-click) recognizer
+        // should `require(toFail: viewportDoubleTap)` so a fast double-tap
+        // is never swallowed as two single taps.
+        let viewportDoubleTap = UITapGestureRecognizer(
+            target: view, action: #selector(VideoView.didViewportDoubleTap(_:)))
+        viewportDoubleTap.numberOfTapsRequired = 2
+        viewportDoubleTap.numberOfTouchesRequired = 2
+        viewportDoubleTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        viewportDoubleTap.cancelsTouchesInView = false
+        viewportDoubleTap.delegate = view
+        view.viewportDoubleTapRecognizer = viewportDoubleTap
+        view.addGestureRecognizer(viewportDoubleTap)
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -769,10 +788,11 @@ struct VideoLayerView: UIViewRepresentable {
         weak var receiver: StreamReceiver?
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
-        fileprivate var twoFingerPanRecognizer: UIPanGestureRecognizer?
+        fileprivate var twoFingerRecognizer: TwoFingerViewportGestureRecognizer?
         fileprivate var threeFingerPanRecognizer: UIPanGestureRecognizer?
         fileprivate var threeFingerTapRecognizer: ThreeFingerTapGestureRecognizer?
         fileprivate var pinchSpreadGestureRecognizer: PinchSpreadSystemGestureRecognizer?
+        fileprivate var viewportDoubleTapRecognizer: UITapGestureRecognizer?
 
         private let cursorLayer: CALayer = {
             let layer = CALayer()
@@ -820,6 +840,22 @@ struct VideoLayerView: UIViewRepresentable {
         // of snapping, while ordinary layout (rotation, initial layout)
         // keeps disabling implicit actions as before.
         private var animatingKeyboardTransition = false
+
+        // MARK: - Local manual viewport zoom/pan
+
+        // The user's own local pinch-to-zoom/pan of the displayed remote
+        // video — never sent to the Mac. Composed *on top of* whichever
+        // base presentation `updateCurrentTransform` computed (normal or
+        // keyboard-adjusted) each layout pass, so it automatically stays
+        // valid across rotation/keyboard changes without its own geometry
+        // recalculation — see `ManualViewportState.clamped(against:)`.
+        fileprivate var manualZoom = ManualViewportState.identity
+        // The manual state and *unzoomed* base rect captured at the start
+        // of the current pinch/pan gesture — the fixed reference frame
+        // `ManualViewportState.pinching(from:...)` computes from for every
+        // `.changed` update in that same gesture.
+        private var manualZoomGestureStart = ManualViewportState.identity
+        private var manualZoomGestureBase = CGRect.zero
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -917,6 +953,12 @@ struct VideoLayerView: UIViewRepresentable {
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
             lastAnchor = nil
+            // Force the two-finger recognizer to give up whatever it was
+            // mid-deciding or already committed to — toggling `isEnabled`
+            // is UIKit's standard way to force a recognizer to `.cancelled`
+            // (same trick used elsewhere for gesture-ownership hand-off).
+            twoFingerRecognizer?.isEnabled = false
+            twoFingerRecognizer?.isEnabled = true
         }
 
         override func layoutSubviews() {
@@ -957,19 +999,26 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func updateCurrentTransform() {
+            currentTransform = RemoteViewportCalculator.applyManualZoom(to: unzoomedBaseTransform(), state: manualZoom)
+        }
+
+        /// The normal or keyboard-adjusted presentation, *before* manual
+        /// zoom/pan — the fixed reference frame both `updateCurrentTransform`
+        /// and the live pinch/pan gesture (`manualZoomGestureBase`) compose
+        /// on top of, so there is exactly one place that decides between
+        /// `.normal`/`.keyboardOpen`.
+        private func unzoomedBaseTransform() -> RemoteViewportTransform {
             guard let video = receiver?.videoSize, video != .zero,
                   bounds.width > 0, bounds.height > 0 else {
-                currentTransform = .invalid
-                return
+                return .invalid
             }
             if let keyboardVisibleRect {
-                currentTransform = RemoteViewportCalculator.keyboardOpen(
+                return RemoteViewportCalculator.keyboardOpen(
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
                     zoomEnabled: zoomWhileTypingEnabled)
-            } else {
-                currentTransform = RemoteViewportCalculator.normal(viewBounds: bounds, remoteAspectSize: video)
             }
+            return RemoteViewportCalculator.normal(viewBounds: bounds, remoteAspectSize: video)
         }
 
         /// Positions a content layer (the AVSBDL sublayer or the Metal
@@ -1071,34 +1120,6 @@ struct VideoLayerView: UIViewRepresentable {
         private var gestureEmissionGate = GestureEmissionGate()
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
 
-        @objc func didTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
-            guard let video = receiver?.videoSize, video != .zero else { return }
-            switch recognizer.state {
-            case .began:
-                twoFingerActive = true
-                lastPan = .zero
-                // macOS delivers scroll to whatever sits under the cursor, and
-                // the cursor no longer follows the fingers now that a press is
-                // withheld until it commits. Put it on the gesture once, up
-                // front, so the scroll lands on the window being touched. Once
-                // only: a real trackpad does not drag the cursor while
-                // scrolling, and moving it mid-gesture would change the target.
-                if let n = normalized(recognizer.location(in: self)) {
-                    lastNorm = n
-                    receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
-                }
-            case .changed:
-                guard twoFingerActive, let scale = pointsPerRemotePixel(video: video) else { return }
-                let t = recognizer.translation(in: self)
-                // Deltas in video pixels, natural-scrolling direction.
-                receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
-                                     dy: (t.y - lastPan.y) / scale)
-                lastPan = t
-            default:
-                twoFingerActive = false
-            }
-        }
-
         @objc func didThreeFingerSystemPan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
             case .began, .changed:
@@ -1140,6 +1161,101 @@ struct VideoLayerView: UIViewRepresentable {
             receiver?.sendGesture(name: gesture.rawValue)
         }
 
+        // MARK: - Two-finger gesture: remote scroll / local viewport zoom+pan
+
+        /// The single action for `twoFingerRecognizer` — see its type doc
+        /// for the full three-way arbitration model. `recognizer.intent` is
+        /// fixed for the lifetime of one gesture once it leaves `.undecided`
+        /// (the recognizer's own contract), so this only ever needs to
+        /// branch on it, never re-decide.
+        @objc func didTwoFingerGesture(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                switch recognizer.intent {
+                case .scroll:
+                    beginScroll(at: recognizer.midpoint)
+                case .viewportZoomPan:
+                    beginViewportManipulation()
+                    applyViewportPinchUpdate(recognizer)
+                case .undecided:
+                    break   // never begins while undecided — see the recognizer.
+                }
+            case .changed:
+                switch recognizer.intent {
+                case .scroll:
+                    continueScroll(recognizer)
+                case .viewportZoomPan:
+                    applyViewportPinchUpdate(recognizer)
+                case .undecided:
+                    break
+                }
+            default:
+                twoFingerActive = false
+            }
+        }
+
+        /// Ownership hand-off for the `.viewportZoomPan` intent, mirroring
+        /// the existing system gestures' `takeGestureOwnershipAndSend` —
+        /// this is the *only* place remote scroll/touch gets suppressed for
+        /// a viewport gesture, and it happens once, at commitment, not on
+        /// every frame — there is no second recognizer racing this one to
+        /// coordinate against any more.
+        private func beginViewportManipulation() {
+            twoFingerActive = false
+            cancelTouchForGestureOwnership()
+            manualZoomGestureStart = manualZoom
+            manualZoomGestureBase = unzoomedBaseTransform().displayedRect
+        }
+
+        private func applyViewportPinchUpdate(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            guard manualZoomGestureBase.width > 0, manualZoomGestureBase.height > 0 else { return }
+            manualZoom = ManualViewportState.pinching(
+                from: manualZoomGestureStart,
+                initialBase: manualZoomGestureBase,
+                initialMidpoint: recognizer.initialMidpoint,
+                currentMidpoint: recognizer.midpoint,
+                scaleRatio: recognizer.scaleRatio)
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+
+        private func beginScroll(at midpoint: CGPoint) {
+            guard let video = receiver?.videoSize, video != .zero else { return }
+            twoFingerActive = true
+            lastPan = .zero
+            // macOS delivers scroll to whatever sits under the cursor, and
+            // the cursor no longer follows the fingers now that a press is
+            // withheld until it commits. Put it on the gesture once, up
+            // front, so the scroll lands on the window being touched. Once
+            // only: a real trackpad does not drag the cursor while
+            // scrolling, and moving it mid-gesture would change the target.
+            if let n = normalized(midpoint) {
+                lastNorm = n
+                receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
+            }
+        }
+
+        private func continueScroll(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            guard twoFingerActive, let video = receiver?.videoSize, video != .zero,
+                  let scale = pointsPerRemotePixel(video: video) else { return }
+            // Cumulative translation since the gesture started, matching
+            // `UIPanGestureRecognizer.translation(in:)`'s convention (this
+            // recognizer isn't one, so it's derived from the midpoint here
+            // instead of read off the recognizer directly).
+            let t = CGPoint(x: recognizer.midpoint.x - recognizer.initialMidpoint.x,
+                            y: recognizer.midpoint.y - recognizer.initialMidpoint.y)
+            // Deltas in video pixels, natural-scrolling direction.
+            receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
+                                 dy: (t.y - lastPan.y) / scale)
+            lastPan = t
+        }
+
+        @objc func didViewportDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended, !manualZoom.isIdentity else { return }
+            manualZoom = .identity
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
         override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             if gestureRecognizer === threeFingerPanRecognizer {
                 return gestureRecognizer.numberOfTouches == 3
@@ -1150,9 +1266,11 @@ struct VideoLayerView: UIViewRepresentable {
             if gestureRecognizer === pinchSpreadGestureRecognizer {
                 return (4...5).contains(gestureRecognizer.numberOfTouches)
             }
-            if gestureRecognizer === twoFingerPanRecognizer {
-                return gestureRecognizer.numberOfTouches == 2
-            }
+            // `twoFingerRecognizer` needs no case here: it decides its own
+            // intent internally (`TwoFingerGestureClassifier`) and is
+            // eligible to begin regardless of `manualZoom` — remote scroll
+            // must stay available while manually zoomed (PRODUCT RULE), not
+            // just at 1x.
             return true
         }
 
@@ -1168,12 +1286,18 @@ struct VideoLayerView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            // Let a three-finger swipe take ownership if the two-finger pan
-            // already began before the third finger landed.
-            (gestureRecognizer === twoFingerPanRecognizer
+            // Let a three-finger swipe take ownership if the two-finger
+            // gesture (scroll or viewport) already began before the third
+            // finger landed.
+            (gestureRecognizer === twoFingerRecognizer
                 && otherGestureRecognizer === threeFingerPanRecognizer)
                 || (gestureRecognizer === threeFingerPanRecognizer
-                    && otherGestureRecognizer === twoFingerPanRecognizer)
+                    && otherGestureRecognizer === twoFingerRecognizer)
+                // The double-tap recognizer needs to observe the same
+                // two-finger touch stream as `twoFingerRecognizer` — see its
+                // doc comment on why no `require(toFail:)` is needed here.
+                || gestureRecognizer === viewportDoubleTapRecognizer
+                || otherGestureRecognizer === viewportDoubleTapRecognizer
         }
 
         /// A system gesture takes ownership from a pending or active touch press.
@@ -1516,6 +1640,135 @@ final class PinchSpreadSystemGestureRecognizer: UIGestureRecognizer {
             return (x: Double(point.x), y: Double(point.y))
         }
         return ReceiverGestureGeometry.meanPairwiseDistance(points)
+    }
+}
+
+/// The single owner of every two-finger gesture on the video view: ordinary
+/// remote-Mac scroll, local viewport pinch-zoom, and (once a pinch/zoom
+/// session is already under way) local viewport pan.
+///
+/// An earlier version used *two* independent recognizers — a plain
+/// `UIPanGestureRecognizer` for scroll and a separate custom one for
+/// viewport pinch/pan — racing each other and reconciled with `isEnabled`
+/// toggling. That produced exactly the failure mode this replaces:
+/// unreliable scrolling at 1x (whichever recognizer happened to win a given
+/// frame), and, worse, a rule that treated *any* small two-finger movement
+/// while already manually zoomed as viewport pan, which made remote
+/// scrolling effectively impossible whenever zoomed in.
+///
+/// This recognizer instead makes the three-way choice exactly once per
+/// touch-down sequence and then holds it: `intent` starts `.undecided` and,
+/// once `TwoFingerGestureClassifier.classify` returns a real answer, is
+/// fixed for the rest of the gesture — the state transitions to `.began`
+/// only at that moment, so `VideoView`'s action method never has to
+/// re-decide anything, only branch on `intent` (see
+/// `VideoView.didTwoFingerGesture`). "Viewport pan while already zoomed" is
+/// not a separate state: once `intent == .viewportZoomPan`, every
+/// subsequent `.changed` sample (whether it looks like more pinching or
+/// pure dragging) is fed through the same `ManualViewportState.pinching`
+/// math, which already degrades to pure pan when the distance ratio stops
+/// changing — so a pinch-then-drag-without-lifting session naturally zooms
+/// and then pans within one continuous, single-owner gesture, and lifting
+/// fingers (`reset()`) is the only thing that returns to `.undecided` for
+/// the next fresh two-finger touch.
+final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
+    private var activeTouches: [ObjectIdentifier: UITouch] = [:]
+    private(set) var initialMidpoint: CGPoint = .zero
+    private var initialDistance: CGFloat = 0
+    private(set) var midpoint: CGPoint = .zero
+    private var distance: CGFloat = 0
+
+    /// Fixed for the lifetime of a gesture once it leaves `.undecided` —
+    /// see the type doc's "acquire ownership and keep it" contract. Backed
+    /// by the pure, independently-testable `TwoFingerGestureSession` rather
+    /// than duplicating its commit-once logic here.
+    private var session = TwoFingerGestureSession()
+    var intent: TwoFingerGestureIntent { session.intent }
+
+    /// `distance / initialDistance`, i.e. how much the two fingers have
+    /// spread or pinched since the gesture started; `1` (no-op) until
+    /// there is a valid baseline to compare against.
+    var scaleRatio: CGFloat {
+        guard initialDistance > 0 else { return 1 }
+        return distance / initialDistance
+    }
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        cancelsTouchesInView = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let view, touches.allSatisfy({ $0.type == .direct }) else {
+            state = .failed
+            return
+        }
+        for touch in touches { activeTouches[ObjectIdentifier(touch)] = touch }
+        // A third touch landing means this is not (or is no longer) a
+        // two-finger gesture — cleanly hand off to 3+-finger system
+        // gestures. `.failed` is only a legal transition from `.possible`;
+        // once already committed (`.began`/`.changed`) use `.cancelled`
+        // instead so a mid-scroll or mid-viewport-manipulation third finger
+        // doesn't hit an invalid state transition.
+        guard activeTouches.count <= 2 else {
+            state = (state == .began || state == .changed) ? .cancelled : .failed
+            return
+        }
+        guard activeTouches.count == 2 else { return }
+        let points = activeTouches.values.map { $0.location(in: view) }
+        initialMidpoint = Self.midpoint(points)
+        initialDistance = Self.distance(points)
+        midpoint = initialMidpoint
+        distance = initialDistance
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard state == .possible || state == .began || state == .changed,
+              activeTouches.count == 2, let view else { return }
+        let points = activeTouches.values.map { $0.location(in: view) }
+        midpoint = Self.midpoint(points)
+        distance = Self.distance(points)
+        guard distance.isFinite else { return }
+        if state == .possible {
+            let classified = session.update(
+                initialDistance: initialDistance, currentDistance: distance,
+                initialMidpoint: initialMidpoint, currentMidpoint: midpoint)
+            guard classified != .undecided else { return }
+            state = .began
+        } else {
+            state = .changed
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches { activeTouches.removeValue(forKey: ObjectIdentifier(touch)) }
+        state = (state == .began || state == .changed) ? .ended : .failed
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches { activeTouches.removeValue(forKey: ObjectIdentifier(touch)) }
+        state = .cancelled
+    }
+
+    override func reset() {
+        super.reset()
+        activeTouches.removeAll()
+        initialMidpoint = .zero
+        initialDistance = 0
+        midpoint = .zero
+        distance = 0
+        session = TwoFingerGestureSession()
+    }
+
+    private static func midpoint(_ points: [CGPoint]) -> CGPoint {
+        guard points.count == 2 else { return .zero }
+        return CGPoint(x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2)
+    }
+
+    private static func distance(_ points: [CGPoint]) -> CGFloat {
+        guard points.count == 2 else { return 0 }
+        return hypot(points[0].x - points[1].x, points[0].y - points[1].y)
     }
 }
 
