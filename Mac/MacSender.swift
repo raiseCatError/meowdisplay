@@ -818,11 +818,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func receiverInputIsAllowed() -> Bool {
-        guard InputPolicy.allowsInput() else {
+        guard InputPolicy.allowsInput(),
+              captureStateSnapshot().allowsInput else {
             inputInjector?.cancelActiveInput()
             return false
         }
         return true
+    }
+
     func pauseDisplay() {
         queue.async { [weak self] in
             guard let self,
@@ -2096,14 +2099,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 break
             }
         }
-    }
-
-    private func receiverInputIsAllowed() -> Bool {
-        guard captureStateSnapshot().allowsInput else {
-            inputInjector?.cancelActiveInput()
-            return false
-        }
-        return true
     }
 
     private func waitForHello() async throws -> PhoneInfo {

@@ -66,25 +66,50 @@ final class InputInjector {
         self.displayID = displayID
     }
 
-    /// Release every synthetic contact when capture is paused or torn down.
-    /// The receiver may disappear without delivering the matching up event.
+    /// Release every synthetic contact when capture is paused, torn down,
+    /// or input is disabled while a gesture is active.
     func cancelActiveInput() {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        cancelActiveInputLocked()
+    }
+
+    /// Caller must already hold inputLock.
+    private func cancelActiveInputLocked() {
         let point = currentCursor()
+
         if isDown {
-            if let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                                   mouseCursorPosition: point, mouseButton: .left) {
+            if let event = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            ) {
                 event.setIntegerValueField(.mouseEventClickState, value: 0)
                 event.post(tap: .cghidEventTap)
             }
             isDown = false
         }
+
         if penDown {
             penClickSession = nil
-            postTabletPoint(phase: .up, x: nil, y: nil, pressure: 0,
-                            tiltX: 0, tiltY: 0, rotation: 0, cancelClick: true)
+            postTabletPoint(
+                phase: .up,
+                x: nil,
+                y: nil,
+                pressure: 0,
+                tiltX: 0,
+                tiltY: 0,
+                rotation: 0,
+                cancelClick: true
+            )
             penDown = false
         }
-        if inRange { setProximity(entering: false, at: point) }
+
+        if inRange {
+            setProximity(entering: false, at: point)
+        }
+
         penClickSession = nil
         penLastClick = nil
     }
@@ -163,31 +188,11 @@ final class InputInjector {
         setProximity(entering: entering, at: screenPoint(nx: x, ny: y))
     }
 
-    /// Clear held synthetic state when input is disabled during a gesture.
-    func cancelActiveInput() {
-        inputLock.lock()
-        defer { inputLock.unlock() }
-        if isDown {
-            isDown = false
-            if let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                                   mouseCursorPosition: currentCursor(), mouseButton: .left) {
-                event.setIntegerValueField(.mouseEventClickState, value: 0)
-                event.post(tap: .cghidEventTap)
-            }
-        }
-        if penDown {
-            postTabletPoint(phase: .up, x: nil, y: nil, pressure: 0,
-                            tiltX: 0, tiltY: 0, rotation: 0)
-            penDown = false
-        }
-        if inRange { setProximity(entering: false, at: currentCursor()) }
-    }
-
     /// The control-message gate is duplicated here under the input lock so an
     /// OFF transition cannot race an event that already passed its outer gate.
     private func inputIsAllowed() -> Bool {
         guard InputPolicy.allowsInput() else {
-            cancelActiveInput()
+            cancelActiveInputLocked()
             return false
         }
         return true
