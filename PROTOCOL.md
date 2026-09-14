@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 3** &nbsp;|&nbsp; Status: **normative** for `pv <= 3`
+**Protocol version (`pv`): 4** &nbsp;|&nbsp; Status: **normative** for `pv <= 4`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -39,7 +39,7 @@ caused by third-party clients should be reported to those projects.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
-Every requirement applies to `pv` 3 unless a different version is called
+Every requirement applies to `pv` 4 unless a different version is called
 out. "The official apps" means the Mac sender and iOS receiver in this
 repository; their behavior is cited as illustration, not as requirement,
 unless marked normative.
@@ -158,8 +158,8 @@ Consequences that are **normative for senders**:
   cannot happen with well-formed Annex B payloads).
 
 **Deprecation.** This heuristic is a design debt, not a feature. It is
-specified here so that `pv <= 3` implementations agree on it, and it is
-**expected to be replaced by a typed frame header in `pv` 4** (a
+specified here so that `pv <= 4` implementations agree on it, and it is
+**expected to be replaced by a typed frame header in a future `pv`** (a
 discriminator between the length prefix and the payload). The change will
 follow the two-phase procedure in COMPATIBILITY.md section 6: a release
 that understands both framings, then, after adoption, a release that
@@ -254,6 +254,7 @@ Coordinates use the conventions of section 7.
 | `gesture` | pv 1 | `name` | Semantic receiver gesture |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
+| `keyboard` | pv 4 | `action`, plus fields per `action` (below) | Keyboard input |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -343,6 +344,51 @@ is up is a hover move.
 `proximity` to a sender whose `pv` is below 3; it MUST degrade the stylus
 to `touch` events instead. (An old sender would ignore the unknown types
 and the stylus would go dead; the fallback keeps it usable.)
+
+**`keyboard`** (pv 4) carries `action` (string): `"text"`, `"press"`,
+`"down"`, or `"up"`, plus fields specific to it:
+
+* `"text"` — committed Unicode text: `text` (string), the finished
+  characters to type (a whole composed/IME commit, an emoji, or an ordinary
+  run of typed characters — never intermediate/marked composition state).
+  `{"type":"keyboard","action":"text","text":"…"}`
+* `"press"` — one atomic special key with no down/up lifecycle to track
+  (used by the software keyboard's Return and Backspace keys): `usage`
+  (int), a USB HID keyboard-page (0x07) usage number (below).
+  `{"type":"keyboard","action":"press","usage":42}`
+* `"down"` / `"up"` — a hardware key's lifecycle, for keys a sender must
+  hold (arrows, modified shortcuts): `usage` (int, as above), `modifiers`
+  (array of strings, optional, absent means none). Every `"down"` a
+  receiver sends MUST be followed by a matching `"up"` (or by disconnect —
+  senders MUST release a still-held key on session loss regardless).
+  `{"type":"keyboard","action":"down","usage":80,"modifiers":["shift"]}`
+
+Named protocol modifiers (not raw platform modifier bit masks): `"shift"`,
+`"control"`, `"option"`, `"command"`, `"capsLock"`. Senders MUST ignore
+unrecognized modifier names.
+
+`usage` values are USB HID Usage Tables keyboard-page (0x07) usage numbers.
+Senders MUST validate `usage` (an integral value in `0...65535`) and MUST
+ignore an out-of-range, non-integral, or unrecognized value rather than
+treat it as fatal. The keys the official apps exchange today:
+
+| Usage | Key |
+|---|---|
+| 40 | Return / Enter |
+| 41 | Escape |
+| 42 | Delete / Backspace |
+| 43 | Tab |
+| 44 | Spacebar |
+| 76 | Delete Forward |
+| 79 | Right Arrow |
+| 80 | Left Arrow |
+| 81 | Down Arrow |
+| 82 | Up Arrow |
+
+**Keyboard fallback (normative):** a receiver MUST NOT send `keyboard`
+messages to a sender whose `pv` is below 4, and SHOULD NOT offer keyboard
+input UI at all while connected to one (there is no legacy fallback path —
+unlike pencil, a receiver simply has nothing useful to degrade to).
 
 **`stats`** is free-form telemetry the sender only logs, so both ends stay
 diagnosable from one log file. The official receiver sends it every ~5 s
@@ -667,7 +713,8 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 2 | Version handshake: `pv` in `hello` and TXT, `welcome`, `updateRequired`, `sleeping`, `closing` |
 | 3 | `pencil`, `proximity`; below pv 3 the receiver degrades stylus to `touch` |
 | 3 (additive) | `hello.cursorPort` and the UDP cursor side channel (6.3); optional, no bump |
-| 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
+| 4 | `keyboard` (text/press/down/up); below pv 4 the receiver has no keyboard fallback and MUST NOT offer keyboard UI |
+| 5 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---
 
@@ -705,7 +752,12 @@ recorded as hints for porters:
 * **Sender, input:** `CGEvent` for touch-as-mouse and scroll, tablet
   events for pencil. Semantic system gestures use macOS keyboard shortcuts
   posted as flagged key-down/key-up events; the sender does not synthesize a
-  trackpad gesture or use private multitouch APIs.
+  trackpad gesture or use private multitouch APIs. `keyboard.text` posts a
+  paired key-down/up carrying the whole string as a Unicode string
+  (`CGEventKeyboardSetUnicodeString`); `press`/`down`/`up` post ordinary
+  virtual-key `CGEvent`s. The sender tracks which hardware keys are held so
+  it can release them all on pause, disconnect, transport migration, or
+  input being disabled — the same cancellation path touch and pencil use.
 * **Receiver, decode/present:** VideoToolbox decode into
   `AVSampleBufferDisplayLayer` (or a Metal layer). Android ports use
   `MediaCodec` + `SurfaceView`.
@@ -724,3 +776,4 @@ This file is versioned by git; the authoritative change log is
 |---|---|
 | 2026-08-19 | Initial specification, written against `pv` 3 |
 | 2026-08-26 | Additive: `hello.cursorPort` and the UDP cursor side channel (section 6.3) |
+| 2026-09-14 | `pv` 4: `keyboard` message family (native keyboard input, M4) |

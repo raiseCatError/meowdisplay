@@ -22,6 +22,16 @@ struct CaptureLifecycleState: Equatable {
         phase == .running || phase == .recovering
     }
 
+    /// M4: whether keyboard input specifically may inject right now.
+    /// Stricter than `allowsInput`, which also tolerates `.recovering` for
+    /// touch/Pencil — that established tolerance is deliberately left
+    /// unchanged here. Keyboard requires the capture lifecycle to be fully
+    /// `.running`; a key injected mid-recovery, mid-pause, or mid-stop has
+    /// no live session to land in.
+    var allowsKeyboardInput: Bool {
+        phase == .running
+    }
+
     var ownsCaptureStop: Bool {
         phase == .pausing || phase == .paused || phase == .resuming || phase == .stopped
     }

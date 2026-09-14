@@ -48,10 +48,23 @@ struct ReceiverScreen: View {
     // Shown until either the user dismisses it or the device connects once.
     @AppStorage("hasConnectedBefore") private var hasConnectedBefore = false
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
+    // M4: the native keyboard responder is focused only while this is true.
+    @State private var keyboardActive = false
+    // M4: "Zoom While Typing" — default ON (see SettingsView).
+    @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
 
     // Streaming = connected and the video format is known.
     private var isStreaming: Bool {
         model.receiver.connected && model.receiver.videoSize != .zero
+    }
+
+    // The floating keyboard button is offered only while keyboard input can
+    // actually reach the Mac: streaming, not paused, and the connected Mac
+    // is new enough to understand `keyboard` wire messages. (Allow Input off
+    // isn't observable from the receiver today — same as touch/pencil, the
+    // Mac silently drops the input instead.)
+    private var keyboardAvailable: Bool {
+        isStreaming && model.receiver.displayState == .running && model.receiver.macSupportsKeyboardWire
     }
 
     // Below the force floor → present the blocking gate (issue #135). The
@@ -74,7 +87,9 @@ struct ReceiverScreen: View {
                     Color.black.ignoresSafeArea()
                     VideoLayerView(displayLayer: model.receiver.displayLayer,
                                    receiver: model.receiver,
-                                   useMetal: metalRenderer)
+                                   useMetal: metalRenderer,
+                                   zoomWhileTyping: zoomWhileTyping,
+                                   keyboardRequested: keyboardActive)
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
                         .allowsHitTesting(model.receiver.displayState == .running)
@@ -99,6 +114,44 @@ struct ReceiverScreen: View {
                                 .padding(.bottom, 10)
                         }
                         .allowsHitTesting(false)   // never block touch input
+                    }
+                    // M4: temporary floating keyboard button — evolves into
+                    // the full M5 floating control. The responder view has
+                    // no visual footprint; only the button is visible.
+                    RemoteKeyboardInputView(
+                        isActive: $keyboardActive,
+                        onCommitText: { model.receiver.sendKeyboardText($0) },
+                        onSpecialPress: { model.receiver.sendKeyboardPress(usage: $0) },
+                        onHardwareKeyDown: { usage, modifiers in
+                            model.receiver.sendKeyboardDown(usage: usage, modifiers: modifiers)
+                        },
+                        onHardwareKeyUp: { usage, modifiers in
+                            model.receiver.sendKeyboardUp(usage: usage, modifiers: modifiers)
+                        },
+                        onRequestDismiss: { keyboardActive = false }
+                    )
+                    .frame(width: 1, height: 1)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+                    if keyboardAvailable {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                Button {
+                                    keyboardActive.toggle()
+                                } label: {
+                                    Image(systemName: keyboardActive
+                                          ? "keyboard.chevron.compact.down" : "keyboard")
+                                        .font(.title2)
+                                        .foregroundStyle(.white)
+                                        .padding(12)
+                                        .background(.ultraThinMaterial, in: Circle())
+                                }
+                                .padding(.trailing, 16)
+                                .padding(.bottom, 24)
+                            }
+                        }
                     }
                 } else {
                     IdleView(receiver: model.receiver, showSettings: $showSettings)
@@ -147,6 +200,13 @@ struct ReceiverScreen: View {
             case .background: model.sceneDidBackground()
             default: break
             }
+            // M4: never hold the keyboard responder while backgrounded.
+            if phase != .active { keyboardActive = false }
+        }
+        // M4: close the keyboard the moment it stops being usable — peer too
+        // old, capture paused, or the session ended.
+        .onChange(of: keyboardAvailable) { available in
+            if !available { keyboardActive = false }
         }
         // The deliberate "screen off" signal: locking the device makes
         // protected data unavailable (a plain app switch doesn't). This is
@@ -326,6 +386,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
+    @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -355,6 +416,14 @@ struct SettingsView: View {
                     Text("Name")
                 } footer: {
                     Text("Shown in the Mac app's WiFi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
+                }
+
+                Section {
+                    Toggle("Zoom While Typing", isOn: $zoomWhileTyping)
+                } header: {
+                    Text("Keyboard")
+                } footer: {
+                    Text("Enlarge the area you're typing in when the keyboard is open.")
                 }
 
                 Section {
@@ -587,12 +656,24 @@ struct VideoLayerView: UIViewRepresentable {
     let displayLayer: AVSampleBufferDisplayLayer
     let receiver: StreamReceiver
     let useMetal: Bool
+    /// M4: the "Zoom While Typing" preference — always enlarges around the
+    /// last touch when the keyboard opens if true; pans (never zooms) if
+    /// false. Either way the typing area still ends up visible.
+    let zoomWhileTyping: Bool
+    /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
+    /// reacts to keyboard-frame notifications while this is true, so a
+    /// keyboard opened for an unrelated text field elsewhere in the app
+    /// (e.g. the Settings sheet's device name field, presented over the
+    /// still-live stream) can never zoom/pan the remote display.
+    let keyboardRequested: Bool
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.setZoomWhileTyping(zoomWhileTyping)
+        view.setKeyboardRequested(keyboardRequested)
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
         }
@@ -616,7 +697,10 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         view.inputEngine.normalize = { [weak view] point in view?.normalized(point) }
-        view.inputEngine.onPencil = { [weak receiver] phase, x, y, pressure, azimuth, altitude in
+        view.inputEngine.onPencil = { [weak receiver, weak view] phase, x, y, pressure, azimuth, altitude in
+            // M4 typing-focus anchor: a real pencil touch-down counts as a
+            // meaningful primary interaction; hover does not (PRODUCT RULE).
+            if phase == "down" { view?.noteAnchorFromNormalized(x: x, y: y) }
             receiver?.sendPencil(phase: phase, x: x, y: y,
                                  pressure: pressure, azimuth: azimuth,
                                  altitude: altitude)
@@ -675,6 +759,8 @@ struct VideoLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: VideoView, context: Context) {
+        uiView.setZoomWhileTyping(zoomWhileTyping)
+        uiView.setKeyboardRequested(keyboardRequested)
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -704,47 +790,220 @@ struct VideoLayerView: UIViewRepresentable {
 
         private var lastLoggedLayout = ""
 
+        // MARK: - M4 keyboard presentation
+
+        // The authoritative transform for this layout pass — rendering
+        // (content layer geometry, cursor position) and input mapping
+        // (normalized()) both derive from this single value so they can
+        // never independently drift out of sync.
+        private var currentTransform = RemoteViewportTransform.invalid
+        // The "Zoom While Typing" preference; set from SwiftUI.
+        private var zoomWhileTypingEnabled = true
+        // Whether *our* keyboard is the one that might be open — gates
+        // keyboardWillChangeFrame so an unrelated keyboard elsewhere in the
+        // app (e.g. the Settings sheet's device name field, presented over
+        // the still-live stream) can never zoom/pan the remote display.
+        private var keyboardRequested = false
+        // Non-nil sub-rect of `bounds`, above the keyboard (including its
+        // accessory view), while our keyboard is open and docked at the
+        // bottom; nil whenever the keyboard is closed or not ours.
+        private var keyboardVisibleRect: CGRect?
+        // Most recent meaningful primary interaction, in normalized
+        // remote-display coordinates — the typing-focus anchor. Never
+        // updated from multi-finger/system gestures, Pencil hover, the
+        // keyboard button, or a touch outside the rendered video (those
+        // simply never call the note*Anchor* methods below).
+        private var lastAnchor: CGPoint?
+        // True only while layoutSubviews is running inside the UIView.animate
+        // block a keyboard-frame change (or a live preference toggle) drives
+        // — lets the content layer's geometry inherit that animation instead
+        // of snapping, while ordinary layout (rotation, initial layout)
+        // keeps disabling implicit actions as before.
+        private var animatingKeyboardTransition = false
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            // Keyboard notifications fire globally regardless of which
+            // responder triggered them — `keyboardRequested` (above) is
+            // what keeps this from reacting to somebody else's keyboard.
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(keyboardWillChangeFrame(_:)),
+                name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+            // The zoomed/panned content layer can extend beyond `bounds` —
+            // clip it so it never bleeds into sibling SwiftUI content.
+            clipsToBounds = true
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("unsupported") }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func setZoomWhileTyping(_ enabled: Bool) {
+            guard enabled != zoomWhileTypingEnabled else { return }
+            zoomWhileTypingEnabled = enabled
+            guard keyboardVisibleRect != nil else { return }   // only matters while open
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        func setKeyboardRequested(_ requested: Bool) {
+            guard requested != keyboardRequested else { return }
+            keyboardRequested = requested
+            guard !requested, keyboardVisibleRect != nil else { return }
+            // Explicit close (Done / the floating button) restores normal
+            // presentation immediately rather than waiting on the system's
+            // hide notification, which this view now ignores anyway.
+            keyboardVisibleRect = nil
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        @objc private func keyboardWillChangeFrame(_ note: Notification) {
+            guard keyboardRequested,
+                  let info = note.userInfo,
+                  let endFrameValue = info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+            let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? TimeInterval) ?? 0.25
+            let curveRaw = (info[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int)
+                ?? UIView.AnimationCurve.easeInOut.rawValue
+            let curveOption = UIView.AnimationOptions(rawValue: UInt(curveRaw << 16))
+            let localFrame = convert(endFrameValue.cgRectValue, from: nil)
+            // The system keyboard docks at the bottom edge; an undocked/
+            // floating iPad keyboard doesn't cover our bottom edge and
+            // needs no protection.
+            let dockedAtBottom = localFrame.maxY >= bounds.maxY - 1 && localFrame.minY < bounds.maxY
+            keyboardVisibleRect = dockedAtBottom
+                ? CGRect(x: 0, y: 0, width: bounds.width, height: min(bounds.height, max(0, localFrame.minY)))
+                : nil
+            animateTransformChange(duration: duration, options: curveOption)
+        }
+
+        private func animateTransformChange(duration: TimeInterval, options: UIView.AnimationOptions) {
+            setNeedsLayout()
+            animatingKeyboardTransition = true
+            UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState], animations: {
+                self.layoutIfNeeded()
+            }, completion: { [weak self] _ in self?.animatingKeyboardTransition = false })
+        }
+
+        /// Finger-primary-touch anchor updates: only from a touch that
+        /// actually landed on the rendered video, never a letterbox bar.
+        private func noteAnchorIfOnDisplay(viewPoint: CGPoint, normalized: CGPoint) {
+            guard currentTransform.containsViewPoint(viewPoint) else { return }
+            setAnchor(normalized)
+        }
+
+        /// Pencil-down anchor updates. Already-normalized coordinates come
+        /// from a real touch on the glass, so no extra bounds check.
+        fileprivate func noteAnchorFromNormalized(x: Double, y: Double) {
+            setAnchor(CGPoint(x: x, y: y))
+        }
+
+        /// Updates the typing-focus anchor and, if the keyboard is already
+        /// open, smoothly re-targets the viewport to it (tapping a
+        /// different Mac field mid-session must not snap — a short,
+        /// non-bouncy ease, same family as the keyboard-frame transition).
+        /// While the keyboard is closed this only records the anchor for
+        /// whenever it next opens; no animation is needed since nothing is
+        /// visibly changing yet.
+        private func setAnchor(_ normalized: CGPoint) {
+            lastAnchor = normalized
+            guard keyboardVisibleRect != nil else { return }
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
         func clearInputStateForPause() {
             twoFingerActive = false
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
+            lastAnchor = nil
         }
 
         override func layoutSubviews() {
             super.layoutSubviews()
+            updateCurrentTransform()
+            let normalRect = RemoteViewportCalculator.normal(
+                viewBounds: bounds, remoteAspectSize: receiver?.videoSize ?? .zero).displayedRect
+            let applyContent = {
+                if let renderer = self.metalRenderer {
+                    self.applyContentGeometry(renderer.metalLayer, normalRect: normalRect, transform: self.currentTransform)
+                } else if let first = self.layer.sublayers?.first {
+                    self.applyContentGeometry(first, normalRect: normalRect, transform: self.currentTransform)
+                }
+            }
+            if animatingKeyboardTransition {
+                applyContent()
+            } else {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                applyContent()
+                CATransaction.commit()
+            }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if let renderer = metalRenderer {
-                // The metal layer scales its drawable to fill its frame, so
-                // the frame itself must be the aspect-fit rect.
-                renderer.metalLayer.frame = videoRect() ?? bounds
-            } else {
-                // AVSBDL aspect-fits internally (videoGravity) — full bounds.
-                layer.sublayers?.first?.frame = bounds
-            }
             if cursorLayer.superlayer == nil { layer.addSublayer(cursorLayer) }
             updateCursorLayout()
             CATransaction.commit()
             // Rotation diagnostics — one line per layout change.
             let video = receiver?.videoSize ?? .zero
+            let displayed = currentTransform.displayedRect
             let line = "layout: bounds=\(Int(bounds.width))x\(Int(bounds.height))"
                 + " video=\(Int(video.width))x\(Int(video.height))"
-                + " layer=\(Int(layer.sublayers?.first?.frame.width ?? -1))x\(Int(layer.sublayers?.first?.frame.height ?? -1))"
+                + " layer=\(Int(displayed.width))x\(Int(displayed.height))"
             if line != lastLoggedLayout {
                 lastLoggedLayout = line
                 Log.info(line)
             }
         }
 
-        /// Aspect-fit rect of the video inside the view (inverse of normalized()).
-        private func videoRect() -> CGRect? {
+        private func updateCurrentTransform() {
             guard let video = receiver?.videoSize, video != .zero,
-                  bounds.width > 0, bounds.height > 0 else { return nil }
-            let scale = min(bounds.width / video.width, bounds.height / video.height)
-            let size = CGSize(width: video.width * scale, height: video.height * scale)
-            return CGRect(x: (bounds.width - size.width) / 2,
-                          y: (bounds.height - size.height) / 2,
-                          width: size.width, height: size.height)
+                  bounds.width > 0, bounds.height > 0 else {
+                currentTransform = .invalid
+                return
+            }
+            if let keyboardVisibleRect {
+                currentTransform = RemoteViewportCalculator.keyboardOpen(
+                    viewBounds: bounds, remoteAspectSize: video,
+                    visibleRect: keyboardVisibleRect, anchor: lastAnchor,
+                    zoomEnabled: zoomWhileTypingEnabled)
+            } else {
+                currentTransform = RemoteViewportCalculator.normal(viewBounds: bounds, remoteAspectSize: video)
+            }
+        }
+
+        /// Positions a content layer (the AVSBDL sublayer or the Metal
+        /// layer) using `bounds`/`anchorPoint`/`position`/`transform`
+        /// rather than `frame`, because neither renderer supports drawing a
+        /// cropped sub-region on its own (AVSBDL's `videoGravity` and the
+        /// Metal shader's fullscreen-quad UV both always show the *whole*
+        /// frame). Instead, the layer is always sized at its natural,
+        /// un-zoomed (`normalRect`) size, and a `CGAffineTransform` scales
+        /// it — around whatever point in its own bounds corresponds to
+        /// `remoteCrop`'s origin — so only that cropped fraction ends up
+        /// visible, at `displayedRect`. A pure compositing trick: neither
+        /// renderer's actual drawing changes.
+        private func applyContentGeometry(_ layer: CALayer, normalRect: CGRect, transform: RemoteViewportTransform) {
+            guard transform.isValid, normalRect.width > 0, normalRect.height > 0 else {
+                layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+                layer.bounds = CGRect(origin: .zero, size: bounds.size)
+                layer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+                layer.setAffineTransform(.identity)
+                return
+            }
+            let scale = transform.displayedRect.width / max(transform.remoteCrop.width * normalRect.width, 0.0001)
+            layer.bounds = CGRect(origin: .zero, size: normalRect.size)
+            layer.anchorPoint = CGPoint(x: transform.remoteCrop.minX, y: transform.remoteCrop.minY)
+            layer.position = transform.displayedRect.origin
+            layer.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale))
+        }
+
+        /// View points per Mac pixel under the current transform — used to
+        /// convert a finger-pan drag into `sendScroll`'s pixel deltas. `nil`
+        /// when there's nothing valid to scroll against.
+        private func pointsPerRemotePixel(video: CGSize) -> CGFloat? {
+            guard currentTransform.isValid, video.width > 0, currentTransform.remoteCrop.width > 0 else { return nil }
+            return currentTransform.displayedRect.width / (currentTransform.remoteCrop.width * video.width)
         }
 
         func moveCursor(x: Double, y: Double, visible: Bool) {
@@ -768,27 +1027,32 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.commit()
         }
 
+        /// Places the cursor sprite via the same `currentTransform` that
+        /// positions the content layer and maps touches, so it stays
+        /// correctly aligned whether the remote display is zoomed, panned,
+        /// or shown normally — including scaling up while zoomed in, and
+        /// (correctly) landing outside the clipped view when the Mac
+        /// cursor itself is currently outside the visible crop.
         private func updateCursorLayout() {
-            guard let rect = videoRect(), cursorNormSize != .zero else { return }
+            guard currentTransform.isValid, cursorNormSize != .zero else { return }
+            let displayedRect = currentTransform.displayedRect
+            let crop = currentTransform.remoteCrop
+            let scaleX = displayedRect.width / crop.width
+            let scaleY = displayedRect.height / crop.height
             cursorLayer.bounds = CGRect(x: 0, y: 0,
-                                        width: cursorNormSize.width * rect.width,
-                                        height: cursorNormSize.height * rect.height)
-            cursorLayer.position = CGPoint(x: rect.minX + cursorNorm.x * rect.width,
-                                           y: rect.minY + cursorNorm.y * rect.height)
+                                        width: cursorNormSize.width * scaleX,
+                                        height: cursorNormSize.height * scaleY)
+            cursorLayer.position = currentTransform.viewPoint(forRemote: cursorNorm)
         }
 
-        // The video is aspect-fit inside the view; map view coords into the
-        // displayed video rect and normalize to [0,1].
+        // Maps a view-local point into normalized remote-display space
+        // through `currentTransform` — the exact inverse of how the
+        // content layer and cursor are placed, so a visible Mac control
+        // tapped while zoomed/panned still receives input at that precise
+        // Mac location.
         fileprivate func normalized(_ point: CGPoint) -> (x: Double, y: Double)? {
-            guard let video = receiver?.videoSize, video != .zero,
-                  bounds.width > 0, bounds.height > 0 else { return nil }
-            let scale = min(bounds.width / video.width, bounds.height / video.height)
-            let size = CGSize(width: video.width * scale, height: video.height * scale)
-            let origin = CGPoint(x: (bounds.width - size.width) / 2,
-                                 y: (bounds.height - size.height) / 2)
-            let x = (point.x - origin.x) / size.width
-            let y = (point.y - origin.y) / size.height
-            return (min(max(x, 0), 1), min(max(y, 0), 1))
+            guard let remote = currentTransform.remotePoint(forView: point) else { return nil }
+            return (Double(remote.x), Double(remote.y))
         }
 
         private func isFinger(_ touch: UITouch) -> Bool {
@@ -824,9 +1088,8 @@ struct VideoLayerView: UIViewRepresentable {
                     receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
                 }
             case .changed:
-                guard twoFingerActive else { return }
+                guard twoFingerActive, let scale = pointsPerRemotePixel(video: video) else { return }
                 let t = recognizer.translation(in: self)
-                let scale = min(bounds.width / video.width, bounds.height / video.height)
                 // Deltas in video pixels, natural-scrolling direction.
                 receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
                                      dy: (t.y - lastPan.y) / scale)
@@ -951,6 +1214,9 @@ struct VideoLayerView: UIViewRepresentable {
             downSent = true
             holdTimer?.cancel()
             holdTimer = nil
+            // M4 typing-focus anchor: the primary single-finger press is
+            // the "meaningful primary interaction" (PRODUCT/FOCUS rules).
+            noteAnchorIfOnDisplay(viewPoint: pendingDownPoint, normalized: CGPoint(x: p.x, y: p.y))
             receiver?.sendTouch(phase: "began", x: p.x, y: p.y)
         }
 
@@ -1040,6 +1306,8 @@ struct VideoLayerView: UIViewRepresentable {
             guard let touch = touches.first,
                   let norm = normalized(touch.location(in: self)) else { return }
             lastNorm = norm
+            // Pre-pv3-pencil-wire fallback: "began" is this path's down.
+            if phase == "began" { noteAnchorFromNormalized(x: norm.x, y: norm.y) }
             if phase == "moved", let event {
                 for t in event.samples(for: touch) {
                     if let n = normalized(t.location(in: self)) {

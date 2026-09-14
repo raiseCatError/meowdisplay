@@ -79,6 +79,9 @@ final class StreamReceiver: ObservableObject {
     /// True when the connected Mac understands pencil/proximity wire messages.
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
 
+    /// True when the connected Mac understands the `keyboard` message family (M4).
+    var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
+
     private var listener: NWListener?
     private var listenerHealthy = false
     private var listenerRestartState = StreamListenerRestartState()
@@ -1025,6 +1028,36 @@ final class StreamReceiver: ObservableObject {
     func sendProximity(entering: Bool, x: Double, y: Double) {
         guard displayState == .running else { return }
         sendControl(["type": "proximity", "entering": entering, "x": x, "y": y])
+    }
+
+    /// Committed Unicode text from the native software/hardware keyboard
+    /// (M4). Never carries marked/IME-intermediate text — callers commit
+    /// only finished text (see `RemoteKeyboardInputView`).
+    func sendKeyboardText(_ text: String) {
+        guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
+        sendControl(["type": "keyboard", "action": "text", "text": text])
+    }
+
+    /// An atomic special key from the software keyboard (e.g. Return,
+    /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
+    /// keyboard-page usage number.
+    func sendKeyboardPress(usage: Int) {
+        guard displayState == .running, macSupportsKeyboardWire else { return }
+        sendControl(["type": "keyboard", "action": "press", "usage": usage])
+    }
+
+    /// A hardware key going down, for keys the Mac must hold (arrows,
+    /// modified shortcuts). `modifiers` are named protocol modifiers, not
+    /// raw UIKit flags.
+    func sendKeyboardDown(usage: Int, modifiers: [String]) {
+        guard displayState == .running, macSupportsKeyboardWire else { return }
+        sendControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
+    }
+
+    /// The matching release for `sendKeyboardDown`.
+    func sendKeyboardUp(usage: Int, modifiers: [String]) {
+        guard displayState == .running, macSupportsKeyboardWire else { return }
+        sendControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,

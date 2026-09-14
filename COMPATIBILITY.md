@@ -145,6 +145,15 @@ the floor once a force-capable build has spread.
   fields and new message types, gated on the peer's `pv`. Both apps already
   log-and-ignore unknown message types and tolerate missing optional fields, so
   additive changes never break an older peer.
+- **Example: `pv` 4 keyboard input (M4).** The `keyboard` message family
+  (PROTOCOL.md §6.1) is additive in the same sense as `pencil`/`proximity`
+  at `pv` 3 — an old Mac simply ignores the unknown `keyboard` type, so
+  nothing breaks. The `pv` bump exists so iOS can gate the *UI*: the
+  floating keyboard button only appears while `welcome.pv ≥ 4`, because
+  unlike stylus input there is no legacy fallback for typed text — showing
+  the button against an old Mac would silently type into nothing. `minPeer`
+  stays at `1` on both sides; a `pv 3` Mac keeps streaming and receiving
+  touch/scroll/pencil exactly as before, just without the keyboard button.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

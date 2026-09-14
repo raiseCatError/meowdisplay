@@ -35,6 +35,136 @@ enum InputPolicy {
     }
 }
 
+/// USB HID keyboard-page (0x07) usage numbers the wire protocol accepts for
+/// special/raw key events (M4). Values match the USB HID Usage Tables spec,
+/// which is also what UIKit's `UIKeyboardHIDUsage` uses, so a receiver can
+/// send a hardware key's `UIKey.keyCode.rawValue` unmodified.
+enum HIDKeyUsage: Int, CaseIterable {
+    case returnOrEnter = 40
+    case escape = 41
+    case deleteOrBackspace = 42
+    case tab = 43
+    case spacebar = 44
+    case forwardDelete = 76
+    case rightArrow = 79
+    case leftArrow = 80
+    case downArrow = 81
+    case upArrow = 82
+
+    /// The macOS virtual key code (`CGKeyCode`, US ANSI layout) this usage
+    /// injects as.
+    var keyCode: CGKeyCode {
+        switch self {
+        case .returnOrEnter: return 36
+        case .escape: return 53
+        case .deleteOrBackspace: return 51
+        case .tab: return 48
+        case .spacebar: return 49
+        case .forwardDelete: return 117
+        case .rightArrow: return 124
+        case .leftArrow: return 123
+        case .downArrow: return 125
+        case .upArrow: return 126
+        }
+    }
+
+    /// Parses a wire `usage` value — an arbitrary, untrusted JSON number —
+    /// into a known HID usage, rejecting anything non-integral, negative, or
+    /// out of the 16-bit HID usage range before it can reach an unchecked
+    /// conversion. Also the single place an unrecognized (but validly
+    /// formed) usage is rejected.
+    static func parse(_ value: Any?) -> HIDKeyUsage? {
+        guard let number = value as? NSNumber else { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double == double.rounded(),
+              double >= 0, double <= 65535 else { return nil }
+        return HIDKeyUsage(rawValue: Int(double))
+    }
+}
+
+/// Named protocol keyboard modifiers. The wire carries these strings, never
+/// raw UIKit modifier bit masks.
+enum KeyModifier: String {
+    case shift
+    case control
+    case option
+    case command
+    case capsLock
+
+    var flag: CGEventFlags {
+        switch self {
+        case .shift: return .maskShift
+        case .control: return .maskControl
+        case .option: return .maskAlternate
+        case .command: return .maskCommand
+        case .capsLock: return .maskAlphaShift
+        }
+    }
+
+    /// Decodes wire modifier names into event flags, silently ignoring
+    /// unrecognized names (an additive future modifier from a newer peer).
+    static func flags(named names: [String]) -> CGEventFlags {
+        names.reduce(into: CGEventFlags()) { flags, name in
+            guard let modifier = KeyModifier(rawValue: name) else { return }
+            flags.insert(modifier.flag)
+        }
+    }
+}
+
+/// The event flags a committed-text keyboard event must carry: none, always.
+/// A stray or ambient modifier flag on a text-commit event reads to the
+/// receiving app as a shortcut instead of typed text — e.g. plain "t" firing
+/// Chrome's Cmd+T (observed on a real device: a modified hardware key event
+/// left `.hidSystemState` reporting Command down, and the text path's
+/// CGEvents inherited that ambient flag because they never set `.flags`
+/// explicitly). Named and tested in isolation so the invariant "text is
+/// never modified" stays visible and can't silently regress.
+enum KeyboardTextFlags {
+    static let committed: CGEventFlags = []
+}
+
+/// Prepares committed keyboard text for Unicode injection, rejecting empty
+/// or unreasonably large payloads before they reach a CGEvent.
+enum KeyboardTextPlanner {
+    static let maxUTF16Length = 4096
+
+    static func plan(_ text: String) -> [unichar]? {
+        guard !text.isEmpty else { return nil }
+        let units = Array(text.utf16)
+        guard !units.isEmpty, units.count <= maxUTF16Length else { return nil }
+        return units
+    }
+}
+
+/// Tracks which hardware keys are currently held, deciding whether a
+/// down/up message should produce a synthetic event or be ignored as a
+/// duplicate/spurious transition. Pure state, no CGEvent side effects, so
+/// it can be exercised directly by tests without touching real input.
+struct HeldKeyTracker {
+    private(set) var held: Set<HIDKeyUsage> = []
+
+    /// Returns true if this down should be posted, i.e. the key wasn't
+    /// already held (a duplicate down is ignored).
+    @discardableResult
+    mutating func down(_ usage: HIDKeyUsage) -> Bool {
+        held.insert(usage).inserted
+    }
+
+    /// Returns true if this up should be posted, i.e. the key was actually
+    /// held (a spurious up is ignored).
+    @discardableResult
+    mutating func up(_ usage: HIDKeyUsage) -> Bool {
+        held.remove(usage) != nil
+    }
+
+    /// Every currently held key, clearing tracked state — used to release
+    /// everything on cancellation.
+    mutating func releaseAll() -> Set<HIDKeyUsage> {
+        defer { held.removeAll() }
+        return held
+    }
+}
+
 struct SystemGestureShortcut {
     let keyCode: CGKeyCode
     let flags: CGEventFlags

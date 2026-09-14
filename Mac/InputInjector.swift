@@ -62,6 +62,10 @@ final class InputInjector {
     private var penClickSession: PenClickSession?
     private var penLastClick: PenCompletedClick?
 
+    // Hardware keys currently held down (M4) — released on cancellation so a
+    // dropped session can never leave a modifier or arrow key stuck.
+    private var heldKeys = HeldKeyTracker()
+
     init(displayID: CGDirectDisplayID) {
         self.displayID = displayID
     }
@@ -112,6 +116,10 @@ final class InputInjector {
 
         penClickSession = nil
         penLastClick = nil
+
+        for usage in heldKeys.releaseAll() {
+            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: [])
+        }
     }
 
     static func ensureAccessibilityPermission() -> Bool {
@@ -186,6 +194,87 @@ final class InputInjector {
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
         setProximity(entering: entering, at: screenPoint(nx: x, ny: y))
+    }
+
+    // MARK: - Keyboard (M4)
+
+    /// Committed Unicode text from the software/hardware keyboard's text
+    /// path. Injected as one paired key-down/up carrying the whole string,
+    /// so multi-scalar clusters (emoji, accented composed characters) post
+    /// as a single event pair.
+    func handleKeyboardText(_ text: String) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), let units = KeyboardTextPlanner.plan(text) else { return }
+        postUnicodeText(units)
+    }
+
+    /// An atomic special key from the software keyboard (no held state to
+    /// track — down and up post back to back).
+    func handleKeyboardPress(_ usage: HIDKeyUsage) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: [])
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: [])
+    }
+
+    /// A hardware key going down. A duplicate down for an already-held key
+    /// is ignored rather than re-posted.
+    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String]) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), heldKeys.down(usage) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: KeyModifier.flags(named: modifiers))
+    }
+
+    /// The matching release. A spurious up for a key that isn't held (e.g.
+    /// after cancellation already released it) is ignored.
+    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String]) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard heldKeys.up(usage) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: KeyModifier.flags(named: modifiers))
+    }
+
+    private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown) else { return }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// Attaching the Unicode string to both the key-down and key-up events is
+    /// the conventional pattern for `CGEventKeyboardSetUnicodeString`
+    /// (mirrored by, among others, Apple's own Quartz Event Services sample
+    /// code and every widely used open-source Unicode-typing utility built
+    /// on this API): text insertion is driven by the *key-down* event alone
+    /// — `keyUp` is never routed through `insertText:`/IME processing, so
+    /// carrying the string there cannot cause a second insertion. It matters
+    /// only because some apps read the string back off whichever event they
+    /// inspect (e.g. matching a down/up pair by content for key-repeat or
+    /// event-tap logic); omitting it from `up` risks that pairing seeing a
+    /// down for one character and an empty up, not a correctness issue for
+    /// insertion itself. Post as one down/up pair per commit either way.
+    ///
+    /// `.flags` is set explicitly to `KeyboardTextFlags.committed` (always
+    /// empty) rather than left at whatever `CGEventCreateKeyboardEvent`
+    /// defaults to for this event source — a real-device incident showed
+    /// plain typed text ("t") acting as a Command shortcut (Chrome opened a
+    /// new tab) after a modified hardware key combo, because an unset
+    /// `.flags` on a `.hidSystemState`-sourced event can inherit whatever
+    /// modifier state is currently ambient rather than reading as "none".
+    /// Committed text must never carry a modifier regardless of what any
+    /// other key event recently posted, so both events state that
+    /// explicitly instead of relying on a default.
+    private func postUnicodeText(_ units: [unichar]) {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
+        down.flags = KeyboardTextFlags.committed
+        up.flags = KeyboardTextFlags.committed
+        down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 
     /// The control-message gate is duplicated here under the input lock so an

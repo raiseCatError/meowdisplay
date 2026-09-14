@@ -826,6 +826,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    /// M4: the keyboard's own, stricter input gate. Touch/Pencil/scroll keep
+    /// using `receiverInputIsAllowed()` (tolerates `.recovering`) — this
+    /// exists only so keyboard input additionally requires the capture
+    /// lifecycle to be fully `.running` (see `CaptureLifecycleState.
+    /// allowsKeyboardInput`), without touching that shared policy.
+    private func receiverKeyboardInputIsAllowed() -> Bool {
+        guard InputPolicy.allowsInput(),
+              captureStateSnapshot().allowsKeyboardInput else {
+            inputInjector?.cancelActiveInput()
+            return false
+        }
+        return true
+    }
+
     func pauseDisplay() {
         queue.async { [weak self] in
             guard let self,
@@ -923,6 +937,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, !self.stopped else { return }
             let label = if case .usb = newTransport { "USB" } else { "WiFi" }
             Log.info("switching \(self.endpointName) to \(label)")
+            // A held hardware key (or drag/pen contact) must not survive the
+            // old connection into the migrated one.
+            self.inputInjector?.cancelActiveInput()
             self.transport = newTransport
             // Fresh grace window: if the new link can't come up either, the
             // session ends like any other disconnect instead of dialing
@@ -1100,6 +1117,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("unexpected SCStream stop mode=\(mode.rawValue) domain=\(nsError.domain) "
             + "code=\(nsError.code): \(error.localizedDescription)")
         Task { await status("Capture stopped: \(error.localizedDescription)") }
+        // An unplanned stop is exactly the kind of drop a held keyboard key
+        // (or mouse/Pencil contact) must not survive — the recovery window
+        // that follows has no live session for it to belong to.
+        inputInjector?.cancelActiveInput()
         invalidateCapturePipeline()
         stream = nil
         scheduleCaptureRecovery()
@@ -1458,6 +1479,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let names = conn.currentPath?.availableInterfaces.map(\.name)
             .joined(separator: ",") ?? "?"
         Log.info("cable path answered (\(names)) — migrating the session off WiFi")
+        // Same reasoning as switchTransport: the underlying connection is
+        // being replaced, so any held hardware key must not survive it.
+        inputInjector?.cancelActiveInput()
         upgradeProbes.removeAll { $0 === conn }
         stopUpgradeProbing()
         dialGeneration += 1   // a redial in flight must not clobber this
@@ -1639,6 +1663,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func scheduleReconnect() {
         guard !stopped else { return }
+        // Same reasoning as switchTransport/migrate: the connection this
+        // session held input on is gone, so nothing may stay held across
+        // the reconnect attempt.
+        inputInjector?.cancelActiveInput()
         if everConnected {
             if let since = disconnectedSince {
                 if Date().timeIntervalSince(since) > disconnectGraceSeconds {
@@ -2081,6 +2109,32 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
                 inputInjector?.handleProximity(entering: entering, x: x, y: y)
+            }
+        case "keyboard":
+            // M4: stricter than touch/pencil/proximity — keyboard requires
+            // the capture lifecycle to be fully running, not merely
+            // "recovering" (see receiverKeyboardInputIsAllowed), on top of
+            // the usual Allow Input requirement.
+            guard receiverKeyboardInputIsAllowed(), let action = obj["action"] as? String else { return }
+            switch action {
+            case "text":
+                if let text = obj["text"] as? String {
+                    inputInjector?.handleKeyboardText(text)
+                }
+            case "press":
+                if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                    inputInjector?.handleKeyboardPress(usage)
+                }
+            case "down":
+                if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                }
+            case "up":
+                if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                    inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                }
+            default:
+                break   // unknown keyboard action from a newer peer — ignore
             }
         case "gesture":
             guard let name = obj["name"] as? String,
