@@ -154,6 +154,14 @@ the floor once a force-capable build has spread.
   the button against an old Mac would silently type into nothing. `minPeer`
   stays at `1` on both sides; a `pv 3` Mac keeps streaming and receiving
   touch/scroll/pencil exactly as before, just without the keyboard button.
+- **Example: `pv` 5 pointer/click gestures (M7).** The `pointer` message
+  family (PROTOCOL.md §6.1) is additive the same way — an old Mac ignores
+  the unknown `pointer` type, so nothing breaks. Unlike keyboard, there
+  *is* a legacy fallback here: iOS gates on `macSupportsPointerWire`
+  (`welcome.pv ≥ 5`) and, when it's false, drives the pre-M7 `touch`
+  click-drag behavior instead of hiding a feature outright. `minPeer`
+  stays at `1`; a `pv 4` Mac keeps receiving `touch`/`scroll` exactly as
+  before, just without absolute-pointer/precision/right-click/right-drag.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

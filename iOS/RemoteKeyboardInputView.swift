@@ -48,8 +48,13 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
         uiView.onHardwareKeyUp = onHardwareKeyUp
         uiView.onRequestDismiss = onRequestDismiss
         if isActive, !uiView.isFirstResponder {
+            // Diagnostic breadcrumb for a real-device-only first-activation
+            // crash under investigation — cheap, no behavior change. Remove
+            // once root-caused.
+            Log.info("keyboard: activating — inWindow=\(uiView.window != nil) bounds=\(uiView.bounds)")
             uiView.becomeFirstResponder()
         } else if !isActive, uiView.isFirstResponder {
+            Log.info("keyboard: resigning")
             uiView.resignFirstResponder()
         }
     }
@@ -244,7 +249,12 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         // or a resign that raced a press callback). Starting clean means a
         // stray leftover entry can't suppress a genuinely new key's down.
         heldUsages.removeAll()
-        return super.becomeFirstResponder()
+        let result = super.becomeFirstResponder()
+        // Diagnostic breadcrumb for a real-device-only first-activation
+        // crash under investigation — cheap, no behavior change. Remove
+        // once root-caused.
+        Log.info("keyboard: becomeFirstResponder -> \(result)")
+        return result
     }
 
     @discardableResult

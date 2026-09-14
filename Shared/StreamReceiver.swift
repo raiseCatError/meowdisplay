@@ -82,6 +82,9 @@ final class StreamReceiver: ObservableObject {
     /// True when the connected Mac understands the `keyboard` message family (M4).
     var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
 
+    /// True when the connected Mac understands the `pointer` message family (M7).
+    var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
+
     private var listener: NWListener?
     private var listenerHealthy = false
     private var listenerRestartState = StreamListenerRestartState()
@@ -1005,6 +1008,41 @@ final class StreamReceiver: ObservableObject {
     /// Send a semantic gesture without changing the meaning of touch/scroll input.
     func sendGesture(name: String) {
         sendControl(["type": "gesture", "name": name])
+    }
+
+    /// M7 pointer/click messages (pv 5). Callers MUST check
+    /// `macSupportsPointerWire` first — see `PointerGestureEngine` and its
+    /// use from `iOS/OpenSidecarPhoneApp.swift`'s `VideoView`.
+    ///
+    /// Absolute cursor move: `x`/`y` normalized [0,1] in video space, no
+    /// button implied.
+    func sendPointerMove(x: Double, y: Double) {
+        guard displayState == .running else { return }
+        sendControl(["type": "pointer", "action": "move", "x": x, "y": y])
+    }
+
+    /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
+    /// `scroll`), no button implied.
+    func sendPointerMoveRelative(dx: Double, dy: Double) {
+        guard displayState == .running else { return }
+        sendControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
+    }
+
+    /// Presses `button` down at the Mac's current cursor position with the
+    /// given click count (1 = single, 2 = double, 3 = triple — mirrors
+    /// `NSEvent.clickCount`/`CGEventClickState`).
+    func sendPointerDown(button: PointerButton, clickCount: Int) {
+        guard displayState == .running else { return }
+        sendControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
+    }
+
+    /// Releases `button`. Every `down` a receiver sends MUST be followed by
+    /// a matching `up` (or disconnect — senders MUST release a still-held
+    /// button on session loss regardless, mirroring `keyboard`'s down/up
+    /// contract).
+    func sendPointerUp(button: PointerButton, clickCount: Int) {
+        guard displayState == .running else { return }
+        sendControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.

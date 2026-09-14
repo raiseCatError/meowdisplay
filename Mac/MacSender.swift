@@ -2084,6 +2084,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                 inputInjector?.handleScroll(dx: dx, dy: dy)
             }
+        case "pointer":
+            // M7: absolute/relative cursor movement decoupled from button
+            // state, plus explicit left/right down/up with click counts.
+            guard receiverInputIsAllowed(), let action = obj["action"] as? String else { return }
+            switch action {
+            case "move":
+                if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
+                    inputInjector?.handlePointerMove(x: x, y: y)
+                }
+            case "moveRelative":
+                if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
+                    inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
+                }
+            case "down":
+                if let button = PointerButton.parse(obj["button"]) {
+                    inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                }
+            case "up":
+                if let button = PointerButton.parse(obj["button"]) {
+                    inputInjector?.handlePointerUp(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                }
+            default:
+                break   // unknown pointer action from a newer peer — ignore
+            }
         case "pencil":
             guard receiverInputIsAllowed() else { return }
             if let phase = obj["phase"] as? String,

@@ -255,6 +255,7 @@ Coordinates use the conventions of section 7.
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `keyboard` | pv 4 | `action`, plus fields per `action` (below) | Keyboard input |
+| `pointer` | pv 5 | `action`, plus fields per `action` (below) | Pointer/click gestures |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -389,6 +390,42 @@ treat it as fatal. The keys the official apps exchange today:
 messages to a sender whose `pv` is below 4, and SHOULD NOT offer keyboard
 input UI at all while connected to one (there is no legacy fallback path —
 unlike pencil, a receiver simply has nothing useful to degrade to).
+
+**`pointer`** (pv 5) carries `action` (string): `"move"`, `"moveRelative"`,
+`"down"`, or `"up"`, plus fields specific to it. Decouples cursor movement
+from button state — unlike `touch`, moving the pointer never implies a
+mouse button, and a button press/release is a separate, explicit message
+carrying its own click count and button identity:
+
+* `"move"` — absolute cursor move: `x`, `y` (numbers), normalized position
+  (section 7). No button implied.
+  `{"type":"pointer","action":"move","x":0.42,"y":0.7}`
+* `"moveRelative"` — relative cursor move from the Mac's own current
+  cursor position (never a touch location): `dx`, `dy` (numbers), in
+  **video pixels** (section 7), same convention as `scroll`'s deltas. No
+  button implied.
+  `{"type":"pointer","action":"moveRelative","dx":4,"dy":-2}`
+* `"down"` — a mouse button going down at the Mac's *current* cursor
+  position: `button` (string, `"left"` or `"right"`), `clickCount` (int,
+  1/2/3 for single/double/triple click — mirrors
+  `NSEvent.clickCount`/`CGEventClickState`). Every `"down"` a receiver
+  sends MUST be followed by a matching `"up"` (or disconnect — senders
+  MUST release a still-held button on session loss regardless, same
+  contract as `keyboard`'s `"down"`/`"up"`).
+  `{"type":"pointer","action":"down","button":"left","clickCount":1}`
+* `"up"` — the matching release: `button`, `clickCount` (as above).
+  `{"type":"pointer","action":"up","button":"left","clickCount":1}`
+
+Senders MUST validate `button` and MUST ignore an unrecognized value
+rather than treat it as fatal (a future button name is a no-op, not a
+disconnect).
+
+**Pointer fallback (normative):** a receiver MUST NOT send `pointer`
+messages to a sender whose `pv` is below 5; it MUST degrade to the legacy
+`touch` click-drag behavior instead (finger down/moved/up mapped straight
+to left mouse down/dragged/up, as before pv 5) — there is a full working
+fallback, unlike keyboard, so pointer/click gestures degrade gracefully
+rather than disappearing.
 
 **`stats`** is free-form telemetry the sender only logs, so both ends stay
 diagnosable from one log file. The official receiver sends it every ~5 s

@@ -784,6 +784,19 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
+    /// The view can be torn down without an explicit pause/disconnect
+    /// notification ever reaching it first (e.g. `isStreaming` itself
+    /// flips false and SwiftUI removes the whole subtree). A `CADisplayLink`
+    /// retains its target and keeps firing every frame until invalidated —
+    /// unlike the pointer engine's one-shot `DispatchWorkItem` timers, a
+    /// live momentum session left running here would leak the view AND
+    /// keep sending scroll deltas into a connection nobody is using
+    /// anymore, so this MUST invalidate it directly rather than rely on
+    /// deinit.
+    static func dismantleUIView(_ uiView: VideoView, coordinator: ()) {
+        uiView.clearInputStateForPause()
+    }
+
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
         var metalRenderer: MetalVideoRenderer?
@@ -856,6 +869,20 @@ struct VideoLayerView: UIViewRepresentable {
         // `.changed` update in that same gesture.
         private var manualZoomGestureStart = ManualViewportState.identity
         private var manualZoomGestureBase = CGRect.zero
+        // Most recent meaningful non-1x manual viewport state, remembered
+        // across a two-finger-double-tap reset so a second double tap can
+        // restore it — see `didViewportDoubleTap`. Instance-only, never
+        // persisted across launches.
+        private var manualZoomMemory: ManualViewportState?
+
+        // MARK: - M7 pointer/click gestures
+
+        // Pure touch-intent/session policy — see its type doc. Only driven
+        // when the connected Mac speaks the pv5 `pointer` wire (checked at
+        // each touch); older Macs keep the legacy click-drag `send()` path
+        // below untouched.
+        private let pointerEngine = PointerGestureEngine()
+        private var pointerPollTimer: DispatchWorkItem?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -911,6 +938,10 @@ struct VideoLayerView: UIViewRepresentable {
             keyboardVisibleRect = dockedAtBottom
                 ? CGRect(x: 0, y: 0, width: bounds.width, height: min(bounds.height, max(0, localFrame.minY)))
                 : nil
+            // Diagnostic breadcrumb for a real-device-only first-activation
+            // keyboard crash under investigation — cheap, no behavior
+            // change. Remove once root-caused.
+            Log.info("keyboard: willChangeFrame bounds=\(bounds) localFrame=\(localFrame) docked=\(dockedAtBottom)")
             animateTransformChange(duration: duration, options: curveOption)
         }
 
@@ -953,12 +984,26 @@ struct VideoLayerView: UIViewRepresentable {
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
             lastAnchor = nil
+            resetPointerEngine()
+            cancelScrollMomentum()
             // Force the two-finger recognizer to give up whatever it was
             // mid-deciding or already committed to — toggling `isEnabled`
             // is UIKit's standard way to force a recognizer to `.cancelled`
             // (same trick used elsewhere for gesture-ownership hand-off).
             twoFingerRecognizer?.isEnabled = false
             twoFingerRecognizer?.isEnabled = true
+        }
+
+        /// Releases any pointer-engine-held mouse button and forgets every
+        /// tracked touch. MUST run on pause, disconnect/input-disable, and
+        /// gesture-ownership takeover by the existing system/scroll/pinch
+        /// recognizers — the stuck-button safety net for the M7 pointer
+        /// model, mirroring `InputInjector.cancelActiveInputLocked` on the
+        /// Mac side.
+        private func resetPointerEngine() {
+            pointerPollTimer?.cancel()
+            pointerPollTimer = nil
+            dispatchPointerCommands(pointerEngine.reset())
         }
 
         override func layoutSubviews() {
@@ -1120,6 +1165,18 @@ struct VideoLayerView: UIViewRepresentable {
         private var gestureEmissionGate = GestureEmissionGate()
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
 
+        // MARK: - Remote-scroll momentum
+
+        // Recent velocity samples for the LIVE scroll only — reset every
+        // time a fresh scroll begins, fed on every `continueScroll` tick.
+        // Pure/testable estimation logic lives in `Shared/ScrollMomentum.swift`;
+        // this is just the UIKit-side glue driving it off real touch/frame
+        // timing, mirroring how `pointerEngine`/`schedulePointerPoll` split
+        // pure policy from UIKit glue.
+        private var scrollVelocityTracker = ScrollVelocityTracker()
+        private var scrollMomentumSession: ScrollMomentumSession?
+        private var scrollMomentumDisplayLink: CADisplayLink?
+
         @objc func didThreeFingerSystemPan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
             case .began, .changed:
@@ -1190,7 +1247,17 @@ struct VideoLayerView: UIViewRepresentable {
                     break
                 }
             default:
+                // `.ended`/`.cancelled`/`.failed`. Only a real `.ended`
+                // scroll release (not a cancellation — another gesture or
+                // system takeover already calls `cancelScrollMomentum()`
+                // itself) can start momentum.
+                let wasScrolling = twoFingerActive && recognizer.intent == .scroll
                 twoFingerActive = false
+                if recognizer.state == .ended, wasScrolling {
+                    beginScrollMomentum()
+                } else {
+                    cancelScrollMomentum()
+                }
             }
         }
 
@@ -1202,7 +1269,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// coordinate against any more.
         private func beginViewportManipulation() {
             twoFingerActive = false
-            cancelTouchForGestureOwnership()
+            cancelTouchForGestureOwnership()   // also cancels any remote-scroll momentum — see its doc
             manualZoomGestureStart = manualZoom
             manualZoomGestureBase = unzoomedBaseTransform().displayedRect
         }
@@ -1221,6 +1288,8 @@ struct VideoLayerView: UIViewRepresentable {
 
         private func beginScroll(at midpoint: CGPoint) {
             guard let video = receiver?.videoSize, video != .zero else { return }
+            cancelScrollMomentum()   // touching again immediately cancels any active momentum
+            scrollVelocityTracker.reset()
             twoFingerActive = true
             lastPan = .zero
             // macOS delivers scroll to whatever sits under the cursor, and
@@ -1245,18 +1314,106 @@ struct VideoLayerView: UIViewRepresentable {
             let t = CGPoint(x: recognizer.midpoint.x - recognizer.initialMidpoint.x,
                             y: recognizer.midpoint.y - recognizer.initialMidpoint.y)
             // Deltas in video pixels, natural-scrolling direction.
-            receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
-                                 dy: (t.y - lastPan.y) / scale)
+            let stepX = t.x - lastPan.x
+            let stepY = t.y - lastPan.y
+            receiver?.sendScroll(dx: stepX / scale, dy: stepY / scale)
+            // Recorded in view points (pre-scale), matching the domain
+            // `cancelScrollMomentum`/`beginScrollMomentum` convert from —
+            // see `tickScrollMomentum`.
+            scrollVelocityTracker.record(dx: stepX, dy: stepY, at: CACurrentMediaTime())
             lastPan = t
         }
 
+        /// Starts a decaying momentum phase from the velocity estimated
+        /// over the just-ended scroll's recent samples — a no-op if the
+        /// release was too slow to clear `ScrollMomentumConfig.minReleaseVelocity`.
+        private func beginScrollMomentum() {
+            let releaseTime = CACurrentMediaTime()
+            defer { scrollVelocityTracker.reset() }
+            guard let velocity = scrollVelocityTracker.releaseVelocity(at: releaseTime),
+                  let session = ScrollMomentumSession(initialVelocity: velocity, at: releaseTime) else { return }
+            scrollMomentumSession = session
+            scrollMomentumDisplayLink?.invalidate()
+            let link = CADisplayLink(target: self, selector: #selector(tickScrollMomentum))
+            link.add(to: .main, forMode: .common)
+            scrollMomentumDisplayLink = link
+        }
+
+        @objc private func tickScrollMomentum() {
+            guard let session = scrollMomentumSession, let video = receiver?.videoSize, video != .zero,
+                  let scale = pointsPerRemotePixel(video: video) else {
+                cancelScrollMomentum()
+                return
+            }
+            let (delta, alive) = session.tick(now: CACurrentMediaTime())
+            if delta.dx != 0 || delta.dy != 0 {
+                receiver?.sendScroll(dx: delta.dx / scale, dy: delta.dy / scale)
+            }
+            if !alive { cancelScrollMomentum() }
+        }
+
+        /// Stops any active/pending remote-scroll momentum immediately and
+        /// forgets its velocity history. MUST be called on every ownership
+        /// transition away from remote scroll (a new touch, pinch/pan,
+        /// pointer interaction, system gesture, input-disable, pause, or
+        /// disconnect) — see call sites.
+        private func cancelScrollMomentum() {
+            scrollMomentumDisplayLink?.invalidate()
+            scrollMomentumDisplayLink = nil
+            scrollMomentumSession = nil
+        }
+
+        /// Toggles between the normal 1x viewport and the most recent
+        /// meaningful manually-zoomed/panned state: zoomed -> stores it and
+        /// resets to exactly 1x; already at 1x with a remembered state ->
+        /// restores it, clamped against the *current* geometry (rotation,
+        /// keyboard, or receiver-size changes since it was stored). Never
+        /// persisted across launches — a plain instance property.
         @objc func didViewportDoubleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended, !manualZoom.isIdentity else { return }
-            manualZoom = .identity
+            guard recognizer.state == .ended else { return }
+            if !manualZoom.isIdentity {
+                manualZoomMemory = manualZoom
+                manualZoom = .identity
+            } else if let memory = manualZoomMemory {
+                let base = unzoomedBaseTransform().displayedRect
+                manualZoom = memory.clamped(against: base)
+            } else {
+                return   // nothing manually set and nothing remembered — no-op
+            }
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
+        /// True whenever the M7 pointer engine already owns this touch
+        /// sequence via a *committed* anchor (an absolute-pointer/relative
+        /// session, or a later chord/drag on one) — the existing
+        /// system-gesture and scroll/pinch recognizers must never also
+        /// claim these same touches (see GOAL: "existing pointer session +
+        /// two extra fingers" must not become a fresh 3-finger system
+        /// gesture).
+        ///
+        /// `.firstTouchPending`/`.tapBuffered` are deliberately excluded —
+        /// those are still mere *arbitration*, not commitment (GOAL:
+        /// "fresh 2-finger gestures can actually form before finger 1 is
+        /// irrevocably claimed"): the engine hasn't decided anything yet,
+        /// so the legacy recognizers must stay free to receive these same
+        /// touches and race normally, exactly as before this touch
+        /// sequence started. A fresh two-finger candidate not yet
+        /// recognized as continuing a buffered right tap
+        /// (`.twoFingerPending` without `isChordContinuation`) is excluded
+        /// for the same reason.
+        private var pointerEngineOwnsAnchor: Bool {
+            switch pointerEngine.mode {
+            case .absolutePointer, .relativePointerSession, .leftDragHeld, .chordPending, .rightDragHeld:
+                return true
+            case .twoFingerPending:
+                return pointerEngine.isChordContinuation
+            case .idle, .firstTouchPending, .tapBuffered, .deferredSystemGesture:
+                return false
+            }
+        }
+
         override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if pointerEngineOwnsAnchor { return false }
             if gestureRecognizer === threeFingerPanRecognizer {
                 return gestureRecognizer.numberOfTouches == 3
             }
@@ -1279,7 +1436,10 @@ struct VideoLayerView: UIViewRepresentable {
             if gestureRecognizer === threeFingerPanRecognizer
                 || gestureRecognizer === threeFingerTapRecognizer
                 || gestureRecognizer === pinchSpreadGestureRecognizer {
-                return touch.type == .direct
+                return touch.type == .direct && !pointerEngineOwnsAnchor
+            }
+            if gestureRecognizer === twoFingerRecognizer {
+                return !pointerEngineOwnsAnchor
             }
             return true
         }
@@ -1311,6 +1471,16 @@ struct VideoLayerView: UIViewRepresentable {
                     discardPendingDown()
                 }
             }
+            // A fresh scroll/pinch (or system gesture) winning ownership of
+            // touches the M7 pointer engine may also have been tracking —
+            // release any button it already committed and forget its
+            // state, so the two systems can never both act on the same
+            // touch stream.
+            resetPointerEngine()
+            // ...and any remote-scroll momentum from a still-coasting
+            // PREVIOUS scroll — a system gesture or pointer chord taking
+            // ownership now must not leave stale momentum ticking.
+            cancelScrollMomentum()
         }
 
         // A press is only a click once we know a second finger is not coming.
@@ -1426,6 +1596,88 @@ struct VideoLayerView: UIViewRepresentable {
             receiver?.sendTouch(phase: phase, x: norm.x, y: norm.y)
         }
 
+        // MARK: - M7 pointer/click gestures
+
+        /// Feeds every finger touch in this batch to `pointerEngine` and
+        /// dispatches whatever commands come back. Only called when the
+        /// connected Mac speaks the pv5 `pointer` wire — see
+        /// `routeTouches`.
+        private func handlePointerFingerTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?) {
+            for touch in touches {
+                let viewPoint = touch.location(in: self)
+                let norm = normalized(viewPoint).map { CGPoint(x: $0.x, y: $0.y) }
+                let enginePhase: PointerTouchSample.Phase
+                switch phase {
+                case "began": enginePhase = .began
+                case "moved": enginePhase = .moved
+                case "ended": enginePhase = .ended
+                case "cancelled": enginePhase = .cancelled
+                default: return
+                }
+                let sample = PointerTouchSample(id: AnyHashable(ObjectIdentifier(touch)), phase: enginePhase,
+                                                viewPoint: viewPoint, normalized: norm, time: touch.timestamp)
+                let commands = pointerEngine.handle(sample)
+                dispatchPointerCommands(commands)
+                // The single-finger primary press is the M4 typing-focus
+                // anchor, same as the legacy path's `commitPendingDown`.
+                if (phase == "began" || phase == "moved"), let n = norm,
+                   (event?.allTouches?.filter { isFinger($0) }.count ?? 1) == 1 {
+                    noteAnchorIfOnDisplay(viewPoint: viewPoint, normalized: n)
+                }
+            }
+            schedulePointerPoll()
+        }
+
+        private func dispatchPointerCommands(_ commands: [PointerCommand]) {
+            guard !commands.isEmpty, let receiver else { return }
+            // Only `.moveRelative` needs a valid video size (to convert
+            // through the viewport scale) — button down/up MUST still post
+            // even if it's momentarily unknown, so this isn't a guard on
+            // the whole function (a dropped mouseUp would leave the Mac
+            // with a stuck button).
+            let video = receiver.videoSize
+            for command in commands {
+                switch command {
+                case .moveAbsolute(let x, let y):
+                    receiver.sendPointerMove(x: x, y: y)
+                case .moveRelative(let dx, let dy):
+                    guard let scale = pointsPerRemotePixel(video: video) else { continue }
+                    receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+                case .mouseDown(let button, let clickCount):
+                    receiver.sendPointerDown(button: button, clickCount: clickCount)
+                    if button == .right {
+                        // Preempt the legacy scroll/pinch recognizer from
+                        // also claiming these same two touches — see
+                        // `PointerGestureEngine.isChordContinuation`'s doc.
+                        twoFingerRecognizer?.isEnabled = false
+                        twoFingerRecognizer?.isEnabled = true
+                    }
+                case .mouseUp(let button, let clickCount):
+                    receiver.sendPointerUp(button: button, clickCount: clickCount)
+                }
+            }
+        }
+
+        /// Re-polls for the next engine deadline. The engine reports pending
+        /// work independently from pointer-session ownership, so click
+        /// chains still resolve while their anchor remains on screen and
+        /// right taps still resolve after the chord returns to idle.
+        private func schedulePointerPoll() {
+            pointerPollTimer?.cancel()
+            guard let delay = pointerEngine.pollDelay(now: CACurrentMediaTime()) else {
+                pointerPollTimer = nil
+                return
+            }
+            let work = DispatchWorkItem { [weak self] in self?.runPointerPoll() }
+            pointerPollTimer = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        private func runPointerPoll() {
+            dispatchPointerCommands(pointerEngine.poll(now: CACurrentMediaTime()))
+            schedulePointerPoll()
+        }
+
         private func sendPencilAsTouch(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?) {
             guard let touch = touches.first,
                   let norm = normalized(touch.location(in: self)) else { return }
@@ -1462,11 +1714,22 @@ struct VideoLayerView: UIViewRepresentable {
             }
             // Palm rejection: ignore resting fingers while the pen is down.
             if !finger.isEmpty && !inputEngine.hasActivePen {
-                send(phase, finger, event)
+                if receiver?.macSupportsPointerWire ?? false {
+                    handlePointerFingerTouches(phase, finger, event)
+                } else {
+                    send(phase, finger, event)
+                }
             }
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            // Any new touch beginning — pointer, chord, pinch, system
+            // gesture, or a fresh scroll's own first samples — cancels a
+            // still-coasting momentum phase immediately (PRODUCT RULE:
+            // "touching again immediately cancels any active momentum").
+            // `beginScroll` also cancels it explicitly for the specific
+            // fresh-scroll case; this is the catch-all for every other one.
+            cancelScrollMomentum()
             routeTouches("began", touches, event, ended: false)
         }
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {

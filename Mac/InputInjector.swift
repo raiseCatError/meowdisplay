@@ -31,6 +31,13 @@ final class InputInjector {
     private let inputLock = NSRecursiveLock()
     private var isDown = false
     private var penDown = false
+    // M7 pointer/click wire (pv 5): which synthetic mouse button, if any,
+    // `PointerGestureEngine` currently holds down, plus the click count its
+    // `mouseDown` carried — every subsequent move/drag/up event echoes that
+    // same clickState, matching the CGEvent convention AppKit/WebKit expect
+    // across one press.
+    private var pointerHeldButton: CGMouseButton?
+    private var pointerHeldClickCount: Int64 = 1
     // A real event source (vs nil) plus non-zero clickState on down/up: menu
     // tracking treats sourceless/zero-click synthetic clicks as malformed — menus
     // open but their tracking session breaks, leaving zombie menu windows
@@ -93,6 +100,21 @@ final class InputInjector {
                 event.post(tap: .cghidEventTap)
             }
             isDown = false
+        }
+
+        // M7: release whichever pointer-engine button (left or right) is
+        // currently held. This is the stuck-button safety net for the
+        // absolute/precision/chord pointer model — it MUST run on
+        // disconnect, input-disable, pause, and gesture-ownership takeover,
+        // exactly like the legacy touch `isDown` release above.
+        if let button = pointerHeldButton {
+            let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
+            if let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                   mouseCursorPosition: point, mouseButton: button) {
+                event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
+                event.post(tap: .cghidEventTap)
+                pointerHeldButton = nil
+            }
         }
 
         if penDown {
@@ -187,6 +209,92 @@ final class InputInjector {
                                   wheel2: Int32((dx / scale).rounded()),
                                   wheel3: 0) else { return }
         event.post(tap: .cghidEventTap)
+    }
+
+    // MARK: - Pointer / click gestures (M7)
+
+    /// Absolute cursor move (`PointerCommand.moveAbsolute`). Never implies a
+    /// button — if the engine already holds one down (a left/right drag in
+    /// progress), the event type reflects that automatically so the drag
+    /// keeps moving; otherwise it's a plain `mouseMoved`.
+    func handlePointerMove(x: Double, y: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        let bounds = CGDisplayBounds(displayID)
+        let point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        postPointerMotion(to: point)
+    }
+
+    /// Relative cursor move (`PointerCommand.moveRelative`) — `dx`/`dy` in
+    /// video pixels, same convention as `handleScroll`. Moves from the
+    /// Mac's own current cursor position, never the touch location.
+    func handlePointerMoveRelative(dx: Double, dy: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        let bounds = CGDisplayBounds(displayID)
+        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+        let current = currentCursor()
+        let point = CGPoint(x: current.x + dx / scale, y: current.y + dy / scale)
+        postPointerMotion(to: point)
+    }
+
+    private func postPointerMotion(to point: CGPoint) {
+        let type: CGEventType
+        let button: CGMouseButton
+        if let held = pointerHeldButton {
+            type = held == .left ? .leftMouseDragged : .rightMouseDragged
+            button = held
+        } else {
+            type = .mouseMoved
+            button = .left
+        }
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: button) else { return }
+        if pointerHeldButton != nil {
+            event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
+        }
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// Presses `button` down at the Mac's *current* cursor position —
+    /// never a touch location, matching the chord/precision-tap product
+    /// rule ("the physical centroid of the fingers should not teleport the
+    /// cursor").
+    func handlePointerDown(button: PointerButton, clickCount: Int) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        guard pointerHeldButton == nil else { return }
+        let cgButton: CGMouseButton = button == .left ? .left : .right
+        let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
+        let point = currentCursor()
+        let clickState = Int64(max(clickCount, 1))
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: cgButton) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        event.post(tap: .cghidEventTap)
+        pointerHeldButton = cgButton
+        pointerHeldClickCount = clickState
+    }
+
+    /// Releases `button` at the Mac's current cursor position.
+    func handlePointerUp(button: PointerButton, clickCount: Int) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        // No `inputIsAllowed()` gate on the up path: an up matching a
+        // down already posted must always be free to release the button,
+        // exactly like legacy touch's `"ended"`/`"cancelled"` handling.
+        let cgButton: CGMouseButton = button == .left ? .left : .right
+        guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
+        let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
+        let point = currentCursor()
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: cgButton) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event.post(tap: .cghidEventTap)
+        pointerHeldButton = nil
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {

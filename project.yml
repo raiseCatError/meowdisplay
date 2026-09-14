@@ -163,6 +163,8 @@ targets:
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
       - Shared/RemoteViewport.swift
+      - Shared/PointerGestureEngine.swift
+      - Shared/ScrollMomentum.swift
       - Shared/KeyboardEditPlanner.swift
     settings:
       base:

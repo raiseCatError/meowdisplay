@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 4
+    static let version = 5
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
@@ -21,6 +21,13 @@ enum WireProtocol {
     /// A receiver MUST NOT surface keyboard input UI, and a sender MUST NOT
     /// expect keyboard messages, when the peer is below this version.
     static let keyboardWireVersion = 4
+
+    /// Protocol version that introduced the `pointer` message family (M7):
+    /// absolute/relative cursor movement decoupled from button state, click
+    /// counts, and the right mouse button. A receiver MUST NOT send
+    /// `pointer` messages, and MUST fall back to legacy `touch`
+    /// click-drag semantics, when the peer is below this version.
+    static let pointerWireVersion = 5
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
