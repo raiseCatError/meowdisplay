@@ -3,6 +3,14 @@ import Foundation
 enum CaptureMode: String {
     case mirror
     case extend
+
+    init(_ receiverMode: ReceiverDisplayMode) {
+        self = receiverMode == .mirror ? .mirror : .extend
+    }
+
+    var receiverMode: ReceiverDisplayMode {
+        self == .mirror ? .mirror : .extend
+    }
 }
 
 enum CaptureLifecyclePhase: String, Equatable {

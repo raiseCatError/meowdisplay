@@ -72,6 +72,7 @@ final class InputInjector {
     // Hardware keys currently held down (M4) — released on cancellation so a
     // dropped session can never leave a modifier or arrow key stuck.
     private var heldKeys = HeldKeyTracker()
+    private var heldModifiers = HeldModifierTracker()
 
     init(displayID: CGDirectDisplayID) {
         self.displayID = displayID
@@ -140,7 +141,10 @@ final class InputInjector {
         penLastClick = nil
 
         for usage in heldKeys.releaseAll() {
-            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: [])
+            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: heldModifiers.flags)
+        }
+        for modifier in heldModifiers.releaseAll() {
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
         }
     }
 
@@ -319,12 +323,26 @@ final class InputInjector {
 
     /// An atomic special key from the software keyboard (no held state to
     /// track — down and up post back to back).
-    func handleKeyboardPress(_ usage: HIDKeyUsage) {
+    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: [])
-        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: [])
+        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: flags)
+    }
+
+    func handleModifier(name: String, down: Bool) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), let modifier = ControlModifier(rawValue: name) else { return }
+        if down {
+            guard heldModifiers.down(modifier) else { return }
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: true, flags: heldModifiers.flags)
+        } else {
+            guard heldModifiers.up(modifier) else { return }
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
+        }
     }
 
     /// A hardware key going down. A duplicate down for an already-held key
@@ -333,7 +351,8 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(), heldKeys.down(usage) else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: KeyModifier.flags(named: modifiers))
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true,
+                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
     }
 
     /// The matching release. A spurious up for a key that isn't held (e.g.
@@ -342,7 +361,8 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard heldKeys.up(usage) else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: KeyModifier.flags(named: modifiers))
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false,
+                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
     }
 
     private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {

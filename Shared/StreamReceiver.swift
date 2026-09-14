@@ -75,6 +75,17 @@ final class StreamReceiver: ObservableObject {
     @Published var peerSignal: PeerUpdateSignal?
     /// Mac protocol version from the most recent `welcome` message.
     @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
+    @Published private(set) var inputResetGeneration = 0
+    @Published private(set) var controlResetGeneration = 0
+    @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
+    @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
+    @Published private(set) var displayModeConfirmationGeneration = 0
+    private var displayModeRequestState = DisplayModeRequestState()
+
+    /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
+    var onReceiverUIPreferences: ((_ trayEnabled: Bool?, _ keyboardButtonEnabled: Bool?) -> Void)?
+    private var announcedTrayEnabled = true
+    private var announcedKeyboardButtonEnabled = true
 
     /// True when the connected Mac understands pencil/proximity wire messages.
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
@@ -290,6 +301,16 @@ final class StreamReceiver: ObservableObject {
                  scale: deviceScale)
     }
 
+    func setReceiverUIPreferencesForHello(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
+        queue.async {
+            self.announcedTrayEnabled = trayEnabled
+            self.announcedKeyboardButtonEnabled = keyboardButtonEnabled
+            if let connection = self.connection, connection.state == .ready {
+                self.sendHello(on: connection)
+            }
+        }
+    }
+
     /// Announce the panel this receiver renders onto. Called before start()
     /// and again whenever it changes (iOS rotation via setOrientation, macOS
     /// display-mode changes) — a live connection re-sends hello so the sender
@@ -413,6 +434,7 @@ final class StreamReceiver: ObservableObject {
                 self.listenerRestartState.invalidate()
                 self.stopCursorListener()
                 self.setConnected(false)
+                self.resetDisplayModeState()
                 self.setStatus(status)
                 DispatchQueue.main.async {
                     self.displayState = .running
@@ -849,6 +871,10 @@ final class StreamReceiver: ObservableObject {
                 self.displayState = state
                 self.onDisplayStateChange?(state)
             }
+        case WireMessage.displayModeState:
+            guard let rawMode = obj["mode"] as? String,
+                  let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
+            DispatchQueue.main.async { self.applyConfirmedDisplayMode(mode) }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
@@ -867,6 +893,13 @@ final class StreamReceiver: ObservableObject {
                 ?? "Update OpenDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
             DispatchQueue.main.async { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
+        case WireMessage.receiverUI:
+            guard let update = ReceiverUIPreferenceUpdate(message: obj) else { return }
+            DispatchQueue.main.async {
+                self.onReceiverUIPreferences?(update.trayEnabled, update.keyboardButtonEnabled)
+            }
+        case WireMessage.inputReset:
+            DispatchQueue.main.async { self.inputResetGeneration &+= 1 }
         default:
             break
         }
@@ -922,6 +955,10 @@ final class StreamReceiver: ObservableObject {
             "id": Self.installID,
             "pv": WireProtocol.version,   // issue #132 — absent on old receivers
         ]
+        if deviceKind != "Mac" {
+            hello["trayEnabled"] = announcedTrayEnabled
+            hello["keyboardButtonEnabled"] = announcedKeyboardButtonEnabled
+        }
         // Additive capability: only offered while the UDP listener is bound,
         // so a sender never dials a port nobody answers on.
         if cursorListenerReady { hello["cursorPort"] = Int(cursorPort) }
@@ -1079,9 +1116,75 @@ final class StreamReceiver: ObservableObject {
     /// An atomic special key from the software keyboard (e.g. Return,
     /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
     /// keyboard-page usage number.
-    func sendKeyboardPress(usage: Int) {
+    func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendControl(["type": "keyboard", "action": "press", "usage": usage])
+        sendControl(["type": "keyboard", "action": "press", "usage": usage,
+                     "modifiers": modifiers])
+    }
+
+    func sendModifier(_ modifier: ControlModifier, down: Bool) {
+        guard displayState == .running,
+              macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
+        sendControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
+                     "modifier": modifier.rawValue])
+    }
+
+    func sendCancelActiveInput() {
+        guard macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
+        sendControl(["type": "keyboard", "action": "cancel"])
+    }
+
+    /// Requests a mode transition without predicting its outcome. The Mac
+    /// confirms the actual mode after its existing capture setup succeeds.
+    @MainActor
+    @discardableResult
+    func requestDisplayMode(_ mode: ReceiverDisplayMode) -> Bool {
+        guard connected,
+              macProtocolVersion >= WireProtocol.displayModeWireVersion,
+              displayModeRequestState.request(mode) else { return false }
+        pendingDisplayMode = displayModeRequestState.pendingMode
+        controlResetGeneration &+= 1
+        sendCancelActiveInput()
+        sendControl(["type": WireMessage.displayModeRequest, "mode": mode.rawValue])
+        // A mode switch rebuilds the Mac's session, so the confirmation
+        // legitimately arrives after a reconnect — the pending flag must
+        // survive that. It must never survive a Mac that simply never
+        // answered, so every request is also retired on a deadline.
+        let generation = displayModeRequestState.pendingGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.displayModeRequestTimeout) { [weak self] in
+            self?.expirePendingDisplayMode(generation: generation)
+        }
+        return true
+    }
+
+    /// How long the receiver waits for the Mac's authoritative reply before
+    /// giving the control back to the user. Generous: the reply only lands
+    /// once the rebuilt capture session is actually streaming.
+    private static let displayModeRequestTimeout: TimeInterval = 15
+
+    @MainActor
+    private func expirePendingDisplayMode(generation: Int) {
+        guard displayModeRequestState.expirePending(generation: generation) else { return }
+        pendingDisplayMode = nil
+        Log.info("display mode request timed out — keeping \(displayModeRequestState.confirmedMode?.rawValue ?? "unknown")")
+    }
+
+    /// Deliberate session teardown (stop/sleep/close): the Mac's mode is no
+    /// longer known and any in-flight request dies with the session.
+    func resetDisplayModeState() {
+        DispatchQueue.main.async {
+            self.displayModeRequestState.reset()
+            self.confirmedDisplayMode = nil
+            self.pendingDisplayMode = nil
+        }
+    }
+
+    @MainActor
+    private func applyConfirmedDisplayMode(_ mode: ReceiverDisplayMode) {
+        let shouldConfirmWithHaptic = displayModeRequestState.confirm(mode)
+        confirmedDisplayMode = displayModeRequestState.confirmedMode
+        pendingDisplayMode = displayModeRequestState.pendingMode
+        if shouldConfirmWithHaptic { displayModeConfirmationGeneration &+= 1 }
     }
 
     /// A hardware key going down, for keys the Mac must hold (arrows,
@@ -1516,6 +1619,11 @@ final class StreamReceiver: ObservableObject {
             self.connected = value
             if !value {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
+                // The mode is only ever known from a live Mac. A request
+                // already in flight is deliberately kept: switching modes
+                // rebuilds the Mac's session, so the drop is part of the
+                // transition and the reply arrives on the next one.
+                self.confirmedDisplayMode = nil
             }
         }
         if !value {

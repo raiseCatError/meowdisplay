@@ -40,6 +40,37 @@ enum InputPolicy {
 /// which is also what UIKit's `UIKeyboardHIDUsage` uses, so a receiver can
 /// send a hardware key's `UIKey.keyCode.rawValue` unmodified.
 enum HIDKeyUsage: Int, CaseIterable {
+    case keyA = 4
+    case keyB = 5
+    case keyC = 6
+    case keyD = 7
+    case keyE = 8
+    case keyF = 9
+    case keyG = 10
+    case keyH = 11
+    case keyI = 12
+    case keyJ = 13
+    case keyK = 14
+    case keyL = 15
+    case keyM = 16
+    case keyN = 17
+    case keyO = 18
+    case keyP = 19
+    case keyQ = 20
+    case keyR = 21
+    case keyS = 22
+    case keyT = 23
+    case keyU = 24
+    case keyV = 25
+    case keyW = 26
+    case keyX = 27
+    case keyY = 28
+    case keyZ = 29
+    case digit1 = 30
+    case digit2 = 31
+    case digit3 = 32
+    case digit4 = 33
+    case digit5 = 34
     case returnOrEnter = 40
     case escape = 41
     case deleteOrBackspace = 42
@@ -55,6 +86,37 @@ enum HIDKeyUsage: Int, CaseIterable {
     /// injects as.
     var keyCode: CGKeyCode {
         switch self {
+        case .keyA: return 0
+        case .keyB: return 11
+        case .keyC: return 8
+        case .keyD: return 2
+        case .keyE: return 14
+        case .keyF: return 3
+        case .keyG: return 5
+        case .keyH: return 4
+        case .keyI: return 34
+        case .keyJ: return 38
+        case .keyK: return 40
+        case .keyL: return 37
+        case .keyM: return 46
+        case .keyN: return 45
+        case .keyO: return 31
+        case .keyP: return 35
+        case .keyQ: return 12
+        case .keyR: return 15
+        case .keyS: return 1
+        case .keyT: return 17
+        case .keyU: return 32
+        case .keyV: return 9
+        case .keyW: return 13
+        case .keyX: return 7
+        case .keyY: return 16
+        case .keyZ: return 6
+        case .digit1: return 18
+        case .digit2: return 19
+        case .digit3: return 20
+        case .digit4: return 21
+        case .digit5: return 23
         case .returnOrEnter: return 36
         case .escape: return 53
         case .deleteOrBackspace: return 51
@@ -79,6 +141,48 @@ enum HIDKeyUsage: Int, CaseIterable {
         guard double.isFinite, double == double.rounded(),
               double >= 0, double <= 65535 else { return nil }
         return HIDKeyUsage(rawValue: Int(double))
+    }
+}
+
+extension ControlModifier {
+    var keyCode: CGKeyCode {
+        switch self {
+        case .command: return 55
+        case .shift: return 56
+        case .option: return 58
+        case .control: return 59
+        }
+    }
+
+    var eventFlag: CGEventFlags {
+        switch self {
+        case .command: return .maskCommand
+        case .shift: return .maskShift
+        case .option: return .maskAlternate
+        case .control: return .maskControl
+        }
+    }
+}
+
+struct HeldModifierTracker {
+    private(set) var held: Set<ControlModifier> = []
+
+    mutating func down(_ modifier: ControlModifier) -> Bool {
+        held.insert(modifier).inserted
+    }
+
+    mutating func up(_ modifier: ControlModifier) -> Bool {
+        held.remove(modifier) != nil
+    }
+
+    var flags: CGEventFlags {
+        held.reduce(into: CGEventFlags()) { $0.insert($1.eventFlag) }
+    }
+
+    mutating func releaseAll() -> [ControlModifier] {
+        let values = ControlModifier.allCases.reversed().filter(held.contains)
+        held.removeAll()
+        return values
     }
 }
 

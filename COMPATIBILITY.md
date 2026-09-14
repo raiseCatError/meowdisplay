@@ -162,6 +162,18 @@ the floor once a force-capable build has spread.
   click-drag behavior instead of hiding a feature outright. `minPeer`
   stays at `1`; a `pv 4` Mac keeps receiving `touch`/`scroll` exactly as
   before, just without absolute-pointer/precision/right-click/right-drag.
+- **Example: `pv` 6 receiver controls.** The receiver advertises its local
+  tray/keyboard-button state in optional `hello` fields. A pv 6 Mac can update
+  those fields with `receiverUI`, reset receiver-side latch state with
+  `inputReset`, and accept explicit modifier transitions. Older peers ignore
+  the new fields/messages; iOS gates modifier/chord transmission on
+  `welcome.pv >= 6` while the existing native keyboard remains available to
+  pv 4 and pv 5 Macs.
+- **Example: `pv` 7 display-mode synchronization.** A pv 7 receiver may send
+  `displayModeRequest`; the Mac applies it through its existing mode-switch
+  path and replies with authoritative `displayModeState` only after setup.
+  Older peers ignore the messages, and the receiver does not offer switching
+  unless `welcome.pv >= 7`.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

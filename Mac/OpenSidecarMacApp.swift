@@ -153,6 +153,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     // Nil while dialing so the UI never presents a requested target as the
     // route that Network.framework actually selected.
     @Published var route: ConnectionRoute?
+    @Published var receiverTrayEnabled = true
+    @Published var receiverKeyboardButtonEnabled = true
+    @Published var receiverProtocolVersion = WireProtocol.assumedWhenAbsent
 
     var statusWithRoute: String {
         route.map { "\(status) · \($0.rawValue)" } ?? status
@@ -198,14 +201,24 @@ final class SenderController: ObservableObject {
     @Published var host = UserDefaults.standard.string(forKey: "host") ?? "127.0.0.1"
     @Published var port = UserDefaults.standard.string(forKey: "port") ?? "9000"
     // `-mode mirror` / `-mode extend` launch argument also works.
-    @Published var mode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend
+    // Mode/quality apply per-pipeline at construction, so a change rebuilds
+    // every session. Doing that here — rather than in the Settings picker's
+    // onChange — keeps one authoritative transition path shared by the Mac's
+    // own picker and a receiver's `displayModeRequest`.
+    @Published var mode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend {
+        didSet {
+            guard mode != oldValue else { return }
+            UserDefaults.standard.set(mode.rawValue, forKey: "mode")
+            restartAll()
+        }
+    }
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
     }
     @Published var allowInput = InputPolicy.allowsInput() {
         didSet {
             UserDefaults.standard.set(allowInput, forKey: InputPolicy.defaultsKey)
-            if !allowInput { sessions.forEach { $0.sender.cancelActiveInput() } }
+            if !allowInput { sessions.forEach { $0.sender.resetReceiverInputState() } }
         }
     }
 
@@ -687,10 +700,19 @@ final class SenderController: ObservableObject {
         sender.onCaptureLifecycleChanged = { [weak session] phase in
             session?.capturePhase = phase
         }
+        sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
+            guard let self, let session, self.owns(session) else { return }
+            self.mode = CaptureMode(requestedMode)
+        }
         sender.onHello = { [weak self, weak session] info in
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            session.receiverProtocolVersion = info.protocolVersion
+            if let value = info.trayEnabled { session.receiverTrayEnabled = value }
+            if let value = info.keyboardButtonEnabled {
+                session.receiverKeyboardButtonEnabled = value
+            }
             if let installID = info.id {
                 self.autoConnectPolicy.remember(["install:\(installID)"])
                 self.persistKnownIdentifiers()
@@ -1025,7 +1047,6 @@ struct ContentView: View {
                     Text("Mirror").tag(CaptureMode.mirror)
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: controller.mode) { controller.restartAll() }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Allow Input", isOn: $controller.allowInput)
@@ -1223,6 +1244,31 @@ struct SessionRow: View {
             .disabled(session.capturePhase != .running
                 && session.capturePhase != .recovering
                 && session.capturePhase != .paused)
+            if session.deviceKind != "Mac",
+               session.receiverProtocolVersion >= WireProtocol.receiverControlsWireVersion {
+                Menu {
+                    Toggle("Show Control Tray", isOn: Binding(
+                        get: { session.receiverTrayEnabled },
+                        set: { value in
+                            session.receiverTrayEnabled = value
+                            session.sender.setReceiverUIPreferences(
+                                trayEnabled: value,
+                                keyboardButtonEnabled: session.receiverKeyboardButtonEnabled)
+                        }))
+                    Toggle("Show Keyboard Button", isOn: Binding(
+                        get: { session.receiverKeyboardButtonEnabled },
+                        set: { value in
+                            session.receiverKeyboardButtonEnabled = value
+                            session.sender.setReceiverUIPreferences(
+                                trayEnabled: session.receiverTrayEnabled,
+                                keyboardButtonEnabled: value)
+                        }))
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .controlSize(.small)
+                .help("Receiver controls")
+            }
             Button("Disconnect") { controller.disconnect(session) }
                 .controlSize(.small)
         }

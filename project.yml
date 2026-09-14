@@ -167,6 +167,9 @@ targets:
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
       - Shared/KeyboardEditPlanner.swift
+      - Shared/ControlProfile.swift
+      - Shared/ControlInteraction.swift
+      - Shared/ControlTrayGeometry.swift
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight

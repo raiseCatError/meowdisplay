@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 5
+    static let version = 7
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
@@ -28,6 +28,14 @@ enum WireProtocol {
     /// `pointer` messages, and MUST fall back to legacy `touch`
     /// click-drag semantics, when the peer is below this version.
     static let pointerWireVersion = 5
+
+    /// Protocol version that introduced receiver control-tray preferences and
+    /// explicit synthetic modifier transitions.
+    static let receiverControlsWireVersion = 6
+
+    /// Protocol version that introduced explicit, Mac-authoritative display
+    /// mode state and receiver-originated mode-change requests.
+    static let displayModeWireVersion = 7
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
@@ -46,4 +54,56 @@ enum WireMessage {
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
     static let sleeping = "sleeping"                // phone -> Mac: device locked, reconnect on wake
     static let closing = "closing"                  // phone -> Mac: app quit, end the session for good
+    static let receiverUI = "receiverUI"             // Mac -> receiver: receiver-local UI preferences
+    static let inputReset = "inputReset"             // Mac -> receiver: clear local modifier state
+    static let displayModeRequest = "displayModeRequest" // receiver -> Mac: request Mirror/Extend
+    static let displayModeState = "displayModeState" // Mac -> receiver: confirmed actual mode
+}
+
+enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {
+    case mirror
+    case extend
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+/// Receiver-side request bookkeeping. The Mac's state message always wins;
+/// the boolean return from `confirm` identifies the single successful reply
+/// that should produce user feedback.
+struct DisplayModeRequestState: Equatable {
+    private(set) var confirmedMode: ReceiverDisplayMode?
+    private(set) var pendingMode: ReceiverDisplayMode?
+    /// Bumped for every accepted request so a late expiry can only retire the
+    /// request it was armed for, never a newer one.
+    private(set) var pendingGeneration = 0
+
+    mutating func request(_ mode: ReceiverDisplayMode) -> Bool {
+        guard pendingMode == nil, mode != confirmedMode else { return false }
+        pendingMode = mode
+        pendingGeneration &+= 1
+        return true
+    }
+
+    mutating func confirm(_ mode: ReceiverDisplayMode) -> Bool {
+        let confirmsReceiverRequest = pendingMode == mode
+        confirmedMode = mode
+        pendingMode = nil
+        return confirmsReceiverRequest
+    }
+
+    /// Retires a request the Mac never answered (its transition failed, or the
+    /// reply was lost). The last confirmed mode — the real one — is kept.
+    mutating func expirePending(generation: Int) -> Bool {
+        guard pendingMode != nil, pendingGeneration == generation else { return false }
+        pendingMode = nil
+        return true
+    }
+
+    /// Session teardown. Nothing about the Mac's mode is known across a
+    /// deliberate session reset, and no stale request may outlive it.
+    mutating func reset() {
+        confirmedMode = nil
+        pendingMode = nil
+    }
 }

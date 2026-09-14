@@ -38,9 +38,11 @@ extension UIWindow {
 struct ReceiverScreen: View {
     @StateObject private var model = ReceiverModel()
     @StateObject private var versionGate = VersionGate()
+    @StateObject private var controlStore = ReceiverControlStore()
     @State private var showSettings = false
     @State private var showOnboarding = false
     @State private var nagDismissed = false
+    @State private var keyboardVisibleRect: CGRect?
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
@@ -52,6 +54,10 @@ struct ReceiverScreen: View {
     @State private var keyboardActive = false
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+
+    private var haptics: ReceiverHaptics {
+        ReceiverHaptics { controlStore.preferences.hapticsEnabled }
+    }
 
     // Streaming = connected and the video format is known.
     private var isStreaming: Bool {
@@ -89,7 +95,8 @@ struct ReceiverScreen: View {
                                    receiver: model.receiver,
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
-                                   keyboardRequested: keyboardActive)
+                                   keyboardRequested: keyboardActive,
+                                   onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
                         .allowsHitTesting(model.receiver.displayState == .running)
@@ -115,9 +122,6 @@ struct ReceiverScreen: View {
                         }
                         .allowsHitTesting(false)   // never block touch input
                     }
-                    // M4: temporary floating keyboard button — evolves into
-                    // the full M5 floating control. The responder view has
-                    // no visual footprint; only the button is visible.
                     RemoteKeyboardInputView(
                         isActive: $keyboardActive,
                         onCommitText: { model.receiver.sendKeyboardText($0) },
@@ -133,26 +137,16 @@ struct ReceiverScreen: View {
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
-                    if keyboardAvailable {
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Spacer()
-                                Button {
-                                    keyboardActive.toggle()
-                                } label: {
-                                    Image(systemName: keyboardActive
-                                          ? "keyboard.chevron.compact.down" : "keyboard")
-                                        .font(.title2)
-                                        .foregroundStyle(.white)
-                                        .padding(12)
-                                        .background(.ultraThinMaterial, in: Circle())
-                                }
-                                .padding(.trailing, 16)
-                                .padding(.bottom, 24)
-                            }
-                        }
-                    }
+                    ReceiverControlOverlay(
+                        store: controlStore,
+                        receiver: model.receiver,
+                        keyboardActive: $keyboardActive,
+                        showSettings: $showSettings,
+                        keyboardAvailable: keyboardAvailable,
+                        keyboardVisibleRect: keyboardVisibleRect,
+                        containerSize: geo.size,
+                        safeInsets: geo.safeAreaInsets,
+                        haptics: haptics)
                 } else {
                     IdleView(receiver: model.receiver, showSettings: $showSettings)
                 }
@@ -169,7 +163,10 @@ struct ReceiverScreen: View {
         .statusBarHidden(isStreaming)
         .persistentSystemOverlays(isStreaming ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
-            SettingsView(receiver: model.receiver)
+            SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
+        }
+        .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
+            haptics.play(.confirmation)
         }
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
@@ -191,6 +188,7 @@ struct ReceiverScreen: View {
         // Merge the connected Mac's compatibility signal into the same gate.
         .onReceive(model.receiver.$peerSignal) { versionGate.applyPeer($0) }
         .onReceive(NotificationCenter.default.publisher(for: .deviceDidShake)) { _ in
+            haptics.play(.settings)
             showSettings = true
         }
         .onChange(of: scenePhase) { phase in
@@ -239,12 +237,27 @@ struct ReceiverScreen: View {
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
+            model.receiver.onReceiverUIPreferences = { trayEnabled, keyboardButtonEnabled in
+                controlStore.applyRemote(trayEnabled: trayEnabled,
+                                         keyboardButtonEnabled: keyboardButtonEnabled)
+            }
+            controlStore.onInputResetRequested = {
+                model.receiver.sendCancelActiveInput()
+            }
+            model.receiver.setReceiverUIPreferencesForHello(
+                trayEnabled: controlStore.preferences.trayEnabled,
+                keyboardButtonEnabled: controlStore.preferences.keyboardButtonEnabled)
             model.start()
             // Show the first-run hint unless the device has connected before
             // or the user already dismissed it.
             if !hasConnectedBefore && !onboardingDismissed {
                 showOnboarding = true
             }
+        }
+        .onChange(of: controlStore.preferences) { preferences in
+            model.receiver.setReceiverUIPreferencesForHello(
+                trayEnabled: preferences.trayEnabled,
+                keyboardButtonEnabled: preferences.keyboardButtonEnabled)
         }
     }
 }
@@ -383,10 +396,13 @@ struct OnboardingView: View {
 
 struct SettingsView: View {
     @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var controlStore: ReceiverControlStore
+    let haptics: ReceiverHaptics
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    @State private var confirmingReset = false
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -402,6 +418,29 @@ struct SettingsView: View {
                     if receiver.videoSize != .zero {
                         LabeledContent("Stream",
                                        value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
+                    }
+                }
+
+                Section("Display") {
+                    if let confirmedMode = receiver.confirmedDisplayMode {
+                        Picker("Display Mode", selection: Binding(
+                            get: { receiver.pendingDisplayMode ?? confirmedMode },
+                            set: { receiver.requestDisplayMode($0) })) {
+                            ForEach(ReceiverDisplayMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .disabled(!receiver.connected
+                                  || receiver.macProtocolVersion < WireProtocol.displayModeWireVersion
+                                  || receiver.pendingDisplayMode != nil)
+                        if let pendingMode = receiver.pendingDisplayMode {
+                            LabeledContent("Switching to \(pendingMode.title)") {
+                                ProgressView()
+                            }
+                        }
+                    } else {
+                        LabeledContent("Display Mode",
+                                       value: receiver.connected ? "Waiting for Mac" : "Unavailable")
                     }
                 }
 
@@ -424,6 +463,32 @@ struct SettingsView: View {
                     Text("Keyboard")
                 } footer: {
                     Text("Enlarge the area you're typing in when the keyboard is open.")
+                }
+
+                Section("Receiver Controls") {
+                    Toggle("Show Control Tray", isOn: preferenceBinding(\.trayEnabled))
+                    Toggle("Show Keyboard Button", isOn: preferenceBinding(\.keyboardButtonEnabled))
+                    Toggle("Haptics", isOn: preferenceBinding(\.hapticsEnabled))
+                    Toggle("Collapse Control Tray", isOn: preferenceBinding(\.trayCollapsed))
+                    Picker("Landscape Tray Side",
+                           selection: preferenceBinding(\.preferredLandscapeSide)) {
+                        ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Picker("Active Profile", selection: Binding(
+                        get: { controlStore.preferences.activeControlProfile },
+                        set: { profile in
+                            controlStore.update { $0.activeControlProfile = profile }
+                            haptics.play(.profileChange)
+                        })) {
+                        ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
+                    }
+                    NavigationLink("Edit Current Profile") {
+                        ControlProfileEditor(store: controlStore, haptics: haptics)
+                    }
+                    Button("Reset Profile to Default", role: .destructive) {
+                        confirmingReset = true
+                    }
                 }
 
                 Section {
@@ -498,6 +563,20 @@ struct SettingsView: View {
                 }
             }
         }
+        .confirmationDialog("Reset \(controlStore.preferences.activeControlProfile.title)?",
+                            isPresented: $confirmingReset, titleVisibility: .visible) {
+            Button("Reset Profile", role: .destructive) {
+                controlStore.update { $0.resetProfile($0.activeControlProfile) }
+                haptics.play(.reset)
+            }
+        } message: {
+            Text("This restores its tray layout and shortcut palettes. Other receiver settings stay unchanged.")
+        }
+    }
+
+    private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
+        Binding(get: { controlStore.preferences[keyPath: keyPath] },
+                set: { value in controlStore.update { $0[keyPath: keyPath] = value } })
     }
 }
 
@@ -666,6 +745,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// (e.g. the Settings sheet's device name field, presented over the
     /// still-live stream) can never zoom/pan the remote display.
     let keyboardRequested: Bool
+    let onKeyboardVisibleRectChange: (CGRect?) -> Void
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
@@ -674,6 +754,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.receiver = receiver
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
+        view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
         }
@@ -683,7 +764,7 @@ struct VideoLayerView: UIViewRepresentable {
         if useMetal, let renderer = MetalVideoRenderer() {
             Log.info("metal renderer active")
             view.metalRenderer = renderer
-            view.layer.addSublayer(renderer.metalLayer)
+            view.installVideoLayer(renderer.metalLayer)
             receiver.onDecodedFrame = { [weak renderer] pixelBuffer, captureMs in
                 renderer?.render(pixelBuffer, captureMs: captureMs)
             }
@@ -692,8 +773,7 @@ struct VideoLayerView: UIViewRepresentable {
             }
         } else {
             receiver.onDecodedFrame = nil   // route frames back to AVSBDL
-            displayLayer.frame = view.bounds
-            view.layer.addSublayer(displayLayer)
+            view.installVideoLayer(displayLayer)
         }
 
         view.inputEngine.normalize = { [weak view] point in view?.normalized(point) }
@@ -780,6 +860,7 @@ struct VideoLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
         uiView.setKeyboardRequested(keyboardRequested)
+        uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -806,6 +887,12 @@ struct VideoLayerView: UIViewRepresentable {
         fileprivate var threeFingerTapRecognizer: ThreeFingerTapGestureRecognizer?
         fileprivate var pinchSpreadGestureRecognizer: PinchSpreadSystemGestureRecognizer?
         fileprivate var viewportDoubleTapRecognizer: UITapGestureRecognizer?
+
+        // Hosts the presentation layer so zoom/pan geometry is applied in one
+        // place. Whatever the remote aspect ratio does not fill stays the
+        // view's black background — no mirrored, blurred letterbox fill.
+        private let videoContentView = UIView()
+        private var videoLayer: CALayer?
 
         private let cursorLayer: CALayer = {
             let layer = CALayer()
@@ -841,6 +928,7 @@ struct VideoLayerView: UIViewRepresentable {
         // accessory view), while our keyboard is open and docked at the
         // bottom; nil whenever the keyboard is closed or not ours.
         private var keyboardVisibleRect: CGRect?
+        var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
         // Most recent meaningful primary interaction, in normalized
         // remote-display coordinates — the typing-focus anchor. Never
         // updated from multi-finger/system gestures, Pencil hover, the
@@ -895,6 +983,9 @@ struct VideoLayerView: UIViewRepresentable {
             // The zoomed/panned content layer can extend beyond `bounds` —
             // clip it so it never bleeds into sibling SwiftUI content.
             clipsToBounds = true
+            videoContentView.backgroundColor = .clear
+            videoContentView.isUserInteractionEnabled = false
+            addSubview(videoContentView)
         }
 
         @available(*, unavailable)
@@ -902,6 +993,13 @@ struct VideoLayerView: UIViewRepresentable {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
+        }
+
+        func installVideoLayer(_ layer: CALayer) {
+            videoLayer?.removeFromSuperlayer()
+            videoLayer = layer
+            videoContentView.layer.addSublayer(layer)
+            setNeedsLayout()
         }
 
         func setZoomWhileTyping(_ enabled: Bool) {
@@ -919,6 +1017,7 @@ struct VideoLayerView: UIViewRepresentable {
             // presentation immediately rather than waiting on the system's
             // hide notification, which this view now ignores anyway.
             keyboardVisibleRect = nil
+            onKeyboardVisibleRectChange?(nil)
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -938,6 +1037,7 @@ struct VideoLayerView: UIViewRepresentable {
             keyboardVisibleRect = dockedAtBottom
                 ? CGRect(x: 0, y: 0, width: bounds.width, height: min(bounds.height, max(0, localFrame.minY)))
                 : nil
+            onKeyboardVisibleRectChange?(keyboardVisibleRect)
             // Diagnostic breadcrumb for a real-device-only first-activation
             // keyboard crash under investigation — cheap, no behavior
             // change. Remove once root-caused.
@@ -1012,11 +1112,9 @@ struct VideoLayerView: UIViewRepresentable {
             let normalRect = RemoteViewportCalculator.normal(
                 viewBounds: bounds, remoteAspectSize: receiver?.videoSize ?? .zero).displayedRect
             let applyContent = {
-                if let renderer = self.metalRenderer {
-                    self.applyContentGeometry(renderer.metalLayer, normalRect: normalRect, transform: self.currentTransform)
-                } else if let first = self.layer.sublayers?.first {
-                    self.applyContentGeometry(first, normalRect: normalRect, transform: self.currentTransform)
-                }
+                self.applyContentGeometry(self.videoContentView.layer,
+                                          normalRect: normalRect, transform: self.currentTransform)
+                self.videoLayer?.frame = self.videoContentView.bounds
             }
             if animatingKeyboardTransition {
                 applyContent()

@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 4** &nbsp;|&nbsp; Status: **normative** for `pv <= 4`
+**Protocol version (`pv`): 7** &nbsp;|&nbsp; Status: **normative** for `pv <= 7`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -39,7 +39,7 @@ caused by third-party clients should be reported to those projects.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
-Every requirement applies to `pv` 4 unless a different version is called
+Every requirement applies to `pv` 7 unless a different version is called
 out. "The official apps" means the Mac sender and iOS receiver in this
 repository; their behavior is cited as illustration, not as requirement,
 unless marked normative.
@@ -247,7 +247,7 @@ Coordinates use the conventions of section 7.
 
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
-| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`? | Identify the panel; (re)sent on connect and on rotation |
+| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, receiver UI fields? | Identify the panel; (re)sent on connect, rotation, or receiver UI preference change |
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
@@ -256,6 +256,7 @@ Coordinates use the conventions of section 7.
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `keyboard` | pv 4 | `action`, plus fields per `action` (below) | Keyboard input |
 | `pointer` | pv 5 | `action`, plus fields per `action` (below) | Pointer/click gestures |
+| `displayModeRequest` | pv 7 | `mode` (`mirror` or `extend`) | Request a Mac-authoritative mode transition |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -289,6 +290,9 @@ nothing before it arrives.
 * `maxEncodeWide` / `maxEncodeHigh` (int, optional): the receiver's decode
   ceiling in pixels (section 6.5) — the largest stream it can sustain,
   independent of the panel size it announced. Additive at `pv` 3, no bump.
+* `trayEnabled` / `keyboardButtonEnabled` (bool, optional, pv 6): the
+  receiver's persisted local UI preferences. They let the sender present
+  per-receiver controls initialized to the receiver's actual state.
 
 A receiver MUST re-send `hello` on the live connection whenever its
 announced dimensions change (rotation). The sender rebuilds the display in
@@ -346,16 +350,16 @@ is up is a hover move.
 to `touch` events instead. (An old sender would ignore the unknown types
 and the stylus would go dead; the fallback keeps it usable.)
 
-**`keyboard`** (pv 4) carries `action` (string): `"text"`, `"press"`,
-`"down"`, or `"up"`, plus fields specific to it:
+**`keyboard`** (pv 4; extended at pv 6) carries `action` (string): `"text"`,
+`"press"`, `"down"`, `"up"`, `"modifierDown"`, `"modifierUp"`, or `"cancel"`, plus fields specific to it:
 
 * `"text"` — committed Unicode text: `text` (string), the finished
   characters to type (a whole composed/IME commit, an emoji, or an ordinary
   run of typed characters — never intermediate/marked composition state).
   `{"type":"keyboard","action":"text","text":"…"}`
-* `"press"` — one atomic special key with no down/up lifecycle to track
-  (used by the software keyboard's Return and Backspace keys): `usage`
-  (int), a USB HID keyboard-page (0x07) usage number (below).
+* `"press"` — one atomic key with no down/up lifecycle to track: `usage`
+  (int), a USB HID keyboard-page (0x07) usage number (below), and optional
+  named `modifiers` (pv 6) for shortcut execution.
   `{"type":"keyboard","action":"press","usage":42}`
 * `"down"` / `"up"` — a hardware key's lifecycle, for keys a sender must
   hold (arrows, modified shortcuts): `usage` (int, as above), `modifiers`
@@ -363,6 +367,13 @@ and the stylus would go dead; the fallback keeps it usable.)
   receiver sends MUST be followed by a matching `"up"` (or by disconnect —
   senders MUST release a still-held key on session loss regardless).
   `{"type":"keyboard","action":"down","usage":80,"modifiers":["shift"]}`
+* `"modifierDown"` / `"modifierUp"` (pv 6) — a synthetic modifier's held
+  lifecycle: `modifier` is one of `"command"`, `"option"`, `"control"`, or
+  `"shift"`. Every down MUST be followed by an up; senders MUST also release
+  all held modifiers on pause, input disable, migration, or session loss.
+* `"cancel"` (pv 6) — release every synthetic input state held for this
+  session. Receivers send it before hiding or materially changing the active
+  control profile; it is idempotent.
 
 Named protocol modifiers (not raw platform modifier bit masks): `"shift"`,
 `"control"`, `"option"`, `"command"`, `"capsLock"`. Senders MUST ignore
@@ -454,6 +465,9 @@ section 4.
 | `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
 | `updateRequired` | pv 2 | `target`, `store`, `message` | Peer must update to continue |
 | `displayState` | additive | `state` (`running` or `paused`) | Capture pause state for receiver UI/input gating |
+| `receiverUI` | pv 6 | `trayEnabled`?, `keyboardButtonEnabled`? | Update persisted receiver-local UI preferences |
+| `inputReset` | pv 6 | none | Clear the receiver's local latched/temporary modifier state |
+| `displayModeState` | pv 7 | `mode` (`mirror` or `extend`) | Mac-authoritative confirmed capture mode |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -481,6 +495,24 @@ resume, mode replacement, and recovery. Receivers SHOULD keep the last video
 frame visible and indicate that the display is paused; they SHOULD ignore
 interactive input while paused. This is additive and unknown message types
 remain safe to ignore.
+
+**`receiverUI`** updates only the supplied receiver-local preference fields;
+missing and unknown fields are ignored. **`inputReset`** accompanies a sender
+input-disable transition so the receiver cannot retain a visually latched
+modifier after the sender has safely released its synthetic input state.
+
+**`displayModeRequest`** (receiver → Mac, pv 7) carries `mode` (`mirror` or
+`extend`). The Mac owns the transition and MUST use its normal capture/display
+mode path rather than treating the request as confirmation. Once setup has
+succeeded, it sends **`displayModeState`** with the actual active mode. It also
+sends that state after Mac-originated changes and on a newly established
+session, so the receiver never infers mode from dimensions or display shape.
+
+A failed transition produces no reply at all — the sender MUST NOT confirm a
+mode it did not enter. A mode switch normally rebuilds the sender's session,
+so the confirming `displayModeState` legitimately arrives on the *next*
+connection; receivers SHOULD therefore keep a request outstanding across that
+reconnect, and SHOULD retire it on a local deadline rather than wait forever.
 
 **`cursorImg`** delivers the current cursor sprite: `png` is the base64 of
 a PNG (kept under 24000 bytes pre-encoding, see section 4); `nw`, `nh` are
@@ -751,7 +783,9 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 | `pencil`, `proximity`; below pv 3 the receiver degrades stylus to `touch` |
 | 3 (additive) | `hello.cursorPort` and the UDP cursor side channel (6.3); optional, no bump |
 | 4 | `keyboard` (text/press/down/up); below pv 4 the receiver has no keyboard fallback and MUST NOT offer keyboard UI |
-| 5 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
+| 5 | `pointer` (absolute/relative movement, clicks, right button); below pv 5 the receiver uses legacy `touch` fallback |
+| 6 | Receiver control-tray preference fields/messages; modifier down/up and modified atomic keyboard presses |
+| 7 | Explicit `displayModeRequest` / authoritative `displayModeState` synchronization |
 
 ---
 
@@ -814,3 +848,5 @@ This file is versioned by git; the authoritative change log is
 | 2026-08-19 | Initial specification, written against `pv` 3 |
 | 2026-08-26 | Additive: `hello.cursorPort` and the UDP cursor side channel (section 6.3) |
 | 2026-09-14 | `pv` 4: `keyboard` message family (native keyboard input, M4) |
+| 2026-09-14 | `pv` 5: `pointer` message family; `pv` 6: adaptive receiver controls and modifier shortcuts |
+| 2026-09-14 | `pv` 7: receiver mode requests and Mac-authoritative Mirror/Extend state |

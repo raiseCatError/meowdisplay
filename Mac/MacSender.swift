@@ -74,6 +74,8 @@ struct PhoneInfo: Decodable {
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's decode ceiling in pixels (PROTOCOL.md
     let maxEncodeHigh: Int?  //  6.5): cap the stream, keep the desktop size
+    let trayEnabled: Bool?   // receiver-local control UI state (protocol 6)
+    let keyboardButtonEnabled: Bool?
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
@@ -124,6 +126,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // not a delta — repeated bumps in one session must not accumulate into
     // an offset nothing ever validated.
     @MainActor var onDisplayIdentityBumped: ((UInt32) -> Void)?
+    /// Receiver requests are handed to SenderController, which owns the
+    /// existing authoritative session-rebuild mode-switch path.
+    @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
@@ -376,6 +381,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Called on the sender queue while framing control messages.
     private func sendDisplayState(_ state: DisplayState) {
         sendJSONFrame("{\"type\":\"displayState\",\"state\":\"\(state.rawValue)\"}")
+    }
+
+    private func sendDisplayModeState() {
+        sendJSONObject(["type": WireMessage.displayModeState,
+                        "mode": mode.receiverMode.rawValue])
     }
 
     func start() async throws {
@@ -771,6 +781,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // clears a paused state retained by the receiver when changing
             // modes replaces the old session with a new sender.
             self.sendDisplayState(receiverState)
+            self.sendDisplayModeState()
         }
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
@@ -815,6 +826,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// cannot leave a synthetic mouse or tablet button held down.
     func cancelActiveInput() {
         inputInjector?.cancelActiveInput()
+    }
+
+    func setReceiverUIPreferences(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
+        queue.async { [weak self] in
+            self?.sendJSONObject([
+                "type": WireMessage.receiverUI,
+                "trayEnabled": trayEnabled,
+                "keyboardButtonEnabled": keyboardButtonEnabled,
+            ])
+        }
+    }
+
+    func resetReceiverInputState() {
+        queue.async { [weak self] in
+            self?.inputInjector?.cancelActiveInput()
+            self?.sendJSONObject(["type": WireMessage.inputReset])
+        }
     }
 
     private func receiverInputIsAllowed() -> Bool {
@@ -2044,6 +2072,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
+                if stream != nil { sendDisplayModeState() }
                 if info.protocolVersion < WireProtocol.minSupportedPeer {
                     Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer) — requesting update")
                     sendUpdateRequired(kind: info.kind)
@@ -2147,7 +2176,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             case "press":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardPress(usage)
+                    inputInjector?.handleKeyboardPress(
+                        usage, modifiers: obj["modifiers"] as? [String] ?? [])
                 }
             case "down":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
@@ -2157,8 +2187,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
                     inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
                 }
+            case "modifierDown", "modifierUp":
+                if let name = obj["modifier"] as? String {
+                    inputInjector?.handleModifier(name: name, down: action == "modifierDown")
+                }
+            case "cancel":
+                inputInjector?.cancelActiveInput()
             default:
                 break   // unknown keyboard action from a newer peer — ignore
+            }
+        case WireMessage.displayModeRequest:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.displayModeWireVersion,
+                  let rawMode = obj["mode"] as? String,
+                  let requestedMode = ReceiverDisplayMode(rawValue: rawMode) else { return }
+            inputInjector?.cancelActiveInput()
+            sendJSONObject(["type": WireMessage.inputReset])
+            if requestedMode == mode.receiverMode {
+                sendDisplayModeState()
+            } else {
+                Task { @MainActor in self.onDisplayModeRequest?(requestedMode) }
             }
         case "gesture":
             guard let name = obj["name"] as? String,
@@ -2602,6 +2650,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
            let json = String(data: data, encoding: .utf8) {
             sendJSONFrame(json)
         }
+    }
+
+    private func sendJSONObject(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let json = String(data: data, encoding: .utf8) else { return }
+        sendJSONFrame(json)
     }
 
     private func sendJSONFrame(_ json: String) {
