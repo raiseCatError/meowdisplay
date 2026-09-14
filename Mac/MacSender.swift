@@ -985,8 +985,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             currentPathDirectLink = false
             return
         }
-        let wired = !path.usesInterfaceType(.wifi) && !path.usesInterfaceType(.loopback)
-            && !path.usesInterfaceType(.cellular)
+        let wired = TransportSafety.isWiredDirectLinkPath(
+            usesWiFi: path.usesInterfaceType(.wifi),
+            usesLoopback: path.usesInterfaceType(.loopback),
+            usesCellular: path.usesInterfaceType(.cellular),
+            interfaceNames: path.availableInterfaces.map(\.name))
         currentPathDirectLink = wired
             && Self.endpointIsLinkLocal(path.remoteEndpoint ?? conn.endpoint)
     }
@@ -2514,7 +2517,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingSends += 1
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            self.pendingSends -= 1
+            self.pendingSends = TransportSafety.decrementedPendingCount(self.pendingSends)
             if let error {
                 Log.info("send error: \(error)")
                 return
