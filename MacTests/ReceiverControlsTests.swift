@@ -340,6 +340,13 @@ final class ReceiverControlsTests: XCTestCase {
         }
     }
 
+    func testHIDKeyUsageMinusAndEqualParseAndMapToCorrectKeyCodes() {
+        XCTAssertEqual(HIDKeyUsage.parse(45 as NSNumber), .minus)
+        XCTAssertEqual(HIDKeyUsage.parse(46 as NSNumber), .equal)
+        XCTAssertEqual(HIDKeyUsage.minus.keyCode, 27)
+        XCTAssertEqual(HIDKeyUsage.equal.keyCode, 24)
+    }
+
     func testMacDeliveredPreferenceUpdateChangesOnlySuppliedFields() throws {
         var preferences = ReceiverControlPreferences()
         preferences.hapticsEnabled = false

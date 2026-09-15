@@ -71,6 +71,21 @@ enum HIDKeyUsage: Int, CaseIterable {
     case digit3 = 32
     case digit4 = 33
     case digit5 = 34
+    case digit6 = 35
+    case digit7 = 36
+    case digit8 = 37
+    case digit9 = 38
+    case digit0 = 39
+    case minus = 45
+    case equal = 46
+    case leftBracket = 47
+    case rightBracket = 48
+    case backslash = 49
+    case semicolon = 51
+    case quote = 52
+    case comma = 54
+    case period = 55
+    case slash = 56
     case returnOrEnter = 40
     case escape = 41
     case deleteOrBackspace = 42
@@ -117,6 +132,21 @@ enum HIDKeyUsage: Int, CaseIterable {
         case .digit3: return 20
         case .digit4: return 21
         case .digit5: return 23
+        case .digit6: return 22
+        case .digit7: return 26
+        case .digit8: return 28
+        case .digit9: return 25
+        case .digit0: return 29
+        case .minus: return 27
+        case .equal: return 24
+        case .leftBracket: return 33
+        case .rightBracket: return 30
+        case .backslash: return 42
+        case .semicolon: return 41
+        case .quote: return 39
+        case .comma: return 43
+        case .period: return 47
+        case .slash: return 44
         case .returnOrEnter: return 36
         case .escape: return 53
         case .deleteOrBackspace: return 51
