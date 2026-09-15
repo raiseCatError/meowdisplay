@@ -229,6 +229,7 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.hapticsEnabled = false
         preferences.preferredLandscapeSide = .leading
         preferences.allowInput = false
+        preferences.inputMode = .trackpad
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -261,6 +262,21 @@ final class ReceiverControlsTests: XCTestCase {
         // an existing user into an unfamiliar pointer model.
         XCTAssertTrue(migrated.allowInput)
         XCTAssertEqual(migrated.inputMode, .direct)
+    }
+
+    func testSchemaFourPreferencesDefaultTrackpadSensitivityToPreSettingSpeed() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 4
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertEqual(migrated.trackpadSensitivity, PointerGestureConfig.defaultTrackpadSensitivity)
     }
 
     func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {

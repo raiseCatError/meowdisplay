@@ -286,6 +286,15 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `onAllowInputStateChange`. Settings/the gear are never gated by this;
     /// only remote touch/pointer/keyboard/gesture output is.
     var allowInput = true
+    /// The primary one-finger pointer model — see `PointerInputMode`.
+    /// Editable regardless of `allowInput`: choosing a mode never itself
+    /// generates remote input.
+    var inputMode = PointerInputMode.direct
+    /// Linear multiplier on Trackpad's primary one-finger relative delta —
+    /// see `PointerGestureConfig.trackpadSensitivityRange`/
+    /// `defaultTrackpadSensitivity`. Never affects Direct Touch or any
+    /// multi-finger gesture.
+    var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
     var profiles: [ControlProfile]
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) }) {
@@ -322,6 +331,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // existed" — default both to their pre-feature-equivalent behavior:
         // input was always allowed, and touch was always direct/absolute.
         allowInput = try value(.allowInput, fallback.allowInput)
+        inputMode = try value(.inputMode, fallback.inputMode)
+        // Absent (schema < 5) means "written before the sensitivity
+        // setting existed" — default to exactly the pre-setting movement
+        // speed, never a silently different one.
+        trackpadSensitivity = try value(.trackpadSensitivity, fallback.trackpadSensitivity)
         profiles = try value(.profiles, fallback.profiles)
     }
 
@@ -380,6 +394,12 @@ struct ReceiverControlPreferencesRepository {
         // always direct/absolute) — nothing to transform, just record it.
         if value.version < 4 {
             value.version = 4
+        }
+        // Schema 4 predates `trackpadSensitivity`; the custom decoder above
+        // already defaulted it to the pre-setting speed — nothing to
+        // transform.
+        if value.version < 5 {
+            value.version = 5
         }
         return value
     }

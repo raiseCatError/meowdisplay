@@ -7,6 +7,11 @@ import XCTest
 /// and can't run outside a real app); this covers the touch-intent/session
 /// policy both the recognizer and the real device rely on.
 final class PointerGestureEngineTests: XCTestCase {
+    func testOnlyDirectTouchSeedsAnAbsoluteScrollTarget() {
+        XCTAssertTrue(PointerInputMode.direct.seedsAbsoluteScrollTarget)
+        XCTAssertFalse(PointerInputMode.trackpad.seedsAbsoluteScrollTarget)
+    }
+
 
     private func sample(_ id: Int, _ phase: PointerTouchSample.Phase,
                         view: CGPoint, norm: CGPoint? = CGPoint(x: 0.5, y: 0.5),
@@ -936,5 +941,321 @@ final class PointerGestureEngineTests: XCTestCase {
         XCTAssertEqual(engine.mode, .idle)
         XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 205, y: 2), t: 0.2)), [])
         XCTAssertEqual(engine.handle(sample(2, .moved, view: CGPoint(x: 25, y: 24), t: 0.2)), [])
+    }
+
+    // MARK: - Trackpad input mode
+
+    func testDefaultInputModeIsDirect() {
+        XCTAssertEqual(PointerGestureEngine().inputMode, .direct)
+    }
+
+    func testTrackpadTouchDownNeverMovesCursor() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        let down = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), norm: CGPoint(x: 0.2, y: 0.2), t: 0))
+        XCTAssertEqual(down, [])
+        // Movement well beyond dragSlop commits the session — still no
+        // absolute move, ever, in trackpad mode.
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 150, y: 100), norm: CGPoint(x: 0.4, y: 0.2), t: 0.01))
+        XCTAssertFalse(moved.contains(where: isMoveAbsolute))
+        XCTAssertEqual(engine.mode, .relativePointerSession)
+    }
+
+    func testTrackpadOneFingerMovementProducesRelativeDeltas() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        let committed = engine.handle(sample(1, .moved, view: CGPoint(x: 150, y: 100), t: 0.01))
+        XCTAssertEqual(committed, [])   // the crossing movement itself is absorbed, not replayed
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 160, y: 105), t: 0.02))
+        XCTAssertEqual(moved, [.moveRelative(dx: 10, dy: 5)])
+    }
+
+    func testTrackpadWindowExpiryCommitsWithoutMovingCursorThenTracksRelatively() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), norm: CGPoint(x: 0.2, y: 0.2), t: 0))
+        let committed = engine.poll(now: PointerGestureConfig.firstTouchArbitrationWindow + 0.005)
+        XCTAssertEqual(committed, [])
+        XCTAssertEqual(engine.mode, .relativePointerSession)
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 108, y: 100),
+                                         t: PointerGestureConfig.firstTouchArbitrationWindow + 0.02))
+        XCTAssertEqual(moved, [.moveRelative(dx: 8, dy: 0)])
+    }
+
+    func testTrackpadTapClicksAtCurrentCursorLocationNotTouchLocation() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), norm: CGPoint(x: 0.3, y: 0.3), t: 0))
+        let up = engine.handle(sample(1, .ended, view: CGPoint(x: 11, y: 10), norm: CGPoint(x: 0.31, y: 0.3), t: 0.02))
+        // Unlike direct mode, nothing moves the cursor — the click must
+        // land wherever the Mac's cursor already is.
+        XCTAssertEqual(up, [])
+        XCTAssertEqual(engine.mode, .tapBuffered)
+        let flushed = engine.poll(now: 0.02 + PointerGestureConfig.tapChainWindow + 0.01)
+        XCTAssertEqual(flushed, [.mouseDown(button: .left, clickCount: 1), .mouseUp(button: .left, clickCount: 1)])
+    }
+
+    func testTrackpadTapHoldThenMoveDragsRelativelyAndReleaseCleansUp() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        // A quick tap, buffered...
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 10, y: 10), t: 0.02))
+        XCTAssertEqual(engine.mode, .tapBuffered)
+        // ...then a fresh touch continues the chain and holds past the
+        // hold-commit delay with real movement — commits to a drag with NO
+        // absolute move (button posts at the cursor's current position).
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 11, y: 11), t: 0.08))
+        let dragStart = engine.handle(sample(2, .moved, view: CGPoint(x: 25, y: 11), t: 0.1))
+        XCTAssertEqual(dragStart, [.mouseDown(button: .left, clickCount: 1)])
+        XCTAssertFalse(dragStart.contains(where: isMoveAbsolute))
+        XCTAssertEqual(engine.heldMouseButton, .left)
+
+        let dragMove = engine.handle(sample(2, .moved, view: CGPoint(x: 40, y: 11), t: 0.12))
+        XCTAssertEqual(dragMove, [.moveRelative(dx: 15, dy: 0)])
+
+        let release = engine.handle(sample(2, .ended, view: CGPoint(x: 40, y: 11), t: 0.14))
+        XCTAssertEqual(release, [.mouseUp(button: .left, clickCount: 0)])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.mode, .idle)
+    }
+
+    /// Regression: the STATIONARY-hold commit path (via `poll()`, when a
+    /// continuing touch holds past `holdCommitDelay` without ever crossing
+    /// `dragSlop`) must never jump the cursor either — only the
+    /// movement-triggered commit path (`moved()`) was originally fixed;
+    /// this covers the "tap → hold (stay still) → then move" sequence that
+    /// only `poll()`'s timer branch resolves.
+    func testTrackpadTapHoldStationaryThenMoveNeverEmitsAbsoluteMove() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), norm: CGPoint(x: 0.3, y: 0.3), t: 0))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 10, y: 10), norm: CGPoint(x: 0.3, y: 0.3), t: 0.02))
+        XCTAssertEqual(engine.mode, .tapBuffered)
+
+        // A fresh touch continues the chain and holds PERFECTLY STILL past
+        // holdCommitDelay — never crosses dragSlop, so only `poll()`
+        // resolves it, not `moved()`.
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 11, y: 11), norm: CGPoint(x: 0.31, y: 0.31), t: 0.08))
+        let commands = engine.poll(now: 0.08 + PointerGestureConfig.holdCommitDelay + 0.01)
+        XCTAssertFalse(commands.contains(where: isMoveAbsolute))
+        XCTAssertEqual(commands, [.mouseDown(button: .left, clickCount: 1)])
+        XCTAssertEqual(engine.mode, .relativePointerSession)
+        XCTAssertEqual(engine.heldMouseButton, .left)
+
+        // Subsequent movement is relative, from wherever the cursor
+        // actually is — never replayed as an absolute jump.
+        let moved = engine.handle(sample(2, .moved, view: CGPoint(x: 21, y: 11),
+                                         t: 0.08 + PointerGestureConfig.holdCommitDelay + 0.02))
+        XCTAssertEqual(moved, [.moveRelative(dx: 10, dy: 0)])
+    }
+
+    // MARK: - Trackpad sensitivity
+
+    func testDefaultTrackpadSensitivityPreservesUnscaledDelta() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        XCTAssertEqual(engine.trackpadSensitivity, PointerGestureConfig.defaultTrackpadSensitivity)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        _ = engine.handle(sample(1, .moved, view: CGPoint(x: 150, y: 100), t: 0.01))
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 160, y: 105), t: 0.02))
+        XCTAssertEqual(moved, [.moveRelative(dx: 10, dy: 5)])
+    }
+
+    func testTrackpadSensitivityScalesOneFingerRelativeDelta() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        engine.trackpadSensitivity = 2.0
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        _ = engine.handle(sample(1, .moved, view: CGPoint(x: 150, y: 100), t: 0.01))
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 160, y: 105), t: 0.02))
+        XCTAssertEqual(moved, [.moveRelative(dx: 20, dy: 10)])
+    }
+
+    func testTrackpadSensitivityIsClampedToConfiguredRange() {
+        let engine = PointerGestureEngine()
+        engine.trackpadSensitivity = 999
+        XCTAssertEqual(engine.trackpadSensitivity, PointerGestureConfig.trackpadSensitivityRange.upperBound)
+        engine.trackpadSensitivity = -5
+        XCTAssertEqual(engine.trackpadSensitivity, PointerGestureConfig.trackpadSensitivityRange.lowerBound)
+    }
+
+    func testTrackpadSensitivityNeverAffectsDirectModeHybridPrecisionMove() {
+        let engine = PointerGestureEngine()
+        // Direct mode (default) — sensitivity set high, must be ignored.
+        engine.trackpadSensitivity = 2.0
+        _ = engine.handle(sample(1, .began, view: .zero, t: 0))
+        _ = settleAsAnchor(engine, id: 1, to: CGPoint(x: 200, y: 0), norm: CGPoint(x: 0.5, y: 0.2), t: 0.02)
+        XCTAssertEqual(engine.mode, .absolutePointer)
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 300, y: 300), t: 0.1))
+        XCTAssertEqual(engine.mode, .relativePointerSession)   // hybrid precision, still Direct mode
+        let moved = engine.handle(sample(2, .moved, view: CGPoint(x: 310, y: 305), t: 0.12))
+        XCTAssertEqual(moved, [.moveRelative(dx: 10, dy: 5)])   // unscaled
+    }
+
+    func testTrackpadSensitivityNeverAffectsTwoFingerRightDrag() {
+        // Same sequence as testRightTapThenSecondChordHoldProducesOnlyRightDownDragUp,
+        // but in Trackpad mode with sensitivity maxed — the right-drag delta
+        // must come out identical regardless.
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        engine.trackpadSensitivity = 2.0
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 50, y: 50), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 70, y: 50), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 51, y: 50), t: 0.05))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 71, y: 51), t: 0.06))
+
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 52, y: 52), t: 0.15))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 72, y: 52), t: 0.16))
+        let committed = engine.poll(now: 0.16 + PointerGestureConfig.holdCommitDelay + 0.01)
+        XCTAssertEqual(committed, [.mouseDown(button: .right, clickCount: 1)])
+        XCTAssertEqual(engine.mode, .rightDragHeld)
+
+        let moved = engine.handle(sample(3, .moved, view: CGPoint(x: 62, y: 52), t: 0.35))
+        XCTAssertEqual(moved, [.moveRelative(dx: 5, dy: 0)])   // unscaled centroid delta
+    }
+
+    /// Regression for the real-device "right click → hold → drag" report.
+    /// The exact physical flow: cursor already somewhere, first finger
+    /// down, second finger joins STAGGERED (past the 150ms arbitration
+    /// window — the timing that used to get the first finger swallowed
+    /// into its own solo Trackpad session instead of forming the
+    /// continuation chord), the chord commits, is held, dragged, released.
+    func testTrackpadRightClickChordHoldDragNeverJumpsAbsolutelyEvenWithStaggeredFingerArrival() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+
+        // First right click: quick two-finger tap, buffers a pending right
+        // tap for the second attempt to continue.
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 50, y: 50), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 70, y: 50), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 51, y: 50), t: 0.05))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 71, y: 51), t: 0.06))
+
+        var allCommands: [PointerCommand] = []
+
+        // Second attempt: finger 3 lands ALONE and sits past the 150ms
+        // arbitration window before its partner joins.
+        allCommands += engine.handle(sample(3, .began, view: CGPoint(x: 52, y: 52), t: 0.1))
+        allCommands += engine.poll(now: 0.1 + PointerGestureConfig.firstTouchArbitrationWindow + 0.02)
+        // Must still be withheld, arbitrating — NOT solo-committed to its
+        // own relative session (which would swallow the pending chord).
+        XCTAssertEqual(engine.mode, .firstTouchPending)
+
+        // The partner now joins, well after the 150ms window but still
+        // within the buffered tap's own continuation window.
+        allCommands += engine.handle(sample(4, .began, view: CGPoint(x: 72, y: 52), t: 0.28))
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        XCTAssertTrue(engine.isChordContinuation)
+
+        // Held past the commit delay with no movement — right mouseDown,
+        // no move of any kind.
+        let committed = engine.poll(now: 0.28 + PointerGestureConfig.holdCommitDelay + 0.01)
+        allCommands += committed
+        XCTAssertEqual(committed, [.mouseDown(button: .right, clickCount: 1)])
+        XCTAssertEqual(engine.mode, .rightDragHeld)
+        XCTAssertEqual(engine.heldMouseButton, .right)
+
+        // Drag: relative centroid deltas only.
+        let dragMove = engine.handle(sample(3, .moved, view: CGPoint(x: 67, y: 52),
+                                            t: 0.28 + PointerGestureConfig.holdCommitDelay + 0.05))
+        allCommands += dragMove
+        XCTAssertEqual(dragMove, [.moveRelative(dx: 7.5, dy: 0)])
+
+        // Release both fingers — clean right mouseUp.
+        allCommands += engine.handle(sample(3, .ended, view: CGPoint(x: 67, y: 52), t: 1.0))
+        let release = engine.handle(sample(4, .ended, view: CGPoint(x: 72, y: 52), t: 1.01))
+        allCommands += release
+        XCTAssertEqual(release, [.mouseUp(button: .right, clickCount: 0)])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.mode, .idle)
+
+        XCTAssertFalse(allCommands.contains(where: isMoveAbsolute))
+    }
+
+    func testTrackpadStaggeredLoneFingerEventuallyCommitsSoloIfNoPartnerEverArrives() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 50, y: 50), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 70, y: 50), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 51, y: 50), t: 0.05))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 71, y: 51), t: 0.06))
+
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 52, y: 52), t: 0.1))
+        // Nobody ever joins — well past both the arbitration window AND
+        // the buffered tap's own continuation window.
+        let committed = engine.poll(now: 0.1 + PointerGestureConfig.tapChainWindow + 0.05)
+        XCTAssertFalse(committed.contains(where: isMoveAbsolute))
+        XCTAssertEqual(engine.mode, .relativePointerSession)   // committed solo, as a normal Trackpad session
+    }
+
+    func testTrackpadHigherFingerGesturesShareDirectModeSemantics() {
+        // Two-finger/right-click chord arbitration is unmodified by input
+        // mode — a fresh two-finger tap still right-clicks in trackpad mode.
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 50, y: 50), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 70, y: 50), t: 0.01))
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 51, y: 50), t: 0.05))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 71, y: 51), t: 0.06))
+        let flushed = engine.poll(now: 0.06 + PointerGestureConfig.tapChainWindow + 0.01)
+        XCTAssertEqual(flushed, [.mouseDown(button: .right, clickCount: 1), .mouseUp(button: .right, clickCount: 1)])
+    }
+
+    // MARK: - Input mode switching
+
+    func testSetInputModeIsNoOpWhenUnchanged() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: .zero, t: 0))
+        _ = settleAsAnchor(engine, id: 1, to: CGPoint(x: 200, y: 0), norm: CGPoint(x: 0.5, y: 0.2), t: 0.02)
+        XCTAssertEqual(engine.mode, .absolutePointer)
+        XCTAssertEqual(engine.setInputMode(.direct), [])
+        XCTAssertEqual(engine.mode, .absolutePointer)   // untouched — same mode requested
+    }
+
+    func testSwitchingModeMidLeftDragReleasesTheHeldButtonAndReturnsToIdle() {
+        let engine = PointerGestureEngine()
+        // Tap-then-hold-drag in direct mode.
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 10, y: 10), t: 0.02))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 11, y: 11), norm: CGPoint(x: 0.3, y: 0.3), t: 0.08))
+        _ = engine.handle(sample(2, .moved, view: CGPoint(x: 30, y: 11), norm: CGPoint(x: 0.5, y: 0.3), t: 0.1))
+        XCTAssertEqual(engine.mode, .leftDragHeld)
+        XCTAssertEqual(engine.heldMouseButton, .left)
+
+        let cleanup = engine.setInputMode(.trackpad)
+        XCTAssertEqual(cleanup, [.mouseUp(button: .left, clickCount: 0)])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.mode, .idle)
+        XCTAssertEqual(engine.inputMode, .trackpad)
+
+        // The next gesture starts completely clean under the new mode.
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 0, y: 0), t: 0.5))
+        let fresh = engine.handle(sample(3, .moved, view: CGPoint(x: 20, y: 0), t: 0.51))
+        XCTAssertEqual(fresh, [])   // trackpad: crossing movement absorbed, no jump
+        XCTAssertEqual(engine.mode, .relativePointerSession)
+    }
+
+    func testSwitchingModeMidRelativeSessionReleasesHeldButtonAndForgetsFingers() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 10, y: 10), t: 0.02))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 11, y: 11), t: 0.08))
+        _ = engine.handle(sample(2, .moved, view: CGPoint(x: 30, y: 11), t: 0.1))
+        XCTAssertEqual(engine.mode, .relativePointerSession)
+        XCTAssertEqual(engine.heldMouseButton, .left)
+
+        let cleanup = engine.setInputMode(.direct)
+        XCTAssertEqual(cleanup, [.mouseUp(button: .left, clickCount: 0)])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.mode, .idle)
+
+        // No stuck touch: the same finger id starting a brand-new sequence
+        // afterward is treated as fresh, not a continuation.
+        XCTAssertEqual(engine.handle(sample(2, .began, view: CGPoint(x: 60, y: 60), t: 1)), [])
+        XCTAssertEqual(engine.mode, .firstTouchPending)
     }
 }

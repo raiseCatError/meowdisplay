@@ -104,6 +104,8 @@ struct ReceiverScreen: View {
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
                                    keyboardRequested: keyboardActive,
+                                   inputMode: controlStore.preferences.inputMode,
+                                   trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
                                    allowInput: inputReachesMac,
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
@@ -516,6 +518,32 @@ struct SettingsView: View {
                             controlStore.update { $0.allowInput = value }
                             receiver.requestAllowInput(value)
                         }))
+                    Picker("Input Mode", selection: preferenceBinding(\.inputMode)) {
+                        ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(controlStore.preferences.inputMode.explanation)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("Trackpad Sensitivity")
+                        Spacer()
+                        if controlStore.preferences.trackpadSensitivity != PointerGestureConfig.defaultTrackpadSensitivity {
+                            Button("Reset") {
+                                controlStore.update { $0.trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity }
+                            }
+                            .font(.footnote)
+                        }
+                    }
+                    Slider(value: preferenceBinding(\.trackpadSensitivity),
+                           in: PointerGestureConfig.trackpadSensitivityRange, step: 0.1) {
+                        Text("Trackpad Sensitivity")
+                    } minimumValueLabel: {
+                        Text("Slow")
+                    } maximumValueLabel: {
+                        Text("Fast")
+                    }
+                    .font(.footnote)
                 } header: {
                     Text("Input")
                 } footer: {
@@ -803,6 +831,11 @@ struct VideoLayerView: UIViewRepresentable {
     /// (e.g. the Settings sheet's device name field, presented over the
     /// still-live stream) can never zoom/pan the remote display.
     let keyboardRequested: Bool
+    /// The primary one-finger pointer model — see `PointerInputMode`.
+    let inputMode: PointerInputMode
+    /// Linear multiplier on Trackpad's primary one-finger relative delta —
+    /// see `PointerGestureConfig.trackpadSensitivityRange`.
+    let trackpadSensitivity: Double
     /// Master remote-input gate (SETTINGS / ALLOW INPUT INVARIANTS). Belt-
     /// and-suspenders alongside the `.allowsHitTesting` gate `ReceiverScreen`
     /// applies to this whole view: that gate stops new touches from ever
@@ -819,6 +852,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.receiver = receiver
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
+        view.setInputMode(inputMode)
+        view.setTrackpadSensitivity(trackpadSensitivity)
         view.setAllowInput(allowInput)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         receiver.onDisplayStateChange = { [weak view] state in
@@ -926,6 +961,8 @@ struct VideoLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
         uiView.setKeyboardRequested(keyboardRequested)
+        uiView.setInputMode(inputMode)
+        uiView.setTrackpadSensitivity(trackpadSensitivity)
         uiView.setAllowInput(allowInput)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         // videoSize arrives after the format description — re-fit the layers.
@@ -1074,6 +1111,34 @@ struct VideoLayerView: UIViewRepresentable {
             zoomWhileTypingEnabled = enabled
             guard keyboardVisibleRect != nil else { return }   // only matters while open
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        /// Applies a change to the primary one-finger pointer model.
+        /// Guarded exactly like `setZoomWhileTyping`/`setKeyboardRequested`
+        /// below — `updateUIView` calls this on EVERY SwiftUI re-render of
+        /// this view (which happens at up to frame rate, e.g. on every
+        /// `receiver.perf`/`fps` publish), and unlike those two cheap
+        /// property assignments, the unguarded body here cancelled and
+        /// rescheduled `pointerPollTimer` on every single call — main-
+        /// thread timer churn dozens of times a second, competing with the
+        /// two-finger scroll/pinch recognizer for touch delivery and, under
+        /// load, plausibly delaying frame/socket processing far enough to
+        /// trip the receiver's 5s liveness watchdog. Only do real work when
+        /// the mode actually changed.
+        func setInputMode(_ mode: PointerInputMode) {
+            guard mode != pointerEngine.inputMode else { return }
+            dispatchPointerCommands(pointerEngine.setInputMode(mode))
+            schedulePointerPoll()
+        }
+
+        /// Applies a change to the Trackpad sensitivity multiplier. Guarded
+        /// like `setInputMode` for the same reason (`updateUIView` runs at
+        /// up to frame rate) — cheap regardless since this only assigns a
+        /// stored property with no session to cancel, but there is no
+        /// reason to write it redundantly every frame either.
+        func setTrackpadSensitivity(_ sensitivity: Double) {
+            guard sensitivity != pointerEngine.trackpadSensitivity else { return }
+            pointerEngine.trackpadSensitivity = sensitivity
         }
 
         private var allowsInput = true
@@ -1534,7 +1599,11 @@ struct VideoLayerView: UIViewRepresentable {
             // front, so the scroll lands on the window being touched. Once
             // only: a real trackpad does not drag the cursor while
             // scrolling, and moving it mid-gesture would change the target.
-            if let n = normalized(midpoint) {
+            // Direct Touch intentionally targets the scroll under the
+            // fingers. Trackpad must never teleport the Mac cursor: this
+            // legacy absolute touch message can race a right-click chord
+            // and arrive immediately before its right mouseDown.
+            if pointerEngine.inputMode.seedsAbsoluteScrollTarget, let n = normalized(midpoint) {
                 lastNorm = n
                 receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
             }

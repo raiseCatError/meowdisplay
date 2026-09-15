@@ -109,6 +109,51 @@ enum PointerGestureConfig {
     /// regardless — this window only ever matters for a finger that isn't
     /// moving yet).
     static let firstTouchArbitrationWindow: TimeInterval = 0.15
+
+    /// Bounds for `PointerGestureEngine.trackpadSensitivity` — a plain
+    /// linear multiplier on Trackpad's primary one-finger relative delta,
+    /// nothing fancier (no acceleration curve). `1.0` (`defaultTrackpadSensitivity`)
+    /// reproduces the exact pre-sensitivity-setting movement speed;
+    /// half/double that read as clearly slower/faster on real hardware
+    /// without either extreme feeling broken.
+    static let trackpadSensitivityRange: ClosedRange<Double> = 0.5...2.0
+    static let defaultTrackpadSensitivity: Double = 1.0
+}
+
+/// User-selectable primary one-finger pointer model. Persisted receiver
+/// preference (see `ReceiverControlPreferences.inputMode`); only changes the
+/// FIRST finger's semantics — every multi-finger gesture (scroll, pinch,
+/// right-click chord, system gestures) is shared and unaffected by this
+/// setting. Stable raw values: written to disk via `ReceiverControlPreferences`.
+enum PointerInputMode: String, Codable, CaseIterable, Identifiable {
+    /// The first finger maps directly to the corresponding Mac coordinates —
+    /// touch-where-you-want-the-pointer. The existing hybrid behavior (a
+    /// later finger promotes the session to relative/precision tracking)
+    /// still applies on top of this.
+    case direct
+    /// The first finger moves the Mac cursor RELATIVE to wherever it
+    /// already is — touching down never snaps/jumps the cursor to the
+    /// finger's location, like a laptop trackpad.
+    case trackpad
+
+    var id: String { rawValue }
+
+    /// Direct Touch scrolls target the content under the fingers. Trackpad
+    /// scrolls stay at the Mac cursor and must not emit a parallel absolute
+    /// touch move while a right-click chord is forming.
+    var seedsAbsoluteScrollTarget: Bool { self == .direct }
+    var title: String {
+        switch self {
+        case .direct: return "Direct Touch"
+        case .trackpad: return "Trackpad"
+        }
+    }
+    var explanation: String {
+        switch self {
+        case .direct: return "Touch where you want the pointer."
+        case .trackpad: return "Move the pointer relative to your finger."
+        }
+    }
 }
 
 /// Explicit macro-states the engine can be in. Kept small and named after
@@ -188,6 +233,30 @@ enum PointerEngineMode: Equatable {
 /// delivery).
 final class PointerGestureEngine {
     private(set) var mode: PointerEngineMode = .idle
+
+    /// The primary one-finger pointer model — see `PointerInputMode`. Only
+    /// consulted at the moment a fresh first-touch session commits
+    /// (`commitToAbsolutePointer` vs. `commitToRelativePointerSession`, and
+    /// their tap-then-hold-drag counterparts); changing it mid-session does
+    /// nothing until the next commit, so the caller MUST pair a change with
+    /// `setInputMode(_:)` (never assign this directly) to safely cancel
+    /// whatever session is already in flight — see its doc.
+    private(set) var inputMode: PointerInputMode = .direct
+
+    /// Linear multiplier on Trackpad's primary one-finger relative delta —
+    /// see `PointerGestureConfig.trackpadSensitivityRange`. Clamped on
+    /// assignment so a bad persisted/UI value can never leave the sane
+    /// range. Safe to change mid-session (it only scales future deltas,
+    /// nothing tracked is derived from it), so unlike `inputMode` this
+    /// needs no cancellation ceremony.
+    var trackpadSensitivity: Double = PointerGestureConfig.defaultTrackpadSensitivity {
+        didSet {
+            let range = PointerGestureConfig.trackpadSensitivityRange
+            let clamped = min(max(trackpadSensitivity, range.lowerBound), range.upperBound)
+            guard clamped != trackpadSensitivity else { return }
+            trackpadSensitivity = clamped
+        }
+    }
 
     /// Whether the current `.chordPending`/`.twoFingerPending` chord was
     /// recognized as continuing a just-buffered right tap (see
@@ -329,10 +398,28 @@ final class PointerGestureEngine {
         if mode == .firstTouchPending, let start = pendingStart, let pid = pendingID {
             if tapChain != nil {
                 if now - start.time >= PointerGestureConfig.holdCommitDelay {
-                    out += beginLeftDrag(id: pid, normalized: pendingLastNormalized)
+                    out += inputMode == .trackpad
+                        ? beginTrackpadDrag(id: pid, at: pendingLastView ?? start.view, time: now)
+                        : beginLeftDrag(id: pid, normalized: pendingLastNormalized)
                 }
             } else if now - start.time >= PointerGestureConfig.firstTouchArbitrationWindow {
-                out += commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized, viewPoint: pendingLastView ?? start.view)
+                // Same chord-continuation deferral as `moved()` — see its
+                // doc. Tied to the buffered tap's OWN `tapChainWindow`
+                // (not `firstTouchArbitrationWindow`, which is already
+                // exactly this branch's own trigger and so can never
+                // distinguish anything here), so this is never left stuck:
+                // `pollDelay(now:)`'s `pendingChordTap` branch already
+                // schedules a re-check for exactly when that window closes,
+                // and the very next `poll()` after that commits normally.
+                if inputMode == .trackpad,
+                   isPlausibleChordContinuationCandidate(from: start.view, at: now) {
+                    // withheld — see above
+                } else {
+                    let viewPoint = pendingLastView ?? start.view
+                    out += inputMode == .trackpad
+                        ? commitToRelativePointerSession(id: pid, viewPoint: viewPoint, time: now)
+                        : commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized, viewPoint: viewPoint)
+                }
             }
         }
         if mode == .relativePointerSession, let candidateID = relativeChainCandidateID,
@@ -428,6 +515,29 @@ final class PointerGestureEngine {
     private func hasPendingChordContinuationStart(at time: TimeInterval) -> Bool {
         guard let start = pendingChordContinuationStartTime else { return false }
         return time - start < PointerGestureConfig.firstTouchArbitrationWindow
+    }
+
+    /// Whether a lone `.firstTouchPending` finger sitting at `viewPoint`
+    /// (its own touch-down point, not wherever it's since moved to) could
+    /// still be joined by a partner to continue `pendingChordTap` into a
+    /// chord — see `promoteToChord`'s matching distance/timing check, which
+    /// this mirrors. Deliberately tied to the buffered tap's own
+    /// `tapChainWindow`, not `firstTouchArbitrationWindow`: the latter is
+    /// already this finger's OWN commit trigger in `poll()`, so checking it
+    /// again there would always read as "window just closed" — the exact
+    /// same instant, never a real signal. Trackpad-mode call sites
+    /// (`moved()`/`poll()`) use this to withhold a solo commit until the
+    /// continuation possibility has genuinely passed, so a second right-
+    /// click's first finger — placed a little slower than the 150ms
+    /// arbitration window but still within reach of the just-buffered tap —
+    /// is never swallowed into its own solo relative session before its
+    /// partner has a real chance to arrive and form the chord instead.
+    private func isPlausibleChordContinuationCandidate(from viewPoint: CGPoint, at time: TimeInterval) -> Bool {
+        guard let pending = pendingChordTap else { return false }
+        let elapsed = time - pending.time
+        guard elapsed >= 0, elapsed <= PointerGestureConfig.tapChainWindow else { return false }
+        return hypot(viewPoint.x - pending.point.x, viewPoint.y - pending.point.y)
+            <= PointerGestureConfig.tapChainMaxDistance
     }
 
     private func began(_ sample: PointerTouchSample) -> [PointerCommand] {
@@ -639,9 +749,27 @@ final class PointerGestureEngine {
             // continuation of an already-buffered tap chain, or a genuine
             // solo pointer drag.
             if tapChain != nil {
-                return beginLeftDrag(id: sample.id, normalized: sample.normalized)
+                return inputMode == .trackpad
+                    ? beginTrackpadDrag(id: sample.id, at: sample.viewPoint, time: sample.time)
+                    : beginLeftDrag(id: sample.id, normalized: sample.normalized)
             }
-            return commitToAbsolutePointer(id: sample.id, normalized: sample.normalized, viewPoint: sample.viewPoint)
+            // Trackpad only: this lone finger might still be joined by a
+            // partner to continue a just-buffered right tap into a chord
+            // (see `promoteToChord`) — committing it to its own solo
+            // relative session first would swallow that continuation into
+            // ordinary hybrid precision tracking instead, silencing the
+            // right-click entirely (PRODUCT RULE: a chord continuation must
+            // always win — see `began()`'s `.firstTouchPending` case, which
+            // is exactly where the partner's arrival forms the chord).
+            // Withholds any commit — same "no commands during arbitration"
+            // contract as the rest of this mode — until either the partner
+            // joins or `poll()` resolves the continuation window itself.
+            if inputMode == .trackpad, isPlausibleChordContinuationCandidate(from: start.view, at: sample.time) {
+                return []
+            }
+            return inputMode == .trackpad
+                ? commitToRelativePointerSession(id: sample.id, viewPoint: sample.viewPoint, time: sample.time)
+                : commitToAbsolutePointer(id: sample.id, normalized: sample.normalized, viewPoint: sample.viewPoint)
 
         case .absolutePointer:
             guard sample.id == anchorID, let n = sample.normalized else { return [] }
@@ -663,7 +791,19 @@ final class PointerGestureEngine {
             finger.lastPoint = sample.viewPoint
             relativeFingers[sample.id] = finger
             guard dx != 0 || dy != 0 else { return [] }
-            return [.moveRelative(dx: Double(dx), dy: Double(dy))]
+            // `trackpadSensitivity` scales ONLY this one emission point —
+            // the primary one-finger (and its precision-extension) relative
+            // delta. It deliberately never touches the tracked `lastPoint`
+            // baseline above (so it can't compound error), and this `case`
+            // is never reached by the completely separate `.rightDragHeld`
+            // two-finger chord delta below, which stays unscaled in both
+            // modes — PRODUCT RULE: sensitivity affects only Trackpad's
+            // primary one-finger pointer motion, never a multi-finger
+            // gesture. In `.direct` mode this same code path is reached
+            // only by the pre-existing hybrid second-finger precision
+            // move, which the scale factor must also leave untouched.
+            let scale = inputMode == .trackpad ? trackpadSensitivity : 1
+            return [.moveRelative(dx: Double(dx) * scale, dy: Double(dy) * scale)]
 
         case .chordPending, .twoFingerPending:
             guard chordIDs.contains(sample.id) else { return [] }
@@ -720,8 +860,10 @@ final class PointerGestureEngine {
                 // touch's life (a fresh chord would already have left
                 // `.firstTouchPending`) — safe to move the cursor here,
                 // once, so the buffered click lands at the tapped
-                // location.
-                if let n = sample.normalized {
+                // location. Trackpad mode clicks at the cursor's current
+                // (unmoved) position instead — PRODUCT RULE: touching down
+                // must never snap/jump the cursor.
+                if inputMode == .direct, let n = sample.normalized {
                     out.append(.moveAbsolute(x: Double(n.x), y: Double(n.y)))
                 }
                 extendTapChain(at: sample.viewPoint, time: sample.time)
@@ -910,6 +1052,49 @@ final class PointerGestureEngine {
         return [.moveAbsolute(x: Double(n.x), y: Double(n.y))]
     }
 
+    /// Trackpad-mode counterpart of `commitToAbsolutePointer`: commits
+    /// `.firstTouchPending` straight into a single-finger
+    /// `.relativePointerSession` — reusing the exact same relative-delta
+    /// machinery the existing hybrid (direct-mode second-finger precision)
+    /// path already uses, just seeded with only the anchor instead of an
+    /// anchor-plus-partner. Emits NO command: unlike the absolute path,
+    /// touching down must never move/jump the cursor (PRODUCT RULE). The
+    /// baseline is the touch's CURRENT point (not its original touch-down
+    /// point), so the small pre-commit movement that crossed `dragSlop` is
+    /// absorbed rather than replayed as a jump — same convention as
+    /// `commitRelativeLeftDrag`.
+    private func commitToRelativePointerSession(id: AnyHashable, viewPoint: CGPoint, time: TimeInterval) -> [PointerCommand] {
+        pendingID = nil
+        pendingStart = nil
+        pendingLastNormalized = nil
+        pendingLastView = nil
+        anchorID = id
+        anchorViewPoint = viewPoint
+        sessionIsRelative = true
+        mode = .relativePointerSession
+        relativeFingers = [id: RelativeFinger(lastPoint: viewPoint, touchDown: viewPoint, touchDownTime: time)]
+        return []
+    }
+
+    /// Trackpad-mode counterpart of `beginLeftDrag`: a fresh touch
+    /// continuing a buffered tap chain commits to a held left-button drag
+    /// that tracks RELATIVELY from here on, reusing `commitRelativeLeftDrag`
+    /// (normally reached only from within an already-active
+    /// `.relativePointerSession`) by first establishing that session with
+    /// just this one finger as its anchor. Emits no move — the button posts
+    /// at the Mac's current cursor position, exactly like the hybrid path's
+    /// tap-then-hold-drag.
+    private func beginTrackpadDrag(id: AnyHashable, at point: CGPoint, time: TimeInterval) -> [PointerCommand] {
+        pendingID = nil
+        pendingStart = nil
+        pendingLastNormalized = nil
+        pendingLastView = nil
+        anchorID = id
+        sessionIsRelative = true
+        mode = .relativePointerSession
+        return commitRelativeLeftDrag(id: id, at: point)
+    }
+
     /// Commits a buffered tap chain into a held left-button drag, starting
     /// at the drag touch's current position (`normalized`) so the drag —
     /// and the cursor — begin exactly where the finger already is, not
@@ -958,6 +1143,20 @@ final class PointerGestureEngine {
         mode = .rightDragHeld
         heldMouseButton = .right
         return [.mouseDown(button: .right, clickCount: 1)]
+    }
+
+    /// Switches the primary one-finger pointer model. A no-op when already
+    /// in `newMode`; otherwise fully cancels whatever touch/click/drag
+    /// session is in flight (same guarantee as `reset()` — no stuck button,
+    /// no stale tracked touch) before adopting the new mode, so the very
+    /// next gesture starts completely clean. MUST be called instead of
+    /// mutating `inputMode` directly.
+    @discardableResult
+    func setInputMode(_ newMode: PointerInputMode) -> [PointerCommand] {
+        guard newMode != inputMode else { return [] }
+        let out = reset()
+        inputMode = newMode
+        return out
     }
 
     // MARK: - Safety / cleanup
