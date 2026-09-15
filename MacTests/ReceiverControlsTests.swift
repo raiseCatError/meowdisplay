@@ -394,11 +394,332 @@ final class ReceiverControlsTests: XCTestCase {
         }
     }
 
+    // MARK: - Function Tray
+
+    func testDefaultFunctionTrayContainsZoomAndEditActionsInOrder() {
+        let profile = FunctionTrayProfile.canonical()
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo"])
+        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo"])
+    }
+
+    func testDefaultFunctionTrayRendersAsTwoDistinctGroups() {
+        let profile = FunctionTrayProfile.canonical()
+        let groups = profile.visibleGroups
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups[0].map(\.id), ["zoom-in", "zoom-out"])
+        XCTAssertEqual(groups[1].map(\.id), ["undo", "redo"])
+    }
+
+    func testZoomInResolvesToCommandPlus() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-in" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.equal.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testZoomOutResolvesToCommandMinus() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-out" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.minus.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testUndoResolvesToCommandZ() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "undo" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.keyZ.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testRedoResolvesToShiftCommandZ() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "redo" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.keyZ.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command, .shift]))
+    }
+
     func testHIDKeyUsageMinusAndEqualParseAndMapToCorrectKeyCodes() {
         XCTAssertEqual(HIDKeyUsage.parse(45 as NSNumber), .minus)
         XCTAssertEqual(HIDKeyUsage.parse(46 as NSNumber), .equal)
         XCTAssertEqual(HIDKeyUsage.minus.keyCode, 27)
         XCTAssertEqual(HIDKeyUsage.equal.keyCode, 24)
+    }
+
+    func testOldFunctionTrayItemsResolveCanonicalSymbolsWithoutLosingCustomization() {
+        var saved = FunctionTrayProfile.canonical(slot: .profile1)
+        saved.items.reverse()
+        saved.items[0].isVisible = false
+        saved.items[0].group = 42
+        for index in saved.items.indices {
+            saved.items[index].item.systemImage = nil
+            saved.items[index].item.title = "Old \(saved.items[index].item.id)"
+        }
+
+        let resolved = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(resolved.items.map(\.id), saved.items.map(\.id))
+        XCTAssertFalse(resolved.items[0].isVisible)
+        XCTAssertEqual(resolved.items[0].group, 42)
+        XCTAssertEqual(resolved.items.first { $0.id == "zoom-in" }?.item.systemImage,
+                       "plus.magnifyingglass")
+        XCTAssertEqual(resolved.items.first { $0.id == "zoom-out" }?.item.systemImage,
+                       "minus.magnifyingglass")
+        XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.systemImage,
+                       "arrow.uturn.backward")
+        XCTAssertEqual(resolved.items.first { $0.id == "redo" }?.item.systemImage,
+                       "arrow.uturn.forward")
+        XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.title, "Undo")
+    }
+
+    func testSameSideFunctionGroupsAvoidRenderedMainTrayWhenMiddleCannotFit() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let renderedMain = CGRect(x: 12, y: -3, width: 44, height: 396)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: renderedMain,
+            groupSizes: [CGSize(width: 44, height: 88), CGSize(width: 44, height: 88)],
+            avoiding: nil, avoidNotch: true)
+
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertTrue(frames.allSatisfy { !$0.intersects(renderedMain) })
+        XCTAssertTrue(frames.allSatisfy { container.contains($0) })
+    }
+
+    func testFunctionTrayProfilesPersistIndependentlyFromMainTrayProfiles() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+
+        var preferences = ReceiverControlPreferences()
+        preferences.activeControlProfile = .profile2
+        preferences.activeFunctionTrayProfile = .profile1
+        var mainProfile1 = preferences.profile(for: .profile1)
+        mainProfile1.trayItems[0].isVisible = false
+        preferences.updateProfile(mainProfile1)
+        var functionProfile1 = preferences.functionTrayProfile(for: .profile1)
+        functionProfile1.items[0].isVisible = false
+        preferences.updateFunctionTrayProfile(functionProfile1)
+        repository.save(preferences)
+
+        let loaded = repository.load()
+        XCTAssertEqual(loaded, preferences)
+        XCTAssertEqual(loaded.activeControlProfile, .profile2)
+        XCTAssertEqual(loaded.activeFunctionTrayProfile, .profile1)
+        XCTAssertFalse(loaded.profile(for: .profile1).trayItems[0].isVisible)
+        XCTAssertFalse(loaded.functionTrayProfile(for: .profile1).items[0].isVisible)
+        // Changing one tray's profile 1 never touched the other's.
+        XCTAssertEqual(loaded.functionTrayProfile(for: .profile2), .canonical(slot: .profile2))
+        XCTAssertEqual(loaded.profile(for: .profile2), .canonical(slot: .profile2))
+    }
+
+    func testVisibilityAndOrderChangesDoNotMergeMainAndFunctionProfileState() {
+        var preferences = ReceiverControlPreferences()
+        var mainProfile = preferences.profile(for: .default)
+        mainProfile.moveTrayItems(from: [0], to: mainProfile.trayItems.count)
+        preferences.updateProfile(mainProfile)
+        // The Function Tray's default profile — untouched by the Main Tray
+        // edit above — still reads exactly as canonical.
+        XCTAssertEqual(preferences.functionTrayProfile(for: .default), .canonical(slot: .default))
+
+        var functionProfile = preferences.functionTrayProfile(for: .default)
+        functionProfile.items[0].isVisible = false
+        preferences.updateFunctionTrayProfile(functionProfile)
+        // And the Main Tray edit from above is still intact after that.
+        XCTAssertEqual(preferences.profile(for: .default), mainProfile)
+    }
+
+    func testSchemaFivePreferencesDefaultFunctionTrayToEnabledWithCanonicalProfiles() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 5
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.functionTrayEnabled)
+        XCTAssertEqual(migrated.functionTrayPosition, .sameSide)
+        XCTAssertEqual(migrated.functionTrayProfile(for: .default), .canonical(slot: .default))
+    }
+
+    func testFunctionTrayHiddenWhenAllowInputOff() {
+        var preferences = ReceiverControlPreferences()
+        XCTAssertTrue(preferences.functionTrayCanBeShown)
+        preferences.allowInput = false
+        XCTAssertFalse(preferences.functionTrayCanBeShown)
+        // Independent of the Main Tray's own visibility, which reacts the
+        // same way to the same single `allowInput` gate.
+        XCTAssertFalse(preferences.trayCanBeShown)
+        preferences.allowInput = true
+        preferences.functionTrayEnabled = false
+        XCTAssertFalse(preferences.functionTrayCanBeShown)
+        XCTAssertTrue(preferences.trayCanBeShown)   // Main Tray unaffected by Function Tray's own toggle
+    }
+
+    // MARK: - Function Tray layout / collision avoidance
+
+    private let functionContainer = CGRect(x: 0, y: 0, width: 400, height: 300)
+    private let functionGroupSizes = [CGSize(width: 44, height: 90), CGSize(width: 44, height: 90)]
+
+    func testFunctionTraySameSideAnchorsZoomAboveAndEditBelowMainTrayWithoutOverlap() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .sameSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: false)
+        XCTAssertEqual(frames.count, 2)
+        let zoom = frames[0], edit = frames[1]
+        // Both hug the Main Tray's own (trailing) side.
+        XCTAssertGreaterThan(zoom.midX, 200)
+        XCTAssertGreaterThan(edit.midX, 200)
+        // Zoom above, Edit below, neither overlapping the Main Tray or each other.
+        XCTAssertLessThan(zoom.maxY, mainFrame.minY)
+        XCTAssertGreaterThan(edit.minY, mainFrame.maxY)
+        XCTAssertFalse(zoom.intersects(mainFrame))
+        XCTAssertFalse(edit.intersects(mainFrame))
+        XCTAssertFalse(zoom.intersects(edit))
+        // Zoom anchors toward the top of the available space, Edit toward the bottom.
+        XCTAssertLessThan(zoom.minY, functionContainer.midY)
+        XCTAssertGreaterThan(edit.maxY, functionContainer.midY)
+    }
+
+    func testFunctionTrayOppositeSideUsesTheOtherEdgeIndependentlyOfMainTray() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: false)
+        // Opposite of the Main Tray's trailing side — hugs leading instead,
+        // nowhere near the Main Tray's own frame — and top/bottom anchoring
+        // is independent of where the Main Tray happens to sit.
+        for frame in frames {
+            XCTAssertLessThan(frame.midX, 200)
+            XCTAssertFalse(frame.intersects(mainFrame))
+        }
+        XCTAssertLessThan(frames[0].minY, frames[1].minY)
+    }
+
+    func testFunctionTrayDisplacesAroundACollidingPaletteThenReturns() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        func layout(avoiding: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .sameSide,
+                mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: avoiding, avoidNotch: false)
+        }
+        let undisplaced = layout(avoiding: nil)
+        // A palette that exactly covers where the Zoom group would sit.
+        let collidingPalette = undisplaced[0].insetBy(dx: -2, dy: -2)
+        let displaced = layout(avoiding: collidingPalette)
+
+        XCTAssertFalse(displaced[0].intersects(collidingPalette))
+        XCTAssertNotEqual(displaced[0], undisplaced[0])
+        // The uninvolved (Edit) group is untouched.
+        XCTAssertEqual(displaced[1], undisplaced[1])
+
+        // The palette closing (avoiding: nil) returns it to the exact
+        // original position — no permanent reservation of the moved-to spot.
+        XCTAssertEqual(layout(avoiding: nil), undisplaced)
+    }
+
+    func testLeftSameSideLivePaletteMovesOnlyTopGroupAndReturnsExactly() {
+        assertSameSidePaletteMovement(side: .leading, collidingGroup: 0)
+    }
+
+    func testRightSameSideLivePaletteMovesOnlyTopGroupAndReturnsExactly() {
+        assertSameSidePaletteMovement(side: .trailing, collidingGroup: 0)
+    }
+
+    func testSameSideBottomPaletteCollisionMovesOnlyBottomGroup() {
+        assertSameSidePaletteMovement(side: .leading, collidingGroup: 1)
+    }
+
+    private func assertSameSidePaletteMovement(side: LandscapeTraySide,
+                                               collidingGroup: Int,
+                                               file: StaticString = #filePath,
+                                               line: UInt = #line) {
+        // A tall rendered Main Tray forces the working Same Side base
+        // fallback inward. This is the real-device geometry that exposed
+        // the old palette->main displacement loop.
+        let mainX: CGFloat = side == .leading ? 12 : 344
+        let main = CGRect(x: mainX, y: 20, width: 44, height: 260)
+        func layout(palette: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero,
+                keyboardVisibleRect: nil, portrait: false,
+                mainSide: side, position: .sameSide,
+                mainTrayFrame: main, groupSizes: functionGroupSizes,
+                avoiding: palette, avoidNotch: false)
+        }
+
+        let closed = layout(palette: nil)
+        let palette = closed[collidingGroup].insetBy(dx: -2, dy: -2)
+        let open = layout(palette: palette)
+        let other = collidingGroup == 0 ? 1 : 0
+
+        XCTAssertNotEqual(open[collidingGroup], closed[collidingGroup], file: file, line: line)
+        XCTAssertFalse(open[collidingGroup].intersects(palette), file: file, line: line)
+        XCTAssertFalse(open[collidingGroup].intersects(main), file: file, line: line)
+        XCTAssertEqual(open[other], closed[other], file: file, line: line)
+        // `nil` models `paletteChord` closing: geometry is stateless and
+        // recomputes the exact base frame used by SwiftUI's frame animation.
+        XCTAssertEqual(layout(palette: nil), closed, file: file, line: line)
+    }
+
+    func testOppositeSideMovesOnlyForActualPaletteIntersection() {
+        let main = CGRect(x: 344, y: 100, width: 44, height: 100)
+        func layout(palette: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero,
+                keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .oppositeSide,
+                mainTrayFrame: main, groupSizes: functionGroupSizes,
+                avoiding: palette, avoidNotch: false)
+        }
+        let base = layout(palette: nil)
+        XCTAssertEqual(layout(palette: CGRect(x: 300, y: 120, width: 44, height: 60)), base)
+
+        let palette = base[0].insetBy(dx: -2, dy: -2)
+        let moved = layout(palette: palette)
+        XCTAssertNotEqual(moved[0], base[0])
+        XCTAssertFalse(moved[0].intersects(palette))
+        XCTAssertEqual(moved[1], base[1])
+    }
+
+    func testPaletteDisplacementRemainsClearOfUnsafeRegion() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let safe = ControlSafeInsets(top: 0, leading: 50, bottom: 0, trailing: 0)
+        let main = CGRect(x: 50, y: 100, width: 44, height: 200)
+        let base = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: main, groupSizes: functionGroupSizes,
+            avoiding: nil, avoidNotch: true)
+        let palette = base[0].insetBy(dx: -2, dy: -2)
+        let moved = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: main, groupSizes: functionGroupSizes,
+            avoiding: palette, avoidNotch: true)
+
+        XCTAssertFalse(moved[0].intersects(palette))
+        XCTAssertFalse(moved[0].intersects(main))
+        XCTAssertGreaterThanOrEqual(moved[0].minX, safe.leading)
+        XCTAssertTrue(container.contains(moved[0]))
+    }
+
+    func testFunctionTrayLayoutIsANoOpWhenNotActuallyColliding() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let farAwayPalette = CGRect(x: 0, y: 0, width: 20, height: 20)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .sameSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: farAwayPalette, avoidNotch: false)
+        for frame in frames { XCTAssertFalse(frame.intersects(farAwayPalette)) }
     }
 
     // MARK: - Avoid Notch
@@ -566,6 +887,32 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(layout(avoid: true), layout(avoid: false))
     }
 
+    func testNonIntersectingFunctionTrayGroupsStayAtExactRawFrames() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let mainFrame = CGRect(x: 700, y: 120, width: 44, height: 60)
+        func layout(avoid: Bool) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .oppositeSide,
+                mainTrayFrame: mainFrame, groupSizes: functionGroupSizes,
+                avoiding: nil, avoidNotch: avoid, notchSide: .leading)
+        }
+        XCTAssertEqual(layout(avoid: true), layout(avoid: false))
+    }
+
+    func testIntersectingFunctionTrayGroupMovesOnlyMinimumDistance() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let mainFrame = CGRect(x: 700, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: [CGSize(width: 44, height: 200)],
+            avoiding: nil, avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(frames[0].minX, leftNotch.leading)
+    }
+
     func testTemporaryPaletteUsesConditionalObstacleAvoidance() {
         let container = CGRect(x: 0, y: 0, width: 844, height: 390)
         let leftNotch = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
@@ -695,6 +1042,65 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(raw.trayFrame, withNotch.trayFrame)
     }
 
+    // MARK: - Main Tray / Function Tray independence
+
+    /// Both trays share one geometry/avoidance path
+    /// (`ControlTrayGeometry.avoidingUnsafeRegion`, fed the same `notchSide`)
+    /// but are evaluated against their OWN actual rendered frame — a Main
+    /// Tray and Function Tray on opposite sides must not move together.
+    func testMainTrayAndFunctionTrayOnOppositeSidesOnlyTheIntersectingOneMoves() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        // Notch on the right; Main Tray on the right (intersects), Function
+        // Tray on the left (opposite side — never intersects).
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let mainLayout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(mainLayout.trayFrame.maxX, container.maxX - insets.trailing)
+
+        let mainFrame = CGRect(x: mainLayout.trayFrame.midX - 22, y: mainLayout.trayFrame.midY - 150,
+                               width: 44, height: 300)
+        let functionRaw = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: true)
+        let functionWithNotch = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil,
+            avoidNotch: true, notchSide: .trailing)
+        // The Function Tray (opposite/left side) is untouched by the
+        // right-side notch even though the Main Tray (right side) moved.
+        XCTAssertEqual(functionRaw, functionWithNotch)
+    }
+
+    /// Main Tray and Function Tray on the SAME side both avoid the notch
+    /// when it intersects them, independently, each shifted only its own
+    /// minimum distance.
+    func testMainTrayAndFunctionTrayOnTheSameSideBothAvoidTheNotch() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        // Main Tray near the bottom, out of the group's way.
+        let mainLayout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 60), paletteSize: CGSize(width: 42, height: 60),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(mainLayout.trayFrame.minX, insets.leading)
+        let lowMainFrame = CGRect(x: mainLayout.trayFrame.minX, y: 340, width: 44, height: 60)
+
+        // A single tall group anchored from the top corner — at height 200
+        // starting at y=12, it spans into the notch's vertical band
+        // (centered on the container, per `unsafeRegions`) and must be
+        // pushed clear exactly like the Main Tray was, independently.
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .leading, position: .sameSide,
+            mainTrayFrame: lowMainFrame, groupSizes: [CGSize(width: 44, height: 200)], avoiding: nil,
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(frames[0].minX, insets.leading)
+    }
+
     func testPortraitNeverTreatsSideInsetsAsANotch() {
         let container = CGRect(x: 0, y: 0, width: 400, height: 844)
         let sideInsets = ControlSafeInsets(top: 0, leading: 30, bottom: 0, trailing: 0)
@@ -735,6 +1141,35 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.avoidNotch = false
         repository.save(preferences)
         XCTAssertFalse(repository.load().avoidNotch)
+    }
+
+    // MARK: - Function Tray icons
+
+    func testUndoUsesUndoArrowSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "undo" })
+        XCTAssertEqual(item.systemImage, "arrow.uturn.backward")
+    }
+
+    func testRedoUsesRedoArrowSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "redo" })
+        XCTAssertEqual(item.systemImage, "arrow.uturn.forward")
+    }
+
+    func testZoomInUsesMagnifierPlusSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-in" })
+        XCTAssertEqual(item.systemImage, "plus.magnifyingglass")
+    }
+
+    func testZoomOutUsesMagnifierMinusSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-out" })
+        XCTAssertEqual(item.systemImage, "minus.magnifyingglass")
+    }
+
+    func testMainTrayPaletteShortcutsHaveNoSystemImageByDefault() {
+        // Main Tray palette shortcuts keep their plain keycap presentation —
+        // adding `systemImage` never touched their existing definitions.
+        let copy = ControlProfile.canonical().actions(for: ModifierChord([.command])).first { $0.id == "copy" }
+        XCTAssertNil(copy?.systemImage)
     }
 
     func testMacDeliveredPreferenceUpdateChangesOnlySuppliedFields() throws {

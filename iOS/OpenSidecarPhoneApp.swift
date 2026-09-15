@@ -49,6 +49,7 @@ struct ReceiverScreen: View {
     // device can report equal leading/trailing insets despite a genuinely
     // single-sided physical notch (see that type's doc).
     @State private var physicalNotchSide: LandscapeTraySide?
+    @State private var occupiedControlFrames: [CGRect] = []
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
@@ -184,8 +185,10 @@ struct ReceiverScreen: View {
                         keyboardAvailable: keyboardAvailable,
                         keyboardVisibleRect: keyboardVisibleRect,
                         containerSize: geo.size,
-                        safeInsets: geo.safeAreaInsets,
-                        haptics: haptics)
+                        safeInsets: effectiveSafeInsets,
+                        notchSide: physicalNotchSide,
+                        haptics: haptics,
+                        onOccupiedFramesChange: { occupiedControlFrames = $0 })
                 } else {
                     IdleView(receiver: model.receiver, showSettings: $showSettings)
                 }
@@ -535,6 +538,7 @@ struct SettingsView: View {
     @AppStorage("notchDebugOverlay") private var notchDebugOverlayEnabled = false
     #endif
     @State private var confirmingReset = false
+    @State private var confirmingFunctionTrayReset = false
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -673,6 +677,34 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Show Function Tray", isOn: preferenceBinding(\.functionTrayEnabled))
+                        .disabled(!controlStore.preferences.allowInput)
+                    Picker("Function Tray Position",
+                           selection: preferenceBinding(\.functionTrayPosition)) {
+                        ForEach(FunctionTrayPosition.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Picker("Function Profile", selection: Binding(
+                        get: { controlStore.preferences.activeFunctionTrayProfile },
+                        set: { profile in
+                            controlStore.update { $0.activeFunctionTrayProfile = profile }
+                            haptics.play(.profileChange)
+                        })) {
+                        ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
+                    }
+                    NavigationLink("Edit Function Tray") {
+                        FunctionTrayProfileEditor(store: controlStore)
+                    }
+                    Button("Reset Function Tray to Default", role: .destructive) {
+                        confirmingFunctionTrayReset = true
+                    }
+                } header: {
+                    Text("Function Tray")
+                } footer: {
+                    Text("A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the Main Tray above. \"Same Side\" groups it with the Main Tray; \"Opposite Side\" puts it on the other edge of the screen.")
+                }
+
+                Section {
                     Toggle("Performance overlay", isOn: $showAnalytics)
                     Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
                     #if DEBUG
@@ -759,6 +791,15 @@ struct SettingsView: View {
             }
         } message: {
             Text("This restores its tray layout and shortcut palettes. Other receiver settings stay unchanged.")
+        }
+        .confirmationDialog("Reset \(controlStore.preferences.activeFunctionTrayProfile.title)?",
+                            isPresented: $confirmingFunctionTrayReset, titleVisibility: .visible) {
+            Button("Reset Function Tray", role: .destructive) {
+                controlStore.update { $0.resetFunctionTrayProfile($0.activeFunctionTrayProfile) }
+                haptics.play(.reset)
+            }
+        } message: {
+            Text("This restores its default Undo/Redo layout. Other receiver settings stay unchanged.")
         }
     }
 

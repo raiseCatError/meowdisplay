@@ -16,14 +16,30 @@ final class ReceiverControlStore: ObservableObject {
         preferences.profile(for: preferences.activeControlProfile)
     }
 
+    /// Independent of `activeProfile` — the Function Tray's own profile
+    /// selection never moves in lockstep with the Main Tray's.
+    var activeFunctionTrayProfile: FunctionTrayProfile {
+        preferences.functionTrayProfile(for: preferences.activeFunctionTrayProfile)
+    }
+
     func update(_ change: (inout ReceiverControlPreferences) -> Void) {
         let previous = preferences
         let previousActiveProfile = activeProfile
+        let previousActiveFunctionProfile = activeFunctionTrayProfile
         change(&preferences)
         repository.save(preferences)
         let activeProfileChanged = previous.activeControlProfile != preferences.activeControlProfile
             || previousActiveProfile != activeProfile
-        if (previous.trayEnabled && !preferences.trayEnabled) || activeProfileChanged {
+        let activeFunctionProfileChanged = previous.activeFunctionTrayProfile != preferences.activeFunctionTrayProfile
+            || previousActiveFunctionProfile != activeFunctionTrayProfile
+        // Allow Input turning off must cancel any in-flight session (PRODUCT
+        // RULE — see the milestone's SETTINGS / ALLOW INPUT INVARIANTS), and
+        // an input-mode switch must never leave a stale touch/drag behind
+        // either — both reuse this same cancellation hook.
+        let allowInputDisabled = previous.allowInput && !preferences.allowInput
+        let inputModeChanged = previous.inputMode != preferences.inputMode
+        if (previous.trayEnabled && !preferences.trayEnabled) || activeProfileChanged
+            || activeFunctionProfileChanged || allowInputDisabled || inputModeChanged {
             onInputResetRequested?()
         }
     }
@@ -32,6 +48,14 @@ final class ReceiverControlStore: ObservableObject {
         var profile = activeProfile
         change(&profile)
         update { $0.updateProfile(profile) }
+    }
+
+    /// Never coupled to `updateActiveProfile`/the Main Tray's profile —
+    /// switching one tray's profile must never move the other's.
+    func updateActiveFunctionTrayProfile(_ change: (inout FunctionTrayProfile) -> Void) {
+        var profile = activeFunctionTrayProfile
+        change(&profile)
+        update { $0.updateFunctionTrayProfile(profile) }
     }
 
     func applyRemote(trayEnabled: Bool?, keyboardButtonEnabled: Bool?) {
@@ -89,6 +113,7 @@ struct ReceiverControlOverlay: View {
     /// a flat/unknown orientation, or a non-notched device.
     let notchSide: LandscapeTraySide?
     let haptics: ReceiverHaptics
+    let onOccupiedFramesChange: ([CGRect]) -> Void
 
     @State private var interaction = ControlInteractionState()
     @State private var frames: [String: CGRect] = [:]
@@ -121,6 +146,14 @@ struct ReceiverControlOverlay: View {
     }
 
     private var profile: ControlProfile { store.activeProfile }
+    /// `visibleGroups` (see its doc) — the Function Tray's ordered item
+    /// list clustered for rendering; `functionItems` is the flattened form
+    /// used wherever only "is there anything to show at all" matters.
+    private var functionGroups: [[ShortcutItem]] {
+        guard store.preferences.functionTrayCanBeShown else { return [] }
+        return store.activeFunctionTrayProfile.visibleGroups
+    }
+    private var functionItems: [ShortcutItem] { functionGroups.flatMap { $0 } }
     private var controls: [ControlTrayItem] {
         // The gear is permanent receiver chrome, never a tray item subject
         // to the tray's own visibility rules: it stays reachable whenever
@@ -143,91 +176,253 @@ struct ReceiverControlOverlay: View {
     }
 
     var body: some View {
-        if store.preferences.trayEnabled {
-            let portrait = containerSize.height > containerSize.width
-            let collapsed = store.preferences.trayCollapsed
-            let count = max(controls.count, 1)
-            let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count)
-            let paletteChord = interaction.paletteChord
-            let actions = paletteChord.map(profile.actions(for:)) ?? []
-            let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
-            let layout = ControlTrayGeometry.layout(
-                container: CGRect(origin: .zero, size: containerSize),
-                safeInsets: ControlSafeInsets(top: safeInsets.top, leading: safeInsets.leading,
-                                              bottom: safeInsets.bottom, trailing: safeInsets.trailing),
-                keyboardVisibleRect: keyboardVisibleRect,
-                portrait: portrait,
-                side: store.preferences.preferredLandscapeSide,
-                traySize: traySize,
-                paletteSize: paletteSize)
+        // The gear is permanent receiver chrome and must always be
+        // reachable while this overlay exists at all (its parent only
+        // mounts it while actively streaming) — `controls` and `collapsed`
+        // already fall back to gear-only whenever the real tray can't show
+        // (Allow Input off, or the stored "Show Control Tray" preference
+        // off), so there is deliberately no top-level condition here that
+        // could hide the gear itself.
+        let portrait = containerSize.height > containerSize.width
+        let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown
+        let count = max(controls.count, 1)
+        let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count)
+        let paletteChord = interaction.paletteChord
+        let actions = paletteChord.map(profile.actions(for:)) ?? []
+        let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
+        let safe = safeInsets
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(origin: .zero, size: containerSize),
+            safeInsets: safe,
+            keyboardVisibleRect: keyboardVisibleRect,
+            portrait: portrait,
+            side: store.preferences.preferredLandscapeSide,
+            traySize: traySize,
+            paletteSize: paletteSize,
+            avoidNotch: store.preferences.avoidNotch,
+            notchSide: notchSide)
+        let rawLayout = ControlTrayGeometry.layout(
+            container: CGRect(origin: .zero, size: containerSize),
+            safeInsets: safe,
+            keyboardVisibleRect: keyboardVisibleRect,
+            portrait: portrait,
+            side: store.preferences.preferredLandscapeSide,
+            traySize: traySize,
+            paletteSize: paletteSize,
+            avoidNotch: false,
+            notchSide: notchSide)
+        // Independent of the Main Tray's own visibility — only `allowInput`
+        // and the Function Tray's own "Show Function Tray" preference
+        // gate it (see `functionGroups`). One frame per visual group (see
+        // `ControlTrayGeometry.functionTrayLayout`), displaced only while a
+        // temporary shortcut palette would actually collide with it.
+        let functionGroupSizes = functionGroups.map { calculatedFunctionGroupSize($0, portrait: portrait) }
+        // A SwiftUI stack keeps drawing at its intrinsic size when its
+        // enclosing frame is smaller. Geometry clamps `layout.trayFrame`
+        // to the visible screen, so reconstruct the actual rendered
+        // footprint for collision detection instead of under-reporting it.
+        let renderedMainTrayFrame = CGRect(
+            x: layout.trayFrame.midX - traySize.width / 2,
+            y: layout.trayFrame.midY - traySize.height / 2,
+            width: traySize.width,
+            height: traySize.height)
+        // The palette's Grid has the same intrinsic-overflow behavior as
+        // the Main Tray stack. Use its live intrinsic footprint whenever
+        // `paletteChord` is non-nil; closing the palette passes nil again,
+        // so no space remains reserved and the group animates home.
+        let renderedPaletteFrame = paletteChord.map { _ in
+            CGRect(x: layout.paletteFrame.midX - paletteSize.width / 2,
+                   y: layout.paletteFrame.midY - paletteSize.height / 2,
+                   width: paletteSize.width,
+                   height: paletteSize.height)
+        }
+        let functionFrames = ControlTrayGeometry.functionTrayLayout(
+            container: CGRect(origin: .zero, size: containerSize),
+            safeInsets: safe,
+            keyboardVisibleRect: keyboardVisibleRect,
+            portrait: portrait,
+            mainSide: store.preferences.preferredLandscapeSide,
+            position: store.preferences.functionTrayPosition,
+            mainTrayFrame: renderedMainTrayFrame,
+            groupSizes: functionGroupSizes,
+            avoiding: renderedPaletteFrame,
+            avoidNotch: store.preferences.avoidNotch,
+            notchSide: notchSide)
+        #if DEBUG
+        // Only computed when the overlay is actually on — a second,
+        // avoidNotch:false pass purely for the debug visualization below.
+        let rawFunctionFrames = notchDebugOverlayEnabled ? ControlTrayGeometry.functionTrayLayout(
+            container: CGRect(origin: .zero, size: containerSize),
+            safeInsets: safe,
+            keyboardVisibleRect: keyboardVisibleRect,
+            portrait: portrait,
+            mainSide: store.preferences.preferredLandscapeSide,
+            position: store.preferences.functionTrayPosition,
+            mainTrayFrame: renderedMainTrayFrame,
+            groupSizes: functionGroupSizes,
+            avoiding: renderedPaletteFrame,
+            avoidNotch: false) : []
+        #endif
+        let occupiedFrames = [renderedMainTrayFrame]
+            + functionFrames
+            + (renderedPaletteFrame.map { [$0] } ?? [])
 
-            ZStack(alignment: .topLeading) {
-                if let paletteChord {
-                    shortcutPalette(actions, portrait: portrait, chord: paletteChord)
-                        .frame(width: layout.paletteFrame.width, height: layout.paletteFrame.height)
-                        .position(x: layout.paletteFrame.midX, y: layout.paletteFrame.midY)
-                        .transition(.scale(scale: 0.75).combined(with: .opacity))
-                }
+        ZStack(alignment: .topLeading) {
+            if let paletteChord {
+                shortcutPalette(actions, portrait: portrait, chord: paletteChord)
+                    .frame(width: layout.paletteFrame.width, height: layout.paletteFrame.height)
+                    .position(x: layout.paletteFrame.midX, y: layout.paletteFrame.midY)
+                    .transition(.scale(scale: 0.75).combined(with: .opacity))
+            }
 
-                if collapsed {
-                    Image(systemName: ControlTrayItem.settings.displayLabel)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: Metrics.collapsed, height: Metrics.collapsed)
-                        .background(frameReader("tray:more"))
-                        .background(chip(selected: false))
-                        .accessibilityLabel(ControlTrayItem.settings.title)
-                        .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-                } else {
-                    controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
-                        .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
-                        .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-                }
+            if collapsed {
+                Image(systemName: ControlTrayItem.settings.displayLabel)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: Metrics.collapsed, height: Metrics.collapsed)
+                    .background(frameReader("tray:more"))
+                    .background(chip(selected: false))
+                    .accessibilityLabel(ControlTrayItem.settings.title)
+                    .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
+            } else {
+                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                    .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
+                    .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
+            }
 
-                if let selected = selectedAction(in: actions) {
-                    shortcutHUD(selected)
-                        .position(x: containerSize.width / 2,
-                                  y: max(safeInsets.top + 48, layout.paletteFrame.minY - 34))
-                        .transition(.opacity.combined(with: .scale))
+            ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
+                if index < functionFrames.count {
+                    let frame = functionFrames[index]
+                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                        .frame(width: frame.width, height: frame.height)
+                        .position(x: frame.midX, y: frame.midY)
+                        .animation(.snappy(duration: 0.24), value: frame)
                 }
+            }
 
-                Color.clear
-                    .frame(width: containerSize.width, height: containerSize.height)
-                    .contentShape(ControlRegionShape(tray: layout.trayFrame,
-                                                     palette: paletteChord == nil ? nil : layout.paletteFrame))
-                    .gesture(controlGesture())
+            if let selected = selectedAction(in: actions) {
+                shortcutHUD(selected)
+                    .position(x: containerSize.width / 2,
+                              y: max(safeInsets.top + 48, layout.paletteFrame.minY - 34))
+                    .transition(.opacity.combined(with: .scale))
             }
-            .coordinateSpace(name: "receiverControls")
-            .frame(width: containerSize.width, height: containerSize.height,
-                   alignment: .topLeading)
-            .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
-            .onAppear {
-                if !interaction.latchedModifiers.isEmpty || !interaction.temporaryModifiers.isEmpty {
-                    apply(interaction.resetAll())
-                }
+
+            Color.clear
+                .frame(width: containerSize.width, height: containerSize.height)
+                .contentShape(ControlRegionShape(tray: layout.trayFrame,
+                                                 palette: paletteChord == nil ? nil : layout.paletteFrame))
+                .gesture(controlGesture())
+
+            #if DEBUG
+            if notchDebugOverlayEnabled {
+                notchDebugOverlay(container: CGRect(origin: .zero, size: containerSize),
+                                  safeInsets: safe, portrait: portrait, notchSide: notchSide,
+                                  mainRaw: rawLayout.trayFrame, mainFinal: layout.trayFrame,
+                                  functionRaw: rawFunctionFrames, functionFinal: functionFrames)
+                    .allowsHitTesting(false)
             }
-            .animation(.snappy(duration: 0.24), value: store.preferences.trayCollapsed)
-            .animation(.snappy(duration: 0.2), value: interaction.phase)
-            .onChange(of: receiver.connected) { connected in
-                if !connected { apply(interaction.resetAll()) }
-            }
-            .onChange(of: receiver.displayState) { state in
-                if state != .running { apply(interaction.resetAll()) }
-            }
-            .onChange(of: store.preferences.activeControlProfile) { _ in
-                apply(interaction.resetAll())
-            }
-            // The Mac released its synthetic input state; drop the matching
-            // local latch silently. A Mac-originated refresh is not a
-            // receiver-confirmed action and must not buzz.
-            .onChange(of: receiver.inputResetGeneration) { _ in
-                apply(interaction.resetAll())
-            }
-            .onChange(of: receiver.controlResetGeneration) { _ in
+            #endif
+        }
+        .coordinateSpace(name: "receiverControls")
+        .frame(width: containerSize.width, height: containerSize.height,
+               alignment: .topLeading)
+        .onPreferenceChange(ControlFramePreference.self) {
+            frames = $0
+            #if DEBUG
+            // `windowScene.interfaceOrientation` and the raw
+            // `window.safeAreaInsets` that fed `notchSide`/`safe` are logged
+            // separately as `safeAreaTrace:` (see `ReceiverSafeAreaProbe`,
+            // the only place with a UIWindow reference); this line covers
+            // everything downstream of that: the resolved insets this pass
+            // actually used, which physical side (if any) was treated as the
+            // notch, the depth used for its obstacle, and the raw vs. final
+            // tray frame.
+            let notchDepth: CGFloat = notchSide == .leading ? safe.leading
+                : notchSide == .trailing ? safe.trailing : 0
+            Log.info("notchTrace: orientation=\(portrait ? "portrait" : "landscape") "
+                     + "avoidNotch=\(store.preferences.avoidNotch) trayPreferredSide=\(store.preferences.preferredLandscapeSide) "
+                     + "container=\(containerSize) resolvedSafeInsets=\(safe) "
+                     + "physicalNotchSide=\(notchSide.map(String.init(describing:)) ?? "none") notchDepthUsed=\(notchDepth) "
+                     + "rawMain=\(rawLayout.trayFrame) "
+                     + "exclusions=\(ControlTrayGeometry.unsafeRegions(in: CGRect(origin: .zero, size: containerSize), safeInsets: safe, portrait: portrait, notchSide: notchSide)) "
+                     + "finalMain=\(layout.trayFrame) renderedControls=\($0)")
+            #endif
+        }
+        .onAppear { onOccupiedFramesChange(occupiedFrames) }
+        .onChange(of: occupiedFrames) { onOccupiedFramesChange($0) }
+        .onAppear {
+            if !interaction.latchedModifiers.isEmpty || !interaction.temporaryModifiers.isEmpty {
                 apply(interaction.resetAll())
             }
         }
+        .animation(.snappy(duration: 0.24), value: store.preferences.trayCollapsed)
+        .animation(.snappy(duration: 0.2), value: interaction.phase)
+        // Any session interruption — pause, recovery, a failed recovery or a
+        // plain disconnect — drops every latched modifier/held control, so no
+        // transient control state survives into the next live session.
+        .onChange(of: receiver.session.phase) { phase in
+            if phase != .connected { apply(interaction.resetAll()) }
+        }
+        .onChange(of: receiver.displayState) { state in
+            if state != .running { apply(interaction.resetAll()) }
+        }
+        .onChange(of: store.preferences.activeControlProfile) { _ in
+            apply(interaction.resetAll())
+        }
+        .onChange(of: store.preferences.activeFunctionTrayProfile) { _ in
+            apply(interaction.resetAll())
+        }
+        // The Mac released its synthetic input state; drop the matching
+        // local latch silently. A Mac-originated refresh is not a
+        // receiver-confirmed action and must not buzz.
+        .onChange(of: receiver.inputResetGeneration) { _ in
+            apply(interaction.resetAll())
+        }
+        .onChange(of: receiver.controlResetGeneration) { _ in
+            apply(interaction.resetAll())
+        }
     }
+
+    #if DEBUG
+    /// Draws exactly what `ControlTrayGeometry` computed this layout pass —
+    /// nothing recomputed or approximated — so a mismatch between this
+    /// overlay and the physical notch/home-indicator edge on a real device
+    /// says precisely where the runtime path is wrong: red not aligned with
+    /// the physical obstruction means the safe-area/notch-side input is bad;
+    /// a colored (final) frame still overlapping red means the geometry
+    /// math itself isn't consuming its own avoidance result. Main Tray uses
+    /// yellow (raw) / green (final); Function Tray uses orange (raw) / cyan
+    /// (final) — a distinct pair per tray so it stays obvious which frame
+    /// belongs to which control while both are avoiding the same notch.
+    @ViewBuilder
+    private func notchDebugOverlay(container: CGRect, safeInsets: ControlSafeInsets, portrait: Bool,
+                                   notchSide: LandscapeTraySide?,
+                                   mainRaw: CGRect, mainFinal: CGRect,
+                                   functionRaw: [CGRect], functionFinal: [CGRect]) -> some View {
+        ForEach(Array(ControlTrayGeometry.unsafeRegions(in: container, safeInsets: safeInsets, portrait: portrait, notchSide: notchSide).enumerated()),
+                id: \.offset) { _, rect in
+            Rectangle().fill(Color.red.opacity(0.35))
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+        }
+        Rectangle().strokeBorder(Color.yellow, lineWidth: 2)
+            .frame(width: mainRaw.width, height: mainRaw.height)
+            .position(x: mainRaw.midX, y: mainRaw.midY)
+        Rectangle().strokeBorder(Color.green, lineWidth: 2)
+            .frame(width: mainFinal.width, height: mainFinal.height)
+            .position(x: mainFinal.midX, y: mainFinal.midY)
+        ForEach(Array(functionRaw.enumerated()), id: \.offset) { _, rect in
+            Rectangle().strokeBorder(Color.orange, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+        }
+        ForEach(Array(functionFinal.enumerated()), id: \.offset) { _, rect in
+            Rectangle().strokeBorder(Color.cyan, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+        }
+    }
+    #endif
 
     private func calculatedTraySize(collapsed: Bool, portrait: Bool, count: Int) -> CGSize {
         let thickness = Metrics.trayItem + Metrics.touchSlack
@@ -237,6 +432,18 @@ struct ReceiverControlOverlay: View {
         }
         let length = CGFloat(count) * Metrics.trayItem
             + CGFloat(Swift.max(0, count - 1)) * Metrics.trayGap + Metrics.touchSlack
+        return portrait
+            ? CGSize(width: length, height: thickness)
+            : CGSize(width: thickness, height: length)
+    }
+
+    /// Size of ONE Function Tray group's own cluster frame — each group
+    /// gets its own independently-positioned frame now (see
+    /// `ControlTrayGeometry.functionTrayLayout`), not a shared combined one.
+    private func calculatedFunctionGroupSize(_ group: [ShortcutItem], portrait: Bool) -> CGSize {
+        let thickness = Metrics.trayItem + Metrics.touchSlack
+        let length = CGFloat(group.count) * Metrics.trayItem
+            + CGFloat(Swift.max(0, group.count - 1)) * Metrics.trayGap + Metrics.touchSlack
         return portrait
             ? CGSize(width: length, height: thickness)
             : CGSize(width: thickness, height: length)
@@ -282,6 +489,48 @@ struct ReceiverControlOverlay: View {
                 }
             }
         }
+    }
+
+    /// Function Tray items fire immediately on tap — no modifier hold, no
+    /// palette — so each is a plain button, much simpler than
+    /// `controlsRow`'s chord/hold gesture machinery. Renders ONE group's
+    /// cluster; each group gets its own independently-positioned frame
+    /// (see `ControlTrayGeometry.functionTrayLayout`), which is what keeps
+    /// e.g. the default Zoom and Edit clusters visually distinct rather
+    /// than one continuous panel — never a single solid tray/card
+    /// background.
+    private func functionGroupCluster(_ group: [ShortcutItem], axis: Axis) -> some View {
+        let stack = axis == .horizontal
+            ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
+            : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
+        return stack {
+            ForEach(group) { item in functionButton(item) }
+        }
+    }
+
+    private func functionButton(_ item: ShortcutItem) -> some View {
+        Group {
+            if let systemImage = item.systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 17, weight: .semibold))
+            } else {
+                Text(item.displayKey)
+                    .font(.system(size: 15, weight: .semibold))
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+        .background(chip(selected: false))
+        .contentShape(Circle())
+        .onTapGesture { performFunctionAction(item) }
+        .accessibilityLabel(item.title)
+    }
+
+    private func performFunctionAction(_ item: ShortcutItem) {
+        guard case .keyboardShortcut(let shortcut) = item.action else { return }
+        receiver.sendKeyboardPress(usage: shortcut.usage,
+                                   modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
+        haptics.play(.confirmation)
     }
 
     private func modifierButton(_ modifier: ControlModifier) -> some View {
@@ -560,6 +809,37 @@ struct ControlProfileEditor: View {
         ModifierChord(Set(ControlModifier.allCases.enumerated().compactMap { index, modifier in
             mask & (1 << index) == 0 ? nil : modifier
         }))
+    }
+}
+
+/// Editor for the Function Tray's own, independent profile — visibility
+/// and order only; items themselves aren't user-authored this milestone
+/// (see `FunctionTrayProfile.canonical`'s doc on staying generic for
+/// future actions).
+struct FunctionTrayProfileEditor: View {
+    @ObservedObject var store: ReceiverControlStore
+
+    var body: some View {
+        List {
+            Section("Function Tray") {
+                ForEach(store.activeFunctionTrayProfile.items) { configuration in
+                    Toggle(configuration.item.title, isOn: Binding(
+                        get: { configuration.isVisible },
+                        set: { visible in
+                            store.updateActiveFunctionTrayProfile { profile in
+                                if let index = profile.items.firstIndex(where: { $0.id == configuration.id }) {
+                                    profile.items[index].isVisible = visible
+                                }
+                            }
+                        }))
+                }
+                .onMove { source, destination in
+                    store.updateActiveFunctionTrayProfile { $0.moveItems(from: source, to: destination) }
+                }
+            }
+        }
+        .navigationTitle("Edit \(store.preferences.activeFunctionTrayProfile.title)")
+        .toolbar { EditButton() }
     }
 }
 

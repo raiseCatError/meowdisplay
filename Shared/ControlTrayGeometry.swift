@@ -222,4 +222,152 @@ extension ControlTrayGeometry {
         }
         return result
     }
+
+    /// One frame per Function Tray group (see `FunctionTrayProfile.visibleGroups`)
+    /// — never a single combined frame, so groups can anchor independently
+    /// (the default Zoom group toward the top of its side, the Edit group
+    /// toward the bottom). Portrait lays every group out in one horizontal
+    /// row, side by side with a visible gap, stacked above the Main Tray.
+    /// Landscape splits the groups in half: the first half anchor toward
+    /// the top of the tray's side, the second half toward the bottom —
+    /// "Same Side" additionally keeps both halves clear of the Main Tray
+    /// itself (first half above it, second half below, neither overlapping
+    /// it); "Opposite Side" anchors independently against the opposite
+    /// edge, ignoring the Main Tray's own position entirely.
+    static func functionTrayLayout(container: CGRect, safeInsets: ControlSafeInsets,
+                                   keyboardVisibleRect: CGRect?, portrait: Bool,
+                                   mainSide: LandscapeTraySide, position: FunctionTrayPosition,
+                                   mainTrayFrame: CGRect, groupSizes: [CGSize],
+                                   avoiding collisionFrame: CGRect?, avoidNotch: Bool,
+                                   notchSide: LandscapeTraySide? = nil,
+                                   spacing: CGFloat = 10, groupGap: CGFloat = 14) -> [CGRect] {
+        guard !groupSizes.isEmpty else { return [] }
+        var visible = container
+        if let keyboardVisibleRect {
+            visible = visible.intersection(keyboardVisibleRect)
+        }
+        guard !visible.isNull, !visible.isEmpty else { return Array(repeating: .zero, count: groupSizes.count) }
+
+        let margin: CGFloat = 12
+        func bounded(_ size: CGSize) -> CGSize {
+            CGSize(width: min(size.width, max(0, visible.width - margin * 2)),
+                  height: min(size.height, max(0, visible.height - margin * 2)))
+        }
+
+        var frames: [CGRect]
+        if portrait {
+            let sizes = groupSizes.map(bounded)
+            let totalWidth = sizes.reduce(0) { $0 + $1.width } + CGFloat(max(0, sizes.count - 1)) * groupGap
+            var x = visible.midX - totalWidth / 2
+            let rowHeight = sizes.map(\.height).max() ?? 0
+            let y = mainTrayFrame.minY - spacing - rowHeight
+            frames = sizes.map { size in
+                let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+                x += size.width + groupGap
+                return frame
+            }
+        } else {
+            let side = position == .sameSide ? mainSide : mainSide.opposite
+            func originX(_ width: CGFloat) -> CGFloat {
+                side == .trailing ? visible.maxX - margin - width : visible.minX + margin
+            }
+            // Only constrains the halves against the Main Tray when they
+            // share its edge — an opposite-side Function Tray has nothing
+            // to keep clear of.
+            let topBound = position == .sameSide ? mainTrayFrame.minY - spacing : visible.maxY - margin
+            let bottomBound = position == .sameSide ? mainTrayFrame.maxY + spacing : visible.minY + margin
+            let topCount = (groupSizes.count + 1) / 2
+            frames = Array(repeating: CGRect.zero, count: groupSizes.count)
+
+            // Top half: anchored at the corner (`visible.minY + margin`)
+            // unless that would run into the Main Tray, in which case it's
+            // pulled up only as much as needed to stay clear.
+            var y = visible.minY + margin
+            for index in 0..<topCount {
+                let size = bounded(groupSizes[index])
+                let originY = min(y, topBound - size.height)
+                frames[index] = CGRect(x: originX(size.width), y: max(visible.minY + margin, originY),
+                                       width: size.width, height: size.height)
+                y = frames[index].maxY + spacing
+            }
+            // Bottom half: same idea from the opposite corner.
+            var yBottom = visible.maxY - margin
+            for index in stride(from: groupSizes.count - 1, through: topCount, by: -1) {
+                let size = bounded(groupSizes[index])
+                let originY = max(yBottom - size.height, bottomBound)
+                frames[index] = CGRect(x: originX(size.width), y: min(originY, visible.maxY - margin - size.height),
+                                       width: size.width, height: size.height)
+                yBottom = frames[index].minY - spacing
+            }
+        }
+
+        // The top/bottom anchors normally clear the Main Tray already. If
+        // the rendered tray is taller than the available middle region,
+        // however, vertical clearance is mathematically impossible. Move
+        // only the colliding Function group inward along the horizontal
+        // axis; this final collision pass makes overlap impossible without
+        // trusting a clamped SwiftUI frame to describe overflowing content.
+        if !portrait, position == .sameSide {
+            frames = frames.map {
+                displaced($0, avoiding: mainTrayFrame,
+                          within: visible.insetBy(dx: margin, dy: margin),
+                          axis: .vertical, spacing: spacing)
+            }
+        }
+        // The temporary palette has priority over both trays. Resolve it
+        // after the Same Side Main Tray fallback, while retaining the Main
+        // Tray as a protected obstacle so this displacement cannot move a
+        // group back onto the tray it just cleared. Each frame is processed
+        // independently, therefore only an actually-colliding group moves.
+        let protectedFrames = !portrait && position == .sameSide ? [mainTrayFrame] : []
+        frames = frames.map {
+            displaced($0, avoiding: collisionFrame,
+                      alsoAvoiding: protectedFrames,
+                      within: visible.insetBy(dx: margin, dy: margin),
+                      axis: portrait ? .horizontal : .vertical, spacing: spacing)
+        }
+        frames = frames.map {
+            avoidingUnsafeRegion($0, in: container, safeInsets: safeInsets, enabled: avoidNotch,
+                                portrait: portrait, notchSide: notchSide)
+        }
+        return frames.map { frame in
+            var result = frame
+            result.origin.x = clamp(result.origin.x, min: visible.minX + margin, max: visible.maxX - margin - result.width)
+            result.origin.y = clamp(result.origin.y, min: visible.minY + margin, max: visible.maxY - margin - result.height)
+            return result
+        }
+    }
+
+    /// Nudges `frame` clear of `avoid` along `axis` — up/down in portrait
+    /// (`.horizontal` axis, matching the tray's own row direction), left/
+    /// right in landscape — preferring whichever direction actually stays
+    /// inside `visible`. A no-op when there's nothing to avoid or they
+    /// don't overlap.
+    static func displaced(_ frame: CGRect, avoiding avoid: CGRect?,
+                          alsoAvoiding protectedFrames: [CGRect] = [],
+                          within visible: CGRect, axis: ControlTrayAxis,
+                          spacing: CGFloat) -> CGRect {
+        guard let avoid, frame.intersects(avoid) else { return frame }
+        func isAvailable(_ candidate: CGRect) -> Bool {
+            visible.contains(candidate)
+                && protectedFrames.allSatisfy { !candidate.intersects($0) }
+        }
+        if axis == .horizontal {
+            let above = CGRect(x: frame.minX, y: avoid.minY - spacing - frame.height,
+                               width: frame.width, height: frame.height)
+            let below = CGRect(x: frame.minX, y: avoid.maxY + spacing,
+                               width: frame.width, height: frame.height)
+            if isAvailable(above) { return above }
+            if isAvailable(below) { return below }
+            return frame
+        } else {
+            let before = CGRect(x: avoid.minX - spacing - frame.width, y: frame.minY,
+                                width: frame.width, height: frame.height)
+            let after = CGRect(x: avoid.maxX + spacing, y: frame.minY,
+                               width: frame.width, height: frame.height)
+            if isAvailable(before) { return before }
+            if isAvailable(after) { return after }
+            return frame
+        }
+    }
 }

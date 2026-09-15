@@ -124,13 +124,19 @@ struct ShortcutItem: Codable, Equatable, Identifiable {
     var title: String
     var displayKey: String
     var action: ControlAction
+    /// Optional SF Symbol name for a native icon (e.g. Function Tray
+    /// buttons) — `nil` for the Main Tray's palette shortcuts, which keep
+    /// showing `displayKey`'s plain keycap text. Never required: any
+    /// renderer can fall back to `displayKey` when this is `nil`.
+    var systemImage: String?
 
     init(id: String = UUID().uuidString, title: String, displayKey: String,
-         usage: Int, modifiers: ModifierChord) {
+         usage: Int, modifiers: ModifierChord, systemImage: String? = nil) {
         self.id = id
         self.title = title
         self.displayKey = displayKey
         action = .keyboardShortcut(KeyboardShortcut(usage: usage, modifiers: modifiers))
+        self.systemImage = systemImage
     }
 }
 
@@ -245,6 +251,122 @@ enum LandscapeTraySide: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
     var title: String { self == .leading ? "Left" : "Right" }
+    var opposite: LandscapeTraySide { self == .leading ? .trailing : .leading }
+}
+
+// MARK: - Function Tray
+
+/// One Function Tray button. Reuses `ShortcutItem`/`ControlAction` exactly
+/// as the Main Tray's chord palettes do — no separate shortcut-injection
+/// system — but fires immediately on tap rather than opening a palette.
+///
+/// `group` is a deliberately generic visual-clustering key — NOT a fixed
+/// "zoom group"/"edit group" taxonomy baked into the type — so consecutive
+/// items sharing a `group` value render as one small bubble cluster with a
+/// gap before the next one (see `FunctionTrayProfile.visibleGroups`),
+/// without the architecture assuming there are ever exactly two of them or
+/// what they contain. Ordinary `Int`s rather than a named enum for the same
+/// reason: adding a new one is just a new integer, not a schema change.
+struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
+    var item: ShortcutItem
+    var isVisible: Bool
+    var group: Int
+    var id: String { item.id }
+}
+
+/// Independent of `ControlProfile` (the Main Tray's profile type) even
+/// though it reuses the same `ControlProfileSlot` (Default/Profile 1/
+/// Profile 2) naming — Main Tray and Function Tray profiles are selected,
+/// stored, and switched completely separately (see
+/// `ReceiverControlPreferences.activeFunctionTrayProfile`). Still exactly
+/// ONE tray/profile system — `group` (see `FunctionTrayItemConfiguration`)
+/// is presentation metadata on top of one flat, ordered item list, not a
+/// second parallel tray.
+struct FunctionTrayProfile: Codable, Equatable, Identifiable {
+    var slot: ControlProfileSlot
+    var items: [FunctionTrayItemConfiguration]
+    var id: String { slot.rawValue }
+
+    var visibleItems: [ShortcutItem] {
+        items.filter(\.isVisible).map(\.item)
+    }
+
+    /// `visibleItems` clustered into consecutive runs of the same `group`
+    /// value, in tray order — the rendering seam between one small bubble
+    /// cluster and the next. A profile with every item in the same group
+    /// (or with grouping never customized) renders as a single cluster;
+    /// nothing here requires exactly two.
+    var visibleGroups: [[ShortcutItem]] {
+        var groups: [[ShortcutItem]] = []
+        var currentGroup: Int?
+        for configuration in items where configuration.isVisible {
+            if currentGroup != configuration.group {
+                groups.append([])
+                currentGroup = configuration.group
+            }
+            groups[groups.count - 1].append(configuration.item)
+        }
+        return groups
+    }
+
+    mutating func moveItems(from source: IndexSet, to destination: Int) {
+        items.moveItems(from: source, to: destination)
+    }
+
+    /// Refreshes presentation and shortcut metadata by stable action ID.
+    /// Visibility, ordering, and grouping remain entirely user-owned.
+    func resolvingCanonicalMetadata() -> FunctionTrayProfile {
+        let canonicalByID = Dictionary(uniqueKeysWithValues:
+            Self.canonical(slot: slot).items.map { ($0.id, $0.item) })
+        return FunctionTrayProfile(slot: slot, items: items.map { configuration in
+            guard let canonical = canonicalByID[configuration.id] else { return configuration }
+            return FunctionTrayItemConfiguration(item: canonical,
+                                                 isVisible: configuration.isVisible,
+                                                 group: configuration.group)
+        })
+    }
+}
+
+extension FunctionTrayProfile {
+    /// Modeled generically as "Function Tray" — not hardcoded as an
+    /// "Undo/Redo tray" or "Zoom tray" — so future actions (Disconnect,
+    /// Paste, contextual app actions, …) are just more items (and,
+    /// optionally, groups) in this one list.
+    static func canonical(slot: ControlProfileSlot = .default) -> FunctionTrayProfile {
+        let command = ModifierChord([.command])
+        let commandShift = ModifierChord([.command, .shift])
+        // Two default visual clusters: an app-level zoom group (asks the
+        // Mac's foreground app to zoom its own content via the standard
+        // ⌘+/⌘− shortcut — entirely separate from OpenDisplay's own local
+        // two-finger viewport pinch/zoom, which never touches this) and an
+        // edit group. Both are just `group` values — nothing about
+        // `FunctionTrayProfile` itself knows "zoom" or "edit".
+        let zoomGroup = 0
+        let editGroup = 1
+        let items: [(ShortcutItem, Int)] = [
+            (ShortcutItem(id: "zoom-in", title: "Zoom In", displayKey: "+", usage: 46, modifiers: command,
+                         systemImage: "plus.magnifyingglass"), zoomGroup),
+            (ShortcutItem(id: "zoom-out", title: "Zoom Out", displayKey: "−", usage: 45, modifiers: command,
+                         systemImage: "minus.magnifyingglass"), zoomGroup),
+            (ShortcutItem(id: "undo", title: "Undo", displayKey: "Z", usage: 29, modifiers: command,
+                         systemImage: "arrow.uturn.backward"), editGroup),
+            (ShortcutItem(id: "redo", title: "Redo", displayKey: "Z", usage: 29, modifiers: commandShift,
+                         systemImage: "arrow.uturn.forward"), editGroup),
+        ]
+        return FunctionTrayProfile(slot: slot, items: items.map {
+            FunctionTrayItemConfiguration(item: $0.0, isVisible: true, group: $0.1)
+        })
+    }
+}
+
+/// Global (not profile-specific) placement of the Function Tray relative
+/// to the Main Tray in landscape — see `ControlTrayGeometry.functionTrayLayout`.
+enum FunctionTrayPosition: String, Codable, CaseIterable, Identifiable {
+    case sameSide
+    case oppositeSide
+
+    var id: String { rawValue }
+    var title: String { self == .sameSide ? "Same Side" : "Opposite Side" }
 }
 
 /// Superseded by `LandscapeTraySide`. Decoded only to migrate schema-2
@@ -296,15 +418,25 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// multi-finger gesture.
     var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
     var profiles: [ControlProfile]
-
-    init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) }) {
+    /// Independent second tray of immediate-fire shortcut buttons (Undo/
+    /// Redo initially) — see `FunctionTrayProfile`. Its own
+    /// enabled/profile/position state is entirely separate from the Main
+    /// Tray's; only `allowInput` gates both.
+    var functionTrayEnabled = true
+    var activeFunctionTrayProfile = ControlProfileSlot.default
+    var functionTrayPosition = FunctionTrayPosition.sameSide
+    var functionTrayProfiles: [FunctionTrayProfile]
     /// Global (never profile-specific) layout preference: whether tray/
     /// control geometry conditionally shifts inward to clear the notch/
     /// Dynamic Island/home-indicator strip when a frame would actually
     /// intersect it — see `ControlTrayGeometry.avoidingUnsafeRegion`. Never
     /// a permanent margin; OFF lets controls sit at the literal screen edge.
     var avoidNotch = true
+
+    init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
+         functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
         self.profiles = profiles
+        self.functionTrayProfiles = functionTrayProfiles
     }
 
     /// Whether the normal (non-collapsed-to-gear) control tray is allowed to
@@ -314,6 +446,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// deliberately preserved (not zeroed) so it comes back automatically
     /// once input is re-allowed.
     var trayCanBeShown: Bool { allowInput && trayEnabled }
+
+    /// Same rule as `trayCanBeShown`, independently, for the Function Tray.
+    var functionTrayCanBeShown: Bool { allowInput && functionTrayEnabled }
 
     /// Hand-written so a key added by a later schema does not make the whole
     /// blob undecodable — synthesized `Codable` ignores property defaults when
@@ -343,6 +478,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // speed, never a silently different one.
         trackpadSensitivity = try value(.trackpadSensitivity, fallback.trackpadSensitivity)
         profiles = try value(.profiles, fallback.profiles)
+        // Absent (schema < 6) means "written before the Function Tray
+        // existed" — default to ON with canonical Undo/Redo profiles,
+        // matching a brand-new install, since there is no prior state to
+        // preserve for a tray that didn't exist yet.
+        functionTrayEnabled = try value(.functionTrayEnabled, fallback.functionTrayEnabled)
+        activeFunctionTrayProfile = try value(.activeFunctionTrayProfile, fallback.activeFunctionTrayProfile)
+        functionTrayPosition = try value(.functionTrayPosition, fallback.functionTrayPosition)
+        functionTrayProfiles = try value(.functionTrayProfiles, fallback.functionTrayProfiles)
         // Absent (schema < 7) means "written before Avoid Notch existed" —
         // default true, matching a brand-new install (and the explicit
         // "old settings migrate to ON" requirement).
@@ -363,6 +506,23 @@ struct ReceiverControlPreferences: Codable, Equatable {
 
     mutating func resetProfile(_ slot: ControlProfileSlot) {
         updateProfile(.canonical(slot: slot))
+    }
+
+    func functionTrayProfile(for slot: ControlProfileSlot) -> FunctionTrayProfile {
+        (functionTrayProfiles.first(where: { $0.slot == slot }) ?? .canonical(slot: slot))
+            .resolvingCanonicalMetadata()
+    }
+
+    mutating func updateFunctionTrayProfile(_ profile: FunctionTrayProfile) {
+        if let index = functionTrayProfiles.firstIndex(where: { $0.slot == profile.slot }) {
+            functionTrayProfiles[index] = profile
+        } else {
+            functionTrayProfiles.append(profile)
+        }
+    }
+
+    mutating func resetFunctionTrayProfile(_ slot: ControlProfileSlot) {
+        updateFunctionTrayProfile(.canonical(slot: slot))
     }
 }
 
@@ -411,10 +571,22 @@ struct ReceiverControlPreferencesRepository {
         if value.version < 5 {
             value.version = 5
         }
+        // Schema 5 predates the Function Tray; the custom decoder above
+        // already defaulted it to enabled with canonical Undo/Redo
+        // profiles — nothing to transform.
+        if value.version < 6 {
+            value.version = 6
+        }
         // Schema 6 predates Avoid Notch; the custom decoder above already
         // defaulted it to true — nothing to transform.
         if value.version < 7 {
             value.version = 7
+        }
+        // Old Function Tray profiles predate `ShortcutItem.systemImage`.
+        // Resolve current canonical metadata by ID without rewriting the
+        // user's visibility, order, or group choices.
+        value.functionTrayProfiles = value.functionTrayProfiles.map {
+            $0.resolvingCanonicalMetadata()
         }
         return value
     }
