@@ -64,6 +64,15 @@ struct RemoteViewportTransform: Equatable {
     let remoteCrop: CGRect
     /// Where `remoteCrop` is drawn, in the host view's local coordinates.
     let displayedRect: CGRect
+    /// Clockwise rotation in UIKit's y-down coordinate space, around the
+    /// displayed rectangle's center.
+    let rotationRadians: CGFloat
+
+    init(remoteCrop: CGRect, displayedRect: CGRect, rotationRadians: CGFloat = 0) {
+        self.remoteCrop = remoteCrop
+        self.displayedRect = displayedRect
+        self.rotationRadians = rotationRadians
+    }
 
     /// The identity element: nothing valid to draw or map. Every geometry
     /// function in this file returns this instead of producing NaN/invalid
@@ -82,8 +91,10 @@ struct RemoteViewportTransform: Equatable {
         guard isValid else { return .zero }
         let nx = (p.x - remoteCrop.minX) / remoteCrop.width
         let ny = (p.y - remoteCrop.minY) / remoteCrop.height
-        return CGPoint(x: displayedRect.minX + nx * displayedRect.width,
-                       y: displayedRect.minY + ny * displayedRect.height)
+        let point = CGPoint(x: displayedRect.minX + nx * displayedRect.width,
+                            y: displayedRect.minY + ny * displayedRect.height)
+        return Self.rotated(point, around: CGPoint(x: displayedRect.midX, y: displayedRect.midY),
+                            radians: rotationRadians)
     }
 
     /// Host-view-local point -> normalized remote-space point, clamped to
@@ -93,8 +104,10 @@ struct RemoteViewportTransform: Equatable {
     /// never returns NaN.
     func remotePoint(forView p: CGPoint) -> CGPoint? {
         guard isValid else { return nil }
-        let nx = (p.x - displayedRect.minX) / displayedRect.width
-        let ny = (p.y - displayedRect.minY) / displayedRect.height
+        let unrotated = Self.rotated(p, around: CGPoint(x: displayedRect.midX, y: displayedRect.midY),
+                                     radians: -rotationRadians)
+        let nx = (unrotated.x - displayedRect.minX) / displayedRect.width
+        let ny = (unrotated.y - displayedRect.minY) / displayedRect.height
         let x = remoteCrop.minX + nx * remoteCrop.width
         let y = remoteCrop.minY + ny * remoteCrop.height
         guard x.isFinite, y.isFinite else { return nil }
@@ -106,7 +119,21 @@ struct RemoteViewportTransform: Equatable {
     /// M4 typing-focus anchor from ever being set to a point that isn't
     /// really on the remote display.
     func containsViewPoint(_ p: CGPoint) -> Bool {
-        isValid && displayedRect.contains(p)
+        guard isValid else { return false }
+        let unrotated = Self.rotated(p, around: CGPoint(x: displayedRect.midX, y: displayedRect.midY),
+                                     radians: -rotationRadians)
+        return displayedRect.contains(unrotated)
+    }
+
+    private static func rotated(_ point: CGPoint, around center: CGPoint,
+                                radians: CGFloat) -> CGPoint {
+        guard radians.isFinite else { return point }
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let c = cos(radians)
+        let s = sin(radians)
+        return CGPoint(x: center.x + dx * c - dy * s,
+                       y: center.y + dx * s + dy * c)
     }
 }
 
@@ -413,6 +440,7 @@ struct ManualViewportState: Equatable {
     /// base rect's center — see `RemoteViewportCalculator.applyManualZoom`.
     var panX: CGFloat = 0
     var panY: CGFloat = 0
+    var rotationRadians: CGFloat = 0
 
     static let identity = ManualViewportState()
 
@@ -433,9 +461,12 @@ struct ManualViewportState: Equatable {
     func clamped(against base: CGRect) -> ManualViewportState {
         var copy = self
         copy.scale = scale.isFinite ? min(max(scale, Self.minScale), Self.maxScale) : Self.minScale
-        guard base.width > 0, base.height > 0, copy.scale > Self.minScale else {
+        copy.rotationRadians = rotationRadians.isFinite ? Self.normalizedAngle(rotationRadians) : 0
+        guard base.width > 0, base.height > 0,
+              copy.scale > Self.minScale || abs(copy.rotationRadians) > 0.0001 else {
             copy.panX = 0
             copy.panY = 0
+            copy.rotationRadians = 0
             return copy
         }
         let width = base.width * copy.scale
@@ -445,8 +476,12 @@ struct ManualViewportState: Equatable {
             copy.panY = 0
             return copy
         }
-        let maxPanX = max(0, (width - base.width) / 2)
-        let maxPanY = max(0, (height - base.height) / 2)
+        let c = abs(cos(copy.rotationRadians))
+        let s = abs(sin(copy.rotationRadians))
+        let extentWidth = width * c + height * s
+        let extentHeight = width * s + height * c
+        let maxPanX = max(0, (extentWidth - base.width) / 2)
+        let maxPanY = max(0, (extentHeight - base.height) / 2)
         copy.panX = panX.isFinite ? min(max(panX, -maxPanX), maxPanX) : 0
         copy.panY = panY.isFinite ? min(max(panY, -maxPanY), maxPanY) : 0
         return copy
@@ -471,32 +506,74 @@ struct ManualViewportState: Equatable {
                          initialBase: CGRect,
                          initialMidpoint: CGPoint,
                          currentMidpoint: CGPoint,
-                         scaleRatio: CGFloat) -> ManualViewportState {
+                         scaleRatio: CGFloat,
+                         rotationDelta: CGFloat = 0) -> ManualViewportState {
         guard initialBase.width > 0, initialBase.height > 0,
               scaleRatio.isFinite, scaleRatio > 0 else { return initial }
         let start = initial.clamped(against: initialBase)
         let width0 = initialBase.width * start.scale
         let height0 = initialBase.height * start.scale
         guard width0 > 0, height0 > 0 else { return initial }
-        let originX0 = initialBase.midX - width0 / 2 + start.panX
-        let originY0 = initialBase.midY - height0 / 2 + start.panY
+        let center0 = CGPoint(x: initialBase.midX + start.panX,
+                              y: initialBase.midY + start.panY)
+        let unrotatedInitial = rotate(initialMidpoint, around: center0, radians: -start.rotationRadians)
+        let originX0 = center0.x - width0 / 2
+        let originY0 = center0.y - height0 / 2
         // Which fraction of the *currently displayed* content sits under
         // the gesture's starting midpoint — this is what stays anchored.
-        let fractionX = (initialMidpoint.x - originX0) / width0
-        let fractionY = (initialMidpoint.y - originY0) / height0
+        let fractionX = (unrotatedInitial.x - originX0) / width0
+        let fractionY = (unrotatedInitial.y - originY0) / height0
         guard fractionX.isFinite, fractionY.isFinite else { return initial }
 
         let newScale = min(max(start.scale * scaleRatio, Self.minScale), Self.maxScale)
         let width1 = initialBase.width * newScale
         let height1 = initialBase.height * newScale
         guard width1.isFinite, height1.isFinite, width1 > 0, height1 > 0 else { return initial }
-        let originX1 = currentMidpoint.x - fractionX * width1
-        let originY1 = currentMidpoint.y - fractionY * height1
+        let newRotation = normalizedAngle(start.rotationRadians + rotationDelta)
+        let local = CGPoint(x: (fractionX - 0.5) * width1,
+                            y: (fractionY - 0.5) * height1)
+        let rotatedLocal = rotate(local, around: .zero, radians: newRotation)
+        let center1 = CGPoint(x: currentMidpoint.x - rotatedLocal.x,
+                              y: currentMidpoint.y - rotatedLocal.y)
         let result = ManualViewportState(
             scale: newScale,
-            panX: originX1 - (initialBase.midX - width1 / 2),
-            panY: originY1 - (initialBase.midY - height1 / 2))
+            panX: center1.x - initialBase.midX,
+            panY: center1.y - initialBase.midY,
+            rotationRadians: newRotation)
         return result.clamped(against: initialBase)
+    }
+
+    static func normalizedAngle(_ angle: CGFloat) -> CGFloat {
+        guard angle.isFinite else { return 0 }
+        var value = angle.truncatingRemainder(dividingBy: .pi * 2)
+        if value > .pi { value -= .pi * 2 }
+        if value <= -.pi { value += .pi * 2 }
+        return value
+    }
+
+    private static func rotate(_ point: CGPoint, around center: CGPoint,
+                               radians: CGFloat) -> CGPoint {
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let c = cos(radians)
+        let s = sin(radians)
+        return CGPoint(x: center.x + dx * c - dy * s,
+                       y: center.y + dx * s + dy * c)
+    }
+}
+
+enum ViewportRotationSnap {
+    static let threshold: CGFloat = 7 * .pi / 180
+
+    static func snappedAngle(_ angle: CGFloat, enabled: Bool) -> (angle: CGFloat, targetQuarter: Int?) {
+        let normalized = ManualViewportState.normalizedAngle(angle)
+        guard enabled else { return (normalized, nil) }
+        let quarter = Int((normalized / (.pi / 2)).rounded())
+        let target = CGFloat(quarter) * .pi / 2
+        guard abs(ManualViewportState.normalizedAngle(normalized - target)) <= threshold else {
+            return (normalized, nil)
+        }
+        return (ManualViewportState.normalizedAngle(target), ((quarter % 4) + 4) % 4)
     }
 }
 
@@ -535,6 +612,7 @@ enum TwoFingerGestureClassifier {
     /// Minimum centroid (midpoint) movement, in points, before a
     /// still-undecided gesture is confidently a scroll drag.
     static let scrollIntentThreshold: CGFloat = 10
+    static let rotationIntentThreshold: CGFloat = 5 * .pi / 180
 
     /// Classifies one live sample of an as-yet-undecided two-finger
     /// gesture from its distance-ratio and centroid movement since the
@@ -545,12 +623,16 @@ enum TwoFingerGestureClassifier {
     /// because it happens to cross the (much smaller, percentage-based)
     /// scale threshold a frame before the absolute movement threshold.
     static func classify(initialDistance: CGFloat, currentDistance: CGFloat,
-                         initialMidpoint: CGPoint, currentMidpoint: CGPoint) -> TwoFingerGestureIntent {
+                         initialMidpoint: CGPoint, currentMidpoint: CGPoint,
+                         rotationDelta: CGFloat = 0) -> TwoFingerGestureIntent {
         guard initialDistance > 0, currentDistance.isFinite else { return .undecided }
         let scaleDeviation = abs(currentDistance / initialDistance - 1)
         let centroidMoved = hypot(currentMidpoint.x - initialMidpoint.x, currentMidpoint.y - initialMidpoint.y)
         let scaleSignal = scaleDeviation / pinchIntentThreshold
         let scrollSignal = centroidMoved / scrollIntentThreshold
+        let rotationSignal = abs(rotationDelta) / rotationIntentThreshold
+        if rotationSignal >= 1, rotationSignal >= scrollSignal,
+           rotationSignal >= scaleSignal { return .viewportZoomPan }
         if scaleSignal >= 1, scaleSignal >= scrollSignal { return .viewportZoomPan }
         if scrollSignal >= 1 { return .scroll }
         return .undecided
@@ -575,11 +657,13 @@ struct TwoFingerGestureSession {
     /// without checking whether it has already decided.
     @discardableResult
     mutating func update(initialDistance: CGFloat, currentDistance: CGFloat,
-                         initialMidpoint: CGPoint, currentMidpoint: CGPoint) -> TwoFingerGestureIntent {
+                         initialMidpoint: CGPoint, currentMidpoint: CGPoint,
+                         rotationDelta: CGFloat = 0) -> TwoFingerGestureIntent {
         guard intent == .undecided else { return intent }
         let classified = TwoFingerGestureClassifier.classify(
             initialDistance: initialDistance, currentDistance: currentDistance,
-            initialMidpoint: initialMidpoint, currentMidpoint: currentMidpoint)
+            initialMidpoint: initialMidpoint, currentMidpoint: currentMidpoint,
+            rotationDelta: rotationDelta)
         if classified != .undecided { intent = classified }
         return intent
     }
@@ -602,7 +686,7 @@ extension RemoteViewportCalculator {
                                 state: ManualViewportState) -> RemoteViewportTransform {
         guard base.isValid else { return base }
         let clamped = state.clamped(against: base.displayedRect)
-        guard clamped.scale > ManualViewportState.minScale else { return base }
+        guard !clamped.isIdentity else { return base }
         let rect = base.displayedRect
         let width = rect.width * clamped.scale
         let height = rect.height * clamped.scale
@@ -610,6 +694,7 @@ extension RemoteViewportCalculator {
         let scaled = CGRect(x: rect.midX - width / 2 + clamped.panX,
                             y: rect.midY - height / 2 + clamped.panY,
                             width: width, height: height)
-        return RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: scaled)
+        return RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: scaled,
+                                       rotationRadians: clamped.rotationRadians)
     }
 }

@@ -119,3 +119,40 @@ final class VideoModePolicyTests: XCTestCase {
         XCTAssertEqual(VideoModePolicy.normalized(mode: off, videoEnabled: true), .mirror)
     }
 }
+
+final class NativeAppGestureProtocolTests: XCTestCase {
+    func testContinuousLifecycleRequiresBeginAndCleansUp() throws {
+        var state = NativeAppGestureSessionState()
+        let changed = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "changed", "delta": 0.1,
+        ]))
+        XCTAssertFalse(state.accept(changed))
+        let began = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "began", "delta": 0,
+        ]))
+        XCTAssertTrue(state.accept(began))
+        XCTAssertTrue(state.accept(changed))
+        let ended = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "ended", "delta": 0,
+        ]))
+        XCTAssertTrue(state.accept(ended))
+        XCTAssertTrue(state.active.isEmpty)
+    }
+
+    func testMagnifyAndRotateCanRemainActiveSimultaneously() throws {
+        var state = NativeAppGestureSessionState()
+        for kind in ["magnify", "rotate"] {
+            let update = try XCTUnwrap(NativeAppGestureUpdate(message: [
+                "type": WireMessage.nativeAppGesture, "kind": kind,
+                "phase": "began", "delta": 0,
+            ]))
+            XCTAssertTrue(state.accept(update))
+        }
+        XCTAssertEqual(state.active, Set([.magnify, .rotate]))
+        state.cancelAll()
+        XCTAssertTrue(state.active.isEmpty)
+    }
+}

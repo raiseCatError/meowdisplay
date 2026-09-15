@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 7
+    static let version = 10
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
@@ -51,6 +51,12 @@ enum WireProtocol {
     /// can keep mapping input while capture and encoding are stopped.
     static let videoControlWireVersion = 9
 
+    /// Protocol version that introduced continuous app-gesture lifecycle
+    /// messages. The current Mac advertises the wire but reports native
+    /// injection unavailable because public CGEvent/AppKit constructors do
+    /// not expose cross-process magnify/rotate event payloads.
+    static let nativeAppGestureWireVersion = 10
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -76,6 +82,57 @@ enum WireMessage {
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
     static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
+    static let nativeAppGesture = "nativeAppGesture" // receiver -> Mac: continuous magnify/rotate lifecycle
+}
+
+enum NativeAppGestureKind: String, Codable, CaseIterable, Hashable {
+    case magnify
+    case rotate
+}
+
+enum NativeAppGesturePhase: String, Codable, CaseIterable {
+    case began
+    case changed
+    case ended
+    case cancelled
+}
+
+struct NativeAppGestureUpdate: Equatable {
+    let kind: NativeAppGestureKind
+    let phase: NativeAppGesturePhase
+    let delta: Double
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.nativeAppGesture,
+              let rawKind = message["kind"] as? String,
+              let kind = NativeAppGestureKind(rawValue: rawKind),
+              let rawPhase = message["phase"] as? String,
+              let phase = NativeAppGesturePhase(rawValue: rawPhase),
+              let number = message["delta"] as? NSNumber,
+              number.doubleValue.isFinite else { return nil }
+        self.kind = kind
+        self.phase = phase
+        delta = number.doubleValue
+    }
+}
+
+/// Pure lifecycle validation shared by the Mac handler and hostless tests.
+/// Changed/end packets without a matching begin are safely ignored.
+struct NativeAppGestureSessionState: Equatable {
+    private(set) var active: Set<NativeAppGestureKind> = []
+
+    mutating func accept(_ update: NativeAppGestureUpdate) -> Bool {
+        switch update.phase {
+        case .began:
+            return active.insert(update.kind).inserted
+        case .changed:
+            return active.contains(update.kind)
+        case .ended, .cancelled:
+            return active.remove(update.kind) != nil
+        }
+    }
+
+    mutating func cancelAll() { active.removeAll() }
 }
 
 enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {

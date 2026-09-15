@@ -619,6 +619,49 @@ final class RemoteViewportTests: XCTestCase {
             XCTAssertEqual(back.y, remotePoint.y, accuracy: 0.0005)
         }
     }
+
+    func testForwardAndInverseMappingRemainCorrectUnderCombinedTransform() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        let state = ManualViewportState(scale: 2, panX: 30, panY: -20,
+                                        rotationRadians: .pi / 3)
+        let transform = RemoteViewportCalculator.applyManualZoom(to: base, state: state)
+        for remote in [CGPoint(x: 0.1, y: 0.2), CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.9, y: 0.8)] {
+            let view = transform.viewPoint(forRemote: remote)
+            let mapped = try? XCTUnwrap(transform.remotePoint(forView: view))
+            XCTAssertEqual(mapped?.x ?? -.infinity, remote.x, accuracy: 0.0005)
+            XCTAssertEqual(mapped?.y ?? -.infinity, remote.y, accuracy: 0.0005)
+        }
+    }
+
+    func testPinchPanAndRotationPreserveGestureAnchor() throws {
+        let initial = ManualViewportState(scale: 1.4, panX: 15, panY: -10,
+                                          rotationRadians: .pi / 8)
+        let start = CGPoint(x: 420, y: 470)
+        let current = CGPoint(x: 445, y: 450)
+        let result = ManualViewportState.pinching(
+            from: initial, initialBase: squareBounds,
+            initialMidpoint: start, currentMidpoint: current,
+            scaleRatio: 1.25, rotationDelta: .pi / 6)
+        let before = RemoteViewportCalculator.applyManualZoom(
+            to: RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                        displayedRect: squareBounds), state: initial)
+        let after = RemoteViewportCalculator.applyManualZoom(
+            to: RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                        displayedRect: squareBounds), state: result)
+        let remote = try XCTUnwrap(before.remotePoint(forView: start))
+        let anchored = after.viewPoint(forRemote: remote)
+        XCTAssertEqual(anchored.x, current.x, accuracy: 1)
+        XCTAssertEqual(anchored.y, current.y, accuracy: 1)
+    }
+
+    func testRotationSnapEngagesOnceInsideSevenDegreeZone() {
+        let nearQuarter = ViewportRotationSnap.snappedAngle(84 * .pi / 180, enabled: true)
+        XCTAssertEqual(nearQuarter.angle, .pi / 2, accuracy: 0.0001)
+        XCTAssertEqual(nearQuarter.targetQuarter, 1)
+        XCTAssertNil(ViewportRotationSnap.snappedAngle(80 * .pi / 180, enabled: true).targetQuarter)
+        XCTAssertNil(ViewportRotationSnap.snappedAngle(89 * .pi / 180, enabled: false).targetQuarter)
+    }
+
     func testVideoOffIgnoresButPreservesManualViewportState() {
         let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
         let stored = ManualViewportState(scale: 2, panX: 40, panY: -25,
@@ -648,4 +691,15 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertFalse(admission.contains(2))
     }
 
+    func testDoubleTapResetRestoreIncludesRotation() throws {
+        let transformed = ManualViewportState(scale: 1.8, panX: 20, panY: -15,
+                                              rotationRadians: .pi / 2)
+        let reset = try XCTUnwrap(ViewportResetRestorePolicy.toggled(
+            current: transformed, memory: nil, base: squareBounds))
+        XCTAssertEqual(reset.current, .identity)
+        let restored = try XCTUnwrap(ViewportResetRestorePolicy.toggled(
+            current: reset.current, memory: reset.memory, base: squareBounds))
+        XCTAssertEqual(restored.current.rotationRadians, .pi / 2, accuracy: 0.0001)
+        XCTAssertEqual(restored.current.scale, transformed.scale, accuracy: 0.0001)
+    }
 }

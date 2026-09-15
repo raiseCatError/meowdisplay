@@ -1259,3 +1259,59 @@ final class PointerGestureEngineTests: XCTestCase {
         XCTAssertEqual(engine.mode, .firstTouchPending)
     }
 }
+
+final class AppGestureCommandAccumulatorTests: XCTestCase {
+    func testJitterBelowThresholdSendsNothing() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: 0.1), 0)
+        XCTAssertEqual(accumulator.advance(by: 0.2), 0)
+        XCTAssertEqual(accumulator.advance(by: -0.05), 0)   // still absorbed as jitter after reversal
+    }
+
+    func testOutwardCrossingThresholdFiresOnce() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: 1.2), 1)
+    }
+
+    func testInwardCrossingThresholdFiresNegative() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: -1.2), -1)
+    }
+
+    func testContinuedMovementRepeatsProportionally() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: 1.0), 1)     // exactly at threshold
+        XCTAssertEqual(accumulator.advance(by: 0.5), 1)     // one more full step
+        XCTAssertEqual(accumulator.advance(by: 0.24), 0)    // under a step: no repeat yet
+        XCTAssertEqual(accumulator.advance(by: 0.26), 1)    // completes the step
+    }
+
+    func testLargeMovementFiresMultipleCappedRepeatsInOneUpdate() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5, maxFiresPerUpdate: 3)
+        // 1 (threshold) + 5 * 0.5 (step) would be 6 fires; capped at 3.
+        XCTAssertEqual(accumulator.advance(by: 3.5), 3)
+    }
+
+    func testDirectionReversalRebasesCleanly() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: 1.2), 1)
+        // Reversing direction with a small delta must not immediately fire
+        // the opposite command — it rebases and re-accumulates from zero.
+        XCTAssertEqual(accumulator.advance(by: -0.3), 0)
+        XCTAssertEqual(accumulator.advance(by: -0.8), -1)
+    }
+
+    func testResetClearsAccumulationOnGestureEndOrCancel() {
+        var accumulator = AppGestureCommandAccumulator(threshold: 1, step: 0.5)
+        XCTAssertEqual(accumulator.advance(by: 0.9), 0)
+        accumulator.reset()
+        XCTAssertEqual(accumulator.advance(by: 0.9), 0)   // did not carry over the prior 0.9
+    }
+
+    func testConfiguredPinchAndRotationRoutingHaveSaneThresholds() {
+        var pinch = AppGestureCommandRouting.makePinchAccumulator()
+        XCTAssertEqual(pinch.advance(by: 0.05), 0)   // small pinch jitter: nothing
+        var rotation = AppGestureCommandRouting.makeRotationAccumulator()
+        XCTAssertEqual(rotation.advance(by: 0.05), 0)   // a few degrees: nothing
+    }
+}

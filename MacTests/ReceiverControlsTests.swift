@@ -1266,6 +1266,77 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertLessThanOrEqual(surface.maxY, 760)
     }
 
+    func testGesturePreferencesDefaultAndMigrateWithoutOverwritingOldChoices() throws {
+        let suite = "ReceiverGestureMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 9
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertEqual(loaded.pinchTarget, .viewport)
+        XCTAssertEqual(loaded.rotateTarget, .viewport)
+        XCTAssertTrue(loaded.snapRotation)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    // MARK: - App Gesture Commands
+
+    func testAppGestureCommandDefaultsMatchSpec() {
+        let defaults = AppGestureCommands.defaults
+        XCTAssertEqual(defaults.zoomIn, KeyboardShortcut(usage: 46, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.zoomOut, KeyboardShortcut(usage: 45, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.rotateLeft, KeyboardShortcut(usage: 47, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.rotateRight, KeyboardShortcut(usage: 48, modifiers: ModifierChord([.command])))
+    }
+
+    func testAppGestureCommandsMigrateInWithCanonicalDefaults() throws {
+        let suite = "AppGestureCommandMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 10
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertEqual(loaded.appGestureCommands, AppGestureCommands.defaults)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    func testAppGestureCommandsPersistAcrossSaveAndLoad() throws {
+        let suite = "AppGestureCommandPersistenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.appGestureCommands.setShortcut(
+            KeyboardShortcut(usage: 6, modifiers: ModifierChord([.option, .shift])), for: .zoomIn)
+        repository.save(preferences)
+        XCTAssertEqual(repository.load().appGestureCommands.zoomIn,
+                       KeyboardShortcut(usage: 6, modifiers: ModifierChord([.option, .shift])))
+    }
+
+    func testResetAppGestureCommandsRestoresOnlyTheFourDefaultsNotUnrelatedSettings() {
+        var preferences = ReceiverControlPreferences()
+        preferences.appGestureCommands.setShortcut(
+            KeyboardShortcut(usage: 6, modifiers: ModifierChord([.control])), for: .rotateRight)
+        preferences.pinchTarget = .app
+        preferences.rotateTarget = .app
+        preferences.snapRotation = false
+        preferences.avoidNotch = false
+
+        preferences.resetAppGestureCommands()
+
+        XCTAssertEqual(preferences.appGestureCommands, AppGestureCommands.defaults)
+        // Unrelated settings — including the gesture targets themselves —
+        // are untouched by this reset (spec section G).
+        XCTAssertEqual(preferences.pinchTarget, .app)
+        XCTAssertEqual(preferences.rotateTarget, .app)
+        XCTAssertFalse(preferences.snapRotation)
+        XCTAssertFalse(preferences.avoidNotch)
+    }
+
     // MARK: - Physical notch side (orientation-derived)
 
     /// `UIInterfaceOrientation` describes how CONTENT rotates to compensate

@@ -129,8 +129,13 @@ struct ReceiverScreen: View {
                                    allowInput: inputReachesMac,
                                    videoEnabled: model.receiver.videoEnabled,
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
+                                   pinchTarget: controlStore.preferences.pinchTarget,
+                                   rotateTarget: controlStore.preferences.rotateTarget,
+                                   snapRotation: controlStore.preferences.snapRotation,
+                                   appGestureCommands: controlStore.preferences.appGestureCommands,
                                    safeInsets: effectiveSafeInsets,
                                    occupiedControlFrames: occupiedControlFrames,
+                                   onRotationSnap: { haptics.play(.selection) },
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
@@ -664,6 +669,45 @@ struct SettingsView: View {
                     Text("Settings always stays reachable, even with input turned off. Sensitivity only affects Trackpad mode's one-finger pointer movement.")
                 }
 
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Pinch / Zoom")
+                        Picker("Pinch / Zoom", selection: preferenceBinding(\.pinchTarget)) {
+                            ForEach(ReceiverGestureTarget.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        if controlStore.preferences.pinchTarget == .app {
+                            Text("Experimental app command mode")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Rotation")
+                        Picker("Rotation", selection: preferenceBinding(\.rotateTarget)) {
+                            ForEach(ReceiverGestureTarget.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        if controlStore.preferences.rotateTarget == .app {
+                            Text("Experimental app command mode")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle("Snap Rotation", isOn: preferenceBinding(\.snapRotation))
+                    if controlStore.preferences.pinchTarget == .app || controlStore.preferences.rotateTarget == .app {
+                        NavigationLink("App Gesture Commands") {
+                            AppGestureCommandsView(store: controlStore)
+                        }
+                    }
+                } header: {
+                    Text("Gestures")
+                } footer: {
+                    Text("Video Off temporarily routes pinch and rotate to App without changing these saved choices. App mode is experimental: instead of injecting native gestures into the foreground app, it sends the keyboard commands configured in App Gesture Commands.")
+                }
+
                 Section("Receiver Controls") {
                     Toggle("Show Control Tray", isOn: preferenceBinding(\.trayEnabled))
                         .disabled(!controlStore.preferences.allowInput)
@@ -1005,8 +1049,13 @@ struct VideoLayerView: UIViewRepresentable {
     /// while this is false because it is also the mapped input surface.
     let videoEnabled: Bool
     let showSurfaceGrid: Bool
+    let pinchTarget: ReceiverGestureTarget
+    let rotateTarget: ReceiverGestureTarget
+    let snapRotation: Bool
+    let appGestureCommands: AppGestureCommands
     let safeInsets: ControlSafeInsets
     let occupiedControlFrames: [CGRect]
+    let onRotationSnap: () -> Void
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
 
     func makeUIView(context: Context) -> VideoView {
@@ -1021,6 +1070,9 @@ struct VideoLayerView: UIViewRepresentable {
         view.setAllowInput(allowInput)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
+        view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
+                                   snapRotation: snapRotation, appGestureCommands: appGestureCommands,
+                                   onRotationSnap: onRotationSnap)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
@@ -1132,6 +1184,9 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setAllowInput(allowInput)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
+        uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
+                                     snapRotation: snapRotation, appGestureCommands: appGestureCommands,
+                                     onRotationSnap: onRotationSnap)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
@@ -1172,6 +1227,21 @@ struct VideoLayerView: UIViewRepresentable {
         private var surfaceSafeInsets = ControlSafeInsets.zero
         private var occupiedControlFrames: [CGRect] = []
         private var surfaceAdmission = SurfaceTouchAdmission<ObjectIdentifier>()
+        private var pinchTarget = ReceiverGestureTarget.viewport
+        private var rotateTarget = ReceiverGestureTarget.viewport
+        private var snapRotation = true
+        private var onRotationSnap: (() -> Void)?
+        private var engagedSnapQuarter: Int?
+        private var appGestureCommands = AppGestureCommands.defaults
+        private var appMagnifyActive = false
+        private var appRotateActive = false
+        private var lastAppScaleRatio: CGFloat = 1
+        private var lastAppRotation: CGFloat = 0
+        // Discrete App Gesture Command routing (spec H/I) — one deterministic
+        // path, never alongside continuous native gesture injection. Separate
+        // accumulators so pinch and rotation repeat independently.
+        private var pinchCommandAccumulator = AppGestureCommandRouting.makePinchAccumulator()
+        private var rotationCommandAccumulator = AppGestureCommandRouting.makeRotationAccumulator()
 
         private let cursorLayer: CALayer = {
             let layer = CALayer()
@@ -1357,6 +1427,18 @@ struct VideoLayerView: UIViewRepresentable {
             setNeedsLayout()
         }
 
+        func setGesturePreferences(pinchTarget: ReceiverGestureTarget,
+                                   rotateTarget: ReceiverGestureTarget,
+                                   snapRotation: Bool,
+                                   appGestureCommands: AppGestureCommands,
+                                   onRotationSnap: @escaping () -> Void) {
+            self.pinchTarget = pinchTarget
+            self.rotateTarget = rotateTarget
+            self.snapRotation = snapRotation
+            self.appGestureCommands = appGestureCommands
+            self.onRotationSnap = onRotationSnap
+        }
+
         func setKeyboardRequested(_ requested: Bool) {
             guard requested != keyboardRequested else { return }
             keyboardRequested = requested
@@ -1437,6 +1519,7 @@ struct VideoLayerView: UIViewRepresentable {
             activeFingerTouchIDs.removeAll()
             systemGestureOwnedTouchIDs.removeAll()
             surfaceAdmission.reset()
+            endAppGestures(cancelled: true)
             recognizerResetPending = false
             // Force the two-finger recognizer to give up whatever it was
             // mid-deciding or already committed to — toggling `isEnabled`
@@ -1582,9 +1665,11 @@ struct VideoLayerView: UIViewRepresentable {
             }
             let scale = transform.displayedRect.width / max(transform.remoteCrop.width * normalRect.width, 0.0001)
             layer.bounds = CGRect(origin: .zero, size: normalRect.size)
-            layer.anchorPoint = CGPoint(x: transform.remoteCrop.minX, y: transform.remoteCrop.minY)
-            layer.position = transform.displayedRect.origin
-            layer.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale))
+            layer.anchorPoint = CGPoint(x: transform.remoteCrop.midX, y: transform.remoteCrop.midY)
+            layer.position = transform.viewPoint(forRemote: CGPoint(x: transform.remoteCrop.midX,
+                                                                     y: transform.remoteCrop.midY))
+            layer.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale)
+                .rotated(by: transform.rotationRadians))
         }
 
         /// View points per Mac pixel under the current transform — used to
@@ -1632,6 +1717,7 @@ struct VideoLayerView: UIViewRepresentable {
                                         width: cursorNormSize.width * scaleX,
                                         height: cursorNormSize.height * scaleY)
             cursorLayer.position = currentTransform.viewPoint(forRemote: cursorNorm)
+            cursorLayer.setAffineTransform(CGAffineTransform(rotationAngle: currentTransform.rotationRadians))
         }
 
         // Maps a view-local point into normalized remote-display space
@@ -1784,6 +1870,7 @@ struct VideoLayerView: UIViewRepresentable {
                 case .viewportZoomPan:
                     beginViewportManipulation()
                     applyViewportPinchUpdate(recognizer)
+                    beginAppGesturesIfNeeded(recognizer)
                 case .undecided:
                     break   // never begins while undecided — see the recognizer.
                 }
@@ -1793,6 +1880,7 @@ struct VideoLayerView: UIViewRepresentable {
                     continueScroll(recognizer)
                 case .viewportZoomPan:
                     applyViewportPinchUpdate(recognizer)
+                    updateAppGestures(recognizer)
                 case .undecided:
                     break
                 }
@@ -1808,6 +1896,7 @@ struct VideoLayerView: UIViewRepresentable {
                 } else {
                     cancelScrollMomentum()
                 }
+                endAppGestures(cancelled: recognizer.state != .ended)
             }
         }
 
@@ -1817,24 +1906,110 @@ struct VideoLayerView: UIViewRepresentable {
         /// a viewport gesture, and it happens once, at commitment, not on
         /// every frame — there is no second recognizer racing this one to
         /// coordinate against any more.
+        ///
+        /// Deliberately calls `cancelPointerAndLegacyTouchState()`, NOT
+        /// `cancelTouchForGestureOwnership()` — a viewport pinch/pan is a
+        /// LOCAL takeover from `pointerEngine`/the legacy click path, never
+        /// an external system gesture, so its own two fingers must never
+        /// join `systemGestureOwnedTouchIDs`. Doing so used to silence
+        /// `didTwoFingerGesture`'s own subsequent `.changed` callbacks for
+        /// the rest of THIS SAME gesture (its top-level guard checks
+        /// exactly that set) — a real-device trace caught pinch/pan
+        /// updating once at `.began` and then going dead until the fingers
+        /// lifted. `twoFingerRecognizer` keeps tracking these touches
+        /// completely normally throughout — see the type doc.
         private func beginViewportManipulation() {
             twoFingerActive = false
-            cancelTouchForGestureOwnership()   // also cancels any remote-scroll momentum — see its doc
+            cancelPointerAndLegacyTouchState()   // also cancels any remote-scroll momentum — see its doc
             manualZoomGestureStart = manualZoom
             manualZoomGestureBase = unzoomedBaseTransform().displayedRect
+            engagedSnapQuarter = nil
         }
 
         private func applyViewportPinchUpdate(_ recognizer: TwoFingerViewportGestureRecognizer) {
             guard videoEnabled else { return }
             guard manualZoomGestureBase.width > 0, manualZoomGestureBase.height > 0 else { return }
-            manualZoom = ManualViewportState.pinching(
+            let scaleRatio = pinchTarget == .viewport ? recognizer.scaleRatio : 1
+            let rotationDelta = rotateTarget == .viewport ? recognizer.rotationDelta : 0
+            var next = ManualViewportState.pinching(
                 from: manualZoomGestureStart,
                 initialBase: manualZoomGestureBase,
                 initialMidpoint: recognizer.initialMidpoint,
                 currentMidpoint: recognizer.midpoint,
-                scaleRatio: recognizer.scaleRatio)
+                scaleRatio: scaleRatio,
+                rotationDelta: rotationDelta)
+            if rotateTarget == .viewport {
+                let snap = ViewportRotationSnap.snappedAngle(next.rotationRadians, enabled: snapRotation)
+                next.rotationRadians = snap.angle
+                if let quarter = snap.targetQuarter, quarter != engagedSnapQuarter {
+                    engagedSnapQuarter = quarter
+                    onRotationSnap?()
+                } else if snap.targetQuarter == nil {
+                    engagedSnapQuarter = nil
+                }
+            }
+            manualZoom = next
             setNeedsLayout()
             layoutIfNeeded()
+        }
+
+        private var effectivePinchTarget: ReceiverGestureTarget {
+            VideoInteractionPolicy.effectiveTarget(stored: pinchTarget, videoEnabled: videoEnabled)
+        }
+
+        private var effectiveRotateTarget: ReceiverGestureTarget {
+            VideoInteractionPolicy.effectiveTarget(stored: rotateTarget, videoEnabled: videoEnabled)
+        }
+
+        /// App mode is EXPERIMENTAL command routing only (spec H/I): pinch/
+        /// rotation magnitude accumulates locally and fires discrete
+        /// Zoom In/Out / Rotate Left/Right keyboard chords — it never
+        /// mutates the local viewport, and never also injects a continuous
+        /// native gesture at the same time (see
+        /// `AppGestureCommandAccumulator`'s doc for why only one path runs).
+        private func beginAppGesturesIfNeeded(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            lastAppScaleRatio = recognizer.scaleRatio
+            lastAppRotation = recognizer.rotationDelta
+            if effectivePinchTarget == .app {
+                appMagnifyActive = true
+                pinchCommandAccumulator.reset()
+            }
+            if effectiveRotateTarget == .app {
+                appRotateActive = true
+                rotationCommandAccumulator.reset()
+            }
+        }
+
+        private func updateAppGestures(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            if appMagnifyActive {
+                let previous = max(lastAppScaleRatio, 0.0001)
+                let logDelta = log(Double(recognizer.scaleRatio / previous))
+                lastAppScaleRatio = recognizer.scaleRatio
+                let fires = pinchCommandAccumulator.advance(by: logDelta)
+                fireAppGestureCommands(fires > 0 ? .zoomIn : .zoomOut, count: abs(fires))
+            }
+            if appRotateActive {
+                let delta = ManualViewportState.normalizedAngle(recognizer.rotationDelta - lastAppRotation)
+                lastAppRotation = recognizer.rotationDelta
+                let fires = rotationCommandAccumulator.advance(by: Double(delta))
+                fireAppGestureCommands(fires > 0 ? .rotateRight : .rotateLeft, count: abs(fires))
+            }
+        }
+
+        private func endAppGestures(cancelled: Bool) {
+            if appMagnifyActive { pinchCommandAccumulator.reset() }
+            if appRotateActive { rotationCommandAccumulator.reset() }
+            appMagnifyActive = false
+            appRotateActive = false
+        }
+
+        private func fireAppGestureCommands(_ kind: AppGestureCommandKind, count: Int) {
+            guard count > 0 else { return }
+            let shortcut = appGestureCommands.shortcut(for: kind)
+            for _ in 0..<count {
+                receiver?.sendKeyboardPress(usage: shortcut.usage,
+                                            modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
+            }
         }
 
         private func beginScroll(at midpoint: CGPoint) {
@@ -2054,8 +2229,33 @@ struct VideoLayerView: UIViewRepresentable {
         /// behavior. Their own internal session state (`TwoFingerGestureSession`
         /// et al.) is reset once ownership actually ends — see the
         /// `SYSTEM RELEASE` branch in `routeTouches`.
+        ///
+        /// ONLY for a genuine EXTERNAL/system takeover (3/4/5-finger
+        /// Mission Control/Spaces/App Exposé/Spotlight, pinch-spread) —
+        /// see `cancelPointerAndLegacyTouchState()` for the shared
+        /// cancellation work this also does, which a LOCAL two-finger
+        /// viewport pinch/pan needs too but must reach WITHOUT marking its
+        /// own fingers `systemGestureOwnedTouchIDs` (that would silence its
+        /// own subsequent `didTwoFingerGesture` callbacks for the rest of
+        /// the same gesture — the exact bug a real-device trace caught:
+        /// `beginViewportManipulation` used to call this directly).
         private func cancelTouchForGestureOwnership() {
             systemGestureOwnedTouchIDs.formUnion(activeFingerTouchIDs)
+            cancelPointerAndLegacyTouchState()
+        }
+
+        /// The shared cleanup a touch-sequence takeover needs regardless of
+        /// who's taking it over: releases whatever the legacy (non-pointer-
+        /// wire) click path had pending, resets `pointerEngine` (any held
+        /// button, any tracked touch), and cancels remote-scroll momentum —
+        /// so the outgoing owner can never keep acting on a touch stream
+        /// that's no longer theirs. Deliberately does NOT touch
+        /// `systemGestureOwnedTouchIDs`/`activeFingerTouchIDs` — that
+        /// decision (is this an external system gesture, or a still-local
+        /// viewport pinch/pan?) belongs entirely to the caller; see
+        /// `cancelTouchForGestureOwnership` (external) vs
+        /// `beginViewportManipulation` (local).
+        private func cancelPointerAndLegacyTouchState() {
             for action in ReceiverTouchOwnership.cancellationActions(downWasSent: downSent) {
                 switch action {
                 case .sendCancellation:
@@ -2603,10 +2803,13 @@ final class PinchSpreadSystemGestureRecognizer: UIGestureRecognizer {
 /// the next fresh two-finger touch.
 final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
     private var activeTouches: [ObjectIdentifier: UITouch] = [:]
+    private var orderedTouchIDs: [ObjectIdentifier] = []
     private(set) var initialMidpoint: CGPoint = .zero
     private var initialDistance: CGFloat = 0
     private(set) var midpoint: CGPoint = .zero
     private var distance: CGFloat = 0
+    private var initialAngle: CGFloat = 0
+    private var angle: CGFloat = 0
 
     /// Fixed for the lifetime of a gesture once it leaves `.undecided` —
     /// see the type doc's "acquire ownership and keep it" contract. Backed
@@ -2623,6 +2826,10 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
         return distance / initialDistance
     }
 
+    var rotationDelta: CGFloat {
+        ManualViewportState.normalizedAngle(angle - initialAngle)
+    }
+
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
         allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -2634,7 +2841,11 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
             state = .failed
             return
         }
-        for touch in touches { activeTouches[ObjectIdentifier(touch)] = touch }
+        for touch in touches {
+            let id = ObjectIdentifier(touch)
+            activeTouches[id] = touch
+            if !orderedTouchIDs.contains(id) { orderedTouchIDs.append(id) }
+        }
         // A third touch landing means this is not (or is no longer) a
         // two-finger gesture — cleanly hand off to 3+-finger system
         // gestures. `.failed` is only a legal transition from `.possible`;
@@ -2646,24 +2857,28 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
             return
         }
         guard activeTouches.count == 2 else { return }
-        let points = activeTouches.values.map { $0.location(in: view) }
+        let points = orderedTouchIDs.compactMap { activeTouches[$0]?.location(in: view) }
         initialMidpoint = Self.midpoint(points)
         initialDistance = Self.distance(points)
+        initialAngle = Self.angle(points)
         midpoint = initialMidpoint
         distance = initialDistance
+        angle = initialAngle
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard state == .possible || state == .began || state == .changed,
               activeTouches.count == 2, let view else { return }
-        let points = activeTouches.values.map { $0.location(in: view) }
+        let points = orderedTouchIDs.compactMap { activeTouches[$0]?.location(in: view) }
         midpoint = Self.midpoint(points)
         distance = Self.distance(points)
+        angle = Self.angle(points)
         guard distance.isFinite else { return }
         if state == .possible {
             let classified = session.update(
                 initialDistance: initialDistance, currentDistance: distance,
-                initialMidpoint: initialMidpoint, currentMidpoint: midpoint)
+                initialMidpoint: initialMidpoint, currentMidpoint: midpoint,
+                rotationDelta: rotationDelta)
             guard classified != .undecided else { return }
             state = .began
         } else {
@@ -2684,10 +2899,13 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
     override func reset() {
         super.reset()
         activeTouches.removeAll()
+        orderedTouchIDs.removeAll()
         initialMidpoint = .zero
         initialDistance = 0
         midpoint = .zero
         distance = 0
+        initialAngle = 0
+        angle = 0
         session = TwoFingerGestureSession()
     }
 
@@ -2699,6 +2917,11 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
     private static func distance(_ points: [CGPoint]) -> CGFloat {
         guard points.count == 2 else { return 0 }
         return hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+    }
+
+    private static func angle(_ points: [CGPoint]) -> CGFloat {
+        guard points.count == 2 else { return 0 }
+        return atan2(points[1].y - points[0].y, points[1].x - points[0].x)
     }
 }
 

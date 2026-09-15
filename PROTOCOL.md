@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 7** &nbsp;|&nbsp; Status: **normative** for `pv <= 7`
+**Protocol version (`pv`): 10** &nbsp;|&nbsp; Status: **normative** for `pv <= 10`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -39,7 +39,7 @@ caused by third-party clients should be reported to those projects.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
-Every requirement applies to `pv` 7 unless a different version is called
+Every requirement applies to `pv` 10 unless a different version is called
 out. "The official apps" means the Mac sender and iOS receiver in this
 repository; their behavior is cited as illustration, not as requirement,
 unless marked normative.
@@ -259,6 +259,7 @@ Coordinates use the conventions of section 7.
 | `displayModeRequest` | pv 7 | `mode` (`mirror` or `extend`) | Request a Mac-authoritative mode transition |
 | `allowInputRequest` | pv 8 | `allowed` (bool) | Request the Mac-authoritative input gate state |
 | `videoRequest` | pv 9 | `enabled` (bool) | Request Mac video capture/encode/transmission on or off |
+| `nativeAppGesture` | pv 10 | `kind` (`magnify` or `rotate`), `phase` (`began`, `changed`, `ended`, or `cancelled`), `delta` (number) | Continuous foreground-app gesture lifecycle |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -267,6 +268,11 @@ Coordinates use the conventions of section 7.
 **`hello`** MUST be the first message a receiver sends on every new
 connection, because the sender sizes its virtual display from it and can do
 nothing before it arrives.
+
+`nativeAppGesture.delta` is incremental: magnification is the fractional
+change since the preceding sample and rotation is radians since the preceding
+sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
+`changed`/terminal phase without an active matching `began`.
 
 * `pixelsWide`, `pixelsHigh` (int): the panel size in **physical pixels**,
   in the panel's **current orientation** (portrait swaps them).
@@ -774,7 +780,7 @@ Rules already stated elsewhere, gathered:
 Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 
 * `pv` is a single integer, bumped **only when the wire changes**, never
-  per release. Current: **3**.
+  per release. Current: **9**.
 * A peer that advertises no `pv` anywhere (TXT, `hello`, `welcome`) **is**
   protocol 1.
 * Each side declares the oldest peer it supports (`welcome.min` on the

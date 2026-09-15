@@ -1184,6 +1184,17 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
     }
 
+    func sendNativeAppGesture(kind: NativeAppGestureKind,
+                              phase: NativeAppGesturePhase,
+                              delta: Double) {
+        guard displayState == .running,
+              macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion else { return }
+        sendControl(["type": WireMessage.nativeAppGesture,
+                     "kind": kind.rawValue,
+                     "phase": phase.rawValue,
+                     "delta": delta])
+    }
+
     /// Retire every decoded/presented frame without forgetting `videoSize`:
     /// that geometry is still the Direct Touch mapping surface while video is
     /// off. The next video-on stream begins from fresh SPS/PPS + an IDR.

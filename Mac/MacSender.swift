@@ -221,6 +221,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastHello: PhoneInfo?
     private var helloContinuation: CheckedContinuation<PhoneInfo, Error>?
     private var inputInjector: InputInjector?
+    private var nativeAppGestureState = NativeAppGestureSessionState()
+    private var loggedNativeGestureLimitation = false
 
     // Liveness: both sides ping every 2s; if nothing arrives for 5s the link
     // is half-open (e.g. usbmuxd accepted but the device is gone) — reconnect.
@@ -2416,6 +2418,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 applyVideoEnabled(requested)
             } else {
                 Task { @MainActor in self.onVideoEnabledRequest?(requested) }
+            }
+        case WireMessage.nativeAppGesture:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.nativeAppGestureWireVersion,
+                  receiverInputIsAllowed(),
+                  let update = NativeAppGestureUpdate(message: obj),
+                  nativeAppGestureState.accept(update) else { return }
+            // CGEvent can post mouse/keyboard/scroll/tablet events, while
+            // AppKit exposes magnification/rotation only as read-only fields
+            // on received NSEvents. There is no public cross-process event
+            // constructor carrying these payloads/phases. Keep the complete
+            // wire lifecycle for a future supported backend, but never fall
+            // back to keyboard shortcuts or undocumented event fields.
+            if !loggedNativeGestureLimitation {
+                loggedNativeGestureLimitation = true
+                Log.info("native app magnify/rotate unavailable: macOS has no public cross-process injection API")
             }
         case "gesture":
             guard let name = obj["name"] as? String,

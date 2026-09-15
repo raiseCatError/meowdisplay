@@ -180,6 +180,13 @@ the floor once a force-capable build has spread.
   older receiver the Mac keeps video on, and an older Mac leaves the receiver's
   Video control unavailable, avoiding an unexplained frozen frame.
 - **Example: `pv` 10 continuous app gestures.** A pv 10 receiver may send
+  overlapping magnify and rotate lifecycles. The wire is additive and older
+  peers ignore it. The official Mac currently validates the lifecycle but
+  cannot inject it across applications: public `CGEvent` types cover mouse,
+  keyboard, scroll, tablet, and related events, while AppKit's received
+  `NSEvent.magnification`/`rotation` values are read-only and its public event
+  constructors expose no gesture payload/phase. No private event fields or
+  keyboard-shortcut emulation are used.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

@@ -1205,3 +1205,96 @@ final class PointerGestureEngine {
         heldMouseButton = nil
     }
 }
+
+// MARK: - App Gesture Command routing (H/I)
+
+/// Converts continuous pinch/rotation magnitude into discrete, rate-limited
+/// App Gesture Commands. Pure accumulator, no I/O: the caller (the pinch/
+/// rotation gesture recognizer's `.changed` handler) feeds incremental
+/// magnitude each update and fires whatever commands come back, in whichever
+/// direction they're returned.
+///
+/// One deterministic routing path only — this replaces continuous native
+/// gesture injection (`sendNativeAppGesture`) for App mode, never runs
+/// alongside it. Positive `direction` on the returned `AppGestureCommandFire`
+/// corresponds to "outward"/"clockwise" (Zoom In / Rotate Right); negative to
+/// "inward"/"counter-clockwise" (Zoom Out / Rotate Left).
+struct AppGestureCommandAccumulator {
+    private var total: Double = 0
+    private var direction: Int = 0
+    /// How many fires this same directional run has already produced —
+    /// tracked so a later call only reports the newly-crossed repeats, not
+    /// the ones already returned.
+    private var firedCount: Int = 0
+    private let threshold: Double
+    private let step: Double
+    private let maxFiresPerUpdate: Int
+
+    /// `threshold`/`step` are in the caller's own magnitude units (log-scale
+    /// ratio for pinch, radians for rotation) — see the call sites below.
+    init(threshold: Double, step: Double, maxFiresPerUpdate: Int = 4) {
+        self.threshold = threshold
+        self.step = step
+        self.maxFiresPerUpdate = maxFiresPerUpdate
+    }
+
+    /// Gesture start, end, or cancellation all rebase cleanly — no partial
+    /// carry-over into the next gesture.
+    mutating func reset() {
+        total = 0
+        direction = 0
+        firedCount = 0
+    }
+
+    /// `delta` is the incremental magnitude since the last call in this same
+    /// gesture (positive one way, negative the other). Returns a signed fire
+    /// count: its magnitude is how many commands to send now (0 when still
+    /// under threshold — jitter below threshold is silently absorbed), its
+    /// sign which direction. A larger `delta` can return more than 1 in a
+    /// single call (proportional repeat: the first fire needs `threshold`
+    /// total movement, each further one only another `step`), capped at
+    /// `maxFiresPerUpdate` per call so a fast flick can't spam commands
+    /// unboundedly in one update — any backlog beyond the cap is still
+    /// tracked and reported on a later call.
+    mutating func advance(by delta: Double) -> Int {
+        guard delta.isFinite, delta != 0 else { return 0 }
+        let newDirection = delta > 0 ? 1 : -1
+        if direction != 0, newDirection != direction {
+            // Reversal: a partial in-flight accumulation toward the old
+            // direction is discarded rather than partially cancelled, so the
+            // new direction starts from a clean, predictable baseline.
+            total = 0
+            firedCount = 0
+        }
+        direction = newDirection
+        total += abs(delta)
+
+        guard total >= threshold else { return 0 }
+        let possibleFires = 1 + Int((total - threshold) / step)
+        let newFires = min(possibleFires - firedCount, maxFiresPerUpdate)
+        guard newFires > 0 else { return 0 }
+        firedCount += newFires
+        return direction * newFires
+    }
+}
+
+enum AppGestureCommandRouting {
+    /// ~35% relative pinch before the first Zoom In/Out, then another ~18%
+    /// per repeat — deliberately coarser than the viewport's own pinch-to-
+    /// zoom feel, since each fire is a whole discrete keyboard command
+    /// rather than continuous scale.
+    static let pinchThreshold = log(1.35)
+    static let pinchStep = log(1.18)
+    /// ~25° before the first Rotate Left/Right, then another ~15° per
+    /// repeat.
+    static let rotationThreshold = Double.pi / 7.2   // 25°
+    static let rotationStep = Double.pi / 12          // 15°
+
+    static func makePinchAccumulator() -> AppGestureCommandAccumulator {
+        AppGestureCommandAccumulator(threshold: pinchThreshold, step: pinchStep)
+    }
+
+    static func makeRotationAccumulator() -> AppGestureCommandAccumulator {
+        AppGestureCommandAccumulator(threshold: rotationThreshold, step: rotationStep)
+    }
+}

@@ -971,6 +971,140 @@ struct ShortcutItemEditor: View {
     }
 }
 
+/// Full key list for App Gesture Commands editing (spec section E) —
+/// letters, 0-9, the listed symbol keys, and the listed special keys.
+/// Deliberately a separate list from `editableShortcutKeys` (Main Tray
+/// shortcuts): that one predates this feature and keeps its own smaller,
+/// unrelated key set. "+" is not a distinct physical key — it is Shift
+/// held with "=" — so it is not listed separately; toggling Shift on the
+/// "=" key produces it.
+let appGestureCommandEditableKeys: [(String, Int)] = {
+    let letters = zip(Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 4...29).map { (String($0), $1) }
+    let digits: [(String, Int)] = [("1", 30), ("2", 31), ("3", 32), ("4", 33), ("5", 34),
+                                   ("6", 35), ("7", 36), ("8", 37), ("9", 38), ("0", 39)]
+    let symbols: [(String, Int)] = [("=", 46), ("-", 45), ("[", 47), ("]", 48),
+                                    ("/", 56), ("\\", 49), (",", 54), (".", 55),
+                                    (";", 51), ("'", 52)]
+    let special: [(String, Int)] = [("Space", 44), ("Return", 40), ("Tab", 43), ("Escape", 41),
+                                    ("Delete", 42), ("↑", 82), ("↓", 81), ("←", 80), ("→", 79)]
+    return letters + digits + symbols + special
+}()
+
+func appGestureCommandKeyLabel(for usage: Int) -> String {
+    appGestureCommandEditableKeys.first(where: { $0.1 == usage })?.0 ?? "?"
+}
+
+func appGestureCommandDisplayText(for shortcut: KeyboardShortcut) -> String {
+    shortcut.modifiers.symbols + appGestureCommandKeyLabel(for: shortcut.usage)
+}
+
+/// Submenu listing the four App-mode command bindings (spec section D) —
+/// hidden from the main Gestures section entirely unless Pinch/Zoom or
+/// Rotation is currently set to App (see `SettingsView`'s conditional
+/// `NavigationLink`).
+struct AppGestureCommandsView: View {
+    @ObservedObject var store: ReceiverControlStore
+    @State private var confirmingReset = false
+
+    var body: some View {
+        List {
+            Section {
+                Text("Experimental")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text("Some Mac apps use different shortcuts for zooming and rotating. Customize the commands OpenDisplay sends when App mode is selected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Zoom") {
+                commandRow(.zoomIn)
+                commandRow(.zoomOut)
+            }
+            Section("Rotation") {
+                commandRow(.rotateLeft)
+                commandRow(.rotateRight)
+            }
+            Section {
+                Button("Reset to Defaults", role: .destructive) {
+                    confirmingReset = true
+                }
+            }
+        }
+        .navigationTitle("App Gesture Commands")
+        .confirmationDialog("Reset App Gesture Commands to their defaults?",
+                            isPresented: $confirmingReset, titleVisibility: .visible) {
+            Button("Reset to Defaults", role: .destructive) {
+                store.update { $0.resetAppGestureCommands() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func commandRow(_ kind: AppGestureCommandKind) -> some View {
+        NavigationLink {
+            AppGestureCommandEditor(store: store, kind: kind)
+        } label: {
+            LabeledContent(kind.title,
+                           value: appGestureCommandDisplayText(for: store.preferences.appGestureCommands.shortcut(for: kind)))
+        }
+    }
+}
+
+/// Editable, not recordable (spec section E): modifiers are toggles and the
+/// key comes from a picker — there is no physical-shortcut recording on
+/// iPhone.
+struct AppGestureCommandEditor: View {
+    @ObservedObject var store: ReceiverControlStore
+    let kind: AppGestureCommandKind
+
+    private var shortcut: KeyboardShortcut {
+        store.preferences.appGestureCommands.shortcut(for: kind)
+    }
+
+    var body: some View {
+        Form {
+            Section("Modifiers") {
+                ForEach(ControlModifier.allCases) { modifier in
+                    Toggle(modifier.title, isOn: modifierBinding(modifier))
+                }
+            }
+            Section("Key") {
+                Picker("Key", selection: usageBinding) {
+                    ForEach(appGestureCommandEditableKeys, id: \.1) { Text($0.0).tag($0.1) }
+                }
+            }
+            Section("Preview") {
+                Text(appGestureCommandDisplayText(for: shortcut))
+                    .font(.title2.monospaced())
+            }
+        }
+        .navigationTitle(kind.title)
+    }
+
+    private func update(_ transform: (inout KeyboardShortcut) -> Void) {
+        store.update { preferences in
+            var current = preferences.appGestureCommands.shortcut(for: kind)
+            transform(&current)
+            preferences.appGestureCommands.setShortcut(current, for: kind)
+        }
+    }
+
+    private func modifierBinding(_ modifier: ControlModifier) -> Binding<Bool> {
+        Binding(get: { shortcut.modifiers.contains(modifier) },
+                set: { enabled in
+                    update {
+                        var values = $0.modifiers.modifiers
+                        if enabled { values.insert(modifier) } else { values.remove(modifier) }
+                        $0.modifiers = ModifierChord(values)
+                    }
+                })
+    }
+
+    private var usageBinding: Binding<Int> {
+        Binding(get: { shortcut.usage }, set: { usage in update { $0.usage = usage } })
+    }
+}
+
 struct NewShortcutEditor: View {
     @ObservedObject var store: ReceiverControlStore
     let chord: ModifierChord

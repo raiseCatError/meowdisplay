@@ -257,6 +257,72 @@ enum LandscapeTraySide: String, Codable, CaseIterable, Identifiable {
     var opposite: LandscapeTraySide { self == .leading ? .trailing : .leading }
 }
 
+/// Receiver-local destination for a two-finger pinch or rotation gesture.
+/// The stored choice is preserved while video is off; the receiver applies
+/// the temporary App override at routing time instead of rewriting it.
+enum ReceiverGestureTarget: String, Codable, CaseIterable, Identifiable {
+    case viewport
+    case app
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+/// One configurable App-mode gesture command — see the App Gesture Commands
+/// spec. Editable on iPhone via modifier toggles + a key picker; never
+/// physical-shortcut recording (that is reserved for a future Mac-side
+/// editor).
+enum AppGestureCommandKind: String, Codable, CaseIterable, Identifiable {
+    case zoomIn
+    case zoomOut
+    case rotateLeft
+    case rotateRight
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .zoomIn: return "Zoom In"
+        case .zoomOut: return "Zoom Out"
+        case .rotateLeft: return "Rotate Left"
+        case .rotateRight: return "Rotate Right"
+        }
+    }
+}
+
+/// Persisted defaults: Cmd+= / Cmd+- / Cmd+[ / Cmd+]. Reuses the existing
+/// `KeyboardShortcut`/`ModifierChord` model shared with Main Tray shortcuts
+/// (no duplicate key/chord representation). The raw HID usage numbers here
+/// are the same USB HID keyboard-page values as `Mac/InputRouting.swift`'s
+/// `HIDKeyUsage`, duplicated as literals because `Shared/` also compiles
+/// into the iOS target, which never builds Mac-only sources.
+struct AppGestureCommands: Codable, Equatable {
+    var zoomIn = KeyboardShortcut(usage: 46, modifiers: ModifierChord([.command]))      // Cmd+=
+    var zoomOut = KeyboardShortcut(usage: 45, modifiers: ModifierChord([.command]))     // Cmd+-
+    var rotateLeft = KeyboardShortcut(usage: 47, modifiers: ModifierChord([.command]))  // Cmd+[
+    var rotateRight = KeyboardShortcut(usage: 48, modifiers: ModifierChord([.command])) // Cmd+]
+
+    static let defaults = AppGestureCommands()
+
+    func shortcut(for kind: AppGestureCommandKind) -> KeyboardShortcut {
+        switch kind {
+        case .zoomIn: return zoomIn
+        case .zoomOut: return zoomOut
+        case .rotateLeft: return rotateLeft
+        case .rotateRight: return rotateRight
+        }
+    }
+
+    mutating func setShortcut(_ shortcut: KeyboardShortcut, for kind: AppGestureCommandKind) {
+        switch kind {
+        case .zoomIn: zoomIn = shortcut
+        case .zoomOut: zoomOut = shortcut
+        case .rotateLeft: rotateLeft = shortcut
+        case .rotateRight: rotateRight = shortcut
+        }
+    }
+}
+
 // MARK: - Function Tray
 
 /// One Function Tray button. Reuses `ShortcutItem`/`ControlAction` exactly
@@ -396,7 +462,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 3
+    static let schemaVersion = 11
 
     var version = schemaVersion
     var trayEnabled = true
@@ -438,6 +504,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Purely visual decoration for the mapped interaction surface shown
     /// while video production is off. It never participates in hit-testing.
     var showSurfaceGrid = true
+    var pinchTarget = ReceiverGestureTarget.viewport
+    var rotateTarget = ReceiverGestureTarget.viewport
+    var snapRotation = true
+    /// App-mode command chords — see App Gesture Commands (spec section D).
+    /// Independent of `pinchTarget`/`rotateTarget`: changing a binding never
+    /// changes which target is active, and "Reset to Defaults" on this page
+    /// touches only this value.
+    var appGestureCommands = AppGestureCommands.defaults
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -497,6 +571,19 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
+        pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
+        rotateTarget = try value(.rotateTarget, fallback.rotateTarget)
+        snapRotation = try value(.snapRotation, fallback.snapRotation)
+        // Absent (schema < 11) means "written before App Gesture Commands
+        // existed" — default to the canonical Cmd+=/Cmd+-/Cmd+[/Cmd+] chords.
+        appGestureCommands = try value(.appGestureCommands, fallback.appGestureCommands)
+    }
+
+    /// Restores only the four App Gesture Commands to their canonical
+    /// defaults — never gesture targets, Snap Rotation, or anything else
+    /// (spec section G).
+    mutating func resetAppGestureCommands() {
+        appGestureCommands = .defaults
     }
 
     func profile(for slot: ControlProfileSlot) -> ControlProfile {
@@ -609,6 +696,18 @@ struct ReceiverControlPreferencesRepository {
         // is ON, so the custom decoder has already supplied the right value.
         if value.version < 9 {
             value.version = 9
+        }
+        // Schema 9 predates gesture targeting and viewport rotation snap.
+        // Defaults preserve the old behavior: gestures manipulate the local
+        // viewport, with snapping enabled once rotation is introduced.
+        if value.version < 10 {
+            value.version = 10
+        }
+        // Schema 10 predates App Gesture Commands; the custom decoder above
+        // already defaulted them to the canonical Cmd+=/Cmd+-/Cmd+[/Cmd+]
+        // chords — nothing to transform.
+        if value.version < 11 {
+            value.version = 11
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
