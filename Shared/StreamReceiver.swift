@@ -86,6 +86,19 @@ final class StreamReceiver: ObservableObject {
     @Published private(set) var displayModeConfirmationGeneration = 0
     private var displayModeRequestState = DisplayModeRequestState()
 
+    /// The single authoritative session state the UI derives from. Mutated
+    /// only on `queue` via `sessionState`; this is its main-thread mirror.
+    @Published private(set) var session = ReceiverSessionState()
+    /// Queue-confined authority. Every transition goes through
+    /// `mutateSession` so there is exactly one logging and publishing path.
+    private var sessionState = ReceiverSessionState()
+    /// The one timer driving automatic recovery — never a second one.
+    private var reconnectTimer: DispatchSourceTimer?
+    /// Set when the peer told us the two apps are version-incompatible. The
+    /// live session is left alone; the flag only reclassifies the eventual
+    /// loss so recovery never loops against a peer that cannot work with us.
+    private var peerIsIncompatible = false
+
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((_ trayEnabled: Bool?, _ keyboardButtonEnabled: Bool?) -> Void)?
     private var announcedTrayEnabled = true
@@ -401,6 +414,20 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    /// iOS lifecycle seam. Backgrounding parks an in-flight recovery run
+    /// (nothing can be dialed at us while suspended, and burning the budget
+    /// there would land us in Connection Lost for no reason); foregrounding
+    /// resumes it from where it stopped.
+    func setAppActive(_ active: Bool) {
+        queue.async {
+            if active {
+                self.resumeReconnectIfNeeded()
+            } else {
+                self.suspendReconnectForBackground()
+            }
+        }
+    }
+
     // Set while the app lingers in the background with the session alive
     // (brief app switch): decoding is pointless and hardware decode sessions
     // fail off-screen, so frames are dropped before the sample stage.
@@ -459,7 +486,11 @@ final class StreamReceiver: ObservableObject {
                 self.listenerHealthy = false
                 self.listenerRestartState.invalidate()
                 self.stopCursorListener()
-                self.setConnected(false)
+                // Deliberate teardown by this device: no automatic recovery,
+                // and any retry already scheduled is invalidated so it cannot
+                // resurrect the session afterwards.
+                self.cancelReconnect()
+                self.setConnected(false, reason: .explicitDisconnect)
                 self.resetDisplayModeState()
                 self.setStatus(status)
                 DispatchQueue.main.async {
@@ -729,6 +760,10 @@ final class StreamReceiver: ObservableObject {
         if greeted { Log.info("newcomer proved itself — adopting it as the session") }
         connection?.cancel()
         connection = conn
+        // A new session supersedes any recovery run: retries scheduled
+        // against the old generation can no longer win.
+        cancelReconnect()
+        mutateSession { $0.connectionAdopted() }
         // The race is decided: rival candidates die here.
         for pending in pendingConnections where pending !== conn { pending.cancel() }
         pendingConnections.removeAll()
@@ -902,6 +937,9 @@ final class StreamReceiver: ObservableObject {
         case "displayState":
             guard let state = DisplayState.decode(messageType: type,
                                                   value: obj["state"] as? String) else { return }
+            // Pause is intentional, not a failure: it shares the interruption
+            // presentation but must never start automatic recovery.
+            mutateSession { state == .paused ? $0.displayPaused() : $0.displayResumed() }
             DispatchQueue.main.async {
                 self.displayState = state
                 self.onDisplayStateChange?(state)
@@ -922,11 +960,14 @@ final class StreamReceiver: ObservableObject {
                 }
             }
             if macPV < WireProtocol.minSupportedPeer {
+                peerIsIncompatible = true
                 let msg = "The OpenDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenDisplay on your Mac to reconnect."
                 DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
             }
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
+            // Retrying cannot fix that, so the eventual loss is terminal.
+            peerIsIncompatible = true
             let message = obj["message"] as? String
                 ?? "Update OpenDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
@@ -1706,6 +1747,109 @@ final class StreamReceiver: ObservableObject {
         return sorted[idx]
     }
 
+    // MARK: - Session state + automatic recovery
+
+    /// Apply one transition to the authoritative session state, log it if it
+    /// actually changed anything, mirror it to the UI, and let the recovery
+    /// driver react. Must run on `queue`.
+    private func mutateSession(_ transition: (inout ReceiverSessionState) -> Bool) {
+        let previous = sessionState.phase
+        let changed = transition(&sessionState)
+        let snapshot = sessionState
+        DispatchQueue.main.async { self.session = snapshot }
+        guard changed else { return }
+        #if DEBUG
+        Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
+                 + " reason=\(snapshot.lossReason?.rawValue ?? "none")"
+                 + " generation=\(snapshot.generation)"
+                 + " attempt=\(snapshot.reconnectAttempt)"
+                 + " transport=\(transport)")
+        #else
+        Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
+                 + " reason=\(snapshot.lossReason?.rawValue ?? "none")")
+        #endif
+        if snapshot.phase == .reconnecting {
+            armReconnect()
+        } else {
+            cancelReconnect()
+        }
+    }
+
+    private func cancelReconnect() {
+        reconnectTimer?.cancel()
+        reconnectTimer = nil
+    }
+
+    /// One automatic recovery step. The Mac is the dialing side (it runs its
+    /// own bounded redial loop), so all this side can act on is its own
+    /// listening half — re-arm it if it is unhealthy and wait out the
+    /// backoff window. Never starts a second attempt or a second timer.
+    private func armReconnect() {
+        cancelReconnect()
+        guard sessionState.phase == .reconnecting else { return }
+        let delay = sessionState.nextReconnectDelay
+        guard let attempt = sessionState.beginReconnectAttempt() else {
+            mutateSession { $0.exhaustRecovery() }
+            setStatus("Connection lost")
+            return
+        }
+        let generation = sessionState.generation
+        let snapshot = sessionState   // never read queue-confined state off-queue
+        DispatchQueue.main.async { self.session = snapshot }
+        Log.info("reconnect attempt \(attempt)/\(ReceiverSessionState.maximumReconnectAttempts)"
+                 + " generation=\(generation) in \(delay)s")
+        setStatus("Reconnecting…")
+        if !listenerHealthy { restartListener() }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.sessionState.generation == generation else { return }
+            _ = self.sessionState.endReconnectAttempt()
+            self.armReconnect()
+        }
+        timer.resume()
+        reconnectTimer = timer
+    }
+
+    /// The user tapped Reconnect on the Connection Lost presentation. Runs
+    /// one clean recovery run through exactly the same path as automatic
+    /// recovery — no second flow, no stacked attempts.
+    func reconnectNow() {
+        queue.async {
+            guard self.sessionState.phase == .reconnectFailed
+                    || self.sessionState.phase == .disconnected else { return }
+            Log.info("manual reconnect requested")
+            self.cancelReconnect()
+            self.peerIsIncompatible = false
+            self.mutateSession { $0.requestManualReconnect() }
+            // A manual retry always rebuilds the listening side, healthy or
+            // not: "I pressed the button and nothing visibly happened" is
+            // the failure mode worth spending one rebind on.
+            self.restartListener()
+        }
+    }
+
+    /// iOS is suspending us: recovery cannot run, so park the run instead of
+    /// burning its budget against a radio we do not have.
+    private func suspendReconnectForBackground() {
+        cancelReconnect()
+        // Deliberately not through `mutateSession`: the phase is unchanged
+        // (still reconnecting), and its reactive arm would immediately
+        // schedule the very attempt this is parking.
+        guard sessionState.suspendRecoveryForBackground() else { return }
+        Log.info("sessionState: recovery parked for background"
+                 + " generation=\(sessionState.generation)"
+                 + " attempt=\(sessionState.reconnectAttempt)")
+        let snapshot = sessionState
+        DispatchQueue.main.async { self.session = snapshot }
+    }
+
+    /// Foregrounding: resume a parked recovery run from where it stopped.
+    private func resumeReconnectIfNeeded() {
+        guard sessionState.phase == .reconnecting, reconnectTimer == nil else { return }
+        armReconnect()
+    }
+
     // MARK: - Helpers
 
     private func setStatus(_ text: String) {
@@ -1713,7 +1857,11 @@ final class StreamReceiver: ObservableObject {
         DispatchQueue.main.async { self.status = text }
     }
 
-    private func setConnected(_ value: Bool) {
+    /// The single funnel for connection up/down. `reason` classifies a loss
+    /// so the session state can tell an interruption worth recovering from
+    /// apart from a deliberate end — see `ReceiverSessionLossReason`.
+    private func setConnected(_ value: Bool,
+                              reason: ReceiverSessionLossReason = .transportLost) {
         DispatchQueue.main.async {
             self.connected = value
             if !value {
@@ -1728,9 +1876,23 @@ final class StreamReceiver: ObservableObject {
         }
         if !value {
             transport = "—"
-            setStatus("Listening on :9000")
+            // A peer that already told us the two apps are incompatible must
+            // not be retried; every other loss is transport-shaped.
+            let classified: ReceiverSessionLossReason = {
+                guard peerIsIncompatible, reason == .transportLost else { return reason }
+                return .protocolIncompatible
+            }()
+            let wasConnected = sessionState.phase == .connected
+                || sessionState.phase == .paused
+            mutateSession { $0.connectionLost(reason: classified) }
+            if sessionState.phase != .reconnecting {
+                setStatus(wasConnected && classified != .explicitDisconnect
+                          ? "Connection lost" : "Listening on :\(port)")
+            }
         }
         else {
+            peerIsIncompatible = false
+            mutateSession { $0.connectionEstablished() }
             setStatus("Connected · \(transport)")
             // Remember the first ever successful connection to a Mac so the
             // first-run onboarding hint never reappears (issue #49).

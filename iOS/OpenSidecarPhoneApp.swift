@@ -71,6 +71,15 @@ struct ReceiverScreen: View {
         model.receiver.connected && model.receiver.videoSize != .zero
     }
 
+    /// Whether the receiver surface stays on screen. A temporary interruption
+    /// (pause, recovery, a failed recovery awaiting a manual retry) keeps the
+    /// user inside the same receiver session instead of flashing back to the
+    /// idle/discovery screen between retries — the geometry the surface needs
+    /// (`videoSize`) deliberately survives a disconnect.
+    private var showsReceiverSurface: Bool {
+        model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
+    }
+
     /// Input may only leave this device while the session is genuinely live.
     /// Folded into the existing master Allow Input gate rather than added as a
     /// second one, so the established OFF-transition cleanup in `VideoView`
@@ -85,7 +94,7 @@ struct ReceiverScreen: View {
     // isn't observable from the receiver today — same as touch/pencil, the
     // Mac silently drops the input instead.)
     private var keyboardAvailable: Bool {
-        isStreaming && model.receiver.displayState == .running && model.receiver.macSupportsKeyboardWire
+        isStreaming && model.receiver.session.allowsLiveInput && model.receiver.macSupportsKeyboardWire
     }
 
     // Below the force floor → present the blocking gate (issue #135). The
@@ -111,7 +120,7 @@ struct ReceiverScreen: View {
             let effectiveSafeInsets = ControlSafeInsets.resolved(
                 proxy: proxySafeInsets, runtime: runtimeSafeInsets)
             ZStack {
-                if isStreaming {
+                if showsReceiverSurface {
                     ReceiverSafeAreaProbe { insets, notchSide in
                         runtimeSafeInsets = insets
                         physicalNotchSide = notchSide
@@ -139,12 +148,6 @@ struct ReceiverScreen: View {
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
-                    if model.receiver.displayState == .paused {
-                        VStack(spacing: 8) {
-                            Text("Display Paused")
-                                .font(.headline)
-                            Text("Resume from OpenDisplay on your Mac.")
-                                .font(.subheadline)
                         // Allow Input OFF disables ALL touch/gesture
                         // delivery to the video layer in one place — no
                         // touch reaches `VideoView` or any of its gesture
@@ -155,12 +158,10 @@ struct ReceiverScreen: View {
                         // `ReceiverControlOverlay`, a sibling view outside
                         // this hit-testing gate, so it stays reachable.
                         .allowsHitTesting(inputReachesMac)
+                    if let interruption = model.receiver.session.interruption {
+                        ReceiverInterruptionOverlay(interruption: interruption) {
+                            model.receiver.reconnectNow()
                         }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 14)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        .foregroundStyle(.white)
-                        .allowsHitTesting(false)
                     }
                     if showAnalytics {
                         VStack {
@@ -210,9 +211,9 @@ struct ReceiverScreen: View {
                 OnboardingView { onboardingDismissed = true }
             }
         }
-        .ignoresSafeArea(edges: isStreaming ? .all : [])
-        .statusBarHidden(isStreaming)
-        .persistentSystemOverlays(isStreaming ? .hidden : .automatic)
+        .ignoresSafeArea(edges: showsReceiverSurface ? .all : [])
+        .statusBarHidden(showsReceiverSurface)
+        .persistentSystemOverlays(showsReceiverSurface ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
         }
@@ -403,6 +404,48 @@ private struct ReceiverSafeAreaProbe: UIViewRepresentable {
         }
     }
 }
+
+// MARK: - Session interruption overlay
+
+/// The one interruption presentation, shared by Pause, Reconnecting and
+/// Connection Lost. Same card mechanics as the original Pause overlay — the
+/// receiver context stays visible underneath, the user is never thrown back
+/// to the idle screen, and two overlays can never stack because the session
+/// state exposes at most one interruption at a time.
+struct ReceiverInterruptionOverlay: View {
+    let interruption: ReceiverSessionInterruption
+    let onReconnect: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if interruption == .reconnecting {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .padding(.bottom, 2)
+            }
+            Text(interruption.title)
+                .font(.headline)
+            Text(interruption.message)
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+            if interruption.offersManualReconnect {
+                Button("Reconnect", action: onReconnect)
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 6)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .foregroundStyle(.white)
+        // Only the failed state has anything to tap; the others must not
+        // swallow touches the receiver surface below might still want.
+        .allowsHitTesting(interruption.offersManualReconnect)
+        .animation(.snappy(duration: 0.2), value: interruption)
+    }
+}
+
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
 struct IdleView: View {
@@ -943,12 +986,20 @@ final class ReceiverModel: ObservableObject {
         Log.info("app switched away — keeping the session, rendering paused")
         beginBackgroundAssertion()
         receiver.setRenderingPaused(true)
+        // iOS will suspend us shortly; an automatic recovery run cannot make
+        // progress there, so park it rather than let it burn its budget and
+        // land in Connection Lost while the phone was simply in a pocket.
+        receiver.setAppActive(false)
     }
 
     func sceneDidActivate() {
         endBackgroundAssertion()
         receiver.setRenderingPaused(false)
         receiver.ensureListening()
+        // Resume a parked recovery run from where it stopped. If the session
+        // is healthy this is a no-op; if it is beyond recovery the session
+        // state already settled into its failed/disconnected phase.
+        receiver.setAppActive(true)
     }
 
     func deviceWillLock() {

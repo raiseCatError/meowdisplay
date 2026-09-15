@@ -160,6 +160,7 @@ targets:
       - Mac/AutoConnectPolicy.swift
       - Shared/ConnectionRoute.swift
       - Shared/StreamListenerRestartState.swift
+      - Shared/ReceiverSessionState.swift
       - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
