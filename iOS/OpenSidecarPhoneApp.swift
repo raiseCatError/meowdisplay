@@ -217,6 +217,26 @@ struct ReceiverScreen: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
         }
+        .sheet(item: Binding(get: { model.receiver.pairingPrompt.pending },
+                             set: { if $0 == nil { model.receiver.pairingPrompt.decide(accept: false) } })) { pending in
+            VStack(spacing: 20) {
+                Text("Pair with \(pending.peerName)?").font(.title3.bold())
+                Text(pending.sas).font(.system(.largeTitle, design: .monospaced)).bold()
+                Text("Make sure this code matches the one on your Mac.")
+                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                HStack {
+                    Button("Cancel", role: .cancel) {
+                        model.receiver.pairingPrompt.decide(accept: false)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Codes Match") {
+                        model.receiver.pairingPrompt.decide(accept: true)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(28).presentationDetents([.medium])
+        }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
         }
@@ -472,6 +492,11 @@ struct IdleView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+                if let pairingStatus = receiver.pairingPrompt.status {
+                    Text(pairingStatus)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             VStack(alignment: .leading, spacing: 14) {
@@ -487,6 +512,25 @@ struct IdleView: View {
             .frame(maxWidth: 420)
             .background(Color(.secondarySystemBackground),
                         in: RoundedRectangle(cornerRadius: 16))
+
+            if !receiver.discoveredMacs.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Nearby Macs").font(.headline)
+                    ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
+                        HStack {
+                            Text(receiver.pairingMacName(result))
+                            Spacer()
+                            if receiver.pairingMacIsPaired(result) {
+                                Text("Paired").foregroundStyle(.secondary)
+                            } else {
+                                Button("Pair") { receiver.pairWithMac(result) }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
+                }
+                .padding(16).frame(maxWidth: 420)
+            }
 
             Spacer()
 
@@ -591,6 +635,7 @@ struct SettingsView: View {
     #endif
     @State private var confirmingReset = false
     @State private var confirmingFunctionTrayReset = false
+    @State private var trustRefresh = 0
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -599,8 +644,27 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Paired Macs") {
+                    let peers = TrustStore.shared.pinnedPeers()
+                    if peers.isEmpty {
+                        Text("No paired Macs").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(peers, id: \.peerID) { peer in
+                            HStack {
+                                Text(peer.displayName)
+                                Spacer()
+                                Button("Forget", role: .destructive) {
+                                    receiver.forgetPeer(peer.peerID)
+                                    receiver.pairingPrompt.cancel()
+                                    trustRefresh &+= 1
+                                }
+                            }
+                        }
+                    }
+                }
+                .id(trustRefresh)
                 Section("Status") {
-                    LabeledContent("Listening", value: "Port 9000")
+                    LabeledContent("Receiver", value: "Waiting for Mac")
                     LabeledContent("Connection",
                                    value: receiver.connected ? receiver.status : "Waiting for Mac")
                     if receiver.videoSize != .zero {

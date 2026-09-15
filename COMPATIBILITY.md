@@ -11,8 +11,8 @@ The wire protocol itself — framing, discovery, the video format, and the
 full control-message catalog — is specified in [PROTOCOL.md](PROTOCOL.md).
 This document is the companion policy for *evolving* it.
 
-> Status: **draft / not yet fully implemented.** Phase 1 (version on the wire +
-> the remote-config force lever) is in progress. Sections marked _(planned)_
+> Status: **draft / partially implemented.** Version negotiation and the pv 11
+> secure-transport boundary are implemented. Sections marked _(planned)_
 > describe target behavior.
 
 ---
@@ -52,6 +52,15 @@ handshake and sends no version, so it is defined as protocol 1. New builds send
 Each side also declares **`minPeer`** — the oldest peer `pv` it still supports.
 Both start at `1` (support everything). We only raise a `minPeer` as the second
 half of a deliberate two-phase breaking change (§6).
+
+### Secure transport boundary
+
+Protocol 11 requires prior pairing and pinned mutual TLS 1.3 for LAN/AWDL
+media. Pairing, TLS negotiation, and pin failures never fall back to the
+historical plaintext Bonjour transport. Older peers can remain usable over
+the loopback-only iOS USB binding, but require an update for wireless use.
+Bonjour names, addresses, interfaces, and TXT records are discovery hints,
+not identities.
 
 ## 3. Compatibility matrix
 

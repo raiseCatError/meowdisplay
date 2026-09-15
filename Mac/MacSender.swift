@@ -13,9 +13,10 @@
 // Wire protocol, phone -> Mac:   [4-byte big-endian length][JSON message]
 //   e.g. {"type":"hello","pixelsWide":2556,"pixelsHigh":1179,"scale":3}
 
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import VideoToolbox
 import Network
+import Security
 import CoreMedia
 import AppKit
 
@@ -83,8 +84,14 @@ struct PhoneInfo: Decodable {
 
 /// How the sender reaches the receiver. Reconnects re-dial from scratch, so
 /// a USB device that was replugged (new usbmuxd DeviceID) is found again.
+struct TLSSessionConfig {
+    let identity: SecIdentity
+    let pinnedPeerSPKI: Data
+    let peerID: String
+}
+
 enum SenderTransport {
-    case tcp(NWEndpoint)                   // WiFi (Bonjour) or -host/-port override
+    case tcp(NWEndpoint, tls: TLSSessionConfig?) // nil is allowed only for explicit local debugging
     case usb(udid: String?, port: UInt16)  // native usbmuxd dial; nil = first device
 }
 
@@ -137,6 +144,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
+    /// Pinned TLS failures are terminal trust failures, never packet-loss retries.
+    @MainActor var onTrustFailure: ((String) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
@@ -1507,7 +1516,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func connect() {
         guard !stopped else { return }
         switch transport {
-        case .tcp(let endpoint): connectTCP(endpoint)
+        case .tcp(let endpoint, let tls): connectTCP(endpoint, tls: tls)
         case .usb(let udid, let port): connectUSB(udid: udid, port: port)
         }
     }
@@ -1653,9 +1662,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         for host in candidates.prefix(16) {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
-            let params = NWParameters(tls: nil, tcp: tcp)
+            let tlsOptions: NWProtocolTLS.Options?
+            if case .tcp(_, let config?) = transport {
+                tlsOptions = TLSConfigurator.mutualTLSOptions(
+                    identity: config.identity,
+                    pinnedSPKIs: { [config.pinnedPeerSPKI] },
+                    isListener: false, queue: queue)
+            } else {
+                tlsOptions = nil
+            }
+            let allowsPlaintext: Bool
+            if case .tcp(_, nil) = transport { allowsPlaintext = true }
+            else { allowsPlaintext = false }
+            guard allowsPlaintext || tlsOptions != nil else { continue }
+            let params = NWParameters(tls: tlsOptions, tcp: tcp)
             params.prohibitedInterfaceTypes = [.wifi, .cellular]
-            let probe = NWConnection(host: host, port: 9000, using: params)
+            let probePort: NWEndpoint.Port = if case .tcp(_, .some) = transport {
+                NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!
+            } else {
+                9000
+            }
+            let probe = NWConnection(host: host, port: probePort, using: params)
             upgradeProbes.append(probe)
             probe.stateUpdateHandler = { [weak self] state in
                 guard let self, self.upgradeProbes.contains(where: { $0 === probe }) else { return }
@@ -1757,7 +1784,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return result
     }
 
-    private func connectTCP(_ endpoint: NWEndpoint) {
+    private func connectTCP(_ endpoint: NWEndpoint, tls: TLSSessionConfig?) {
         let options = NWProtocolTCP.Options()
         options.noDelay = true   // latency matters more than throughput here
         // No interface steering: macOS already ranks a Thunderbolt Bridge or
@@ -1765,7 +1792,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // there is one (field-tested: en10 chosen over en0). A WiFi-prohibited
         // pre-dial was tried and only ever hung until its timeout, adding 2s
         // to every connect. becomeReady reports which path won.
-        let params = NWParameters(tls: nil, tcp: options)
+        let tlsOptions: NWProtocolTLS.Options?
+        if let tls {
+            tlsOptions = TLSConfigurator.mutualTLSOptions(
+                identity: tls.identity,
+                pinnedSPKIs: { [tls.pinnedPeerSPKI] },
+                isListener: false, queue: queue)
+            guard tlsOptions != nil else {
+                Task { await self.status("Secure connection unavailable") }
+                return
+            }
+        } else {
+            tlsOptions = nil
+        }
+        let params = NWParameters(tls: tlsOptions, tcp: options)
         params.includePeerToPeer = true
         let conn = NWConnection(to: endpoint, using: params)
         connection = conn
@@ -1790,6 +1830,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             case .failed(let error):
                 Log.info("connection failed: \(error)")
                 self.connectionReady = false
+                if tls != nil, Self.isTLSFailure(error) {
+                    self.reportTrustFailure()
+                    return
+                }
                 if case .posix(let code) = error, code == .ECONNREFUSED {
                     self.dialRefused()
                 }
@@ -1803,6 +1847,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // waiting as failure and poll by reconnecting.
                 Log.info("connection waiting: \(error) — will retry")
                 self.connectionReady = false
+                if tls != nil, Self.isTLSFailure(error) {
+                    self.reportTrustFailure()
+                    return
+                }
                 // Read the queue-confined flag here (handler runs on queue),
                 // not inside the detached status Task.
                 let text = self.awaitingWake
@@ -1817,6 +1865,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         conn.start(queue: queue)
+    }
+
+    private static func isTLSFailure(_ error: NWError) -> Bool {
+        if case .tls = error { return true }
+        return false
+    }
+
+    private func reportTrustFailure() {
+        guard !stopped else { return }
+        stopped = true
+        connection?.cancel()
+        Task { @MainActor in
+            self.onTrustFailure?("OpenDisplay could not verify this device. Forget it and pair again if its identity was reset.")
+        }
     }
 
     /// Dial through macOS's built-in usbmuxd — no external tunnel needed.
@@ -2068,12 +2130,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendCursor(_ fields: String) {
         cursorSeq &+= 1
         let message = "{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}"
+        let udpAvailable = cursorConnection != nil && cursorConnectionReady
         if let cursorConnection, cursorConnectionReady {
             cursorConnection.send(content: Data(message.utf8),
                                   completion: .contentProcessed { _ in })
-            if cursorChannelConfirmed { return }
         }
-        sendJSONFrame(message)
+        if CursorTransportPolicy.shouldSendOnPrimary(
+            udpAvailable: udpAvailable, udpConfirmed: cursorChannelConfirmed) {
+            sendJSONFrame(message)
+        }
     }
 
     /// Dial the receiver's UDP cursor port (must be called on `queue`). WiFi
@@ -2315,13 +2380,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
+                if case .tcp(_, let tls?) = transport, info.id != tls.peerID {
+                    Log.info("SECURITY: authenticated key claimed unexpected peer id")
+                    stopped = true
+                    connection?.cancel()
+                    Task { @MainActor in
+                        self.onTrustFailure?("Device identity changed. Forget the device and pair again if you intentionally reset it.")
+                    }
+                    return
+                }
                 let previous = lastHello
                 lastHello = info
                 // A fresh dial classifies before the hello names the device —
                 // now that it has, decide again (see the comment on the func).
                 if let conn = connection { refreshDirectLinkClassification(for: conn) }
                 Task { @MainActor in self.onHello?(info) }
-                if let port = info.cursorPort {
+                let secureNetworkSession: Bool = if case .tcp(_, .some) = transport { true } else { false }
+                if CursorTransportPolicy.shouldOpenUDP(
+                    isSecureNetworkSession: secureNetworkSession,
+                    advertisedPort: info.cursorPort), let port = info.cursorPort {
                     openCursorChannel(port: port)
                 } else {
                     closeCursorChannel()

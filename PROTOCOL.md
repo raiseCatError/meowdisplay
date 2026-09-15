@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 10** &nbsp;|&nbsp; Status: **normative** for `pv <= 10`
+**Protocol version (`pv`): 11** &nbsp;|&nbsp; Status: **normative** for `pv <= 11`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -39,7 +39,7 @@ caused by third-party clients should be reported to those projects.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
-Every requirement applies to `pv` 10 unless a different version is called
+Every requirement applies to `pv` 11 unless a different version is called
 out. "The official apps" means the Mac sender and iOS receiver in this
 repository; their behavior is cited as illustration, not as requirement,
 unless marked normative.
@@ -95,6 +95,17 @@ The receiver advertises a Bonjour (mDNS/DNS-SD) service:
 Senders MUST tolerate an absent TXT record and absent keys (pre-`pv` 2
 receivers advertise neither).
 
+At pv 11 this service resolves to TCP port 9001 and carries TLS 1.3. Both
+peers present persistent self-signed P-256 certificates and verify the leaf
+SubjectPublicKeyInfo against their stored peer pin. A failed handshake,
+missing pin, or changed key is terminal and MUST NOT retry as plaintext.
+
+An unpaired pv 11 receiver also advertises `_opendisplay-pair._tcp` on TCP
+port 9002. It conveys discovery, not trust, and carries no secret.
+The Mac sender advertises `_opendisplay-mac-pair._tcp` while running so the
+receiver can present the product's primary "nearby Mac → Pair" flow. Both
+pairing advertisements carry only `id` and `pv` discovery metadata.
+
 ### 2.2 USB (Apple devices)
 
 For iPhones/iPads on a cable, the sender dials through **usbmuxd**, the
@@ -107,6 +118,33 @@ and the protocol proceeds exactly as over WiFi.
 Bonjour plays no role on this path. The official receiver classifies a
 connection arriving from loopback as "USB" purely for its stats display;
 this has no protocol significance.
+
+At pv 11, port 9000 is loopback-only on iOS and is therefore reachable via
+usbmux but not LAN/AWDL. It remains plaintext under the physical-channel
+assumption that the user authorized the attached device. Port 9002 can be
+reached through the same tunnel to create exactly the same peer pins without
+manual SAS comparison. There is no separate USB trust record.
+
+### 2.3 First pairing (pv 11)
+
+Each side generates a fresh P-256 ECDH key and 32-byte nonce. Pairing hello
+messages contain the protocol version, stable device ID, display name,
+persistent TLS identity SPKI, ephemeral public key, and nonce. The canonical
+transcript is role-ordered and length-prefixes every field.
+
+Both sides compute P-256 ECDH and HKDF-SHA256 with the transcript hash as
+salt and a protocol-specific domain. A separately domain-separated value is
+reduced to a six-digit SAS, displayed as `123 456`. The SAS authenticates the
+exchange; it is never a password or encryption key. After the users confirm
+the match on both devices, each sends an HMAC-SHA256 confirmation under a
+role-specific HKDF key. The peer pin is saved only after local acceptance and
+a valid accepted peer confirmation.
+
+Changing any identity, ephemeral key, nonce, role, name, ID, or version
+changes the transcript and SAS. Existing peer IDs with different SPKIs are
+never overwritten; recovery requires Forget Device. Messages use the normal
+big-endian length framing, are limited to 64 KiB, and are invalid on the
+media listener.
 
 ## 3. Framing
 
@@ -872,3 +910,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-14 | `pv` 4: `keyboard` message family (native keyboard input, M4) |
 | 2026-09-14 | `pv` 5: `pointer` message family; `pv` 6: adaptive receiver controls and modifier shortcuts |
 | 2026-09-14 | `pv` 7: receiver mode requests and Mac-authoritative Mirror/Extend state |
+| 2026-09-15 | `pv` 11: transcript-authenticated pairing and pinned mutual TLS 1.3 for LAN/AWDL |

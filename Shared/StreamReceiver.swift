@@ -19,6 +19,7 @@ import CoreMedia
 import VideoToolbox
 import QuartzCore
 import ImageIO
+import Combine
 
 /// One-second window of pipeline health, plus per-frame timing samples for
 /// the performance overlay graph.
@@ -124,6 +125,12 @@ final class StreamReceiver: ObservableObject {
     var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
 
     private var listener: NWListener?
+    private var tlsListener: NWListener?
+    private var pairingListener: NWListener?
+    let pairingPrompt = PairingPromptModel()
+    private var pairingObservation: AnyCancellable?
+    @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
+    private var macPairingBrowser: NWBrowser?
     private var listenerHealthy = false
     private var listenerRestartState = StreamListenerRestartState()
     private var connection: NWConnection?
@@ -309,6 +316,14 @@ final class StreamReceiver: ObservableObject {
                                   domain: nil, txtRecord: txt)
     }
 
+    private var advertisedPairingService: NWListener.Service {
+        var txt = NWTXTRecord()
+        txt["id"] = Self.installID
+        txt["pv"] = String(WireProtocol.version)
+        return NWListener.Service(name: serviceName, type: "_opendisplay-pair._tcp",
+                                  domain: nil, txtRecord: txt)
+    }
+
     /// Update the advertised name and re-publish if already listening.
     func setServiceName(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -317,7 +332,8 @@ final class StreamReceiver: ObservableObject {
             guard resolved != self.serviceName else { return }
             self.serviceName = resolved
             if self.listener != nil {
-                self.listener?.service = self.advertisedService
+                self.tlsListener?.service = self.advertisedService
+                self.pairingListener?.service = self.advertisedPairingService
                 Log.info("re-advertising as \"\(resolved)\"")
             }
         }
@@ -371,6 +387,12 @@ final class StreamReceiver: ObservableObject {
         self.fallbackServiceName = fallbackServiceName
         self.maxEncodeWide = maxEncodeWide
         self.maxEncodeHigh = maxEncodeHigh
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+        }
         displayLayer.videoGravity = .resizeAspect
     }
 
@@ -378,6 +400,10 @@ final class StreamReceiver: ObservableObject {
         self.port = port
         queue.async {
             self.startListener()
+            TrustStore.shared.refreshSnapshot()
+            self.startTLSListener()
+            self.startPairingListener()
+            self.startMacPairingBrowser()
             self.armLivenessTimers()
         }
     }
@@ -394,9 +420,44 @@ final class StreamReceiver: ObservableObject {
             self.addrWatchTimer?.cancel(); self.addrWatchTimer = nil
             self.pendingConnections.forEach { $0.cancel() }
             self.pendingConnections.removeAll()
+            self.macPairingBrowser?.cancel(); self.macPairingBrowser = nil
         }
         closeSession(announcing: WireMessage.closing, status: "Stopped",
                      completion: completion)
+    }
+
+    func forgetPeer(_ peerID: String) {
+        TrustStore.shared.forget(peerID: peerID)
+        queue.async {
+            // A live TLS session may have authenticated before the pin was
+            // removed. End it immediately so forgetting takes effect now.
+            self.connection?.cancel()
+            self.connection = nil
+            self.setConnected(false, reason: .explicitDisconnect)
+        }
+    }
+
+    func pairWithMac(_ result: NWBrowser.Result) {
+        let connection = NWConnection(to: result.endpoint, using: .tcp)
+        Task {
+            defer { connection.cancel() }
+            do {
+                let paired = try await PairingNetwork.runInitiator(
+                    connection: connection, localID: Self.installID,
+                    localName: serviceName, prompt: pairingPrompt)
+                await pairingPrompt.finish("Paired with \(paired.peerName)")
+            } catch { await pairingPrompt.finish(error.localizedDescription) }
+        }
+    }
+
+    func pairingMacName(_ result: NWBrowser.Result) -> String {
+        if case .service(let name, _, _, _) = result.endpoint { return name }
+        return "Mac"
+    }
+
+    func pairingMacIsPaired(_ result: NWBrowser.Result) -> Bool {
+        guard case .bonjour(let txt) = result.metadata, let id = txt["id"] else { return false }
+        return TrustStore.shared.hasPin(peerID: id)
     }
 
     /// Recreate the listener if it isn't healthy — called when the app
@@ -483,6 +544,8 @@ final class StreamReceiver: ObservableObject {
                 self.listener?.newConnectionHandler = nil
                 self.listener?.cancel()
                 self.listener = nil
+                self.tlsListener?.cancel(); self.tlsListener = nil
+                self.pairingListener?.cancel(); self.pairingListener = nil
                 self.listenerHealthy = false
                 self.listenerRestartState.invalidate()
                 self.stopCursorListener()
@@ -664,7 +727,9 @@ final class StreamReceiver: ObservableObject {
             params.allowLocalEndpointReuse = true
             params.includePeerToPeer = true
             params.serviceClass = .interactiveVideo
-            newListener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+            params.requiredLocalEndpoint = .hostPort(
+                host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+            newListener = try NWListener(using: params)
         } catch {
             listenerRestartState.listenerStopped()
             Log.info("listener could not be created: \(error)")
@@ -675,7 +740,8 @@ final class StreamReceiver: ObservableObject {
         listener = newListener
         // Advertise on the local network so the Mac can discover us for WiFi
         // mode (USB/usbmux connects straight to the port and ignores this).
-        newListener.service = advertisedService
+        // Plaintext media is deliberately loopback-only for usbmux. Bonjour
+        // advertises the separate pinned-TLS listener below.
         newListener.newConnectionHandler = { [weak self] conn in
             guard let self, self.listener === newListener else {
                 conn.cancel()
@@ -731,7 +797,7 @@ final class StreamReceiver: ObservableObject {
             case .ready:
                 self.listenerRestartState.listenerReady()
                 self.listenerHealthy = true
-                self.setStatus("Listening on :\(self.port)")
+                self.setStatus("Waiting for Mac")
             case .waiting(let error):
                 // Network.framework owns transient waiting states and may
                 // recover without releasing/rebinding the fixed port.
@@ -750,6 +816,134 @@ final class StreamReceiver: ObservableObject {
         }
         newListener.start(queue: queue)
         startCursorListener()
+    }
+
+    private func startTLSListener() {
+        guard tlsListener == nil, let identity = TrustStore.shared.ownIdentity(),
+              let tls = TLSConfigurator.mutualTLSOptions(
+                identity: identity,
+                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                isListener: true, queue: queue) else {
+            Log.info("secure listener unavailable — refusing network media")
+            return
+        }
+        do {
+            let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
+            let params = NWParameters(tls: tls, tcp: tcp)
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            params.serviceClass = .interactiveVideo
+            let listener = try NWListener(using: params,
+                on: NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!)
+            tlsListener = listener
+            listener.service = advertisedService
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                guard let self, self.tlsListener === listener else { connection.cancel(); return }
+                self.adopt(connection)
+            }
+            listener.stateUpdateHandler = { state in
+                if case .failed(let error) = state { Log.info("secure listener failed: \(error)") }
+            }
+            listener.start(queue: queue)
+        } catch {
+            Log.info("secure listener could not be created: \(error)")
+        }
+    }
+
+    /// Hops onto `queue` to rebuild the TLS listener so its pinned-peer
+    /// verification snapshot picks up the peer that just finished pairing.
+    /// Kept as its own method (rather than a closure inlined at the call
+    /// site) so the pairing-listener's completion `Task` can trigger it
+    /// without itself capturing `self` into a second escaping closure.
+    private func scheduleTLSListenerRefresh() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.tlsListener?.cancel(); self.tlsListener = nil
+            self.startTLSListener()
+        }
+    }
+
+    private func startPairingListener() {
+        guard pairingListener == nil else { return }
+        do {
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: params,
+                on: NWEndpoint.Port(rawValue: WireCrypto.pairingPort)!)
+            pairingListener = listener
+            listener.service = advertisedPairingService
+            #if DEBUG
+            Log.info("pairing listener starting: type=_opendisplay-pair._tcp port=\(WireCrypto.pairingPort) id=\(Self.installID) peerToPeer=true")
+            #endif
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                guard let self, self.pairingListener === listener else { connection.cancel(); return }
+                let localName = self.serviceName
+                let prompt = self.pairingPrompt
+                let autoConfirm = Self.isLoopback(connection.endpoint)
+                Task { [weak self] in
+                    defer { connection.cancel() }
+                    do {
+                        let paired = try await PairingNetwork.runResponder(
+                            connection: connection, localID: Self.installID,
+                            localName: localName, prompt: prompt,
+                            autoConfirm: autoConfirm)
+                        await prompt.finish("Paired with \(paired.peerName)")
+                        self?.scheduleTLSListenerRefresh()
+                    } catch {
+                        await prompt.finish(error.localizedDescription)
+                    }
+                }
+            }
+            listener.stateUpdateHandler = { state in
+                #if DEBUG
+                switch state {
+                case .ready: Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
+                case .failed(let error): Log.info("pairing listener failed: \(error)")
+                case .waiting(let error): Log.info("pairing listener waiting: \(error)")
+                case .cancelled: Log.info("pairing listener cancelled")
+                default: break
+                }
+                #endif
+            }
+            listener.start(queue: queue)
+        } catch {
+            Log.info("pairing listener could not be created: \(error)")
+        }
+    }
+
+    private func startMacPairingBrowser() {
+        guard macPairingBrowser == nil else { return }
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(
+            type: "_opendisplay-mac-pair._tcp", domain: nil), using: parameters)
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            DispatchQueue.main.async {
+                self?.discoveredMacs = Array(results)
+                #if DEBUG
+                Log.info("Mac pairing browser changed: results=\(results.count)")
+                for result in results {
+                    let id: String?
+                    if case .bonjour(let txt) = result.metadata { id = txt["id"] } else { id = nil }
+                    Log.info("Mac pairing browser result: endpoint=\(result.endpoint) id=\(id ?? "missing")")
+                }
+                #endif
+            }
+        }
+        browser.stateUpdateHandler = { state in
+            #if DEBUG
+            Log.info("Mac pairing browser state: \(state)")
+            #endif
+        }
+        browser.start(queue: queue)
+        macPairingBrowser = browser
+    }
+
+    private static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        let peer = String(describing: endpoint).lowercased()
+        return peer.hasPrefix("127.") || peer.hasPrefix("::1")
+            || peer.hasPrefix("[::1]") || peer.hasPrefix("localhost")
     }
 
     /// Make `conn` the session: replace any existing connection and reset
@@ -1887,7 +2081,7 @@ final class StreamReceiver: ObservableObject {
             mutateSession { $0.connectionLost(reason: classified) }
             if sessionState.phase != .reconnecting {
                 setStatus(wasConnected && classified != .explicitDisconnect
-                          ? "Connection lost" : "Listening on :\(port)")
+            ? "Connection lost" : "Waiting for Mac")
             }
         }
         else {

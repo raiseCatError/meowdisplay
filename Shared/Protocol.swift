@@ -11,7 +11,11 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 10
+    static let version = 11
+
+    /// First version that requires pinned mutual TLS for LAN/AWDL media and
+    /// supports the transcript-authenticated local pairing protocol.
+    static let securePairingWireVersion = 11
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
@@ -83,6 +87,28 @@ enum WireMessage {
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
     static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
     static let nativeAppGesture = "nativeAppGesture" // receiver -> Mac: continuous magnify/rotate lifecycle
+    static let unpair = "unpair"
+}
+
+enum WireCrypto {
+    static let tlsPort: UInt16 = 9001
+    static let pairingPort: UInt16 = 9002
+    static let maxPairingFrameBytes = 64 * 1024
+    static let identityKeychainLabel = "com.opendisplay.identity.v1"
+    static let pinKeychainService = "com.opendisplay.trust.v1"
+    static let installIDAccount = "installID"
+    static let fingerprintHKDFSalt = Data("OpenDisplay-TLS-Pairing-v1".utf8)
+    static let fingerprintHKDFInfo = Data("fingerprint".utf8)
+}
+
+enum CursorTransportPolicy {
+    static func shouldOpenUDP(isSecureNetworkSession: Bool, advertisedPort: Int?) -> Bool {
+        !isSecureNetworkSession && advertisedPort.map { $0 > 0 && $0 <= Int(UInt16.max) } == true
+    }
+
+    static func shouldSendOnPrimary(udpAvailable: Bool, udpConfirmed: Bool) -> Bool {
+        !udpAvailable || !udpConfirmed
+    }
 }
 
 enum NativeAppGestureKind: String, Codable, CaseIterable, Hashable {

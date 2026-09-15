@@ -148,6 +148,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     // after a failover — the name is then the only link between the session
     // and its service row.
     var wifiServiceName: String?
+    var usbPairingAttempted = false
 
     // The actual established route, reported from NWConnection.currentPath.
     // Nil while dialing so the UI never presents a requested target as the
@@ -197,6 +198,9 @@ final class SenderController: ObservableObject {
     private var suppressModeRestart = false
     @Published var discovered: [NWBrowser.Result] = []
     @Published var usbDevices: [UsbmuxDevice] = []
+    let pairingPrompt = PairingPromptModel()
+    @Published var pairingMessage: String?
+    private var pairingObservation: AnyCancellable?
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
     // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
     @Published var host = UserDefaults.standard.string(forKey: "host") ?? "127.0.0.1"
@@ -279,6 +283,9 @@ final class SenderController: ObservableObject {
     }
 
     private var browser: NWBrowser?
+    private var receiverPairingBrowser: NWBrowser?
+    private var receiverPairingResults: [NWBrowser.Result] = []
+    private var pairingListener: NWListener?
     private var usbWatcher: UsbmuxDeviceWatcher?
 
     // Connection policy — one session per physical device, and the cable
@@ -317,8 +324,14 @@ final class SenderController: ObservableObject {
         || UserDefaults.standard.bool(forKey: "autostart")
 
     init() {
+        _ = TrustStore.shared.ownIdentity()
+        pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         persistKnownIdentifiers()
         startBrowsing()
+        startReceiverPairingBrowsing()
+        startPairingListener()
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
             let detached = Set(self.usbDevices.map(\.udid)).subtracting(devices.map(\.udid))
@@ -347,6 +360,89 @@ final class SenderController: ObservableObject {
         self.browser = browser
     }
 
+    private func startPairingListener() {
+        guard let localID = TrustStore.shared.installID() else {
+            Log.info("pairing listener not started: local Keychain identity/install ID unavailable")
+            pairingMessage = "Pairing listener unavailable"
+            return
+        }
+        do {
+            let parameters = NWParameters.tcp
+            parameters.includePeerToPeer = true
+            let listener = try NWListener(using: parameters)
+            var txt = NWTXTRecord()
+            txt["id"] = localID
+            txt["pv"] = String(WireProtocol.version)
+            listener.service = NWListener.Service(
+                name: Host.current().localizedName ?? "Mac",
+                type: "_opendisplay-mac-pair._tcp", txtRecord: txt)
+            pairingListener = listener
+            #if DEBUG
+            Log.info("pairing listener starting: type=_opendisplay-mac-pair._tcp id=\(txt["id"] ?? "missing") peerToPeer=true")
+            #endif
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, self.pairingListener === listener,
+                          TrustStore.shared.installID() == localID else {
+                        connection.cancel(); return
+                    }
+                    defer { connection.cancel() }
+                    do {
+                        let paired = try await PairingNetwork.runResponder(
+                            connection: connection, localID: localID,
+                            localName: Host.current().localizedName ?? "Mac",
+                            prompt: self.pairingPrompt)
+                        self.pairingMessage = "Paired with \(paired.peerName)"
+                        if let result = self.discovered.first(where: { self.txtID(of: $0) == paired.peerID }) {
+                            self.connect(to: .wifi(result), userInitiated: true)
+                        }
+                    } catch { self.pairingMessage = error.localizedDescription }
+                }
+            }
+            listener.stateUpdateHandler = { state in
+                #if DEBUG
+                switch state {
+                case .ready:
+                    Log.info("pairing listener ready: endpoint=\(String(describing: listener.port)) type=_opendisplay-mac-pair._tcp")
+                case .failed(let error): Log.info("pairing listener failed: \(error)")
+                case .waiting(let error): Log.info("pairing listener waiting: \(error)")
+                case .cancelled: Log.info("pairing listener cancelled")
+                default: break
+                }
+                #endif
+            }
+            listener.start(queue: .main)
+        } catch {
+            pairingMessage = "Pairing listener unavailable"
+        }
+    }
+
+    private func startReceiverPairingBrowsing() {
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(
+            type: "_opendisplay-pair._tcp", domain: nil), using: parameters)
+        browser.browseResultsChangedHandler = { [weak self] results, changes in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.receiverPairingResults = Array(results)
+                #if DEBUG
+                Log.info("pairing browser changed: results=\(results.count) changes=\(changes.count)")
+                for result in results {
+                    Log.info("pairing browser result: endpoint=\(result.endpoint) id=\(self.txtID(of: result) ?? "missing")")
+                }
+                #endif
+            }
+        }
+        browser.stateUpdateHandler = { state in
+            #if DEBUG
+            Log.info("pairing browser state: \(state)")
+            #endif
+        }
+        browser.start(queue: .main)
+        receiverPairingBrowser = browser
+    }
+
     // MARK: - Physical-device identity
 
     private func serviceName(of result: NWBrowser.Result) -> String? {
@@ -356,6 +452,95 @@ final class SenderController: ObservableObject {
 
     private func txtID(of result: NWBrowser.Result) -> String? {
         if case .bonjour(let txt) = result.metadata { return txt["id"] }
+        return nil
+    }
+
+    func txtIDForUI(_ result: NWBrowser.Result) -> String? { txtID(of: result) }
+
+    func isPaired(_ result: NWBrowser.Result) -> Bool {
+        txtID(of: result).map { TrustStore.shared.hasPin(peerID: $0) } ?? false
+    }
+
+    private func secureWiFiTransport(for result: NWBrowser.Result,
+                                     knownPeerID: String? = nil) -> SenderTransport? {
+        guard let peerID = txtID(of: result) ?? knownPeerID,
+              let pin = TrustStore.shared.pin(peerID: peerID),
+              let identity = TrustStore.shared.ownIdentity() else { return nil }
+        return .tcp(result.endpoint,
+                    tls: TLSSessionConfig(identity: identity,
+                                          pinnedPeerSPKI: pin,
+                                          peerID: peerID))
+    }
+
+    func pair(_ result: NWBrowser.Result) {
+        if case .bonjour(let txt) = result.metadata,
+           let raw = txt["pv"], let version = Int(raw),
+           version < WireProtocol.securePairingWireVersion {
+            pairingMessage = "Update OpenDisplay on this device to pair securely"
+            return
+        }
+        guard let localID = TrustStore.shared.installID() else {
+            Log.info("pair unavailable: local Keychain identity/install ID unavailable")
+            pairingMessage = "Pairing unavailable — secure identity could not be loaded"
+            return
+        }
+        pairingMessage = "Starting pairing…"
+        let expected = txtID(of: result)
+        guard expected != nil else {
+            Log.info("pair unavailable: normal discovery result has no stable TXT id endpoint=\(result.endpoint)")
+            pairingMessage = "Pairing unavailable — device identity is missing"
+            return
+        }
+        Task { @MainActor in
+            let endpoint = await waitForPairingEndpoint(stableID: expected, timeout: 3)
+            guard let endpoint else {
+                Log.info("pair unavailable: no _opendisplay-pair._tcp result matched id=\(expected ?? "missing")")
+                pairingMessage = "Pairing unavailable — pairing service was not found"
+                return
+            }
+            let connection = NWConnection(to: endpoint, using: .tcp)
+            defer { connection.cancel() }
+            do {
+                let paired = try await PairingNetwork.runInitiator(
+                    connection: connection, localID: localID,
+                    localName: Host.current().localizedName ?? "Mac",
+                    prompt: pairingPrompt, expectedPeerID: expected)
+                pairingMessage = "Paired with \(paired.peerName)"
+                objectWillChange.send()
+                connect(to: .wifi(result), userInitiated: true)
+            } catch {
+                pairingMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func forgetPairing(peerID: String) {
+        TrustStore.shared.forget(peerID: peerID)
+        for session in sessions where session.deviceID == peerID { end(session) }
+        pairingMessage = "Device forgotten"
+        objectWillChange.send()
+    }
+
+    private func pairingEndpoint(stableID: String?) -> NWEndpoint? {
+        let records = receiverPairingResults.compactMap { result -> PairingServiceRecord<NWEndpoint>? in
+            guard let id = txtID(of: result) else { return nil }
+            return PairingServiceRecord(stableID: id,
+                displayName: serviceName(of: result) ?? "Device", endpoint: result.endpoint)
+        }
+        return PairingServiceAssociation.endpoint(forStableID: stableID, in: records)
+    }
+
+    private func waitForPairingEndpoint(stableID: String?, timeout: TimeInterval) async -> NWEndpoint? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let endpoint = pairingEndpoint(stableID: stableID) {
+                #if DEBUG
+                Log.info("paired discovery association: normal id=\(stableID ?? "missing") endpoint=\(endpoint)")
+                #endif
+                return endpoint
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        } while Date() < deadline
         return nil
     }
 
@@ -533,7 +718,11 @@ final class SenderController: ObservableObject {
             Log.info("cable detached for \(session.id) — failing over to WiFi")
             session.onUSB = false
             session.wifiServiceName = serviceName(of: result)
-            session.sender.switchTransport(to: .tcp(result.endpoint))
+            guard let transport = secureWiFiTransport(for: result, knownPeerID: session.deviceID) else {
+                session.status = "Pair this device before connecting wirelessly"
+                return
+            }
+            session.sender.switchTransport(to: transport)
         }
     }
 
@@ -548,7 +737,11 @@ final class SenderController: ObservableObject {
             Log.info("WiFi appeared for detached USB session \(session.id) — failing over")
             session.onUSB = false
             session.wifiServiceName = serviceName(of: result)
-            session.sender.switchTransport(to: .tcp(result.endpoint))
+            guard let transport = secureWiFiTransport(for: result, knownPeerID: session.deviceID) else {
+                session.status = "Pair this device before connecting wirelessly"
+                continue
+            }
+            session.sender.switchTransport(to: transport)
         }
     }
 
@@ -726,12 +919,13 @@ final class SenderController: ObservableObject {
             if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
                 // Manual override: dial a plain TCP endpoint instead of usbmuxd.
                 transport = .tcp(.hostPort(host: NWEndpoint.Host(host),
-                                           port: NWEndpoint.Port(rawValue: portNum)!))
+                                           port: NWEndpoint.Port(rawValue: portNum)!), tls: nil)
             } else {
                 transport = .usb(udid: udid, port: portNum)
             }
         case .wifi(let result):
-            transport = .tcp(result.endpoint)
+            guard let secure = secureWiFiTransport(for: result) else { return }
+            transport = secure
         }
 
         let name = label(for: target)
@@ -782,6 +976,33 @@ final class SenderController: ObservableObject {
             }
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
+            }
+            if session.onUSB, !session.usbPairingAttempted,
+               let udid = session.usbUDID, let peerID = info.id,
+               info.protocolVersion >= WireProtocol.securePairingWireVersion {
+                session.usbPairingAttempted = true
+                Task { [weak self, weak session] in
+                    guard let self, let session else { return }
+                    do {
+                        let connection = try await Usbmux.dial(
+                            udid: udid, port: WireCrypto.pairingPort,
+                            queue: DispatchQueue(label: "pairing.usb"))
+                        defer { connection.cancel() }
+                        guard let localID = TrustStore.shared.installID() else {
+                            throw PairingError.invalidKey
+                        }
+                        let paired = try await PairingNetwork.runInitiator(
+                            connection: connection, localID: localID,
+                            localName: Host.current().localizedName ?? "Mac",
+                            prompt: self.pairingPrompt, expectedPeerID: peerID,
+                            autoConfirm: true)
+                        guard self.owns(session) else { return }
+                        self.pairingMessage = "Paired with \(paired.peerName)"
+                    } catch {
+                        guard self.owns(session) else { return }
+                        self.pairingMessage = "USB pairing failed: \(error.localizedDescription)"
+                    }
+                }
             }
             self.dedupeSessions()
             // The learned identity may reveal that this WiFi session's device
@@ -841,6 +1062,11 @@ final class SenderController: ObservableObject {
             Log.info("session \(session.id) closed by the receiver — ending")
             self.autoConnectPolicy.suppress(self.identifiers(for: session))
             self.end(session)
+        }
+        sender.onTrustFailure = { [weak self, weak session] message in
+            guard let self, let session, self.owns(session) else { return }
+            session.failed = true
+            session.status = message
         }
         sessions.append(session)
         Task {
@@ -994,6 +1220,15 @@ final class SenderController: ObservableObject {
         }
         return session(for: entry.id)   // dangling-session rows
     }
+
+    func pairedPeerID(for entry: DeviceEntry) -> String? {
+        if let id = session(for: entry)?.deviceID, TrustStore.shared.hasPin(peerID: id) { return id }
+        if let target = entry.wifiTarget, case .wifi(let result) = target,
+           let id = txtID(of: result), TrustStore.shared.hasPin(peerID: id) { return id }
+        if let target = entry.usbTarget, case .usb(let udid?) = target,
+           let id = installIDByUDID[udid], TrustStore.shared.hasPin(peerID: id) { return id }
+        return nil
+    }
 }
 
 /// Polls the permission states the app depends on so the UI can surface
@@ -1070,6 +1305,9 @@ struct ContentView: View {
             // Settings
             Form {
                 Section("Devices") {
+                    if let message = controller.pairingMessage {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                    }
                     if controller.deviceEntries.isEmpty {
                         Text("No devices found — plug one in via USB, or open the OpenDisplay app on a device on this WiFi network.")
                             .font(.caption)
@@ -1082,6 +1320,13 @@ struct ContentView: View {
                             // often before lockdown resolved the real name.
                             SessionRow(title: entry.name, session: session,
                                        controller: controller)
+                                .contextMenu {
+                                    if let peerID = controller.pairedPeerID(for: entry) {
+                                        Button("Forget Device", role: .destructive) {
+                                            controller.forgetPairing(peerID: peerID)
+                                        }
+                                    }
+                                }
                         } else {
                             HStack(alignment: .firstTextBaseline) {
                                 Circle()
@@ -1095,10 +1340,23 @@ struct ContentView: View {
                                 }
                                 Spacer()
                                 if let target = entry.preferredTarget {
-                                    Button("Connect") {
-                                        controller.connect(to: target, userInitiated: true)
+                                    if case .wifi(let result) = target,
+                                       !controller.isPaired(result) {
+                                        Button("Pair") { controller.pair(result) }
+                                            .controlSize(.small)
+                                    } else {
+                                        Button("Connect") {
+                                            controller.connect(to: target, userInitiated: true)
+                                        }
+                                        .controlSize(.small)
                                     }
-                                    .controlSize(.small)
+                                }
+                            }
+                            .contextMenu {
+                                if let peerID = controller.pairedPeerID(for: entry) {
+                                    Button("Forget Device", role: .destructive) {
+                                        controller.forgetPairing(peerID: peerID)
+                                    }
                                 }
                             }
                         }
@@ -1223,6 +1481,21 @@ struct ContentView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+        }
+        .sheet(item: Binding(get: { controller.pairingPrompt.pending },
+                             set: { if $0 == nil { controller.pairingPrompt.decide(accept: false) } })) { pending in
+            VStack(spacing: 16) {
+                Text("Pair with \(pending.peerName)?").font(.headline)
+                Text(pending.sas).font(.system(.title, design: .monospaced)).bold()
+                Text("Confirm only if this code matches on both devices.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Cancel", role: .cancel) { controller.pairingPrompt.decide(accept: false) }
+                    Button("Codes Match") { controller.pairingPrompt.decide(accept: true) }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24).frame(minWidth: 360)
         }
         .frame(width: 440, height: 540)
     }
