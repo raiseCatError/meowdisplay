@@ -258,6 +258,7 @@ Coordinates use the conventions of section 7.
 | `pointer` | pv 5 | `action`, plus fields per `action` (below) | Pointer/click gestures |
 | `displayModeRequest` | pv 7 | `mode` (`mirror` or `extend`) | Request a Mac-authoritative mode transition |
 | `allowInputRequest` | pv 8 | `allowed` (bool) | Request the Mac-authoritative input gate state |
+| `videoRequest` | pv 9 | `enabled` (bool) | Request Mac video capture/encode/transmission on or off |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -470,6 +471,7 @@ section 4.
 | `inputReset` | pv 6 | none | Clear the receiver's local latched/temporary modifier state |
 | `displayModeState` | pv 7 | `mode` (`mirror` or `extend`) | Mac-authoritative confirmed capture mode |
 | `allowInputState` | pv 8 | `allowed` (bool) | Mac-authoritative input gate state |
+| `videoState` | pv 9 | `enabled` (bool), `width`, `height` | Mac-authoritative video state and retained mapping geometry |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -515,6 +517,16 @@ mode it did not enter. A mode switch normally rebuilds the sender's session,
 so the confirming `displayModeState` legitimately arrives on the *next*
 connection; receivers SHOULD therefore keep a request outstanding across that
 reconnect, and SHOULD retire it on a local deadline rather than wait forever.
+
+**`videoRequest` / `videoState`** (pv 9) control video production without
+changing the logical session. When disabled, the sender stops capture,
+encoding, and video-frame transmission but keeps the connection and all input
+messages active. `videoState.width` / `height` carry the last or intended
+encoded dimensions so absolute input remains mapped to the same display even
+when no decoder format exists. A receiver MUST discard the previously
+presented frame when it receives `enabled: false`. Re-enabling starts a fresh
+encoder stream with SPS/PPS and an IDR. Receivers MUST NOT send `videoRequest`
+below pv 9; senders keep video enabled for older receivers.
 
 **`cursorImg`** delivers the current cursor sprite: `png` is the base64 of
 a PNG (kept under 24000 bytes pre-encoding, see section 4); `nw`, `nh` are
@@ -789,6 +801,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 6 | Receiver control-tray preference fields/messages; modifier down/up and modified atomic keyboard presses |
 | 7 | Explicit `displayModeRequest` / authoritative `displayModeState` synchronization |
 | 8 | Mac-authoritative `allowInputRequest` / `allowInputState` synchronization |
+| 9 | Session-preserving `videoRequest` / `videoState`, including retained input-mapping geometry |
 
 ---
 

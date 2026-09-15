@@ -134,6 +134,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// — Mac remains authoritative and broadcasts the result to every
     /// connected receiver, this one included).
     @MainActor var onAllowInputRequest: ((Bool) -> Void)?
+    /// Receiver video requests are handed to the controller, which persists
+    /// the Mac-authoritative setting and broadcasts it to every session.
+    @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
@@ -146,7 +149,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // can migrate a live session between transports via switchTransport.
     private var transport: SenderTransport
     private let endpointName: String
-    private let mode: CaptureMode
+    private var mode: CaptureMode
     private let quality: StreamQuality
     // Stable per-device serial for the virtual display, so macOS can tell
     // multiple OpenDisplay monitors apart and persist their arrangement.
@@ -193,6 +196,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsEncTotal = 0
     private var dropsNetTotal = 0
     private var needsKeyframe = true
+    /// The persisted preference and the state actually applied to this peer
+    /// differ until its hello proves support for protocol v9. Older peers are
+    /// always kept video-on so they never get a frozen, unexplained surface.
+    private var desiredVideoEnabled: Bool
+    private var videoEnabled = true
+    private var capturePixelsWide = 0
+    private var capturePixelsHigh = 0
     private var connectionReady = false
     private var stopped = false
     // The liveness monitors are self-rescheduling chains guarded only by
@@ -350,7 +360,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
-         identityOffset: UInt32 = 0, awaitingWake: Bool = false) {
+         identityOffset: UInt32 = 0, awaitingWake: Bool = false,
+         videoEnabled: Bool = true) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -358,6 +369,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.displaySerial = displaySerial
         self.baseIdentityOffset = identityOffset
         self.awaitingWake = awaitingWake
+        self.desiredVideoEnabled = videoEnabled
         super.init()
     }
 
@@ -393,6 +405,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         "mode": mode.receiverMode.rawValue])
     }
 
+    func pushDisplayModeState() {
+        queue.async { [weak self] in self?.sendDisplayModeState() }
+    }
+
     /// Called on the sender queue. `InputPolicy.allowsInput()` reads
     /// straight from UserDefaults (the same static check every input-
     /// injection call site already gates on), so this always reports the
@@ -402,10 +418,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         "allowed": InputPolicy.allowsInput()])
     }
 
+    private func sendVideoState() {
+        guard let info = lastHello,
+              info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
+        sendJSONObject(["type": WireMessage.videoState,
+                        "enabled": videoEnabled,
+                        "width": capturePixelsWide,
+                        "height": capturePixelsHigh])
+    }
+
     /// Public entry point for `AppController.allowInput`'s `didSet` to
     /// broadcast the Mac's new state to this receiver.
     func pushAllowInputState() {
         queue.async { [weak self] in self?.sendAllowInputState() }
+    }
+
+    func setVideoEnabled(_ enabled: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.desiredVideoEnabled = enabled
+            guard let info = self.lastHello,
+                  info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
+            self.applyVideoEnabled(enabled)
+        }
+    }
+
+    /// Performs the Extend -> Mirror -> Video Off sequence without replacing
+    /// the transport/session. Input is retargeted to the physical display,
+    /// the virtual display is released only after Extend capture has stopped,
+    /// and video production is disabled only after Mirror setup completes.
+    func transitionToMirrorAndDisableVideo(completion: @escaping @MainActor () -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.desiredVideoEnabled = false
+            self.inputInjector?.cancelActiveInput()
+            let oldStream = self.stream
+            self.stream = nil
+            self.invalidateCapturePipeline(discardingLastFrame: true)
+            if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
+            self.encoder = nil
+            let continueTransition = {
+                self.queue.async {
+                    self.mode = .mirror
+                    self.virtualDisplay = nil
+                    Task {
+                        do {
+                            try await self.startMirrorCapture(preferredDisplayID: nil)
+                        } catch {
+                            Log.info("Extend to Mirror transition failed before Video Off: \(error)")
+                        }
+                        self.queue.async {
+                            self.applyVideoEnabled(false)
+                            Task { @MainActor in completion() }
+                        }
+                    }
+                }
+            }
+            if let oldStream {
+                oldStream.stopCapture { _ in continueTransition() }
+            } else {
+                continueTransition()
+            }
+        }
     }
 
     func start() async throws {
@@ -740,6 +814,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw NSError(domain: "MacSender", code: 6,
                           userInfo: [NSLocalizedDescriptionKey: "capture stream is already active"])
         }
+        capturePixelsWide = pixelsWide
+        capturePixelsHigh = pixelsHigh
+        guard videoEnabled else {
+            invalidateCapturePipeline(discardingLastFrame: true)
+            _ = updateCaptureState { $0.captureStarted() }
+            lastCursorPNGHash = 0
+            lastCursorSent = (-1, -1, false)
+            startCursorEcho()
+            queue.async {
+                self.sendDisplayState(self.captureStateSnapshot().receiverDisplayState)
+                self.sendDisplayModeState()
+                self.sendAllowInputState()
+                self.sendVideoState()
+            }
+            await status("Video off — controls remain connected")
+            return
+        }
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let config = SCStreamConfiguration()
@@ -774,7 +865,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if self.stream === stream { self.stream = nil }
             throw error
         }
-        guard updateCaptureState({ state in state.captureStarted() }) else {
+        guard self.stream === stream, videoEnabled,
+              updateCaptureState({ state in state.captureStarted() }) else {
             if self.stream === stream { self.stream = nil }
             invalidateCapturePipeline()
             do {
@@ -803,6 +895,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendDisplayState(receiverState)
             self.sendDisplayModeState()
             self.sendAllowInputState()
+            self.sendVideoState()
         }
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
@@ -929,6 +1022,70 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   self.updateCaptureState({ $0.requestResume() }) else { return }
             self.captureRecoveryBudget.reset()
             Task { await self.resumeCapture() }
+        }
+    }
+
+    private func applyVideoEnabled(_ enabled: Bool) {
+        guard enabled != videoEnabled else {
+            sendVideoState()
+            return
+        }
+        videoEnabled = enabled
+        sendVideoState()
+        if !enabled {
+            let phase = captureStateSnapshot().phase
+            if phase != .pausing, phase != .paused, phase != .stopped {
+                _ = updateCaptureState { $0.captureStarted() }
+            }
+            invalidateCapturePipeline(discardingLastFrame: true)
+            let activeStream = stream
+            stream = nil
+            if let encoder { VTCompressionSessionInvalidate(encoder) }
+            encoder = nil
+            needsKeyframe = true
+            activeStream?.stopCapture { error in
+                if let error {
+                    let nsError = error as NSError
+                    Log.info("video off capture stop failed domain=\(nsError.domain) code=\(nsError.code)")
+                }
+            }
+            Task { await self.status("Video off — controls remain connected") }
+            return
+        }
+
+        needsKeyframe = true
+        guard captureStateSnapshot().phase != .paused,
+              captureStateSnapshot().phase != .pausing,
+              captureStateSnapshot().phase != .stopped else { return }
+        Task { await self.restartVideoCapture() }
+    }
+
+    private func restartVideoCapture() async {
+        do {
+            switch mode {
+            case .mirror:
+                try await startMirrorCapture(preferredDisplayID: captureDisplayID == 0 ? nil : captureDisplayID)
+            case .extend:
+                guard let vd = virtualDisplay else {
+                    throw NSError(domain: "MacSender", code: 10,
+                                  userInfo: [NSLocalizedDescriptionKey: "virtual display is unavailable while enabling video"])
+                }
+                let display = try await findSCDisplay(
+                    id: vd.displayID,
+                    expectedSize: CGSize(width: vd.pointsWide, height: vd.pointsHigh))
+                let width = capturePixelsWide > 0
+                    ? capturePixelsWide : (Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1
+                let height = capturePixelsHigh > 0
+                    ? capturePixelsHigh : (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1
+                try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard videoEnabled,
+                  updateCaptureState({ $0.unexpectedStop() }) else { return }
+            Log.info("video restart failed: \(error) — entering capture recovery")
+            scheduleCaptureRecovery()
         }
     }
 
@@ -1147,7 +1304,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func handleCaptureStopped(_ stoppedStream: SCStream, error: Error) {
         let lifecycle = captureStateSnapshot()
         let nsError = error as NSError
-        let intentional = lifecycle.ownsCaptureStop
+        let intentional = lifecycle.ownsCaptureStop || !videoEnabled
         let isCurrentStream = stoppedStream === stream
         // Pause/Resume owns its stream stops. In particular, .userStopped from
         // our Pause button must not be mistaken for the system's Stop Extending.
@@ -1179,7 +1336,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// keeps its existing reattach-first path; Mirror recovery reattaches to
     /// the captured physical display and rebuilds capture alone on fallback.
     private func scheduleCaptureRecovery() {
-        guard !captureRecoveryScheduled, captureStateSnapshot().shouldRetryCapture else { return }
+        guard videoEnabled, !captureRecoveryScheduled,
+              captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
         let attempt = captureRecoveryBudget.failedAttempts + 1
         Log.info("capture recovery starting mode=\(mode.rawValue) "
@@ -1187,7 +1345,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self else { return }
             self.captureRecoveryScheduled = false
-            guard !self.stopped, self.stream == nil,
+            guard self.videoEnabled, !self.stopped, self.stream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
             Task { await self.runCaptureRecovery(attempt: attempt) }
         }
@@ -1314,7 +1472,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// session (display torn down, reconnect is the user's call) beats
     /// hammering WindowServer with create/destroy cycles forever.
     private func recoveryRoundEnded() {
-        guard captureStateSnapshot().shouldRetryCapture else { return }
+        guard videoEnabled, captureStateSnapshot().shouldRetryCapture else { return }
         guard stream == nil else {
             captureRecoveryBudget.reset()
             return
@@ -2093,7 +2251,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
-                if stream != nil { sendDisplayModeState() }
+                sendDisplayModeState()
+                if info.protocolVersion >= WireProtocol.videoControlWireVersion {
+                    applyVideoEnabled(desiredVideoEnabled)
+                } else {
+                    applyVideoEnabled(true)
+                }
                 if info.protocolVersion < WireProtocol.minSupportedPeer {
                     Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer) — requesting update")
                     sendUpdateRequired(kind: info.kind)
@@ -2101,7 +2264,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let continuation = helloContinuation {
                     helloContinuation = nil
                     continuation.resume(returning: info)
-                } else if mode == .extend, stream != nil, let previous,
+                } else if mode == .extend, virtualDisplay != nil, let previous,
                           previous.pixelsWide != info.pixelsWide
                           || previous.pixelsHigh != info.pixelsHigh {
                     // Phone rotated — rebuild after a short debounce so a
@@ -2222,6 +2385,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   info.protocolVersion >= WireProtocol.displayModeWireVersion,
                   let rawMode = obj["mode"] as? String,
                   let requestedMode = ReceiverDisplayMode(rawValue: rawMode) else { return }
+            guard desiredVideoEnabled || requestedMode == .mirror else {
+                sendDisplayModeState()
+                return
+            }
             inputInjector?.cancelActiveInput()
             sendJSONObject(["type": WireMessage.inputReset])
             if requestedMode == mode.receiverMode {
@@ -2240,6 +2407,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendAllowInputState()
             } else {
                 Task { @MainActor in self.onAllowInputRequest?(requested) }
+            }
+        case WireMessage.videoRequest:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.videoControlWireVersion,
+                  let requested = obj["enabled"] as? Bool else { return }
+            if requested == desiredVideoEnabled {
+                applyVideoEnabled(requested)
+            } else {
+                Task { @MainActor in self.onVideoEnabledRequest?(requested) }
             }
         case "gesture":
             guard let name = obj["name"] as? String,

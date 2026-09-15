@@ -194,6 +194,7 @@ final class SenderController: ObservableObject {
     }
 
     @Published var sessions: [DeviceSession] = []
+    private var suppressModeRestart = false
     @Published var discovered: [NWBrowser.Result] = []
     @Published var usbDevices: [UsbmuxDevice] = []
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
@@ -205,11 +206,14 @@ final class SenderController: ObservableObject {
     // every session. Doing that here — rather than in the Settings picker's
     // onChange — keeps one authoritative transition path shared by the Mac's
     // own picker and a receiver's `displayModeRequest`.
-    @Published var mode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend {
+    @Published var mode = VideoModePolicy.normalized(
+        mode: CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend,
+        videoEnabled: UserDefaults.standard.object(forKey: "videoEnabled") == nil
+            || UserDefaults.standard.bool(forKey: "videoEnabled")) {
         didSet {
             guard mode != oldValue else { return }
             UserDefaults.standard.set(mode.rawValue, forKey: "mode")
-            restartAll()
+            if !suppressModeRestart { restartAll() }
         }
     }
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
@@ -228,8 +232,51 @@ final class SenderController: ObservableObject {
             }
         }
     }
+    @Published var videoEnabled = UserDefaults.standard.object(forKey: "videoEnabled") == nil
+        || UserDefaults.standard.bool(forKey: "videoEnabled") {
+        didSet {
+            guard videoEnabled != oldValue else { return }
+            UserDefaults.standard.set(videoEnabled, forKey: "videoEnabled")
+            sessions.forEach { $0.sender.setVideoEnabled(videoEnabled) }
+        }
+    }
 
     var running: Bool { !sessions.isEmpty }
+
+    func requestMode(_ requested: CaptureMode) {
+        guard VideoModePolicy.allows(requested, videoEnabled: videoEnabled) else {
+            sessions.forEach { $0.sender.pushDisplayModeState() }
+            return
+        }
+        mode = requested
+    }
+
+    func requestVideoEnabled(_ enabled: Bool) {
+        guard enabled != videoEnabled else { return }
+        // Mirror is established through the existing authoritative mode
+        // transition before capture is stopped. Turning video back on never
+        // restores Extend implicitly.
+        if !enabled, mode == .extend {
+            suppressModeRestart = true
+            mode = .mirror
+            suppressModeRestart = false
+            let transitioning = sessions
+            guard !transitioning.isEmpty else {
+                videoEnabled = false
+                return
+            }
+            var remaining = transitioning.count
+            for session in transitioning {
+                session.sender.transitionToMirrorAndDisableVideo { [weak self] in
+                    guard let self else { return }
+                    remaining -= 1
+                    if remaining == 0 { self.videoEnabled = false }
+                }
+            }
+            return
+        }
+        videoEnabled = enabled
+    }
 
     private var browser: NWBrowser?
     private var usbWatcher: UsbmuxDeviceWatcher?
@@ -691,7 +738,8 @@ final class SenderController: ObservableObject {
         let sender = MacSender(transport: transport, name: name, mode: mode,
                                quality: quality, displaySerial: Self.displaySerial(for: id),
                                identityOffset: identityOffset(for: id),
-                               awaitingWake: awaitingWake)
+                               awaitingWake: awaitingWake,
+                               videoEnabled: videoEnabled)
         let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
                                     target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
@@ -709,11 +757,15 @@ final class SenderController: ObservableObject {
         }
         sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
             guard let self, let session, self.owns(session) else { return }
-            self.mode = CaptureMode(requestedMode)
+            self.requestMode(CaptureMode(requestedMode))
         }
         sender.onAllowInputRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }
             self.allowInput = requested
+        }
+        sender.onVideoEnabledRequest = { [weak self, weak session] requested in
+            guard let self, let session, self.owns(session) else { return }
+            self.requestVideoEnabled(requested)
         }
         sender.onHello = { [weak self, weak session] info in
             guard let self, let session, self.owns(session) else { return }
@@ -1053,11 +1105,23 @@ struct ContentView: View {
                     }
                 }
 
-                Picker("Mode", selection: $controller.mode) {
+                Picker("Mode", selection: Binding(
+                    get: { controller.mode },
+                    set: { controller.requestMode($0) })) {
                     Text("Extend").tag(CaptureMode.extend)
+                        .disabled(!controller.videoEnabled)
                     Text("Mirror").tag(CaptureMode.mirror)
                 }
                 .pickerStyle(.segmented)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Video", isOn: Binding(
+                        get: { controller.videoEnabled },
+                        set: { controller.requestVideoEnabled($0) }))
+                    Text("Stop screen capture and streaming while keeping connected-device controls active.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Allow Input", isOn: $controller.allowInput)
@@ -1204,7 +1268,7 @@ struct SessionRow: View {
 
     private var statusColor: Color {
         if session.status.hasPrefix("Extending") || session.status.hasPrefix("Mirroring")
-            || session.status.hasPrefix("Connected") {
+            || session.status.hasPrefix("Connected") || session.status.hasPrefix("Video off") {
             return .green
         }
         if session.status.hasPrefix("Failed") || session.status.contains("stopped") {

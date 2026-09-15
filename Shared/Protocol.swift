@@ -46,6 +46,11 @@ enum WireProtocol {
     /// itself regardless, it just isn't mirrored to an old receiver.
     static let allowInputWireVersion = 8
 
+    /// Protocol version that introduced a Mac-authoritative video-production
+    /// toggle. Video state carries the retained stream geometry so a receiver
+    /// can keep mapping input while capture and encoding are stopped.
+    static let videoControlWireVersion = 9
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -69,6 +74,8 @@ enum WireMessage {
     static let displayModeState = "displayModeState" // Mac -> receiver: confirmed actual mode
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
+    static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
+    static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
 }
 
 enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {
@@ -116,5 +123,32 @@ struct DisplayModeRequestState: Equatable {
     mutating func reset() {
         confirmedMode = nil
         pendingMode = nil
+    }
+}
+
+struct VideoStateUpdate: Equatable {
+    let enabled: Bool
+    let width: Int?
+    let height: Int?
+
+    init(enabled: Bool, width: Int?, height: Int?) {
+        self.enabled = enabled
+        self.width = width
+        self.height = height
+    }
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.videoState,
+              let enabled = message["enabled"] as? Bool else { return nil }
+        self.enabled = enabled
+        if let width = message["width"] as? Int,
+           let height = message["height"] as? Int,
+           width > 0, height > 0 {
+            self.width = width
+            self.height = height
+        } else {
+            width = nil
+            height = nil
+        }
     }
 }

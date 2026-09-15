@@ -619,4 +619,33 @@ final class RemoteViewportTests: XCTestCase {
             XCTAssertEqual(back.y, remotePoint.y, accuracy: 0.0005)
         }
     }
+    func testVideoOffIgnoresButPreservesManualViewportState() {
+        let base = RemoteViewportCalculator.normal(viewBounds: squareBounds, remoteAspectSize: squareAspect)
+        let stored = ManualViewportState(scale: 2, panX: 40, panY: -25,
+                                         rotationRadians: .pi / 2)
+        XCTAssertEqual(VideoInteractionPolicy.viewportTransform(
+            base: base, state: stored, videoEnabled: false), base)
+        XCTAssertEqual(VideoInteractionPolicy.viewportTransform(
+            base: base, state: stored, videoEnabled: true),
+                       RemoteViewportCalculator.applyManualZoom(to: base, state: stored))
+        XCTAssertEqual(stored.rotationRadians, .pi / 2)
+    }
+
+    func testVideoOffForcesEffectiveAppTargetsWithoutChangingStoredValue() {
+        let stored = ReceiverGestureTarget.viewport
+        XCTAssertEqual(VideoInteractionPolicy.effectiveTarget(stored: stored, videoEnabled: false), .app)
+        XCTAssertEqual(VideoInteractionPolicy.effectiveTarget(stored: stored, videoEnabled: true), .viewport)
+        XCTAssertEqual(stored, .viewport)
+    }
+
+    func testSurfaceAdmissionRejectsOutsideBeginAndKeepsInsideSequenceOutside() {
+        var admission = SurfaceTouchAdmission<Int>()
+        admission.begin(1, inside: false)
+        XCTAssertFalse(admission.contains(1))
+        admission.begin(2, inside: true)
+        XCTAssertTrue(admission.contains(2), "movement outside must not cancel a sequence admitted at begin")
+        admission.end(2)
+        XCTAssertFalse(admission.contains(2))
+    }
+
 }

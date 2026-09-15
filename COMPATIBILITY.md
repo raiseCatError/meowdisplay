@@ -174,6 +174,12 @@ the floor once a force-capable build has spread.
   path and replies with authoritative `displayModeState` only after setup.
   Older peers ignore the messages, and the receiver does not offer switching
   unless `welcome.pv >= 7`.
+- **Example: `pv` 9 Video On/Off.** A pv 9 receiver may request video
+  production independently of the logical/input session. The Mac confirms the
+  actual state and retained mapping geometry with `videoState`. Against an
+  older receiver the Mac keeps video on, and an older Mac leaves the receiver's
+  Video control unavailable, avoiding an unexplained frozen frame.
+- **Example: `pv` 10 continuous app gestures.** A pv 10 receiver may send
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

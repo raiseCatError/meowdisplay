@@ -127,6 +127,10 @@ struct ReceiverScreen: View {
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
                                    allowInput: inputReachesMac,
+                                   videoEnabled: model.receiver.videoEnabled,
+                                   showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
+                                   safeInsets: effectiveSafeInsets,
+                                   occupiedControlFrames: occupiedControlFrames,
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
@@ -559,6 +563,16 @@ struct SettingsView: View {
 
                 Section("Display") {
                     VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Video", isOn: Binding(
+                            get: { receiver.videoEnabled },
+                            set: { receiver.requestVideoEnabled($0) }))
+                            .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
+                        Text("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Toggle("Show Surface Grid", isOn: preferenceBinding(\.showSurfaceGrid))
+                    VStack(alignment: .leading, spacing: 4) {
                         Toggle("Avoid Notch", isOn: preferenceBinding(\.avoidNotch))
                         Text("Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape.")
                             .font(.footnote)
@@ -573,6 +587,7 @@ struct SettingsView: View {
                             set: { receiver.requestDisplayMode($0) })) {
                             ForEach(ReceiverDisplayMode.allCases) { mode in
                                 Text(mode.title).tag(mode)
+                                    .disabled(!receiver.videoEnabled && mode == .extend)
                             }
                         }
                         .disabled(!receiver.connected
@@ -986,6 +1001,12 @@ struct VideoLayerView: UIViewRepresentable {
     /// scheduled (e.g. a buffered tap-chain flush) — only an explicit
     /// cancellation on the OFF transition (see `setAllowInput`) does that.
     let allowInput: Bool
+    /// Mac-confirmed capture/encode/transmit state. The UIKit host stays live
+    /// while this is false because it is also the mapped input surface.
+    let videoEnabled: Bool
+    let showSurfaceGrid: Bool
+    let safeInsets: ControlSafeInsets
+    let occupiedControlFrames: [CGRect]
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
 
     func makeUIView(context: Context) -> VideoView {
@@ -998,6 +1019,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.setInputMode(inputMode)
         view.setTrackpadSensitivity(trackpadSensitivity)
         view.setAllowInput(allowInput)
+        view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
@@ -1107,6 +1130,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
         uiView.setAllowInput(allowInput)
+        uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
@@ -1140,6 +1165,13 @@ struct VideoLayerView: UIViewRepresentable {
         // view's black background — no mirrored, blurred letterbox fill.
         private let videoContentView = UIView()
         private var videoLayer: CALayer?
+        private let surfaceLayer = CAShapeLayer()
+        private let surfaceGridLayer = CAShapeLayer()
+        private var videoEnabled = true
+        private var showSurfaceGrid = true
+        private var surfaceSafeInsets = ControlSafeInsets.zero
+        private var occupiedControlFrames: [CGRect] = []
+        private var surfaceAdmission = SurfaceTouchAdmission<ObjectIdentifier>()
 
         private let cursorLayer: CALayer = {
             let layer = CALayer()
@@ -1233,6 +1265,14 @@ struct VideoLayerView: UIViewRepresentable {
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
+            surfaceLayer.fillColor = UIColor.secondarySystemBackground.cgColor
+            surfaceLayer.strokeColor = UIColor.separator.cgColor
+            surfaceLayer.lineWidth = 1
+            surfaceLayer.isHidden = true
+            surfaceGridLayer.fillColor = UIColor.tertiaryLabel.withAlphaComponent(0.35).cgColor
+            surfaceGridLayer.isHidden = true
+            layer.insertSublayer(surfaceLayer, at: 0)
+            layer.insertSublayer(surfaceGridLayer, above: surfaceLayer)
         }
 
         @available(*, unavailable)
@@ -1295,6 +1335,26 @@ struct VideoLayerView: UIViewRepresentable {
             allowsInput = allowed
             guard !allowed else { return }
             clearInputStateForPause()
+        }
+
+        func setVideoEnabled(_ enabled: Bool, showGrid: Bool) {
+            guard enabled != videoEnabled || showGrid != showSurfaceGrid else { return }
+            if enabled != videoEnabled { clearInputStateForPause() }
+            videoEnabled = enabled
+            showSurfaceGrid = showGrid
+            videoContentView.isHidden = !enabled
+            surfaceLayer.isHidden = enabled
+            surfaceGridLayer.isHidden = enabled || !showGrid
+            backgroundColor = .black
+            setNeedsLayout()
+        }
+
+        func setSurfaceContext(safeInsets: ControlSafeInsets,
+                               occupiedControlFrames: [CGRect]) {
+            guard safeInsets != surfaceSafeInsets || occupiedControlFrames != self.occupiedControlFrames else { return }
+            surfaceSafeInsets = safeInsets
+            self.occupiedControlFrames = occupiedControlFrames
+            setNeedsLayout()
         }
 
         func setKeyboardRequested(_ requested: Bool) {
@@ -1376,6 +1436,7 @@ struct VideoLayerView: UIViewRepresentable {
             cancelScrollMomentum()
             activeFingerTouchIDs.removeAll()
             systemGestureOwnedTouchIDs.removeAll()
+            surfaceAdmission.reset()
             recognizerResetPending = false
             // Force the two-finger recognizer to give up whatever it was
             // mid-deciding or already committed to — toggling `isEnabled`
@@ -1419,6 +1480,7 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.setDisableActions(true)
             if cursorLayer.superlayer == nil { layer.addSublayer(cursorLayer) }
             updateCursorLayout()
+            updateSurfaceLayout()
             CATransaction.commit()
             // Rotation diagnostics — one line per layout change.
             let video = receiver?.videoSize ?? .zero
@@ -1432,8 +1494,40 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
+        private func updateSurfaceLayout() {
+            surfaceLayer.frame = bounds
+            surfaceGridLayer.frame = bounds
+            let rect = currentTransform.displayedRect.intersection(bounds).insetBy(dx: 0.5, dy: 0.5)
+            guard !videoEnabled, !rect.isNull, rect.width > 1, rect.height > 1 else {
+                surfaceLayer.path = nil
+                surfaceGridLayer.path = nil
+                return
+            }
+            surfaceLayer.path = UIBezierPath(roundedRect: rect, cornerRadius: 12).cgPath
+            guard showSurfaceGrid else {
+                surfaceGridLayer.path = nil
+                return
+            }
+            let dots = UIBezierPath()
+            let spacing: CGFloat = 28
+            let radius: CGFloat = 1.1
+            var y = rect.minY + spacing
+            while y < rect.maxY - spacing / 2 {
+                var x = rect.minX + spacing
+                while x < rect.maxX - spacing / 2 {
+                    dots.append(UIBezierPath(ovalIn: CGRect(x: x - radius, y: y - radius,
+                                                           width: radius * 2, height: radius * 2)))
+                    x += spacing
+                }
+                y += spacing
+            }
+            surfaceGridLayer.path = dots.cgPath
+        }
+
         private func updateCurrentTransform() {
-            currentTransform = RemoteViewportCalculator.applyManualZoom(to: unzoomedBaseTransform(), state: manualZoom)
+            let base = unzoomedBaseTransform()
+            currentTransform = VideoInteractionPolicy.viewportTransform(
+                base: base, state: manualZoom, videoEnabled: videoEnabled)
         }
 
         /// The normal or keyboard-adjusted presentation, *before* manual
@@ -1445,6 +1539,18 @@ struct VideoLayerView: UIViewRepresentable {
             guard let video = receiver?.videoSize, video != .zero,
                   bounds.width > 0, bounds.height > 0 else {
                 return .invalid
+            }
+            if !videoEnabled {
+                let rect = VideoOffSurfaceGeometry.interactionRect(
+                    container: bounds,
+                    safeInsets: surfaceSafeInsets,
+                    occupiedControlFrames: occupiedControlFrames,
+                    portrait: bounds.height > bounds.width,
+                    inputMode: pointerEngine.inputMode,
+                    remoteAspectSize: video)
+                return RemoteViewportTransform(
+                    remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
+                    displayedRect: rect)
             }
             if let keyboardVisibleRect {
                 return RemoteViewportCalculator.keyboardOpen(
@@ -1719,6 +1825,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func applyViewportPinchUpdate(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            guard videoEnabled else { return }
             guard manualZoomGestureBase.width > 0, manualZoomGestureBase.height > 0 else { return }
             manualZoom = ManualViewportState.pinching(
                 from: manualZoomGestureStart,
@@ -1822,16 +1929,12 @@ struct VideoLayerView: UIViewRepresentable {
             // recognizer stays attached to a system gesture's leftover
             // touches too.
             guard !systemGestureSequenceOwned else { return }
-            guard recognizer.state == .ended else { return }
-            if !manualZoom.isIdentity {
-                manualZoomMemory = manualZoom
-                manualZoom = .identity
-            } else if let memory = manualZoomMemory {
-                let base = unzoomedBaseTransform().displayedRect
-                manualZoom = memory.clamped(against: base)
-            } else {
-                return   // nothing manually set and nothing remembered — no-op
-            }
+            guard recognizer.state == .ended, videoEnabled else { return }
+            let base = unzoomedBaseTransform().displayedRect
+            guard let toggled = ViewportResetRestorePolicy.toggled(
+                current: manualZoom, memory: manualZoomMemory, base: base) else { return }
+            manualZoom = toggled.current
+            manualZoomMemory = toggled.memory
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -1885,6 +1988,9 @@ struct VideoLayerView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
+            if !videoEnabled && !currentTransform.containsViewPoint(touch.location(in: self)) {
+                return false
+            }
             if gestureRecognizer === threeFingerPanRecognizer
                 || gestureRecognizer === threeFingerTapRecognizer
                 || gestureRecognizer === pinchSpreadGestureRecognizer {
@@ -2199,8 +2305,6 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func routeTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?, ended: Bool) {
-            let pencil = touches.filter { isPencil($0) }
-            let allFingers = touches.filter { isFinger($0) }
             #if DEBUG
             // TEMP diagnostic for the "all input dead" regression report —
             // remove once root-caused. Checkpoint A/B: confirms touches are
@@ -2211,6 +2315,20 @@ struct VideoLayerView: UIViewRepresentable {
                      + "allowsInput=\(allowsInput) macSupportsPointerWire=\(receiver?.macSupportsPointerWire ?? false) "
                      + "displayState=\(String(describing: receiver?.displayState)) connected=\(receiver?.connected ?? false)")
             #endif
+            if phase == "began" {
+                let admitted = touches.filter {
+                    (videoEnabled && pointerEngine.inputMode != .direct)
+                        || currentTransform.containsViewPoint($0.location(in: self))
+                }
+                for touch in touches {
+                    surfaceAdmission.begin(ObjectIdentifier(touch), inside: admitted.contains(touch))
+                }
+            }
+            let routedTouches = touches.filter {
+                surfaceAdmission.contains(ObjectIdentifier($0))
+            }
+            let pencil = routedTouches.filter { isPencil($0) }
+            let allFingers = routedTouches.filter { isFinger($0) }
             let usePencilWire = receiver?.macSupportsPencilWire ?? false
 
             if !pencil.isEmpty {
@@ -2258,6 +2376,7 @@ struct VideoLayerView: UIViewRepresentable {
                     viewportDoubleTapRecognizer?.isEnabled = false
                     viewportDoubleTapRecognizer?.isEnabled = true
                 }
+                for touch in touches { surfaceAdmission.end(ObjectIdentifier(touch)) }
             }
 
             // Palm rejection: ignore resting fingers while the pen is down.

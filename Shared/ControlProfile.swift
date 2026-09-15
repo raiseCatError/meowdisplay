@@ -435,6 +435,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// intersect it — see `ControlTrayGeometry.avoidingUnsafeRegion`. Never
     /// a permanent margin; OFF lets controls sit at the literal screen edge.
     var avoidNotch = true
+    /// Purely visual decoration for the mapped interaction surface shown
+    /// while video production is off. It never participates in hit-testing.
+    var showSurfaceGrid = true
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -493,6 +496,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // default true, matching a brand-new install (and the explicit
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
+        showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
     }
 
     func profile(for slot: ControlProfileSlot) -> ControlProfile {
@@ -600,6 +604,11 @@ struct ReceiverControlPreferencesRepository {
                     at: keyboardIndex)
             }
             value.version = 8
+        }
+        // Schema 8 predates the Video-Off surface grid. The requested default
+        // is ON, so the custom decoder has already supplied the right value.
+        if value.version < 9 {
+            value.version = 9
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

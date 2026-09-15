@@ -64,6 +64,69 @@ struct ControlTrayLayout: Equatable {
     var axis: ControlTrayAxis
 }
 
+/// One source of truth for the Video-Off interaction surface. The returned
+/// rectangle is consumed unchanged by drawing, hit testing, and input
+/// admission. In portrait, Trackpad deliberately fills the tall space left
+/// between the unsafe top edge and bottom controls; it does not inherit the
+/// remote display's landscape aspect ratio.
+enum VideoOffSurfaceGeometry {
+    static let margin: CGFloat = 12
+    static let controlGap: CGFloat = 10
+
+    static func interactionRect(container: CGRect,
+                                safeInsets: ControlSafeInsets,
+                                occupiedControlFrames: [CGRect],
+                                portrait: Bool,
+                                inputMode: PointerInputMode,
+                                remoteAspectSize: CGSize) -> CGRect {
+        guard container.width > 0, container.height > 0 else { return .zero }
+        var available = container.insetBy(dx: margin, dy: margin)
+        available.origin.y = max(available.minY, container.minY + safeInsets.top + controlGap)
+
+        if portrait {
+            // Only bottom chrome limits the large portrait surface. A
+            // temporary palette higher on screen is still an occupied
+            // control, so use the first lower-half frame as the boundary.
+            let bottomBoundary = occupiedControlFrames
+                .filter { !$0.isNull && !$0.isEmpty && $0.midY >= container.midY }
+                .map(\.minY)
+                .min() ?? (container.maxY - safeInsets.bottom)
+            let maxY = min(available.maxY, bottomBoundary - controlGap,
+                           container.maxY - safeInsets.bottom - controlGap)
+            available.size.height = max(0, maxY - available.minY)
+            guard inputMode == .direct else { return available }
+        } else {
+            // Landscape keeps the established broad surface, but carves
+            // away only the side actually occupied by visible controls.
+            for frame in occupiedControlFrames where frame.intersects(available) {
+                if frame.midX < container.midX {
+                    let minX = max(available.minX, frame.maxX + controlGap)
+                    available.size.width = max(0, available.maxX - minX)
+                    available.origin.x = minX
+                } else {
+                    available.size.width = max(0, min(available.maxX, frame.minX - controlGap) - available.minX)
+                }
+            }
+            guard inputMode == .direct else { return available }
+        }
+
+        // Direct Touch must retain an exact aspect-mapped surface. Trackpad
+        // is intentionally free-form because it sends relative movement.
+        guard remoteAspectSize.width > 0, remoteAspectSize.height > 0,
+              available.width > 0, available.height > 0 else { return .zero }
+        let aspect = remoteAspectSize.width / remoteAspectSize.height
+        let size: CGSize
+        if available.width / available.height > aspect {
+            size = CGSize(width: available.height * aspect, height: available.height)
+        } else {
+            size = CGSize(width: available.width, height: available.width / aspect)
+        }
+        return CGRect(x: available.midX - size.width / 2,
+                      y: available.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+}
+
 enum ControlTrayGeometry {
     /// Base placement always uses the raw/full container. `avoidNotch`
     /// affects only the final per-frame obstacle pass below; it never turns

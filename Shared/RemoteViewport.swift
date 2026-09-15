@@ -5,6 +5,43 @@
 import CoreGraphics
 import Foundation
 
+enum VideoInteractionPolicy {
+    static func effectiveTarget(stored: ReceiverGestureTarget,
+                                videoEnabled: Bool) -> ReceiverGestureTarget {
+        videoEnabled ? stored : .app
+    }
+
+    static func viewportTransform(base: RemoteViewportTransform,
+                                  state: ManualViewportState,
+                                  videoEnabled: Bool) -> RemoteViewportTransform {
+        videoEnabled ? RemoteViewportCalculator.applyManualZoom(to: base, state: state) : base
+    }
+}
+
+/// Begin-only hit admission: moving outside never cancels an admitted
+/// sequence, while an outside begin can never enter the input pipeline later.
+struct SurfaceTouchAdmission<ID: Hashable> {
+    private(set) var admitted: Set<ID> = []
+
+    mutating func begin(_ id: ID, inside: Bool) {
+        if inside { admitted.insert(id) }
+    }
+
+    func contains(_ id: ID) -> Bool { admitted.contains(id) }
+    mutating func end(_ id: ID) { admitted.remove(id) }
+    mutating func reset() { admitted.removeAll() }
+}
+
+enum ViewportResetRestorePolicy {
+    static func toggled(current: ManualViewportState,
+                        memory: ManualViewportState?,
+                        base: CGRect) -> (current: ManualViewportState, memory: ManualViewportState?)? {
+        if !current.isIdentity { return (.identity, current) }
+        guard let memory, !memory.isIdentity else { return nil }
+        return (memory.clamped(against: base), memory)
+    }
+}
+
 /// Maps between normalized remote-display coordinates (the same [0,1],
 /// top-left-origin space as `touch.x/y` on the wire — PROTOCOL.md section 7)
 /// and a host view's local point space.

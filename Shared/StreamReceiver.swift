@@ -69,6 +69,10 @@ final class StreamReceiver: ObservableObject {
     @Published var connected = false
     @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @Published private(set) var displayState = DisplayState.running
+    @Published private(set) var videoEnabled = true
+    /// Queue-confined copy used to distinguish an idempotent state push from
+    /// an actual off/on transition that must retire decoder state.
+    private var receivedVideoEnabled = true
     @Published var perf = PerfStats()
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
@@ -95,6 +99,10 @@ final class StreamReceiver: ObservableObject {
 
     /// True when the connected Mac understands pencil/proximity wire messages.
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
+
+    var macSupportsVideoControl: Bool {
+        macProtocolVersion >= WireProtocol.videoControlWireVersion
+    }
 
     /// True when the connected Mac understands the `keyboard` message family (M4).
     var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
@@ -713,6 +721,7 @@ final class StreamReceiver: ObservableObject {
         for pending in pendingConnections where pending !== conn { pending.cancel() }
         pendingConnections.removeAll()
         resetStreamState()
+        receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
         cursorPortAnnounced = false
         // Hide the previous sender's cursor: replayed into a fresh video view
@@ -888,6 +897,9 @@ final class StreamReceiver: ObservableObject {
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async {
                 self.macProtocolVersion = macPV
+                if macPV < WireProtocol.videoControlWireVersion {
+                    self.videoEnabled = true
+                }
             }
             if macPV < WireProtocol.minSupportedPeer {
                 let msg = "The OpenDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenDisplay on your Mac to reconnect."
@@ -909,6 +921,19 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             DispatchQueue.main.async { self.onAllowInputStateChange?(allowed) }
+        case WireMessage.videoState:
+            guard let update = VideoStateUpdate(message: obj) else { return }
+            let changed = update.enabled != receivedVideoEnabled
+            receivedVideoEnabled = update.enabled
+            if changed || !update.enabled {
+                resetDecoderForVideoStateChange()
+            }
+            DispatchQueue.main.async {
+                if let width = update.width, let height = update.height {
+                    self.videoSize = CGSize(width: width, height: height)
+                }
+                self.videoEnabled = update.enabled
+            }
         default:
             break
         }
@@ -1154,6 +1179,25 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
     }
 
+    func requestVideoEnabled(_ enabled: Bool) {
+        guard connected, macSupportsVideoControl else { return }
+        sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
+    }
+
+    /// Retire every decoded/presented frame without forgetting `videoSize`:
+    /// that geometry is still the Direct Touch mapping surface while video is
+    /// off. The next video-on stream begins from fresh SPS/PPS + an IDR.
+    private func resetDecoderForVideoStateChange() {
+        formatDesc = nil
+        sps = nil
+        pps = nil
+        displayLayer.flushAndRemoveImage()
+        if let session = decompressionSession {
+            VTDecompressionSessionInvalidate(session)
+            decompressionSession = nil
+        }
+    }
+
     /// Requests a mode transition without predicting its outcome. The Mac
     /// confirms the actual mode after its existing capture setup succeeds.
     @MainActor
@@ -1161,6 +1205,7 @@ final class StreamReceiver: ObservableObject {
     func requestDisplayMode(_ mode: ReceiverDisplayMode) -> Bool {
         guard connected,
               macProtocolVersion >= WireProtocol.displayModeWireVersion,
+              videoEnabled || mode == .mirror,
               displayModeRequestState.request(mode) else { return false }
         pendingDisplayMode = displayModeRequestState.pendingMode
         controlResetGeneration &+= 1
@@ -1639,6 +1684,7 @@ final class StreamReceiver: ObservableObject {
             self.connected = value
             if !value {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
+                self.videoEnabled = true
                 // The mode is only ever known from a live Mac. A request
                 // already in flight is deliberately kept: switching modes
                 // rebuilds the Mac's session, so the drop is part of the

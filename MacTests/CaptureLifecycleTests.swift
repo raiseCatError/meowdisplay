@@ -81,3 +81,41 @@ final class DisplayStateTests: XCTestCase {
         XCTAssertNil(DisplayState.decode(messageType: "displayState", value: nil))
     }
 }
+
+final class VideoStateUpdateTests: XCTestCase {
+    func testDecodesStateAndRetainedMappingGeometry() {
+        XCTAssertEqual(VideoStateUpdate(message: [
+            "type": WireMessage.videoState,
+            "enabled": false,
+            "width": 2556,
+            "height": 1179,
+        ]), VideoStateUpdate(enabled: false, width: 2556, height: 1179))
+    }
+
+    func testToleratesGeometryThatIsNotKnownYet() {
+        XCTAssertEqual(VideoStateUpdate(message: [
+            "type": WireMessage.videoState,
+            "enabled": false,
+            "width": 0,
+            "height": 0,
+        ]), VideoStateUpdate(enabled: false, width: nil, height: nil))
+    }
+
+    func testRejectsWrongTypeOrMissingAuthoritativeState() {
+        XCTAssertNil(VideoStateUpdate(message: ["type": "displayState", "enabled": false]))
+        XCTAssertNil(VideoStateUpdate(message: ["type": WireMessage.videoState]))
+    }
+}
+
+final class VideoModePolicyTests: XCTestCase {
+    func testVideoOffNormalizesAndRestrictsModeToMirror() {
+        XCTAssertEqual(VideoModePolicy.normalized(mode: .extend, videoEnabled: false), .mirror)
+        XCTAssertTrue(VideoModePolicy.allows(.mirror, videoEnabled: false))
+        XCTAssertFalse(VideoModePolicy.allows(.extend, videoEnabled: false))
+    }
+
+    func testVideoOnDoesNotRestoreExtendImplicitly() {
+        let off = VideoModePolicy.normalized(mode: .extend, videoEnabled: false)
+        XCTAssertEqual(VideoModePolicy.normalized(mode: off, videoEnabled: true), .mirror)
+    }
+}

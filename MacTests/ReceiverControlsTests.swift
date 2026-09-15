@@ -230,6 +230,7 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.preferredLandscapeSide = .leading
         preferences.allowInput = false
         preferences.inputMode = .trackpad
+        preferences.showSurfaceGrid = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -277,6 +278,24 @@ final class ReceiverControlsTests: XCTestCase {
         let migrated = repository.load()
         XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
         XCTAssertEqual(migrated.trackpadSensitivity, PointerGestureConfig.defaultTrackpadSensitivity)
+    }
+
+    func testSchemaEightPreferencesDefaultSurfaceGridOn() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 8
+        let encoded = try JSONEncoder().encode(old)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "showSurfaceGrid")
+        defaults.set(try JSONSerialization.data(withJSONObject: object),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.showSurfaceGrid)
     }
 
     func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {
@@ -1220,6 +1239,33 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertNil(ReceiverUIPreferenceUpdate(message: ["type": "unknown",
                                                           "trayEnabled": true]))
     }
+
+    func testPortraitTrackpadSurfaceUsesMostAvailableHeightAndClearsControls() {
+        let container = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let tray = CGRect(x: 40, y: 770, width: 310, height: 50)
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: container,
+            safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [tray], portrait: true, inputMode: .trackpad,
+            remoteAspectSize: CGSize(width: 1920, height: 1080))
+        XCTAssertGreaterThan(surface.height, surface.width)
+        XCTAssertGreaterThan(surface.height, 650)
+        XCTAssertGreaterThanOrEqual(surface.minY, 69)
+        XCTAssertLessThanOrEqual(surface.maxY, tray.minY - VideoOffSurfaceGeometry.controlGap)
+    }
+
+    func testDirectVideoOffSurfacePreservesRemoteAspectInsideSameAvailableRegion() {
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: CGRect(x: 0, y: 0, width: 390, height: 844),
+            safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [CGRect(x: 50, y: 770, width: 290, height: 50)],
+            portrait: true, inputMode: .direct,
+            remoteAspectSize: CGSize(width: 16, height: 9))
+        XCTAssertEqual(surface.width / surface.height, 16.0 / 9.0, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(surface.minY, 69)
+        XCTAssertLessThanOrEqual(surface.maxY, 760)
+    }
+
     // MARK: - Physical notch side (orientation-derived)
 
     /// `UIInterfaceOrientation` describes how CONTENT rotates to compensate

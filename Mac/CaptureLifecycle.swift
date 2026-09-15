@@ -13,6 +13,16 @@ enum CaptureMode: String {
     }
 }
 
+enum VideoModePolicy {
+    static func normalized(mode: CaptureMode, videoEnabled: Bool) -> CaptureMode {
+        videoEnabled ? mode : .mirror
+    }
+
+    static func allows(_ mode: CaptureMode, videoEnabled: Bool) -> Bool {
+        videoEnabled || mode == .mirror
+    }
+}
+
 enum CaptureLifecyclePhase: String, Equatable {
     case running
     case pausing
