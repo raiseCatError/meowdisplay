@@ -227,6 +227,35 @@ enum KeyboardTextFlags {
     static let committed: CGEventFlags = []
 }
 
+/// The same invariant as `KeyboardTextFlags`, applied to every synthetic
+/// mouse event `InputInjector` posts (touch taps, scroll, pointer moves,
+/// and pointer down/up): a left-unset `.flags` field doesn't mean "no
+/// modifiers" — it means "inherit whatever the shared `.hidSystemState`
+/// event source's current combined modifier flags happen to be," which
+/// any other synthetic event (this app's own, or anyone else's) can leave
+/// non-empty. A real-device incident showed exactly that: `SystemGestureInvoker`
+/// stamps `.maskControl` on the arrow-key events it posts to simulate
+/// Control+Up/Down/Left/Right (Mission Control/App Exposé/Spaces — a
+/// faithful reproduction of the real shortcut, since a physically-held
+/// Control key's own keyDown truly does precede the arrow's), and Quartz's
+/// combined-session modifier state absorbed that flag from the key events
+/// with nothing ever asserting it should be cleared again (no real Control
+/// keyDown/keyUp pair was ever posted to release it). Every following
+/// mouse click, having never stated its own flags, silently inherited that
+/// stuck Control flag — and macOS reads a Control-clicked left button as a
+/// secondary/right click, which is exactly the "next tap becomes a right
+/// click" bug this fixes. Command+Space (Spotlight) never reproduced it
+/// because a stray Command flag on a click has no such special meaning.
+///
+/// The fix is NOT "always clear all mouse flags": the receiver's control
+/// tray can legitimately latch a modifier (`InputInjector.handleModifier`)
+/// that a subsequent click is supposed to carry (Cmd-click, Shift-click,
+/// …), tracked in `heldModifiers`. So every mouse event explicitly sets
+/// `.flags = heldModifiers.flags` — OpenDisplay's own intentionally-held
+/// modifiers, exactly, never more (ambient/stale) and never less (a real
+/// latched one silently dropped).
+enum MouseEventFlags {}
+
 /// Prepares committed keyboard text for Unicode injection, rejecting empty
 /// or unreasonably large payloads before they reach a CGEvent.
 enum KeyboardTextPlanner {

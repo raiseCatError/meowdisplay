@@ -646,6 +646,178 @@ final class PointerGestureEngineTests: XCTestCase {
         XCTAssertEqual(engine.handle(sample(3, .ended, view: CGPoint(x: 50, y: 100), t: 0.2)), [])
     }
 
+    /// The exact real-device failure: a fresh 3-finger system gesture defers
+    /// entirely (as `testFreshThreeFingerGestureDefersEntirely` verifies),
+    /// `VideoView.cancelTouchForGestureOwnership` then calls `reset()` (as
+    /// soon as the gesture is recognized — typically well before all three
+    /// fingers have physically lifted, since `cancelsTouchesInView = false`
+    /// keeps delivering their trailing `moved`/`ended` samples to the
+    /// engine), and only once every one of those three touches has actually
+    /// ended does a genuinely fresh single-finger tap begin. That tap must
+    /// resolve as a LEFT click, never a right click.
+    func testFreshTapAfterThreeFingerGestureDeferAndResetIsALeftClickNotARightClick() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        XCTAssertEqual(engine.mode, .deferredSystemGesture)
+
+        // Ownership taken mid-swipe, well before any finger has lifted.
+        XCTAssertEqual(engine.reset(), [])
+        XCTAssertEqual(engine.mode, .idle)
+
+        // The three fingers keep moving and then lift one at a time —
+        // still delivered to the engine (no UIKit-level cancellation) —
+        // interleaved with the fresh tap that starts once they're gone.
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 10, y: 120), t: 0.1)), [])
+        XCTAssertEqual(engine.handle(sample(2, .moved, view: CGPoint(x: 30, y: 120), t: 0.1)), [])
+        XCTAssertEqual(engine.handle(sample(3, .moved, view: CGPoint(x: 50, y: 120), t: 0.1)), [])
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 10, y: 120), t: 0.2)), [])
+        XCTAssertEqual(engine.handle(sample(2, .ended, view: CGPoint(x: 30, y: 120), t: 0.21)), [])
+        XCTAssertEqual(engine.handle(sample(3, .ended, view: CGPoint(x: 50, y: 120), t: 0.22)), [])
+        XCTAssertEqual(engine.mode, .idle)
+
+        // A genuinely fresh single-finger tap.
+        let began = engine.handle(sample(4, .began, view: CGPoint(x: 200, y: 200),
+                                         norm: CGPoint(x: 0.7, y: 0.7), t: 0.4))
+        XCTAssertEqual(began, [])
+        XCTAssertEqual(engine.mode, .firstTouchPending)
+        let ended = engine.handle(sample(4, .ended, view: CGPoint(x: 200, y: 200),
+                                         norm: CGPoint(x: 0.7, y: 0.7), t: 0.42))
+        XCTAssertEqual(ended, [.moveAbsolute(x: 0.7, y: 0.7)])
+        XCTAssertEqual(engine.mode, .tapBuffered)
+
+        let flushed = engine.poll(now: 0.42 + PointerGestureConfig.tapChainWindow + 0.01)
+        XCTAssertEqual(flushed, [.mouseDown(button: .left, clickCount: 1),
+                                 .mouseUp(button: .left, clickCount: 1)])
+    }
+
+    /// Same as above for a 4-finger pinch/spread system gesture (the
+    /// already-working comparison case) — confirms the engine treats both
+    /// group sizes identically once deferred and reset.
+    func testFreshTapAfterFourFingerGestureDeferAndResetIsALeftClick() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 70, y: 10), t: 0.03))
+        XCTAssertEqual(engine.mode, .deferredSystemGesture)
+
+        XCTAssertEqual(engine.reset(), [])
+        XCTAssertEqual(engine.mode, .idle)
+
+        for (id, x) in [(1, 10.0), (2, 30.0), (3, 50.0), (4, 70.0)] {
+            XCTAssertEqual(engine.handle(sample(id, .moved, view: CGPoint(x: x, y: 120), t: 0.1)), [])
+        }
+        for (id, x, t) in [(1, 10.0, 0.2), (2, 30.0, 0.21), (3, 50.0, 0.22), (4, 70.0, 0.23)] {
+            XCTAssertEqual(engine.handle(sample(id, .ended, view: CGPoint(x: x, y: 120), t: t)), [])
+        }
+        XCTAssertEqual(engine.mode, .idle)
+
+        let began = engine.handle(sample(5, .began, view: CGPoint(x: 200, y: 200),
+                                         norm: CGPoint(x: 0.7, y: 0.7), t: 0.4))
+        XCTAssertEqual(began, [])
+        let ended = engine.handle(sample(5, .ended, view: CGPoint(x: 200, y: 200),
+                                         norm: CGPoint(x: 0.7, y: 0.7), t: 0.42))
+        XCTAssertEqual(ended, [.moveAbsolute(x: 0.7, y: 0.7)])
+        let flushed = engine.poll(now: 0.42 + PointerGestureConfig.tapChainWindow + 0.01)
+        XCTAssertEqual(flushed, [.mouseDown(button: .left, clickCount: 1),
+                                 .mouseUp(button: .left, clickCount: 1)])
+    }
+
+    /// After a deferred-and-reset 3-finger gesture, a fresh DOUBLE tap must
+    /// still count correctly (clickCount 2) — the reset must not leave any
+    /// residual tap-chain state, but must also not block ordinary chaining
+    /// for the genuinely new sequence.
+    func testFreshDoubleTapAfterThreeFingerGestureCountsCorrectly() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        XCTAssertEqual(engine.reset(), [])
+        for id in [1, 2, 3] {
+            _ = engine.handle(sample(id, .ended, view: CGPoint(x: Double(id) * 20, y: 120), t: 0.2))
+        }
+
+        _ = engine.handle(sample(10, .began, view: CGPoint(x: 200, y: 200), t: 0.4))
+        _ = engine.handle(sample(10, .ended, view: CGPoint(x: 200, y: 200), t: 0.41))
+        _ = engine.handle(sample(11, .began, view: CGPoint(x: 201, y: 200), t: 0.45))
+        // Each tap in the chain also repositions the cursor to its own tap
+        // location (see `.firstTouchPending`'s `ended()` case) — only the
+        // click itself stays buffered, waiting out the chain window.
+        let secondTapUp = engine.handle(sample(11, .ended, view: CGPoint(x: 201, y: 200), t: 0.46))
+        XCTAssertEqual(secondTapUp, [.moveAbsolute(x: 0.5, y: 0.5)])
+        let flushed = engine.poll(now: 0.46 + PointerGestureConfig.tapChainWindow + 0.01)
+        XCTAssertEqual(flushed, [.mouseDown(button: .left, clickCount: 2),
+                                 .mouseUp(button: .left, clickCount: 2)])
+    }
+
+    /// A fresh pointer *drag* (not a tap) after a deferred-and-reset
+    /// 3-finger gesture must also start clean: exactly one `moveAbsolute`
+    /// from the new anchor, no leftover chord/right-click output.
+    func testFreshPointerMovementAfterThreeFingerGestureStartsClean() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        XCTAssertEqual(engine.reset(), [])
+        for id in [1, 2, 3] {
+            _ = engine.handle(sample(id, .ended, view: CGPoint(x: Double(id) * 20, y: 120), t: 0.2))
+        }
+
+        _ = engine.handle(sample(20, .began, view: CGPoint(x: 200, y: 200), t: 0.4))
+        let moved = engine.handle(sample(20, .moved, view: CGPoint(x: 260, y: 200),
+                                         norm: CGPoint(x: 0.8, y: 0.5), t: 0.42))
+        XCTAssertEqual(moved, [.moveAbsolute(x: 0.8, y: 0.5)])
+        XCTAssertEqual(engine.mode, .absolutePointer)
+        XCTAssertTrue(moved.allSatisfy { !isMouseDown($0) })
+    }
+
+    /// A fresh, genuine two-finger right-click chord after a deferred-and-
+    /// reset 3-finger gesture must still work — the fix must not suppress
+    /// legitimate right-clicks going forward, only the stale leftovers of
+    /// the claimed sequence.
+    func testFreshTwoFingerRightClickAfterThreeFingerGestureStillWorks() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        XCTAssertEqual(engine.reset(), [])
+        for id in [1, 2, 3] {
+            _ = engine.handle(sample(id, .ended, view: CGPoint(x: Double(id) * 20, y: 120), t: 0.2))
+        }
+
+        _ = engine.handle(sample(30, .began, view: CGPoint(x: 200, y: 200), t: 0.4))
+        _ = engine.handle(sample(31, .began, view: CGPoint(x: 220, y: 200), t: 0.41))
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        _ = engine.handle(sample(30, .ended, view: CGPoint(x: 200, y: 200), t: 0.44))
+        _ = engine.handle(sample(31, .ended, view: CGPoint(x: 220, y: 200), t: 0.45))
+        // A quick fresh chord tap buffers a right tap, only flushed if
+        // nothing continues it — poll past the window to confirm it
+        // actually resolves as a right click, not silently dropped.
+        _ = engine.poll(now: 0.45 + PointerGestureConfig.tapChainWindow + 0.01)
+
+        // Continue it into a drag with a second chord to force the
+        // right-click through unambiguously (mirrors
+        // `testCancellingRightDragReleasesTheButtonExactlyOnce`'s pattern).
+        let engine2 = PointerGestureEngine()
+        _ = engine2.handle(sample(1, .began, view: CGPoint(x: 10, y: 10), t: 0))
+        _ = engine2.handle(sample(2, .began, view: CGPoint(x: 30, y: 10), t: 0.01))
+        _ = engine2.handle(sample(3, .began, view: CGPoint(x: 50, y: 10), t: 0.02))
+        XCTAssertEqual(engine2.reset(), [])
+        for id in [1, 2, 3] {
+            _ = engine2.handle(sample(id, .ended, view: CGPoint(x: Double(id) * 20, y: 120), t: 0.2))
+        }
+        _ = engine2.handle(sample(30, .began, view: CGPoint(x: 200, y: 200), t: 0.4))
+        _ = engine2.handle(sample(31, .began, view: CGPoint(x: 220, y: 200), t: 0.41))
+        _ = engine2.handle(sample(30, .ended, view: CGPoint(x: 200, y: 200), t: 0.44))
+        _ = engine2.handle(sample(31, .ended, view: CGPoint(x: 220, y: 200), t: 0.45))
+        _ = engine2.handle(sample(32, .began, view: CGPoint(x: 202, y: 202), t: 0.5))
+        _ = engine2.handle(sample(33, .began, view: CGPoint(x: 222, y: 202), t: 0.51))
+        let rightDown = engine2.poll(now: 0.51 + PointerGestureConfig.holdCommitDelay + 0.01)
+        XCTAssertEqual(rightDown, [.mouseDown(button: .right, clickCount: 1)])
+    }
+
     func testEstablishedPointerPlusTwoLaterFingersNeverDefersToSystemGesture() {
         let engine = PointerGestureEngine()
         _ = engine.handle(sample(1, .began, view: .zero, t: 0))

@@ -1086,6 +1086,9 @@ struct VideoLayerView: UIViewRepresentable {
             lastAnchor = nil
             resetPointerEngine()
             cancelScrollMomentum()
+            activeFingerTouchIDs.removeAll()
+            systemGestureOwnedTouchIDs.removeAll()
+            recognizerResetPending = false
             // Force the two-finger recognizer to give up whatever it was
             // mid-deciding or already committed to — toggling `isEnabled`
             // is UIKit's standard way to force a recognizer to `.cancelled`
@@ -1263,6 +1266,48 @@ struct VideoLayerView: UIViewRepresentable {
         private var gestureEmissionGate = GestureEmissionGate()
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
 
+        // MARK: - System-gesture touch ownership
+        //
+        // Every finger touch currently down on this view, tracked
+        // independently of which recognizer(s) also see it — the source of
+        // truth `cancelTouchForGestureOwnership` snapshots from.
+        private var activeFingerTouchIDs: Set<ObjectIdentifier> = []
+        // The touches a system gesture (Mission Control, Spaces, App
+        // Exposé, pinch/spread, viewport pinch-zoom) has claimed. The
+        // three-finger and pinch/spread recognizers set `cancelsTouchesInView
+        // = false` (so they can coexist with `twoFingerRecognizer` while
+        // undecided — see its delegate doc), which means UIKit keeps delivering these
+        // exact touches' `moved`/`ended` samples to this view for the rest
+        // of their physical lifetime, well past the moment ownership was
+        // taken (typically mid-swipe, long before all fingers have lifted).
+        // Routing those leftover samples into `pointerEngine`/the legacy
+        // touch path would let a still-lifting 3-finger sequence's
+        // intermediate 2-then-1-touch states be reinterpreted as a fresh
+        // right-click chord or pointer session — once a system gesture
+        // claims a touch sequence, every touch in it stays consumed until
+        // the whole sequence reaches zero, never returned to pointer/chord
+        // recognition. `routeTouches` filters exactly this set out; only a
+        // touch that begins after its own id is gone (or was never in this
+        // set to begin with) may create new pointer/click state.
+        private var systemGestureOwnedTouchIDs: Set<ObjectIdentifier> = []
+
+        /// True from the moment a system gesture claims a touch sequence
+        /// until every touch in it has physically ended — i.e. exactly
+        /// `!systemGestureOwnedTouchIDs.isEmpty`, named for readability at
+        /// its call sites. `twoFingerRecognizer`/`viewportDoubleTapRecognizer`
+        /// stay attached and receive these touches like any other UIKit
+        /// recognizer (see `cancelTouchForGestureOwnership`'s doc for why
+        /// detaching them via `isEnabled` toggling was reverted); their
+        /// *output* — `didTwoFingerGesture`/`didViewportDoubleTap` — is what
+        /// this gates, at the very top of each action method.
+        private var systemGestureSequenceOwned: Bool { !systemGestureOwnedTouchIDs.isEmpty }
+        /// Set the instant the last owned touch ends; consumed (and the
+        /// recognizers actually reset) only once `activeFingerTouchIDs` is
+        /// ALSO empty — see the `ended` branch of `routeTouches` for why an
+        /// overlapping fresh touch must delay this rather than let it fire
+        /// while that touch is still physically down.
+        private var recognizerResetPending = false
+
         // MARK: - Remote-scroll momentum
 
         // Recent velocity samples for the LIVE scroll only — reset every
@@ -1324,6 +1369,14 @@ struct VideoLayerView: UIViewRepresentable {
         /// (the recognizer's own contract), so this only ever needs to
         /// branch on it, never re-decide.
         @objc func didTwoFingerGesture(_ recognizer: TwoFingerViewportGestureRecognizer) {
+            // The recognizer stays attached to and receives every touch
+            // normally — including a system gesture's remaining fingers as
+            // they lift — so its OWN state may reflect leftovers from an
+            // already-claimed sequence. Ignore its output entirely for as
+            // long as that sequence hasn't fully drained; see
+            // `cancelTouchForGestureOwnership`'s doc for why the touches
+            // themselves are never detached from it anymore.
+            guard !systemGestureSequenceOwned else { return }
             switch recognizer.state {
             case .began:
                 switch recognizer.intent {
@@ -1468,6 +1521,10 @@ struct VideoLayerView: UIViewRepresentable {
         /// keyboard, or receiver-size changes since it was stored). Never
         /// persisted across launches — a plain instance property.
         @objc func didViewportDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            // See `didTwoFingerGesture`'s matching guard doc — this
+            // recognizer stays attached to a system gesture's leftover
+            // touches too.
+            guard !systemGestureSequenceOwned else { return }
             guard recognizer.state == .ended else { return }
             if !manualZoom.isIdentity {
                 manualZoomMemory = manualZoom
@@ -1560,7 +1617,42 @@ struct VideoLayerView: UIViewRepresentable {
 
         /// A system gesture takes ownership from a pending or active touch press.
         /// Release a posted down; discard one that has not reached the Mac.
+        /// Also claims every finger currently down for `systemGestureOwnedTouchIDs`
+        /// (see its doc) — the whole point being that ownership, once taken,
+        /// is never handed back to pointer/chord recognition for these same
+        /// touches, no matter how many more `moved`/`ended` samples UIKit
+        /// keeps delivering for them.
+        ///
+        /// An earlier version of this also force-detached `twoFingerRecognizer`/
+        /// `viewportDoubleTapRecognizer` by toggling `isEnabled` right here,
+        /// mid-sequence, on the theory that UIKit's own touch-recognizer
+        /// association would otherwise let them still see these touches. A
+        /// real-device trace showed that toggle is what broke drainage: the
+        /// bookkeeping below got stuck holding 2 "owned" touches forever
+        /// after a later gesture, with `SYSTEM DRAIN` never reaching 0 —
+        /// exactly the touches whose `touchesEnded` this view stopped
+        /// receiving once their recognizer had been disabled and
+        /// re-enabled out from under them mid-flight. Disabling/re-enabling
+        /// a recognizer while it still has physically-down touches is not
+        /// something UIKit contracts to leave the VIEW's own touch delivery
+        /// untouched, and evidently doesn't here.
+        ///
+        /// So the recognizers now stay attached and continue receiving
+        /// these touches completely normally, like any other UIKit
+        /// recognizer — `routeTouches`'s raw `touchesEnded`/`touchesCancelled`
+        /// (never anything this function touches) is the ONLY thing that
+        /// drains `activeFingerTouchIDs`/`systemGestureOwnedTouchIDs`, so it
+        /// can never be starved by a recognizer-state side effect again.
+        /// What's suppressed instead is their *output*:
+        /// `didTwoFingerGesture`/`didViewportDoubleTap` both check
+        /// `systemGestureSequenceOwned` first and no-op while it's true —
+        /// whatever the recognizer privately thinks it recognized from
+        /// leftover touches never reaches scroll/viewport-zoom/right-click
+        /// behavior. Their own internal session state (`TwoFingerGestureSession`
+        /// et al.) is reset once ownership actually ends — see the
+        /// `SYSTEM RELEASE` branch in `routeTouches`.
         private func cancelTouchForGestureOwnership() {
+            systemGestureOwnedTouchIDs.formUnion(activeFingerTouchIDs)
             for action in ReceiverTouchOwnership.cancellationActions(downWasSent: downSent) {
                 switch action {
                 case .sendCancellation:
@@ -1800,7 +1892,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         private func routeTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?, ended: Bool) {
             let pencil = touches.filter { isPencil($0) }
-            let finger = touches.filter { isFinger($0) }
+            let allFingers = touches.filter { isFinger($0) }
             let usePencilWire = receiver?.macSupportsPencilWire ?? false
 
             if !pencil.isEmpty {
@@ -1810,6 +1902,46 @@ struct VideoLayerView: UIViewRepresentable {
                     sendPencilAsTouch(phase, pencil, event)
                 }
             }
+
+            if phase == "began" {
+                activeFingerTouchIDs.formUnion(allFingers.map(ObjectIdentifier.init))
+            }
+            // A touch a system gesture already claimed stays consumed for
+            // the rest of its physical lifetime, including this final
+            // `ended`/`cancelled` sample — see `systemGestureOwnedTouchIDs`.
+            let finger = allFingers.filter { !systemGestureOwnedTouchIDs.contains(ObjectIdentifier($0)) }
+            if ended {
+                for touch in allFingers {
+                    let id = ObjectIdentifier(touch)
+                    activeFingerTouchIDs.remove(id)
+                    let wasOwned = systemGestureOwnedTouchIDs.remove(id) != nil
+                    let releasedNow = wasOwned && systemGestureOwnedTouchIDs.isEmpty
+                    // The last owned touch ending is what makes it SAFE to
+                    // reset `twoFingerRecognizer`/`viewportDoubleTapRecognizer`'s
+                    // own session (below) — but only once no touch of ANY
+                    // kind, owned or not, is still physically down. A fresh
+                    // (unowned) touch can genuinely overlap the tail of a
+                    // draining system sequence — it's routed to
+                    // `pointerEngine` completely normally the moment it
+                    // isn't owned, and that's already correct — but toggling
+                    // `isEnabled` while THAT touch is still live would
+                    // reintroduce the exact bug this replaced, just for the
+                    // overlapping sequence instead of the drained one.
+                    // `recognizerResetPending` defers the toggle until a
+                    // later touch end (of the overlapping touch itself, or
+                    // whatever ends last) actually brings `activeFingerTouchIDs`
+                    // to zero too — never sooner.
+                    if releasedNow { recognizerResetPending = true }
+                }
+                if recognizerResetPending, activeFingerTouchIDs.isEmpty {
+                    recognizerResetPending = false
+                    twoFingerRecognizer?.isEnabled = false
+                    twoFingerRecognizer?.isEnabled = true
+                    viewportDoubleTapRecognizer?.isEnabled = false
+                    viewportDoubleTapRecognizer?.isEnabled = true
+                }
+            }
+
             // Palm rejection: ignore resting fingers while the pen is down.
             if !finger.isEmpty && !inputEngine.hasActivePen {
                 if receiver?.macSupportsPointerWire ?? false {

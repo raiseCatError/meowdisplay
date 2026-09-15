@@ -196,6 +196,11 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
+        // See `MouseEventFlags`'s doc: never let a touch tap silently
+        // inherit ambient/global modifier state left over from some other
+        // synthetic event (e.g. a system-gesture keyboard shortcut) —
+        // always state explicitly what this click intentionally carries.
+        event.flags = heldModifiers.flags
         event.post(tap: .cghidEventTap)
     }
 
@@ -212,6 +217,7 @@ final class InputInjector {
                                   wheel1: Int32((dy / scale).rounded()),
                                   wheel2: Int32((dx / scale).rounded()),
                                   wheel3: 0) else { return }
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         event.post(tap: .cghidEventTap)
     }
 
@@ -259,6 +265,7 @@ final class InputInjector {
         if pointerHeldButton != nil {
             event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
         }
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         event.post(tap: .cghidEventTap)
     }
 
@@ -278,6 +285,14 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        // See `MouseEventFlags`'s doc: a plain click carries exactly
+        // OpenDisplay's own intentionally-held modifiers (empty, unless the
+        // control tray latched one) — never whatever ambient/global
+        // modifier state happens to be set from an unrelated synthetic
+        // event (e.g. a system-gesture keyboard shortcut still reporting
+        // Control down), which a left-unset `.flags` would otherwise
+        // silently inherit and macOS could read as a Control-click.
+        event.flags = heldModifiers.flags
         event.post(tap: .cghidEventTap)
         pointerHeldButton = cgButton
         pointerHeldClickCount = clickState
@@ -297,6 +312,7 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         event.post(tap: .cghidEventTap)
         pointerHeldButton = nil
     }

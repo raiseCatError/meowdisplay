@@ -190,6 +190,30 @@ final class InputRoutingTests: XCTestCase {
         XCTAssertEqual(spotlight.flags, .maskCommand)
     }
 
+    /// `SystemGestureInvoker` defensively releases every `ControlModifier`
+    /// whose `eventFlag` appears in a shortcut's flags (via that
+    /// modifier's own virtual key code) after posting it, so a leftover
+    /// Control flag can never leak into a later synthetic event (see
+    /// `MouseEventFlags`'s doc — this is what caused a plain left click
+    /// right after Mission Control/App Exposé/Spaces to read to macOS as a
+    /// Control-click, i.e. a secondary click). This locks in that those
+    /// four gestures actually carry `.maskControl` — a regression in
+    /// either `ReceiverGesture`'s shortcut mapping or `ControlModifier`'s
+    /// own flag mapping could otherwise silently stop that release from
+    /// ever firing again without any test failing.
+    func testControlUsingSystemGesturesCarryTheControlFlagTheDefensiveReleaseTargets() {
+        for gesture in [ReceiverGesture.missionControl, .appExpose, .nextSpace, .previousSpace] {
+            let flags = SystemGestureShortcutMapping.shortcut(for: gesture).flags
+            XCTAssertTrue(flags.contains(ControlModifier.control.eventFlag),
+                         "\(gesture) must carry .maskControl for the defensive release to cover it")
+        }
+        // Spotlight (Command+Space) never reproduced the bug on a real
+        // device — consistent with it carrying no Control flag at all.
+        let spotlight = SystemGestureShortcutMapping.shortcut(for: .spotlight).flags
+        XCTAssertFalse(spotlight.contains(ControlModifier.control.eventFlag))
+        XCTAssertTrue(spotlight.contains(ControlModifier.command.eventFlag))
+    }
+
     func testNormalizedCoordinatesMapIntoBoundsWithNegativeOrigin() {
         let bounds = CGRect(x: -1_920, y: -240, width: 1_920, height: 1_080)
 
