@@ -60,6 +60,7 @@ enum ControlTrayItem: String, Codable, CaseIterable, Identifiable {
     case shift
     case escape
     case tab
+    case dock
     case keyboard
     /// Opens receiver Settings. The raw value stays `"more"` so profiles
     /// persisted before it became a gear still decode.
@@ -75,6 +76,7 @@ enum ControlTrayItem: String, Codable, CaseIterable, Identifiable {
         case .shift: return "Shift"
         case .escape: return "Escape"
         case .tab: return "Tab"
+        case .dock: return "Toggle Dock"
         case .keyboard: return "Keyboard"
         case .settings: return "Settings"
         }
@@ -88,6 +90,7 @@ enum ControlTrayItem: String, Codable, CaseIterable, Identifiable {
         case .shift: return "⇧"
         case .escape: return "esc"
         case .tab: return "tab"
+        case .dock: return "dock.rectangle"
         case .keyboard: return "keyboard"
         case .settings: return "gearshape.fill"
         }
@@ -222,7 +225,7 @@ extension ControlProfile {
             ChordPalette(chord: commandOption, actions: [
                 shortcut("move-here", "Move Item Here", "V", 25, commandOption),
                 shortcut("force-quit", "Force Quit", "Esc", 41, commandOption),
-                shortcut("dock", "Show/Hide Dock", "D", 7, commandOption),
+                shortcut("dock", "Toggle Dock", "D", 7, commandOption),
                 shortcut("hide-others", "Hide Others", "H", 11, commandOption),
                 shortcut("close-all", "Close All Windows", "W", 26, commandOption),
             ]),
@@ -581,6 +584,22 @@ struct ReceiverControlPreferencesRepository {
         // defaulted it to true — nothing to transform.
         if value.version < 7 {
             value.version = 7
+        }
+        if value.version < 8 {
+            // Toggle Dock is a real Main Tray item. Insert it immediately
+            // before Keyboard without disturbing any other saved ordering
+            // or visibility choice. Existing custom profiles opt in through
+            // the editor; the Default profile gains the new visible action.
+            for index in value.profiles.indices
+                where !value.profiles[index].trayItems.contains(where: { $0.item == .dock }) {
+                let keyboardIndex = value.profiles[index].trayItems.firstIndex(where: { $0.item == .keyboard })
+                    ?? value.profiles[index].trayItems.endIndex
+                value.profiles[index].trayItems.insert(
+                    TrayItemConfiguration(item: .dock,
+                                          isVisible: value.profiles[index].slot == .default),
+                    at: keyboardIndex)
+            }
+            value.version = 8
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

@@ -114,7 +114,7 @@ final class ReceiverControlsTests: XCTestCase {
     func testDefaultTrayIncludesCustomizableOneShotTab() {
         let profile = ControlProfile.canonical()
         XCTAssertEqual(profile.visibleTrayItems,
-                       [.command, .option, .control, .shift, .escape, .tab, .keyboard, .settings])
+                       [.command, .option, .control, .shift, .escape, .tab, .dock, .keyboard, .settings])
         XCTAssertEqual(ControlTrayItem.tab.displayLabel, "tab")
         XCTAssertEqual(profile.trayItems.first(where: { $0.item == .tab })?.isVisible, true)
     }
@@ -445,6 +445,18 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(HIDKeyUsage.equal.keyCode, 24)
     }
 
+    func testMainTrayOwnsToggleDockNotFunctionTray() {
+        let mainItems = ControlProfile.canonical().visibleTrayItems
+        let dockIndex = try? XCTUnwrap(mainItems.firstIndex(of: .dock))
+        let keyboardIndex = try? XCTUnwrap(mainItems.firstIndex(of: .keyboard))
+        XCTAssertEqual(dockIndex.map { $0 + 1 }, keyboardIndex)
+        XCTAssertEqual(ControlTrayItem.dock.title, "Toggle Dock")
+        XCTAssertEqual(ControlTrayItem.dock.displayLabel, "dock.rectangle")
+        let functionIDs = FunctionTrayProfile.canonical().visibleItems.map(\.id)
+        XCTAssertFalse(functionIDs.contains("dock"))
+        XCTAssertFalse(functionIDs.contains { $0.lowercased().contains("dock") })
+    }
+
     func testOldFunctionTrayItemsResolveCanonicalSymbolsWithoutLosingCustomization() {
         var saved = FunctionTrayProfile.canonical(slot: .profile1)
         saved.items.reverse()
@@ -468,6 +480,28 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(resolved.items.first { $0.id == "redo" }?.item.systemImage,
                        "arrow.uturn.forward")
         XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.title, "Undo")
+    }
+
+    func testSchemaSevenProfilesGainDockImmediatelyBeforeKeyboard() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 7
+        for index in old.profiles.indices {
+            old.profiles[index].trayItems.removeAll { $0.item == .dock }
+        }
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        for profile in migrated.profiles {
+            let dock = try XCTUnwrap(profile.trayItems.firstIndex { $0.item == .dock })
+            let keyboard = try XCTUnwrap(profile.trayItems.firstIndex { $0.item == .keyboard })
+            XCTAssertEqual(dock + 1, keyboard)
+            XCTAssertEqual(profile.trayItems[dock].isVisible, profile.slot == .default)
+        }
     }
 
     func testSameSideFunctionGroupsAvoidRenderedMainTrayWhenMiddleCannotFit() {

@@ -728,6 +728,11 @@ struct ReceiverControlOverlay: View {
         case .tab:
             receiver.sendKeyboardPress(usage: 43)
             haptics.play(.confirmation)
+        case .dock:
+            receiver.sendKeyboardPress(usage: 7,
+                                       modifiers: [ControlModifier.option.rawValue,
+                                                   ControlModifier.command.rawValue])
+            haptics.play(.confirmation)
         case .keyboard:
             keyboardActive.toggle()
             haptics.play(.selection)
