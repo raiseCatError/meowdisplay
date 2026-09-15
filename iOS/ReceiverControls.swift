@@ -84,7 +84,10 @@ struct ReceiverControlOverlay: View {
     let keyboardAvailable: Bool
     let keyboardVisibleRect: CGRect?
     let containerSize: CGSize
-    let safeInsets: EdgeInsets
+    let safeInsets: ControlSafeInsets
+    /// Physical notch side — see `PhysicalNotchSide`. `nil` in portrait, on
+    /// a flat/unknown orientation, or a non-notched device.
+    let notchSide: LandscapeTraySide?
     let haptics: ReceiverHaptics
 
     @State private var interaction = ControlInteractionState()
@@ -94,6 +97,13 @@ struct ReceiverControlOverlay: View {
     @State private var initiatingItem: ControlTrayItem?
     @State private var gestureActive = false
     @State private var lastHoveredModifier: ControlModifier?
+    #if DEBUG
+    /// Visual diagnostic for the Avoid Notch runtime path (see the
+    /// "Notch Debug Overlay" toggle in Settings → Analytics): red =
+    /// computed unsafe/obstacle regions, yellow = the raw (Avoid Notch OFF)
+    /// tray frame, green = the final (Avoid Notch's actual effect) frame.
+    @AppStorage("notchDebugOverlay") private var notchDebugOverlayEnabled = false
+    #endif
 
     /// Every control is its own free-floating circle: there is no tray card
     /// and no palette card, so nothing blurs the stream except the chips

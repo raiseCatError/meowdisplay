@@ -298,6 +298,12 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var profiles: [ControlProfile]
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) }) {
+    /// Global (never profile-specific) layout preference: whether tray/
+    /// control geometry conditionally shifts inward to clear the notch/
+    /// Dynamic Island/home-indicator strip when a frame would actually
+    /// intersect it — see `ControlTrayGeometry.avoidingUnsafeRegion`. Never
+    /// a permanent margin; OFF lets controls sit at the literal screen edge.
+    var avoidNotch = true
         self.profiles = profiles
     }
 
@@ -337,6 +343,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // speed, never a silently different one.
         trackpadSensitivity = try value(.trackpadSensitivity, fallback.trackpadSensitivity)
         profiles = try value(.profiles, fallback.profiles)
+        // Absent (schema < 7) means "written before Avoid Notch existed" —
+        // default true, matching a brand-new install (and the explicit
+        // "old settings migrate to ON" requirement).
+        avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
     }
 
     func profile(for slot: ControlProfileSlot) -> ControlProfile {
@@ -400,6 +410,11 @@ struct ReceiverControlPreferencesRepository {
         // transform.
         if value.version < 5 {
             value.version = 5
+        }
+        // Schema 6 predates Avoid Notch; the custom decoder above already
+        // defaulted it to true — nothing to transform.
+        if value.version < 7 {
+            value.version = 7
         }
         return value
     }

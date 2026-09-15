@@ -321,7 +321,7 @@ final class ReceiverControlsTests: XCTestCase {
             ControlTrayGeometry.layout(
                 container: container, safeInsets: .zero, keyboardVisibleRect: nil,
                 portrait: false, side: side, traySize: CGSize(width: 44, height: 348),
-                paletteSize: CGSize(width: 42, height: 260))
+                paletteSize: CGSize(width: 42, height: 260), avoidNotch: true)
         }
         let right = layout(.trailing)
         let left = layout(.leading)
@@ -357,7 +357,8 @@ final class ReceiverControlsTests: XCTestCase {
         let layout = ControlTrayGeometry.layout(
             container: CGRect(x: 0, y: 0, width: 390, height: 844), safeInsets: .zero,
             keyboardVisibleRect: visible, portrait: true, side: .trailing,
-            traySize: CGSize(width: 360, height: 58), paletteSize: CGSize(width: 330, height: 92))
+            traySize: CGSize(width: 360, height: 58), paletteSize: CGSize(width: 330, height: 92),
+            avoidNotch: true)
         XCTAssertLessThanOrEqual(layout.trayFrame.maxY, visible.maxY)
         XCTAssertLessThanOrEqual(layout.paletteFrame.maxY, layout.trayFrame.minY)
         XCTAssertTrue(visible.contains(layout.paletteFrame))
@@ -368,7 +369,8 @@ final class ReceiverControlsTests: XCTestCase {
         let layout = ControlTrayGeometry.layout(
             container: CGRect(x: 0, y: 0, width: 700, height: 390), safeInsets: .zero,
             keyboardVisibleRect: visible, portrait: false, side: .trailing,
-            traySize: CGSize(width: 58, height: 300), paletteSize: CGSize(width: 320, height: 92))
+            traySize: CGSize(width: 58, height: 300), paletteSize: CGSize(width: 320, height: 92),
+            avoidNotch: true)
         XCTAssertTrue(visible.contains(layout.trayFrame))
         XCTAssertTrue(visible.contains(layout.paletteFrame))
         XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
@@ -399,6 +401,342 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(HIDKeyUsage.equal.keyCode, 24)
     }
 
+    // MARK: - Avoid Notch
+
+    func testAvoidingUnsafeRegionShiftsOnlyWhenIntersectingAndOnlyOnTheAffectedEdge() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+
+        // Frame sitting inside the notch's strip — shifted to clear it.
+        let overlapping = CGRect(x: 10, y: 100, width: 44, height: 120)
+        let shifted = ControlTrayGeometry.avoidingUnsafeRegion(overlapping, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading)
+        XCTAssertEqual(shifted.minX, 40)
+        XCTAssertEqual(shifted.minY, overlapping.minY)   // only the affected axis moves
+
+        // A frame nowhere near the unsafe strip is returned unchanged.
+        let clear = CGRect(x: 200, y: 100, width: 44, height: 120)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(clear, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading), clear)
+
+        // Disabled: never shifts, even when intersecting.
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(overlapping, in: container, safeInsets: leftNotch, enabled: false, notchSide: .leading), overlapping)
+    }
+
+    func testAvoidingUnsafeRegionHandlesAllFourEdgesIndependently() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 30, leading: 40, bottom: 20, trailing: 50)
+        // Trailing-edge overlap — the physical notch side is given
+        // explicitly (see `PhysicalNotchSide`), not inferred from comparing
+        // `leading`/`trailing` depths.
+        let trailing = CGRect(x: 770, y: 100, width: 44, height: 44)
+        let shiftedTrailing = ControlTrayGeometry.avoidingUnsafeRegion(trailing, in: container, safeInsets: insets, enabled: true, notchSide: .trailing)
+        XCTAssertEqual(shiftedTrailing.maxX, 750)
+        // Top overlap — independent of notchSide entirely.
+        let top = CGRect(x: 378, y: 5, width: 44, height: 44)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(top, in: container, safeInsets: insets, enabled: true).minY, 30)
+        // Bottom overlap — independent of notchSide entirely.
+        let bottom = CGRect(x: 378, y: 370, width: 44, height: 44)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(bottom, in: container, safeInsets: insets, enabled: true).maxY, 380)
+    }
+
+    func testLeftSideNotchShiftsLeadingTrayInward() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(on.trayFrame.minX, 40)
+    }
+
+    func testRightSideNotchShiftsTrailingTrayInward() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let rightNotch = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 40)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: rightNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(on.trayFrame.maxX, container.maxX - 40)
+    }
+
+    func testLeftTrayIsUnchangedByRightUnsafeInset() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true)
+        let rightUnsafe = ControlSafeInsets(top: 0, leading: 0, bottom: 21, trailing: 59)
+        let resolved = ControlTrayGeometry.layout(
+            container: container, safeInsets: rightUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertEqual(resolved.trayFrame.minX, raw.trayFrame.minX)
+    }
+
+    func testRightTrayIsUnchangedByLeftUnsafeInset() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, side: .trailing,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true)
+        let leftUnsafe = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        let resolved = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .trailing,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(resolved.trayFrame.maxX, raw.trayFrame.maxX)
+    }
+
+    func testCollapsedGearUsesTheSameNotchSafeMainTrayFrame() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let leftUnsafe = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        let gearSize = CGSize(width: 50, height: 50)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading, traySize: gearSize,
+            paletteSize: .zero, avoidNotch: true, notchSide: .leading)
+
+        XCTAssertEqual(layout.trayFrame.minX, leftUnsafe.leading)
+        XCTAssertEqual(layout.trayFrame.size, gearSize)
+
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading, traySize: gearSize,
+            paletteSize: .zero, avoidNotch: false, notchSide: .leading)
+        XCTAssertEqual(off.trayFrame.minX, 12)
+    }
+
+    func testRuntimeSafeAreaReportRepairsZeroedSwiftUIInsetsAfterRotation() {
+        let zeroedProxy = ControlSafeInsets.zero
+        let landscapeWindow = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: zeroedProxy, runtime: landscapeWindow),
+                       landscapeWindow)
+
+        // Rotating the other way swaps the physical sensor side. The live
+        // snapshot replaces, rather than merges with, the stale proxy.
+        let rotatedWindow = ControlSafeInsets(top: 0, leading: 0, bottom: 21, trailing: 59)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: landscapeWindow, runtime: rotatedWindow),
+                       rotatedWindow)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: landscapeWindow, runtime: nil),
+                       landscapeWindow)
+    }
+
+    func testTrayOnNonNotchSideIsUnaffected() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let unaffected = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withLeftNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        // A trailing-side tray is unaffected by a leading-edge notch.
+        XCTAssertEqual(unaffected.trayFrame, withLeftNotch.trayFrame)
+    }
+
+    func testAvoidNotchOffPreservesFullEdgePlacementEvenOverTheUnsafeStrip() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: false, notchSide: .leading)
+        // With Avoid Notch off, the tray sits at the literal screen edge,
+        // ignoring the notch's inset entirely.
+        XCTAssertEqual(off.trayFrame.minX, 12, accuracy: 0.5)
+    }
+
+    func testAvoidNotchOnWithNoActualMainTrayOverlapMatchesOffExactly() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        // A top sensor region is centered horizontally; this left-side
+        // landscape tray never intersects it.
+        let topUnsafe = ControlSafeInsets(top: 59, leading: 0, bottom: 0, trailing: 0)
+        func layout(avoid: Bool) -> ControlTrayLayout {
+            ControlTrayGeometry.layout(
+                container: container, safeInsets: topUnsafe, keyboardVisibleRect: nil,
+                portrait: false, side: .leading,
+                traySize: CGSize(width: 44, height: 300),
+                paletteSize: CGSize(width: 46, height: 330), avoidNotch: avoid)
+        }
+        XCTAssertEqual(layout(avoid: true), layout(avoid: false))
+    }
+
+    func testTemporaryPaletteUsesConditionalObstacleAvoidance() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let clearPalette = CGRect(x: 12, y: 12, width: 46, height: 60)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(
+            clearPalette, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading), clearPalette)
+
+        let collidingPalette = CGRect(x: 12, y: 150, width: 46, height: 100)
+        let shifted = ControlTrayGeometry.avoidingUnsafeRegion(
+            collidingPalette, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading)
+        XCTAssertEqual(shifted.minX, leftNotch.leading)
+        XCTAssertEqual(shifted.minY, collidingPalette.minY)
+    }
+
+    func testResultingFrameStaysWithinVisibleBoundsWithAvoidNotch() {
+        // Asymmetric so the trailing edge is the notch side under test; the
+        // symmetric case (a real device CAN report equal depths on both
+        // edges while still having a real, single-sided notch) is covered
+        // separately below.
+        let container = CGRect(x: 0, y: 0, width: 200, height: 150)
+        let heavyInsets = ControlSafeInsets(top: 10, leading: 0, bottom: 10, trailing: 40)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: heavyInsets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 120), paletteSize: CGSize(width: 42, height: 100),
+            avoidNotch: true, notchSide: .trailing)
+        let visible = CGRect(x: container.minX, y: heavyInsets.top,
+                             width: container.width - heavyInsets.trailing,
+                             height: container.height - heavyInsets.top - heavyInsets.bottom)
+        XCTAssertTrue(visible.contains(layout.trayFrame))
+    }
+
+    /// The real-device failure this replaces: `leading=59, trailing=59`
+    /// used to make the old leading/trailing-depth-comparison heuristic
+    /// (`horizontalNotchSide`, now removed) conclude "no notch," even
+    /// though the device had a real, single-sided physical notch. Depth
+    /// comparison can never distinguish that case from actual symmetric
+    /// rounded corners — only `UIInterfaceOrientation` can (see
+    /// `PhysicalNotchSide`) — so equal insets must still produce an
+    /// exclusion once the physical side is given explicitly.
+    func testSymmetricSafeInsetsStillExcludeGivenAnExplicitNotchSide() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let symmetric = ControlSafeInsets(top: 0, leading: 59, bottom: 20, trailing: 59)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: symmetric, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(on.trayFrame.minX, symmetric.leading)
+
+        // The opposite (non-notch) side is unaffected by the same symmetric
+        // insets, exactly as with an asymmetric notch.
+        let unaffected = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withSymmetricNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: symmetric, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(unaffected.trayFrame, withSymmetricNotch.trayFrame)
+    }
+
+    /// `nil` (no known physical notch side) is the safe default — e.g. a
+    /// non-notched device, or an orientation that isn't clearly landscape —
+    /// and must not invent an obstacle on either edge even with sizable
+    /// insets present.
+    func testNoNotchSideProducesNoHorizontalObstacleEvenWithSizableInsets() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 40)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: nil)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        XCTAssertEqual(on.trayFrame, raw.trayFrame)
+    }
+
+    // MARK: - Notch side vs. tray side matrix
+
+    func testPhysicalNotchLeftAndControlLeftIsDisplaced() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(layout.trayFrame.minX, insets.leading)
+    }
+
+    func testPhysicalNotchLeftAndControlRightIsUnchanged() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(raw.trayFrame, withNotch.trayFrame)
+    }
+
+    func testPhysicalNotchRightAndControlRightIsDisplaced() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxX, container.maxX - insets.trailing)
+    }
+
+    func testPhysicalNotchRightAndControlLeftIsUnchanged() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertEqual(raw.trayFrame, withNotch.trayFrame)
+    }
+
+    func testPortraitNeverTreatsSideInsetsAsANotch() {
+        let container = CGRect(x: 0, y: 0, width: 400, height: 844)
+        let sideInsets = ControlSafeInsets(top: 0, leading: 30, bottom: 0, trailing: 0)
+        // `notchSide` given explicitly (as if a landscape reading were
+        // stale) — portrait's own guard must still win.
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: sideInsets, keyboardVisibleRect: nil, portrait: true,
+            side: .leading, traySize: CGSize(width: 260, height: 60), paletteSize: CGSize(width: 200, height: 60),
+            avoidNotch: true, notchSide: .leading)
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: sideInsets, keyboardVisibleRect: nil, portrait: true,
+            side: .leading, traySize: CGSize(width: 260, height: 60), paletteSize: CGSize(width: 200, height: 60),
+            avoidNotch: false)
+        XCTAssertEqual(on.trayFrame, off.trayFrame)
+    }
+
+    func testSchemaSixPreferencesDefaultAvoidNotchToTrue() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 6
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.avoidNotch)
+    }
+
+    func testAvoidNotchPersistsAcrossSaveAndLoad() throws {
+        let suite = "ReceiverControlsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.avoidNotch = false
+        repository.save(preferences)
+        XCTAssertFalse(repository.load().avoidNotch)
+    }
+
     func testMacDeliveredPreferenceUpdateChangesOnlySuppliedFields() throws {
         var preferences = ReceiverControlPreferences()
         preferences.hapticsEnabled = false
@@ -412,5 +750,26 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertFalse(preferences.hapticsEnabled)
         XCTAssertNil(ReceiverUIPreferenceUpdate(message: ["type": "unknown",
                                                           "trayEnabled": true]))
+    }
+    // MARK: - Physical notch side (orientation-derived)
+
+    /// `UIInterfaceOrientation` describes how CONTENT rotates to compensate
+    /// for the device — the opposite of the device's own physical rotation
+    /// — confirmed against a real notched iPhone: `.landscapeLeft` (device
+    /// rotated left) puts the physical notch on the screen's TRAILING edge.
+    func testLandscapeLeftMapsToTrailingNotchSide() {
+        XCTAssertEqual(PhysicalNotchSide.forLandscape(.landscapeLeft), .trailing)
+    }
+
+    /// `.landscapeRight` (device rotated right) puts the physical notch on
+    /// the screen's LEADING edge.
+    func testLandscapeRightMapsToLeadingNotchSide() {
+        XCTAssertEqual(PhysicalNotchSide.forLandscape(.landscapeRight), .leading)
+    }
+
+    /// No landscape orientation (portrait, flat, or simply unknown) means no
+    /// landscape notch side — never invented.
+    func testNoLandscapeOrientationMapsToNoNotchSide() {
+        XCTAssertNil(PhysicalNotchSide.forLandscape(nil))
     }
 }

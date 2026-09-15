@@ -43,6 +43,12 @@ struct ReceiverScreen: View {
     @State private var showOnboarding = false
     @State private var nagDismissed = false
     @State private var keyboardVisibleRect: CGRect?
+    @State private var runtimeSafeInsets: ControlSafeInsets?
+    // Physical notch side (see `PhysicalNotchSide`) derived from
+    // `UIInterfaceOrientation`, not from comparing safe-area depths — a real
+    // device can report equal leading/trailing insets despite a genuinely
+    // single-sided physical notch (see that type's doc).
+    @State private var physicalNotchSide: LandscapeTraySide?
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
@@ -96,8 +102,21 @@ struct ReceiverScreen: View {
 
     var body: some View {
         GeometryReader { geo in
+            let proxySafeInsets = ControlSafeInsets(
+                top: geo.safeAreaInsets.top,
+                leading: geo.safeAreaInsets.leading,
+                bottom: geo.safeAreaInsets.bottom,
+                trailing: geo.safeAreaInsets.trailing)
+            let effectiveSafeInsets = ControlSafeInsets.resolved(
+                proxy: proxySafeInsets, runtime: runtimeSafeInsets)
             ZStack {
                 if isStreaming {
+                    ReceiverSafeAreaProbe { insets, notchSide in
+                        runtimeSafeInsets = insets
+                        physicalNotchSide = notchSide
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
                     Color.black.ignoresSafeArea()
                     VideoLayerView(displayLayer: model.receiver.displayLayer,
                                    receiver: model.receiver,
@@ -308,6 +327,70 @@ struct ReceiverScreen: View {
     }
 }
 
+/// UIKit remains authoritative for physical window safe-area insets even
+/// while the streaming SwiftUI tree deliberately renders edge-to-edge.
+/// `safeAreaInsetsDidChange` makes rotation updates immediate.
+private struct ReceiverSafeAreaProbe: UIViewRepresentable {
+    let onChange: (ControlSafeInsets, LandscapeTraySide?) -> Void
+
+    func makeUIView(context: Context) -> SafeAreaProbeView {
+        let view = SafeAreaProbeView()
+        view.isUserInteractionEnabled = false
+        view.onChange = onChange
+        return view
+    }
+
+    func updateUIView(_ view: SafeAreaProbeView, context: Context) {
+        view.onChange = onChange
+        view.publishIfNeeded()
+    }
+
+    final class SafeAreaProbeView: UIView {
+        var onChange: ((ControlSafeInsets, LandscapeTraySide?) -> Void)?
+        private var lastPublished: UIEdgeInsets?
+        private var lastOrientation: UIInterfaceOrientation?
+
+        override func safeAreaInsetsDidChange() {
+            super.safeAreaInsetsDidChange()
+            publishIfNeeded()
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            publishIfNeeded()
+        }
+
+        func publishIfNeeded() {
+            // The probe itself may be hosted in a zero/inset SwiftUI
+            // representable. The window is the authoritative public source
+            // for physical screen exclusions in current interface
+            // coordinates, especially after landscape-side rotation.
+            let insets = window?.safeAreaInsets ?? safeAreaInsets
+            let orientation = window?.windowScene?.interfaceOrientation
+            guard insets != lastPublished || orientation != lastOrientation else { return }
+            lastPublished = insets
+            lastOrientation = orientation
+            let value = ControlSafeInsets(top: insets.top,
+                                          leading: insets.left,
+                                          bottom: insets.bottom,
+                                          trailing: insets.right)
+            let landscape: LandscapeInterfaceOrientation?
+            switch orientation {
+            case .landscapeLeft: landscape = .landscapeLeft
+            case .landscapeRight: landscape = .landscapeRight
+            default: landscape = nil
+            }
+            let notchSide = PhysicalNotchSide.forLandscape(landscape)
+            // Avoid mutating SwiftUI state during representable updates.
+            DispatchQueue.main.async { [weak self] in self?.onChange?(value, notchSide) }
+            #if DEBUG
+            Log.info("safeAreaTrace: window=\(String(describing: window?.bounds)) "
+                     + "interfaceOrientation=\(String(describing: orientation)) insets=\(insets) "
+                     + "notchSide=\(notchSide.map(String.init(describing:)) ?? "none")")
+            #endif
+        }
+    }
+}
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
 struct IdleView: View {
@@ -448,6 +531,9 @@ struct SettingsView: View {
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    #if DEBUG
+    @AppStorage("notchDebugOverlay") private var notchDebugOverlayEnabled = false
+    #endif
     @State private var confirmingReset = false
 
     private var version: String {
@@ -468,6 +554,15 @@ struct SettingsView: View {
                 }
 
                 Section("Display") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Avoid Notch", isOn: preferenceBinding(\.avoidNotch))
+                        Text("Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("Experimental")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                     if let confirmedMode = receiver.confirmedDisplayMode {
                         Picker("Display Mode", selection: Binding(
                             get: { receiver.pendingDisplayMode ?? confirmedMode },
@@ -580,10 +675,17 @@ struct SettingsView: View {
                 Section {
                     Toggle("Performance overlay", isOn: $showAnalytics)
                     Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
+                    #if DEBUG
+                    Toggle("Notch Debug Overlay (DEBUG)", isOn: $notchDebugOverlayEnabled)
+                    #endif
                 } header: {
                     Text("Analytics")
                 } footer: {
+                    #if DEBUG
+                    Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging. Notch Debug Overlay draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
+                    #else
                     Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging.")
+                    #endif
                 }
 
                 Section {
