@@ -129,6 +129,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver requests are handed to SenderController, which owns the
     /// existing authoritative session-rebuild mode-switch path.
     @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
+    /// A receiver asked to change Allow Input. Handed to `AppController`,
+    /// which owns the single, global `allowInput` toggle (see its `didSet`
+    /// — Mac remains authoritative and broadcasts the result to every
+    /// connected receiver, this one included).
+    @MainActor var onAllowInputRequest: ((Bool) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
@@ -386,6 +391,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendDisplayModeState() {
         sendJSONObject(["type": WireMessage.displayModeState,
                         "mode": mode.receiverMode.rawValue])
+    }
+
+    /// Called on the sender queue. `InputPolicy.allowsInput()` reads
+    /// straight from UserDefaults (the same static check every input-
+    /// injection call site already gates on), so this always reports the
+    /// Mac's real, current gate — never a stale cached copy.
+    private func sendAllowInputState() {
+        sendJSONObject(["type": WireMessage.allowInputState,
+                        "allowed": InputPolicy.allowsInput()])
+    }
+
+    /// Public entry point for `AppController.allowInput`'s `didSet` to
+    /// broadcast the Mac's new state to this receiver.
+    func pushAllowInputState() {
+        queue.async { [weak self] in self?.sendAllowInputState() }
     }
 
     func start() async throws {
@@ -782,6 +802,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // modes replaces the old session with a new sender.
             self.sendDisplayState(receiverState)
             self.sendDisplayModeState()
+            self.sendAllowInputState()
         }
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
@@ -2207,6 +2228,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendDisplayModeState()
             } else {
                 Task { @MainActor in self.onDisplayModeRequest?(requestedMode) }
+            }
+        case WireMessage.allowInputRequest:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.allowInputWireVersion,
+                  let requested = obj["allowed"] as? Bool else { return }
+            if requested == InputPolicy.allowsInput() {
+                // Already in the requested state — just re-confirm it,
+                // covering a receiver that missed an earlier push (e.g. it
+                // connected mid-flight).
+                sendAllowInputState()
+            } else {
+                Task { @MainActor in self.onAllowInputRequest?(requested) }
             }
         case "gesture":
             guard let name = obj["name"] as? String,

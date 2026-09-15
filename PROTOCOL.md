@@ -257,6 +257,7 @@ Coordinates use the conventions of section 7.
 | `keyboard` | pv 4 | `action`, plus fields per `action` (below) | Keyboard input |
 | `pointer` | pv 5 | `action`, plus fields per `action` (below) | Pointer/click gestures |
 | `displayModeRequest` | pv 7 | `mode` (`mirror` or `extend`) | Request a Mac-authoritative mode transition |
+| `allowInputRequest` | pv 8 | `allowed` (bool) | Request the Mac-authoritative input gate state |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -468,6 +469,7 @@ section 4.
 | `receiverUI` | pv 6 | `trayEnabled`?, `keyboardButtonEnabled`? | Update persisted receiver-local UI preferences |
 | `inputReset` | pv 6 | none | Clear the receiver's local latched/temporary modifier state |
 | `displayModeState` | pv 7 | `mode` (`mirror` or `extend`) | Mac-authoritative confirmed capture mode |
+| `allowInputState` | pv 8 | `allowed` (bool) | Mac-authoritative input gate state |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -786,6 +788,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 5 | `pointer` (absolute/relative movement, clicks, right button); below pv 5 the receiver uses legacy `touch` fallback |
 | 6 | Receiver control-tray preference fields/messages; modifier down/up and modified atomic keyboard presses |
 | 7 | Explicit `displayModeRequest` / authoritative `displayModeState` synchronization |
+| 8 | Mac-authoritative `allowInputRequest` / `allowInputState` synchronization |
 
 ---
 

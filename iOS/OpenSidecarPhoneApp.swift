@@ -64,6 +64,14 @@ struct ReceiverScreen: View {
         model.receiver.connected && model.receiver.videoSize != .zero
     }
 
+    /// Input may only leave this device while the session is genuinely live.
+    /// Folded into the existing master Allow Input gate rather than added as a
+    /// second one, so the established OFF-transition cleanup in `VideoView`
+    /// (`clearInputStateForPause`) also runs on every session interruption.
+    private var inputReachesMac: Bool {
+        model.receiver.session.allowsLiveInput && controlStore.preferences.allowInput
+    }
+
     // The floating keyboard button is offered only while keyboard input can
     // actually reach the Mac: streaming, not paused, and the connected Mac
     // is new enough to understand `keyboard` wire messages. (Allow Input off
@@ -96,16 +104,26 @@ struct ReceiverScreen: View {
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
                                    keyboardRequested: keyboardActive,
+                                   allowInput: inputReachesMac,
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
-                        .allowsHitTesting(model.receiver.displayState == .running)
                     if model.receiver.displayState == .paused {
                         VStack(spacing: 8) {
                             Text("Display Paused")
                                 .font(.headline)
                             Text("Resume from OpenDisplay on your Mac.")
                                 .font(.subheadline)
+                        // Allow Input OFF disables ALL touch/gesture
+                        // delivery to the video layer in one place — no
+                        // touch reaches `VideoView` or any of its gesture
+                        // recognizers to begin with, covering direct touch,
+                        // trackpad, clicks, drag, scroll, pinch and system
+                        // gestures together (SETTINGS / ALLOW INPUT
+                        // INVARIANTS). The Settings gear lives in
+                        // `ReceiverControlOverlay`, a sibling view outside
+                        // this hit-testing gate, so it stays reachable.
+                        .allowsHitTesting(inputReachesMac)
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
@@ -206,6 +224,24 @@ struct ReceiverScreen: View {
         .onChange(of: keyboardAvailable) { available in
             if !available { keyboardActive = false }
         }
+        // Allow Input OFF must close the keyboard responder too — it's the
+        // one interactive element the video-layer hit-testing gate above
+        // doesn't cover (it's activated programmatically, not by a touch
+        // that gate would have blocked).
+        .onChange(of: inputReachesMac) { allowed in
+            #if DEBUG
+            // Checkpoint A (SwiftUI side) — remove once root-caused.
+            Log.info("inputTrace: controlStore.preferences.allowInput -> \(allowed) "
+                     + "displayState=\(model.receiver.displayState)")
+            #endif
+            if !allowed { keyboardActive = false }
+        }
+        #if DEBUG
+        .onAppear {
+            Log.info("inputTrace: ReceiverScreen onAppear allowInput=\(controlStore.preferences.allowInput) "
+                     + "displayState=\(model.receiver.displayState) connected=\(model.receiver.connected)")
+        }
+        #endif
         // The deliberate "screen off" signal: locking the device makes
         // protected data unavailable (a plain app switch doesn't). This is
         // what separates "put the iPhone to sleep — end the session now"
@@ -243,6 +279,14 @@ struct ReceiverScreen: View {
             }
             controlStore.onInputResetRequested = {
                 model.receiver.sendCancelActiveInput()
+            }
+            // The connected Mac is authoritative for Allow Input (a
+            // security-relevant, Mac-owned gate) — its confirmed state
+            // always wins over whatever this receiver had stored, so there
+            // is exactly one source of truth once connected. See
+            // `ReceiverControlStore.applyAllowInput`.
+            model.receiver.onAllowInputStateChange = { allowed in
+                controlStore.applyAllowInput(allowed)
             }
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: controlStore.preferences.trayEnabled,
@@ -465,8 +509,22 @@ struct SettingsView: View {
                     Text("Enlarge the area you're typing in when the keyboard is open.")
                 }
 
+                Section {
+                    Toggle("Allow Input", isOn: Binding(
+                        get: { controlStore.preferences.allowInput },
+                        set: { value in
+                            controlStore.update { $0.allowInput = value }
+                            receiver.requestAllowInput(value)
+                        }))
+                } header: {
+                    Text("Input")
+                } footer: {
+                    Text("Settings always stays reachable, even with input turned off. Sensitivity only affects Trackpad mode's one-finger pointer movement.")
+                }
+
                 Section("Receiver Controls") {
                     Toggle("Show Control Tray", isOn: preferenceBinding(\.trayEnabled))
+                        .disabled(!controlStore.preferences.allowInput)
                     Toggle("Show Keyboard Button", isOn: preferenceBinding(\.keyboardButtonEnabled))
                     Toggle("Haptics", isOn: preferenceBinding(\.hapticsEnabled))
                     Toggle("Collapse Control Tray", isOn: preferenceBinding(\.trayCollapsed))
@@ -745,6 +803,13 @@ struct VideoLayerView: UIViewRepresentable {
     /// (e.g. the Settings sheet's device name field, presented over the
     /// still-live stream) can never zoom/pan the remote display.
     let keyboardRequested: Bool
+    /// Master remote-input gate (SETTINGS / ALLOW INPUT INVARIANTS). Belt-
+    /// and-suspenders alongside the `.allowsHitTesting` gate `ReceiverScreen`
+    /// applies to this whole view: that gate stops new touches from ever
+    /// reaching here, but can't retroactively silence a timer already
+    /// scheduled (e.g. a buffered tap-chain flush) — only an explicit
+    /// cancellation on the OFF transition (see `setAllowInput`) does that.
+    let allowInput: Bool
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
 
     func makeUIView(context: Context) -> VideoView {
@@ -754,6 +819,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.receiver = receiver
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
+        view.setAllowInput(allowInput)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
@@ -860,6 +926,7 @@ struct VideoLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
         uiView.setKeyboardRequested(keyboardRequested)
+        uiView.setAllowInput(allowInput)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
@@ -1007,6 +1074,19 @@ struct VideoLayerView: UIViewRepresentable {
             zoomWhileTypingEnabled = enabled
             guard keyboardVisibleRect != nil else { return }   // only matters while open
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        private var allowsInput = true
+
+        /// Applies a change to the master remote-input gate. Only acts on
+        /// the OFF transition — that's the one direction with stale state to
+        /// clean up; turning input back on has nothing to undo (the next
+        /// touch simply starts a fresh session normally).
+        func setAllowInput(_ allowed: Bool) {
+            guard allowed != allowsInput else { return }
+            allowsInput = allowed
+            guard !allowed else { return }
+            clearInputStateForPause()
         }
 
         func setKeyboardRequested(_ requested: Bool) {
@@ -1376,6 +1456,11 @@ struct VideoLayerView: UIViewRepresentable {
             // long as that sequence hasn't fully drained; see
             // `cancelTouchForGestureOwnership`'s doc for why the touches
             // themselves are never detached from it anymore.
+            #if DEBUG
+            // Checkpoint F — remove once root-caused.
+            Log.info("inputTrace: didTwoFingerGesture state=\(recognizer.state.rawValue) intent=\(recognizer.intent) "
+                     + "systemGestureSequenceOwned=\(systemGestureSequenceOwned)")
+            #endif
             guard !systemGestureSequenceOwned else { return }
             switch recognizer.state {
             case .began:
@@ -1793,6 +1878,11 @@ struct VideoLayerView: UIViewRepresentable {
         /// connected Mac speaks the pv5 `pointer` wire — see
         /// `routeTouches`.
         private func handlePointerFingerTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?) {
+            #if DEBUG
+            // Checkpoint C — remove once root-caused.
+            Log.info("inputTrace: handlePointerFingerTouches phase=\(phase) touches=\(touches.count) "
+                     + "engineMode=\(pointerEngine.mode) inputMode=\(pointerEngine.inputMode)")
+            #endif
             for touch in touches {
                 let viewPoint = touch.location(in: self)
                 let norm = normalized(viewPoint).map { CGPoint(x: $0.x, y: $0.y) }
@@ -1819,6 +1909,12 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func dispatchPointerCommands(_ commands: [PointerCommand]) {
+            #if DEBUG
+            // Checkpoint D — remove once root-caused.
+            if !commands.isEmpty {
+                Log.info("inputTrace: dispatchPointerCommands count=\(commands.count) hasReceiver=\(receiver != nil)")
+            }
+            #endif
             guard !commands.isEmpty, let receiver else { return }
             // Only `.moveRelative` needs a valid video size (to convert
             // through the viewport scale) — button down/up MUST still post
@@ -1893,6 +1989,16 @@ struct VideoLayerView: UIViewRepresentable {
         private func routeTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?, ended: Bool) {
             let pencil = touches.filter { isPencil($0) }
             let allFingers = touches.filter { isFinger($0) }
+            #if DEBUG
+            // TEMP diagnostic for the "all input dead" regression report —
+            // remove once root-caused. Checkpoint A/B: confirms touches are
+            // physically reaching VideoView and being routed, plus the
+            // gating state that decides whether anything downstream can
+            // act on them.
+            Log.info("inputTrace: routeTouches phase=\(phase) touches=\(touches.count) "
+                     + "allowsInput=\(allowsInput) macSupportsPointerWire=\(receiver?.macSupportsPointerWire ?? false) "
+                     + "displayState=\(String(describing: receiver?.displayState)) connected=\(receiver?.connected ?? false)")
+            #endif
             let usePencilWire = receiver?.macSupportsPencilWire ?? false
 
             if !pencil.isEmpty {

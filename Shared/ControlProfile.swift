@@ -280,11 +280,25 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var preferredLandscapeSide = LandscapeTraySide.trailing
     var activeControlProfile = ControlProfileSlot.default
     var trayCollapsed = false
+    /// Master remote-input gate, receiver-local and (once connected to a
+    /// Mac speaking `allowInputWireVersion`) kept in sync with the Mac's own
+    /// Allow Input toggle — see `StreamReceiver.requestAllowInput` /
+    /// `onAllowInputStateChange`. Settings/the gear are never gated by this;
+    /// only remote touch/pointer/keyboard/gesture output is.
+    var allowInput = true
     var profiles: [ControlProfile]
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) }) {
         self.profiles = profiles
     }
+
+    /// Whether the normal (non-collapsed-to-gear) control tray is allowed to
+    /// render at all: `trayEnabled` is the user's stored preference, but it
+    /// can never show while `allowInput` is off — PRODUCT RULE: the tray
+    /// only ever drives remote input, and the stored preference is
+    /// deliberately preserved (not zeroed) so it comes back automatically
+    /// once input is re-allowed.
+    var trayCanBeShown: Bool { allowInput && trayEnabled }
 
     /// Hand-written so a key added by a later schema does not make the whole
     /// blob undecodable — synthesized `Codable` ignores property defaults when
@@ -304,6 +318,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
         preferredLandscapeSide = try value(.preferredLandscapeSide, fallback.preferredLandscapeSide)
         activeControlProfile = try value(.activeControlProfile, fallback.activeControlProfile)
         trayCollapsed = try value(.trayCollapsed, fallback.trayCollapsed)
+        // Absent (schema < 4) means "written before either preference
+        // existed" — default both to their pre-feature-equivalent behavior:
+        // input was always allowed, and touch was always direct/absolute.
+        allowInput = try value(.allowInput, fallback.allowInput)
         profiles = try value(.profiles, fallback.profiles)
     }
 
@@ -356,6 +374,12 @@ struct ReceiverControlPreferencesRepository {
                 value.preferredLandscapeSide = corner.side
             }
             value.version = 3
+        }
+        // Schema 3 predates both `allowInput` and `inputMode`; the custom
+        // decoder above already defaulted them (input always allowed,
+        // always direct/absolute) — nothing to transform, just record it.
+        if value.version < 4 {
+            value.version = 4
         }
         return value
     }

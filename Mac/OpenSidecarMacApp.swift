@@ -217,8 +217,15 @@ final class SenderController: ObservableObject {
     }
     @Published var allowInput = InputPolicy.allowsInput() {
         didSet {
+            guard allowInput != oldValue else { return }
             UserDefaults.standard.set(allowInput, forKey: InputPolicy.defaultsKey)
-            if !allowInput { sessions.forEach { $0.sender.resetReceiverInputState() } }
+            sessions.forEach { session in
+                if !allowInput { session.sender.resetReceiverInputState() }
+                // Every connected receiver gets the new state, not just
+                // whichever one may have requested it — Allow Input is one
+                // global Mac-wide gate, never per-receiver.
+                session.sender.pushAllowInputState()
+            }
         }
     }
 
@@ -703,6 +710,10 @@ final class SenderController: ObservableObject {
         sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
             guard let self, let session, self.owns(session) else { return }
             self.mode = CaptureMode(requestedMode)
+        }
+        sender.onAllowInputRequest = { [weak self, weak session] requested in
+            guard let self, let session, self.owns(session) else { return }
+            self.allowInput = requested
         }
         sender.onHello = { [weak self, weak session] info in
             guard let self, let session, self.owns(session) else { return }

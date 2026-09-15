@@ -37,6 +37,15 @@ enum WireProtocol {
     /// mode state and receiver-originated mode-change requests.
     static let displayModeWireVersion = 7
 
+    /// Protocol version that introduced Mac-authoritative, receiver-visible
+    /// Allow Input state: the Mac pushes its current allow/deny gate on
+    /// connect and whenever it changes, and a receiver can request a
+    /// change. A receiver MUST NOT send `allowInputRequest`, and MUST NOT
+    /// expect `allowInputState`, when the peer is below this version — the
+    /// Mac's pre-existing local-only Allow Input toggle still enforces
+    /// itself regardless, it just isn't mirrored to an old receiver.
+    static let allowInputWireVersion = 8
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -58,6 +67,8 @@ enum WireMessage {
     static let inputReset = "inputReset"             // Mac -> receiver: clear local modifier state
     static let displayModeRequest = "displayModeRequest" // receiver -> Mac: request Mirror/Extend
     static let displayModeState = "displayModeState" // Mac -> receiver: confirmed actual mode
+    static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
+    static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
 }
 
 enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {

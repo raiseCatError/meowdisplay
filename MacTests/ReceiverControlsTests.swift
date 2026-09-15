@@ -228,6 +228,7 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.keyboardButtonEnabled = false
         preferences.hapticsEnabled = false
         preferences.preferredLandscapeSide = .leading
+        preferences.allowInput = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -240,6 +241,41 @@ final class ReceiverControlsTests: XCTestCase {
         reset.resetProfile(.profile1)
         XCTAssertEqual(reset.profile(for: .profile1), .canonical(slot: .profile1))
         XCTAssertFalse(reset.trayEnabled)
+    }
+
+    func testSchemaThreePreferencesDefaultAllowInputAndDirectTouch() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 3
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        // A save written before either preference existed must migrate to
+        // exactly the pre-feature behavior: input always allowed, touch
+        // always direct/absolute — never silently disable input or switch
+        // an existing user into an unfamiliar pointer model.
+        XCTAssertTrue(migrated.allowInput)
+        XCTAssertEqual(migrated.inputMode, .direct)
+    }
+
+    func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {
+        var preferences = ReceiverControlPreferences()
+        XCTAssertTrue(preferences.trayCanBeShown)
+
+        preferences.allowInput = false
+        XCTAssertFalse(preferences.trayCanBeShown)
+        // Turning input back on restores the tray automatically because the
+        // stored `trayEnabled` preference was never touched.
+        preferences.allowInput = true
+        XCTAssertTrue(preferences.trayCanBeShown)
+
+        preferences.trayEnabled = false
+        XCTAssertFalse(preferences.trayCanBeShown)
     }
 
     func testVersionOnePreferencesGainTabWithoutLosingCustomization() throws {

@@ -40,6 +40,14 @@ final class ReceiverControlStore: ObservableObject {
             if let keyboardButtonEnabled { $0.keyboardButtonEnabled = keyboardButtonEnabled }
         }
     }
+
+    /// The connected Mac is authoritative for Allow Input (a security-
+    /// relevant, Mac-owned gate — see `StreamReceiver.onAllowInputStateChange`)
+    /// so its confirmed state always overwrites the local preference rather
+    /// than merging with it — exactly one source of truth once connected.
+    func applyAllowInput(_ allowed: Bool) {
+        update { $0.allowInput = allowed }
+    }
 }
 
 @MainActor
@@ -104,6 +112,14 @@ struct ReceiverControlOverlay: View {
 
     private var profile: ControlProfile { store.activeProfile }
     private var controls: [ControlTrayItem] {
+        // The gear is permanent receiver chrome, never a tray item subject
+        // to the tray's own visibility rules: it stays reachable whenever
+        // the actual shortcut/action tray can't show, whether that's
+        // because Allow Input is off or simply because the user turned
+        // "Show Control Tray" off — those every-other-item cases only ever
+        // drive remote input, which either isn't allowed or isn't wanted
+        // right now.
+        guard store.preferences.trayCanBeShown else { return [.settings] }
         // Collapsed means the tray is gone — a single gear remains so
         // Settings (where it is un-collapsed) stays reachable without a
         // shake. It ignores per-profile visibility for that reason.

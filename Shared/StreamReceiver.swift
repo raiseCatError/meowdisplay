@@ -87,6 +87,12 @@ final class StreamReceiver: ObservableObject {
     private var announcedTrayEnabled = true
     private var announcedKeyboardButtonEnabled = true
 
+    /// The connected Mac's confirmed Allow Input state — pushed on connect
+    /// and whenever it changes on the Mac (its own toggle, or an honored
+    /// request from any receiver). The Mac remains the single authority;
+    /// see `requestAllowInput`.
+    var onAllowInputStateChange: ((Bool) -> Void)?
+
     /// True when the connected Mac understands pencil/proximity wire messages.
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
 
@@ -900,6 +906,9 @@ final class StreamReceiver: ObservableObject {
             }
         case WireMessage.inputReset:
             DispatchQueue.main.async { self.inputResetGeneration &+= 1 }
+        case WireMessage.allowInputState:
+            guard let allowed = obj["allowed"] as? Bool else { return }
+            DispatchQueue.main.async { self.onAllowInputStateChange?(allowed) }
         default:
             break
         }
@@ -1132,6 +1141,17 @@ final class StreamReceiver: ObservableObject {
     func sendCancelActiveInput() {
         guard macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
         sendControl(["type": "keyboard", "action": "cancel"])
+    }
+
+    /// Asks the connected Mac to change its Allow Input gate. The Mac
+    /// remains authoritative: this is a request, not an assignment — the
+    /// confirmed state always arrives back via `onAllowInputStateChange`,
+    /// whether or not it matches what was requested. A no-op against an
+    /// older Mac (or while disconnected) — the local, receiver-only
+    /// preference this drives from the UI side stays in effect either way.
+    func requestAllowInput(_ allowed: Bool) {
+        guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
+        sendControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
     }
 
     /// Requests a mode transition without predicting its outcome. The Mac
