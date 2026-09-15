@@ -816,6 +816,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw NSError(domain: "MacSender", code: 6,
                           userInfo: [NSLocalizedDescriptionKey: "capture stream is already active"])
         }
+        captureDisplayID = display.displayID
         capturePixelsWide = pixelsWide
         capturePixelsHigh = pixelsHigh
         guard videoEnabled else {
@@ -865,11 +866,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await stream.startCapture()
         } catch {
             if self.stream === stream { self.stream = nil }
+            captureDisplayID = 0   // this attempt never actually started capturing
             throw error
         }
         guard self.stream === stream, videoEnabled,
               updateCaptureState({ state in state.captureStarted() }) else {
             if self.stream === stream { self.stream = nil }
+            captureDisplayID = 0   // superseded/discarded — not the active capture
             invalidateCapturePipeline()
             do {
                 try await stream.stopCapture()
@@ -879,7 +882,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             throw CancellationError()
         }
-        captureDisplayID = display.displayID
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         startCursorEcho()
@@ -912,6 +914,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return true
         }
         invalidateCapturePipeline(discardingLastFrame: true)
+        captureDisplayID = 0   // definitive teardown — nothing is being captured anymore
         cursorTimer?.cancel()
         cursorTimer = nil
         cursorImageTimer?.cancel()
@@ -991,6 +994,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
             self.invalidateCapturePipeline()
+            self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
             Task {
                 var stopSucceeded = true
@@ -2013,9 +2017,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func pollCursorPosition() {
         guard connectionReady, captureDisplayID != 0,
-              let loc = CGEvent(source: nil)?.location else { return }
+              let loc = CGEvent(source: nil)?.location else {
+            #if DEBUG
+            logCursorTraceIfDue(reason: "gated: connectionReady=\(connectionReady) captureDisplayID=\(captureDisplayID)")
+            #endif
+            return
+        }
         let bounds = CGDisplayBounds(captureDisplayID)
-        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard bounds.width > 0, bounds.height > 0 else {
+            #if DEBUG
+            logCursorTraceIfDue(reason: "gated: empty display bounds for \(captureDisplayID)")
+            #endif
+            return
+        }
         if bounds.contains(loc) {
             let x = (loc.x - bounds.minX) / bounds.width
             let y = (loc.y - bounds.minY) / bounds.height
@@ -2028,7 +2042,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastCursorSent.visible = false
             sendCursor("\"v\":0")
         }
+        #if DEBUG
+        logCursorTraceIfDue(reason: "polling: loc=\(loc) bounds=\(bounds) visible=\(lastCursorSent.visible) "
+            + "localCursor=\(localCursor) hasSprite=\(lastCursorPNGHash != 0)")
+        #endif
     }
+
+    #if DEBUG
+    private var lastCursorTraceAt = Date.distantPast
+    /// Throttled to once every 2s — `pollCursorPosition` runs at 120Hz, and
+    /// unthrottled logging at that rate would itself be a performance
+    /// regression and would flood the log past usefulness.
+    private func logCursorTraceIfDue(reason: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastCursorTraceAt) > 2 else { return }
+        lastCursorTraceAt = now
+        Log.info("cursorTrace: \(reason)")
+    }
+    #endif
 
     /// Cursor position: UDP side channel while it is up, TCP otherwise. The
     /// datagram carries a sequence so the receiver can drop reordered ones;
@@ -2124,6 +2155,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorChannelPort = nil
     }
 
+    private static let maxCursorPNGBytes = 24_000
+
     private func pollCursorImage() {
         // Display size read LIVE, not snapshotted at capture start: the
         // HiDPI mode settles (and macOS re-flips it) asynchronously, and a
@@ -2131,16 +2164,47 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // device. Mixing the size into the dedup hash re-sends the sprite
         // whenever the mode flips, so the proportion always heals.
         guard connectionReady, captureDisplayID != 0,
-              let cursor = NSCursor.currentSystem else { return }
+              let cursor = NSCursor.currentSystem else {
+            #if DEBUG
+            logCursorTraceIfDue(reason: "cursorImg gated: connectionReady=\(connectionReady) "
+                + "captureDisplayID=\(captureDisplayID) currentSystem=\(NSCursor.currentSystem != nil)")
+            #endif
+            return
+        }
         let displaySize = CGDisplayBounds(captureDisplayID).size   // points, current mode
         guard displaySize.width > 0, displaySize.height > 0 else { return }
         let image = cursor.image
-        guard let tiff = image.tiffRepresentation else { return }
+        guard let tiff = image.tiffRepresentation else {
+            #if DEBUG
+            Log.info("cursorTrace: cursorImg dropped — no tiffRepresentation for system cursor \(image.size)")
+            #endif
+            return
+        }
         let hash = tiff.hashValue ^ Int(displaySize.width) &* 31
         guard hash != lastCursorPNGHash else { return }
-        guard let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]),
-              png.count < 24_000 else { return }
+        guard var png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+            #if DEBUG
+            Log.info("cursorTrace: cursorImg dropped — could not build a PNG representation")
+            #endif
+            return
+        }
+        // A larger system cursor (bumped Accessibility pointer size, a
+        // custom high-res bitmap) can exceed the size cap — downscale
+        // rather than silently dropping the sprite outright. The receiver
+        // stretches `contents` to whatever bounds it computes from `nw`/
+        // `nh` below, which stay derived from the ORIGINAL `image.size`, so
+        // shrinking only the PNG's own pixels here never changes the
+        // displayed size or hotspot math.
+        if png.count >= Self.maxCursorPNGBytes,
+           let downscaled = Self.downscaledCursorPNG(image: image, maxDimension: 96) {
+            png = downscaled
+        }
+        guard png.count < Self.maxCursorPNGBytes else {
+            #if DEBUG
+            Log.info("cursorTrace: cursorImg dropped — PNG still \(png.count) bytes after downscaling")
+            #endif
+            return
+        }
         lastCursorPNGHash = hash
         let size = image.size            // Mac points
         let hot = cursor.hotSpot
@@ -2154,6 +2218,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
         queue.async { self.sendJSONFrame(msg) }
+        #if DEBUG
+        logCursorTraceIfDue(reason: "cursorImg sent: \(png.count) bytes size=\(size) hot=\(hot)")
+        #endif
+    }
+
+    /// Re-renders `image` into a smaller bitmap, preserving aspect ratio, so
+    /// an oversized system cursor bitmap still produces a PNG under the wire
+    /// size cap instead of never sending a sprite at all. Returns `nil` if
+    /// the image is already within `maxDimension` (nothing to do) or the
+    /// re-render fails.
+    private static func downscaledCursorPNG(image: NSImage, maxDimension: CGFloat) -> Data? {
+        guard image.size.width > 0, image.size.height > 0 else { return nil }
+        let scale = maxDimension / max(image.size.width, image.size.height)
+        guard scale < 1 else { return nil }
+        let targetSize = NSSize(width: max(1, image.size.width * scale),
+                                height: max(1, image.size.height * scale))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(targetSize.width), pixelsHigh: Int(targetSize.height),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.current = context
+        image.draw(in: NSRect(origin: .zero, size: targetSize),
+                  from: .zero, operation: .copy, fraction: 1)
+        return rep.representation(using: .png, properties: [:])
     }
 
     // MARK: - Control messages (phone -> Mac)
@@ -2929,11 +3020,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Invalidate the retired ScreenCaptureKit/VideoToolbox callbacks before
     /// changing the display or encoder they feed.
+    ///
+    /// Deliberately does NOT touch `captureDisplayID`: that field has its own
+    /// single lifecycle rule (set once in `startCapture`, right after a
+    /// target display is confirmed; cleared explicitly wherever capture
+    /// genuinely stops with no immediate restart — `stop()`, a failed
+    /// `startCapture`, `pauseDisplay()`). This function runs on every
+    /// rebuild — including mid-`startCapture`, before the new display is
+    /// fully live — so it must never clear state describing the CURRENT
+    /// capture attempt's target; doing so previously left `captureDisplayID`
+    /// at 0 for the entire lifetime of every capture session, silently
+    /// gating cursor position/image polling (`pollCursorPosition`/
+    /// `pollCursorImage` both guard on `captureDisplayID != 0`) even while
+    /// capture was healthy and streaming.
     private func invalidateCapturePipeline(discardingLastFrame: Bool = false) {
         pipelineLock.lock()
         captureGeneration &+= 1
         pipelineLock.unlock()
-        captureDisplayID = 0
         if discardingLastFrame {
             lastPixelBuffer = nil
             lastCaptureAt = .distantPast

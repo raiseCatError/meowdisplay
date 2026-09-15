@@ -1688,6 +1688,9 @@ struct VideoLayerView: UIViewRepresentable {
             cursorLayer.isHidden = !visible || cursorLayer.contents == nil
             updateCursorLayout()
             CATransaction.commit()
+            #if DEBUG
+            logCursorTraceIfDue(reason: "moveCursor")
+            #endif
         }
 
         func setCursorSprite(_ image: CGImage, anchor: CGPoint, normSize: CGSize) {
@@ -1699,7 +1702,26 @@ struct VideoLayerView: UIViewRepresentable {
             cursorLayer.isHidden = !cursorVisible
             updateCursorLayout()
             CATransaction.commit()
+            #if DEBUG
+            Log.info("cursorTrace: setCursorSprite image=\(image.width)x\(image.height) "
+                + "anchor=\(anchor) normSize=\(normSize) isHidden=\(cursorLayer.isHidden)")
+            #endif
         }
+
+        #if DEBUG
+        private var lastCursorTraceAt = Date.distantPast
+        /// Throttled to once every 2s — `moveCursor` can arrive at up to
+        /// 120Hz over the cursor side channel.
+        private func logCursorTraceIfDue(reason: String) {
+            let now = Date()
+            guard now.timeIntervalSince(lastCursorTraceAt) > 2 else { return }
+            lastCursorTraceAt = now
+            Log.info("cursorTrace: \(reason) norm=\(cursorNorm) visible=\(cursorVisible) "
+                + "isHidden=\(cursorLayer.isHidden) hasContents=\(cursorLayer.contents != nil) "
+                + "normSize=\(cursorNormSize) bounds=\(cursorLayer.bounds) position=\(cursorLayer.position) "
+                + "transformValid=\(currentTransform.isValid)")
+        }
+        #endif
 
         /// Places the cursor sprite via the same `currentTransform` that
         /// positions the content layer and maps touches, so it stays

@@ -138,6 +138,18 @@ final class StreamReceiver: ObservableObject {
     // must not.
     private var advertisesAddresses: Bool { deviceKind == "Mac" }
     private var lastCursorSeq: UInt64 = 0
+    #if DEBUG
+    private var lastCursorPositionTraceAt = Date.distantPast
+    /// Throttled to once every 2s — cursor position updates can arrive at
+    /// up to 120Hz, and unthrottled logging at that rate would itself be a
+    /// performance regression and flood the log past usefulness.
+    private func logCursorPositionTraceIfDue(x: Double, y: Double, visible: Bool) {
+        let now = Date()
+        guard now.timeIntervalSince(lastCursorPositionTraceAt) > 2 else { return }
+        lastCursorPositionTraceAt = now
+        Log.info("cursorTrace: position x=\(x) y=\(y) visible=\(visible)")
+    }
+    #endif
     // Cursor channel health for the HUD/stats: how many positions landed and
     // how many datagrams never did (sequence gaps + reordered drops). A
     // stuttering pointer with a healthy count means the drawing side; a low
@@ -872,9 +884,17 @@ final class StreamReceiver: ObservableObject {
                   let png = Data(base64Encoded: b64),
                   let source = CGImageSourceCreateWithData(png as CFData, nil),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-                  let nw = obj["nw"] as? Double, let nh = obj["nh"] as? Double else { return }
+                  let nw = obj["nw"] as? Double, let nh = obj["nh"] as? Double else {
+                #if DEBUG
+                Log.info("cursorTrace: cursorImg message failed to decode: keys=\(obj.keys.sorted())")
+                #endif
+                return
+            }
             let anchor = CGPoint(x: obj["ax"] as? Double ?? 0, y: obj["ay"] as? Double ?? 0)
             let normSize = CGSize(width: nw, height: nh)
+            #if DEBUG
+            Log.info("cursorTrace: cursorImg received bytes=\(png.count) nw=\(nw) nh=\(nh) anchor=\(anchor)")
+            #endif
             DispatchQueue.main.async {
                 self.cursorSprite = (image, anchor, normSize)
                 self.onCursorImage?(image, anchor, normSize)
@@ -954,6 +974,9 @@ final class StreamReceiver: ObservableObject {
         let x = obj["x"] as? Double ?? 0
         let y = obj["y"] as? Double ?? 0
         cursorUpdatesThisWindow += 1
+        #if DEBUG
+        logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
+        #endif
         DispatchQueue.main.async {
             self.cursorState = (x, y, visible)
             self.onCursor?(x, y, visible)
