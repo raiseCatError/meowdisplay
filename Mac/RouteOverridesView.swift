@@ -49,10 +49,25 @@ struct RemoteEndpointDebugView: View {
             Button("Forget") {
                 guard !peerID.isEmpty else { return }
                 RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+                host = ""
+                port = "9001"
             }
             .disabled(peerID.isEmpty)
         }
         .controlSize(.small)
+        // Loads the same canonical `RemoteEndpointStore` value the
+        // release-visible `RemoteEndpointEditorView` does on selection —
+        // this view previously left the fields blank/stale here, which is
+        // what made a successful Save look like it hadn't persisted.
+        .onChange(of: peerID) { _, newValue in
+            guard let hint = RemoteEndpointStore.endpoint(forPeerID: newValue) else {
+                host = ""
+                port = "9001"
+                return
+            }
+            host = hint.host
+            port = String(hint.port)
+        }
     }
 }
 
