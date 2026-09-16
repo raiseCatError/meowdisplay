@@ -8,7 +8,10 @@ import Foundation
 enum VideoInteractionPolicy {
     static func effectiveTarget(stored: ReceiverGestureTarget,
                                 videoEnabled: Bool) -> ReceiverGestureTarget {
-        videoEnabled ? stored : .app
+        // Disabled is a true no-op: unlike `.viewport`, it must never be
+        // promoted to `.app` just because video is off.
+        if stored == .disabled { return .disabled }
+        return videoEnabled ? stored : .app
     }
 
     static func viewportTransform(base: RemoteViewportTransform,

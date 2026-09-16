@@ -263,6 +263,14 @@ enum LandscapeTraySide: String, Codable, CaseIterable, Identifiable {
 enum ReceiverGestureTarget: String, Codable, CaseIterable, Identifiable {
     case viewport
     case app
+    // Added after `viewport`/`app` shipped — a String-backed enum, so this is
+    // purely additive: previously persisted "viewport"/"app" raw values
+    // still decode to the same cases. A true no-op: never zooms/rotates the
+    // viewport and never fires an App Gesture Command (see
+    // `VideoInteractionPolicy.effectiveTarget`, which must never promote a
+    // stored `.disabled` into `.app` the way it does for `.viewport` when
+    // video is off).
+    case disabled
 
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
@@ -321,6 +329,35 @@ struct AppGestureCommands: Codable, Equatable {
         case .rotateRight: rotateRight = shortcut
         }
     }
+}
+
+/// Full key list for App Gesture Commands editing (spec section E) —
+/// letters, 0-9, the listed symbol keys, and the listed special keys.
+/// Deliberately a separate list from `editableShortcutKeys` (Main Tray
+/// shortcuts): that one predates this feature and keeps its own smaller,
+/// unrelated key set. "+" is not a distinct physical key — it is Shift
+/// held with "=" — so it is not listed separately; toggling Shift on the
+/// "=" key produces it. Lives in `Shared` (not iOS-only) so Mac Sender's
+/// per-device App Gesture Commands section can reuse the exact same key
+/// list/labeling instead of a parallel one.
+let appGestureCommandEditableKeys: [(String, Int)] = {
+    let letters = zip(Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 4...29).map { (String($0), $1) }
+    let digits: [(String, Int)] = [("1", 30), ("2", 31), ("3", 32), ("4", 33), ("5", 34),
+                                   ("6", 35), ("7", 36), ("8", 37), ("9", 38), ("0", 39)]
+    let symbols: [(String, Int)] = [("=", 46), ("-", 45), ("[", 47), ("]", 48),
+                                    ("/", 56), ("\\", 49), (",", 54), (".", 55),
+                                    (";", 51), ("'", 52)]
+    let special: [(String, Int)] = [("Space", 44), ("Return", 40), ("Tab", 43), ("Escape", 41),
+                                    ("Delete", 42), ("↑", 82), ("↓", 81), ("←", 80), ("→", 79)]
+    return letters + digits + symbols + special
+}()
+
+func appGestureCommandKeyLabel(for usage: Int) -> String {
+    appGestureCommandEditableKeys.first(where: { $0.1 == usage })?.0 ?? "?"
+}
+
+func appGestureCommandDisplayText(for shortcut: KeyboardShortcut) -> String {
+    shortcut.modifiers.symbols + appGestureCommandKeyLabel(for: shortcut.usage)
 }
 
 // MARK: - Function Tray
@@ -764,6 +801,13 @@ struct ReceiverUIPreferenceUpdate: Equatable {
     var pinchTarget: ReceiverGestureTarget?
     var rotateTarget: ReceiverGestureTarget?
     var snapRotation: Bool?
+    /// App-mode command chords, pushed only from a Mac's per-device
+    /// Experimental App Gesture Commands section (shown when Pinch or
+    /// Rotate is App) — reuses the exact same `AppGestureCommands` model
+    /// the receiver's own editor writes, so this is additive storage, not a
+    /// parallel one. Encoded/decoded via the model's own `Codable`
+    /// conformance rather than a hand-written field list.
+    var appGestureCommands: AppGestureCommands?
 
     init?(message: [String: Any]) {
         guard message["type"] as? String == WireMessage.receiverUI else { return nil }
@@ -777,9 +821,16 @@ struct ReceiverUIPreferenceUpdate: Equatable {
         pinchTarget = (message["pinchTarget"] as? String).flatMap(ReceiverGestureTarget.init(rawValue:))
         rotateTarget = (message["rotateTarget"] as? String).flatMap(ReceiverGestureTarget.init(rawValue:))
         snapRotation = message["snapRotation"] as? Bool
+        if let raw = message["appGestureCommands"],
+           let data = try? JSONSerialization.data(withJSONObject: raw) {
+            appGestureCommands = try? JSONDecoder().decode(AppGestureCommands.self, from: data)
+        } else {
+            appGestureCommands = nil
+        }
         guard trayEnabled != nil || keyboardButtonEnabled != nil || functionTrayEnabled != nil
             || inputMode != nil || trackpadSensitivity != nil || hapticsEnabled != nil
             || avoidNotch != nil || pinchTarget != nil || rotateTarget != nil || snapRotation != nil
+            || appGestureCommands != nil
         else { return nil }
     }
 
@@ -797,5 +848,6 @@ struct ReceiverUIPreferenceUpdate: Equatable {
         if let pinchTarget { preferences.pinchTarget = pinchTarget }
         if let rotateTarget { preferences.rotateTarget = rotateTarget }
         if let snapRotation { preferences.snapRotation = snapRotation }
+        if let appGestureCommands { preferences.appGestureCommands = appGestureCommands }
     }
 }

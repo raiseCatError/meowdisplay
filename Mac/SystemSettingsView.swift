@@ -48,17 +48,17 @@ struct SystemSettingsView: View {
             }
 
             Section("App Behavior") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Show app in", selection: $controller.presentation) {
-                        ForEach(AppPresentation.allCases, id: \.self) { p in
-                            Text(p.label).tag(p)
-                        }
+                Picker("Show app in", selection: $controller.presentation) {
+                    ForEach(AppPresentation.allCases, id: \.self) { p in
+                        Text(p.label).tag(p)
                     }
-                    if controller.presentation == .background {
-                        Text("No menu bar or Dock icon — streaming keeps running. Open the OpenDisplay app again (Spotlight/Finder) to show this window.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                }
+
+                Toggle("Start at Login", isOn: $controller.startAtLoginEnabled)
+                if let message = controller.startAtLoginStatusMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 

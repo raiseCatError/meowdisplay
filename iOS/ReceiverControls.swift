@@ -971,33 +971,6 @@ struct ShortcutItemEditor: View {
     }
 }
 
-/// Full key list for App Gesture Commands editing (spec section E) —
-/// letters, 0-9, the listed symbol keys, and the listed special keys.
-/// Deliberately a separate list from `editableShortcutKeys` (Main Tray
-/// shortcuts): that one predates this feature and keeps its own smaller,
-/// unrelated key set. "+" is not a distinct physical key — it is Shift
-/// held with "=" — so it is not listed separately; toggling Shift on the
-/// "=" key produces it.
-let appGestureCommandEditableKeys: [(String, Int)] = {
-    let letters = zip(Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 4...29).map { (String($0), $1) }
-    let digits: [(String, Int)] = [("1", 30), ("2", 31), ("3", 32), ("4", 33), ("5", 34),
-                                   ("6", 35), ("7", 36), ("8", 37), ("9", 38), ("0", 39)]
-    let symbols: [(String, Int)] = [("=", 46), ("-", 45), ("[", 47), ("]", 48),
-                                    ("/", 56), ("\\", 49), (",", 54), (".", 55),
-                                    (";", 51), ("'", 52)]
-    let special: [(String, Int)] = [("Space", 44), ("Return", 40), ("Tab", 43), ("Escape", 41),
-                                    ("Delete", 42), ("↑", 82), ("↓", 81), ("←", 80), ("→", 79)]
-    return letters + digits + symbols + special
-}()
-
-func appGestureCommandKeyLabel(for usage: Int) -> String {
-    appGestureCommandEditableKeys.first(where: { $0.1 == usage })?.0 ?? "?"
-}
-
-func appGestureCommandDisplayText(for shortcut: KeyboardShortcut) -> String {
-    shortcut.modifiers.symbols + appGestureCommandKeyLabel(for: shortcut.usage)
-}
-
 /// Submenu listing the four App-mode command bindings (spec section D) —
 /// hidden from the main Gestures section entirely unless Pinch/Zoom or
 /// Rotation is currently set to App (see `SettingsView`'s conditional

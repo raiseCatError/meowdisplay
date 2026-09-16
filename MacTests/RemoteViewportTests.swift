@@ -681,6 +681,23 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertEqual(stored, .viewport)
     }
 
+    /// Disabled must be a true no-op: unlike `.viewport`, turning video off
+    /// must never promote it into `.app` (that would fire a keyboard
+    /// command the user explicitly asked to disable).
+    func testDisabledGestureTargetNeverPromotesToApp() {
+        XCTAssertEqual(VideoInteractionPolicy.effectiveTarget(stored: .disabled, videoEnabled: false), .disabled)
+        XCTAssertEqual(VideoInteractionPolicy.effectiveTarget(stored: .disabled, videoEnabled: true), .disabled)
+    }
+
+    /// Backward compatibility: `ReceiverGestureTarget` gained `.disabled`
+    /// after `.viewport`/`.app` shipped and persisted. Previously-stored raw
+    /// values must keep decoding to the same cases.
+    func testReceiverGestureTargetDecodesPreviouslyPersistedRawValues() {
+        XCTAssertEqual(ReceiverGestureTarget(rawValue: "viewport"), .viewport)
+        XCTAssertEqual(ReceiverGestureTarget(rawValue: "app"), .app)
+        XCTAssertEqual(ReceiverGestureTarget(rawValue: "disabled"), .disabled)
+    }
+
     func testSurfaceAdmissionRejectsOutsideBeginAndKeepsInsideSequenceOutside() {
         var admission = SurfaceTouchAdmission<Int>()
         admission.begin(1, inside: false)

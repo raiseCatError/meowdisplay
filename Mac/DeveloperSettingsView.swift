@@ -33,9 +33,12 @@ struct DeveloperSettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(peer.name).font(.caption.bold())
                             Text("peer=\(peer.id)").font(.caption2).foregroundStyle(.secondary)
-                            Text("trusted=\(peer.trusted) normalDiscovered=\(peer.normalDiscovered) pairingDiscovered=\(peer.pairingDiscovered)")
+                            // `Text(verbatim:)` with a plain `String` — these are debug values
+                            // (Bool/Int), not user-facing copy, so `LocalizedStringKey`
+                            // interpolation (which only supports a fixed set of types) doesn't apply.
+                            Text(verbatim: "trusted=\(peer.trusted) normalDiscovered=\(peer.normalDiscovered) pairingDiscovered=\(peer.pairingDiscovered)")
                                 .font(.caption2).foregroundStyle(.secondary)
-                            Text("connected=\(peer.connected) route=\(peer.route) generation=\(peer.sessionGeneration)")
+                            Text(verbatim: "connected=\(peer.connected) route=\(peer.route) generation=\(peer.sessionGeneration)")
                                 .font(.caption2).foregroundStyle(.secondary)
                             Text("normalEndpoint=\(peer.normalEndpoint)").font(.caption2).foregroundStyle(.secondary)
                             Text("pairingEndpoint=\(peer.pairingEndpoint)").font(.caption2).foregroundStyle(.secondary)

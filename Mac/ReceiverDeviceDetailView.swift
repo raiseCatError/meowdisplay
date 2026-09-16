@@ -38,6 +38,9 @@ struct ReceiverDeviceDetailView: View {
 
             if let session, session.receiverPreferencesReported {
                 receiverControlsSection(session)
+                if session.receiverPinchTarget == "app" || session.receiverRotateTarget == "app" {
+                    appGestureCommandsSection(session)
+                }
                 audioSyncSection(session, entry: entry)
                 functionTraySection(session)
             } else {
@@ -120,6 +123,7 @@ struct ReceiverDeviceDetailView: View {
                 })) {
                 Text("Viewport").tag("viewport")
                 Text("App").tag("app")
+                Text("Disabled").tag("disabled")
             }
             Picker("Rotate Gesture", selection: Binding(
                 get: { session.receiverRotateTarget },
@@ -129,6 +133,7 @@ struct ReceiverDeviceDetailView: View {
                 })) {
                 Text("Viewport").tag("viewport")
                 Text("App").tag("app")
+                Text("Disabled").tag("disabled")
             }
             Toggle("Snap Rotation", isOn: Binding(
                 get: { session.receiverSnapRotation },
@@ -136,6 +141,71 @@ struct ReceiverDeviceDetailView: View {
                     session.receiverSnapRotation = value
                     session.sender.setReceiverControlOverrides(snapRotation: value)
                 }))
+        }
+    }
+
+    /// Shown once, whenever EITHER Pinch or Rotate is App — never duplicated
+    /// when both are — and reuses the exact same canonical model
+    /// (`AppGestureCommands`/`AppGestureCommandKind`/`KeyboardShortcut`/
+    /// `ModifierChord`/`appGestureCommandEditableKeys`) as iOS's
+    /// Experimental App Gesture Commands editor. There is no Mac-local
+    /// storage for these values: every edit here is pushed straight to the
+    /// connected receiver via `setReceiverControlOverrides`, which is also
+    /// the authoritative store — this section only reflects what the
+    /// receiver last reported (`session.receiverAppGestureCommands`).
+    @ViewBuilder
+    private func appGestureCommandsSection(_ session: DeviceSession) -> some View {
+        Section {
+            Text("Experimental")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+            Text("Some Mac apps use different shortcuts for zooming and rotating. Customize the commands sent to this device when App mode is selected.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(AppGestureCommandKind.allCases) { kind in
+                appGestureCommandRow(session, kind: kind)
+            }
+        } header: {
+            Text("App Gesture Commands")
+        }
+    }
+
+    @ViewBuilder
+    private func appGestureCommandRow(_ session: DeviceSession, kind: AppGestureCommandKind) -> some View {
+        let shortcut = session.receiverAppGestureCommands.shortcut(for: kind)
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent(kind.title, value: appGestureCommandDisplayText(for: shortcut))
+            HStack {
+                ForEach(ControlModifier.allCases) { modifier in
+                    Toggle(modifier.symbol, isOn: Binding(
+                        get: { shortcut.modifiers.contains(modifier) },
+                        set: { enabled in
+                            var updated = session.receiverAppGestureCommands
+                            var current = updated.shortcut(for: kind)
+                            var values = current.modifiers.modifiers
+                            if enabled { values.insert(modifier) } else { values.remove(modifier) }
+                            current.modifiers = ModifierChord(values)
+                            updated.setShortcut(current, for: kind)
+                            session.receiverAppGestureCommands = updated
+                            session.sender.setReceiverControlOverrides(appGestureCommands: updated)
+                        }))
+                    .toggleStyle(.button)
+                }
+                Picker("Key", selection: Binding(
+                    get: { shortcut.usage },
+                    set: { usage in
+                        var updated = session.receiverAppGestureCommands
+                        var current = updated.shortcut(for: kind)
+                        current.usage = usage
+                        updated.setShortcut(current, for: kind)
+                        session.receiverAppGestureCommands = updated
+                        session.sender.setReceiverControlOverrides(appGestureCommands: updated)
+                    })) {
+                    ForEach(appGestureCommandEditableKeys, id: \.1) { Text($0.0).tag($0.1) }
+                }
+                .labelsHidden()
+                .frame(width: 90)
+            }
         }
     }
 

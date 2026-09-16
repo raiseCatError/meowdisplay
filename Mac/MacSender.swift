@@ -92,6 +92,9 @@ struct PhoneInfo: Decodable {
     let rotateTarget: String?
     let snapRotation: Bool?
     let avSyncOffsetMs: Int?
+    // App-mode command chords (see `AppGestureCommands`) — reported/pushed
+    // alongside pinch/rotateTarget, never a separate storage.
+    let appGestureCommands: AppGestureCommands?
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
@@ -1370,7 +1373,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         avoidNotch: Bool? = nil,
         pinchTarget: String? = nil,
         rotateTarget: String? = nil,
-        snapRotation: Bool? = nil
+        snapRotation: Bool? = nil,
+        appGestureCommands: AppGestureCommands? = nil
     ) {
         var message: [String: Any] = ["type": WireMessage.receiverUI]
         if let functionTrayEnabled { message["functionTrayEnabled"] = functionTrayEnabled }
@@ -1381,6 +1385,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let pinchTarget { message["pinchTarget"] = pinchTarget }
         if let rotateTarget { message["rotateTarget"] = rotateTarget }
         if let snapRotation { message["snapRotation"] = snapRotation }
+        // Reuses `AppGestureCommands`'s own `Codable` conformance — see
+        // `ReceiverUIPreferenceUpdate`.
+        if let appGestureCommands,
+           let data = try? JSONEncoder().encode(appGestureCommands),
+           let obj = try? JSONSerialization.jsonObject(with: data) {
+            message["appGestureCommands"] = obj
+        }
         guard message.count > 1 else { return }
         queue.async { [weak self] in self?.sendJSONObject(message) }
     }

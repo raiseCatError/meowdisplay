@@ -180,6 +180,8 @@ targets:
       - Mac/ReceiverInputAuthorizationStore.swift
       - Mac/RouteOverrides.swift
       - Mac/WakeInspector.swift
+      - Mac/AppPresentation.swift
+      - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift

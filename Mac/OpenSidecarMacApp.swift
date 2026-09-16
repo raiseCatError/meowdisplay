@@ -3,36 +3,28 @@ import Network
 import Combine
 import Sparkle
 
-/// How the app presents itself. One bundle, switched at runtime via the
-/// activation policy — like Raycast/Hammerspoon style background agents.
-enum AppPresentation: String, CaseIterable {
-    case menuBar, dock, background
-
-    var label: String {
-        switch self {
-        case .menuBar: return "Menu bar"
-        case .dock: return "Dock"
-        case .background: return "Background only"
-        }
-    }
-}
+// `AppPresentation` lives in its own file (Mac/AppPresentation.swift) — a
+// pure, dependency-free policy type, same shape as `ReconnectPolicy`/
+// `AutoConnectPolicy`, kept separate so `AppPresentationTests` can compile it
+// into MacTests without dragging this whole app-lifecycle file (Sparkle,
+// SenderController, NSApplicationDelegateAdaptor, `@main`) into the test
+// target.
 
 @main
 struct OpenSidecarMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = SenderController.shared
 
+    // No SwiftUI WindowGroup/MenuBarExtra: the Settings window is a manually
+    // managed NSWindow (`MacSettingsWindow`) and the menu-bar icon is a
+    // manually managed NSStatusItem (`MenuBarPresenceController`) — see that
+    // type's doc for why the icon is no longer a `MenuBarExtra`. SwiftUI
+    // still requires at least one Scene; `Settings` contributes no window or
+    // Dock presence of its own and is never shown (Cmd+, is rebound below).
     var body: some Scene {
-        MenuBarExtra(isInserted: Binding(
-            get: { controller.presentation == .menuBar },
-            set: { _ in }
-        )) {
-            MenuBarQuickView(controller: controller)
-        } label: {
-            Image(systemName: controller.hasActiveDisplay
-                  ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle")
+        Settings {
+            EmptyView()
         }
-        .menuBarExtraStyle(.window)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { MacSettingsWindow.show() }
@@ -56,9 +48,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the SwiftUI App scene (NSHostingView), so it can offer the same
         // button.
         MacSettingsWindow.updater = updater
-        let presentation = SenderController.shared.presentation
-        NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
-        if presentation != .menuBar {
+        let controller = SenderController.shared
+        let presentation = controller.presentation
+        NSApp.setActivationPolicy(presentation.showsDockIcon ? .regular : .accessory)
+        // Cold-launch presence: the menu-bar icon (if any) must appear
+        // immediately, not only after the user later toggles the setting.
+        MenuBarPresenceController.shared.apply(presentation, controller: controller)
+        // A login-launch (Start at Login) must be quiet — no Settings window
+        // popping up unasked. Only an interactive launch opens it, and only
+        // for the modes that need it to avoid stranding the user without a
+        // menu-bar icon or Dock icon to bring the UI back.
+        if !StartAtLoginPolicy.wasLaunchedAsLoginItem(), !presentation.showsMenuBarIcon {
             MacSettingsWindow.show()
         }
     }
@@ -191,6 +191,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var receiverPinchTarget = "viewport"
     @Published var receiverRotateTarget = "viewport"
     @Published var receiverSnapRotation = true
+    @Published var receiverAppGestureCommands = AppGestureCommands.defaults
     @Published var receiverAVSyncOffsetMs = 0
     // Nil until the first hello with these fields arrives (protocol 6+) —
     // distinguishes "not yet reported" from "reported and off/default" so
@@ -249,13 +250,38 @@ final class SenderController: ObservableObject {
     @Published var presentation = AppPresentation(
         rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "") ?? .menuBar {
         didSet {
+            guard presentation != oldValue else { return }
             UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
-            NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
-            // Never strand the user without UI: leaving menu-bar mode opens
-            // the window immediately.
-            if presentation != .menuBar { MacSettingsWindow.show() }
+            NSApp.setActivationPolicy(presentation.showsDockIcon ? .regular : .accessory)
+            // Live switch: create/destroy the single status item right here,
+            // rather than only reading the setting at launch — this is the
+            // fix for the mode never actually gaining a menu-bar icon.
+            MenuBarPresenceController.shared.apply(presentation, controller: self)
+            // Never strand the user without UI: switching to a mode with no
+            // menu-bar icon opens the Settings window immediately.
+            if !presentation.showsMenuBarIcon { MacSettingsWindow.show() }
         }
     }
+
+    /// Start at Login (Mac Sender only): backed by `SMAppService.mainApp`,
+    /// never a stored boolean pretending to be the real state — reading
+    /// `.status` on init means Settings always shows what's actually
+    /// registered, including `.requiresApproval` after a Login Items change.
+    @Published var startAtLoginEnabled = StartAtLoginPolicy.isEnabled() {
+        didSet {
+            guard startAtLoginEnabled != oldValue else { return }
+            do {
+                try StartAtLoginPolicy.setEnabled(startAtLoginEnabled)
+                startAtLoginStatusMessage = StartAtLoginPolicy.statusMessage()
+            } catch {
+                // Registration failed: reflect reality rather than the
+                // toggle the user just tapped.
+                startAtLoginStatusMessage = "Couldn't update Start at Login: \(error.localizedDescription)"
+                startAtLoginEnabled = StartAtLoginPolicy.isEnabled()
+            }
+        }
+    }
+    @Published var startAtLoginStatusMessage: String? = StartAtLoginPolicy.statusMessage()
 
     @Published var sessions: [DeviceSession] = []
     private var suppressModeRestart = false
@@ -1409,6 +1435,7 @@ final class SenderController: ObservableObject {
             if let value = info.pinchTarget { session.receiverPinchTarget = value }
             if let value = info.rotateTarget { session.receiverRotateTarget = value }
             if let value = info.snapRotation { session.receiverSnapRotation = value }
+            if let value = info.appGestureCommands { session.receiverAppGestureCommands = value }
             if let value = info.avSyncOffsetMs { session.receiverAVSyncOffsetMs = value }
             if info.functionTrayEnabled != nil || info.inputMode != nil {
                 session.receiverPreferencesReported = true

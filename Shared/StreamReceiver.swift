@@ -153,6 +153,7 @@ final class StreamReceiver: ObservableObject {
     private var announcedPinchTarget = ReceiverGestureTarget.viewport
     private var announcedRotateTarget = ReceiverGestureTarget.viewport
     private var announcedSnapRotation = true
+    private var announcedAppGestureCommands = AppGestureCommands.defaults
 
     /// The connected Mac's confirmed Allow Input state — pushed on connect
     /// and whenever it changes on the Mac (its own toggle, or an honored
@@ -610,6 +611,7 @@ final class StreamReceiver: ObservableObject {
             self.announcedPinchTarget = preferences.pinchTarget
             self.announcedRotateTarget = preferences.rotateTarget
             self.announcedSnapRotation = preferences.snapRotation
+            self.announcedAppGestureCommands = preferences.appGestureCommands
             self.avSyncOffsetMs = AVSyncOffset.clamped(preferences.avSyncOffsetMs)
             if let connection = self.connection, connection.state == .ready {
                 self.sendHello(on: connection)
@@ -1660,6 +1662,12 @@ final class StreamReceiver: ObservableObject {
             hello["pinchTarget"] = announcedPinchTarget.rawValue
             hello["rotateTarget"] = announcedRotateTarget.rawValue
             hello["snapRotation"] = announcedSnapRotation
+            // Reuses `AppGestureCommands`'s own `Codable` conformance rather
+            // than a hand-written field list — see `ReceiverUIPreferenceUpdate`.
+            if let data = try? JSONEncoder().encode(announcedAppGestureCommands),
+               let obj = try? JSONSerialization.jsonObject(with: data) {
+                hello["appGestureCommands"] = obj
+            }
             // Receiver-local playback timing — never Mac-pushed (only the
             // receiver can judge its own speaker/headphone latency), but
             // reported so Streaming/device detail can show the real value
