@@ -1351,6 +1351,13 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestVideoEnabled(requested)
         }
+        sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in
+            guard let self, let session, self.owns(session) else { return }
+            // Same authoritative setter the Mac's own MirrorDisplayPickerView
+            // writes — its didSet persists the choice and restarts capture
+            // when Mirror is active, so both surfaces stay one source of truth.
+            self.mirrorDisplayUUID = requestedUUID
+        }
         sender.onHello = { [weak self, weak session] info in
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id

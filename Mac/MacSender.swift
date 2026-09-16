@@ -165,6 +165,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
+    /// A receiver asked to change the Mirror capture source. Handed to
+    /// `SenderController`, which owns the canonical `mirrorDisplayUUID`
+    /// setting (the same one its own Settings picker writes) and the
+    /// existing session-rebuild path that applies it. `nil` requests Auto.
+    @MainActor var onMirrorDisplayRequest: ((String?) -> Void)?
     /// Pinned TLS failures are terminal trust failures, never packet-loss retries.
     @MainActor var onTrustFailure: ((String) -> Void)?
 
@@ -460,6 +465,39 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         defer { pipelineLock.unlock() }
         return captureGeneration
     }
+
+    // Mirror display inventory (P1): a connected/external display appearing
+    // or disappearing must refresh what a receiver's Manual picker can
+    // choose from — main-thread only, `sendMirrorDisplayState` itself hops
+    // onto `queue`.
+    private var mirrorDisplayTopologyObserver: NSObjectProtocol?
+
+    #if DEBUG
+    // Fresh post-wake SCK reconstruction experiment (Mirror mode only) —
+    // see `runWakeCaptureRecovery`. `wakeCaptureObserver`/scheduling flags
+    // are `queue`-confined like the rest of the capture-recovery state;
+    // the two "awaiting" generations are read from the SCK sample-buffer
+    // callback and the VideoToolbox encode-completion callback (different
+    // queues), so — like `captureGeneration`/`audioGeneration` — they live
+    // under `pipelineLock`.
+    private var wakeCaptureObserver: NSObjectProtocol?
+    // Not itself part of the wake-capture-recovery experiment above — this
+    // is the fixed 60s post-Promote display-sleep stabilization hold (see
+    // WakeStabilizationAssertion). DEBUG-only because Promote itself is.
+    private var wakeStabilizationAssertion: WakeStabilizationAssertion?
+    private var wakeCaptureRecoveryScheduled = false
+    private var wakeCaptureRecoveryRunning = false
+    private var wakeCaptureAwaitingFirstFrameGenerationStorage: UInt64?
+    private var wakeCaptureAwaitingFirstFrameGeneration: UInt64? {
+        get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return wakeCaptureAwaitingFirstFrameGenerationStorage }
+        set { pipelineLock.lock(); wakeCaptureAwaitingFirstFrameGenerationStorage = newValue; pipelineLock.unlock() }
+    }
+    private var wakeCaptureAwaitingEncodedFrameGenerationStorage: UInt64?
+    private var wakeCaptureAwaitingEncodedFrameGeneration: UInt64? {
+        get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return wakeCaptureAwaitingEncodedFrameGenerationStorage }
+        set { pipelineLock.lock(); wakeCaptureAwaitingEncodedFrameGenerationStorage = newValue; pipelineLock.unlock() }
+    }
+    #endif
 
     // Input latency: touches arrive stamped in our clock (the phone applies
     // its sync offset); delta to now = network + deframe + dispatch.
@@ -760,6 +798,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             monitorsStarted = true
             schedulePing()
             scheduleWatchdog()
+            #if DEBUG
+            startWakeCaptureObserver()
+            #endif
+            startMirrorDisplayTopologyObserver()
         }
 
         // Screen Recording permission: poll until granted. No auto-prompt at
@@ -1243,6 +1285,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         stopped = true
         authenticatedSession.invalidate()
+        #if DEBUG
+        wakeStabilizationAssertion?.release()
+        #endif
         inputInjector?.cancelActiveInput()
         _ = updateCaptureState { state in
             state.stop()
@@ -1254,6 +1299,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorTimer = nil
         cursorImageTimer?.cancel()
         cursorImageTimer = nil
+        #if DEBUG
+        if let wakeCaptureObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeCaptureObserver)
+        }
+        wakeCaptureObserver = nil
+        #endif
+        if let mirrorDisplayTopologyObserver {
+            NotificationCenter.default.removeObserver(mirrorDisplayTopologyObserver)
+        }
+        mirrorDisplayTopologyObserver = nil
         stream?.stopCapture { _ in }
         stream = nil
         audioEnabled = false
@@ -1930,6 +1985,176 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         scheduleCaptureRecovery()
     }
 
+    #if DEBUG
+    // MARK: - Wake capture recovery (fresh post-wake SCK reconstruction)
+    //
+    // Experiment: after sleep → WoL → Promote Interactive Wake → external
+    // monitor power-on, the pre-sleep SCStream/SCContentFilter/SCDisplay
+    // must not be trusted or reused — this reconstructs capture from
+    // scratch and answers, via `wakeCapture:` logs, whether the existing
+    // Aqua process can stream the post-wake lock screen. Mirror mode only;
+    // does not touch Extend, WoL, Promote, or the reconnect/dial machinery.
+
+    /// `screensDidWakeNotification` is the earliest point the interactive
+    /// display graph is expected to exist — unlike `didWakeNotification`
+    /// (fires on DarkWake/network wake, before displays are necessarily
+    /// live). Debounced below so a multi-display topology settling into
+    /// place cannot launch overlapping reconstructions.
+    private func startWakeCaptureObserver() {
+        guard wakeCaptureObserver == nil else { return }
+        wakeCaptureObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.queue.async { self?.scheduleWakeCaptureRecovery(reason: "screensDidWake") }
+        }
+    }
+
+    private func scheduleWakeCaptureRecovery(reason: String) {
+        guard mode == .mirror, !stopped else { return }
+        guard !wakeCaptureRecoveryScheduled, !wakeCaptureRecoveryRunning else {
+            Log.info("wakeCapture: coalesced duplicate reason=\(reason)")
+            return
+        }
+        wakeCaptureRecoveryScheduled = true
+        queue.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            guard let self else { return }
+            self.wakeCaptureRecoveryScheduled = false
+            guard self.mode == .mirror, !self.stopped, !self.wakeCaptureRecoveryRunning else { return }
+            self.wakeCaptureRecoveryRunning = true
+            Task { await self.runWakeCaptureRecovery(reason: reason) }
+        }
+    }
+
+    /// Stale pre-sleep SCK objects are stopped and discarded; the persisted
+    /// stable display UUID is re-resolved against a freshly fetched
+    /// `SCShareableContent`; a brand-new `SCStream` is built via the
+    /// existing `startMirrorCapture` path. Generation-safe: bumping
+    /// `captureGeneration` up front means the old stream's own late async
+    /// stop completion, and any of its stale frame/encode callbacks, are
+    /// ignored by the checks already in `stream(_:didOutputSampleBuffer:)`
+    /// and `encode`, so they cannot affect the new stream once it exists.
+    private func runWakeCaptureRecovery(reason: String) async {
+        defer { queue.async { self.wakeCaptureRecoveryRunning = false } }
+        Log.info("wakeCapture: begin reason=\(reason)")
+
+        invalidateCapturePipeline(discardingLastFrame: true)
+        let generation = captureGenerationNow
+        Log.info("wakeCapture: generation=\(generation)")
+
+        let oldStream = stream
+        Log.info("wakeCapture: oldStreamPresent=\(oldStream != nil)")
+        stream = nil   // the new build below must not be torn down by the old stream's late callback
+        if let oldStream {
+            Log.info("wakeCapture: stoppingOldStream")
+            do {
+                try await oldStream.stopCapture()
+            } catch {
+                Log.info("wakeCapture: oldStreamStopFailed error=\(error)")
+            }
+            Log.info("wakeCapture: oldStreamStopped")
+        }
+
+        Log.info("wakeCapture: requestingShareableContent")
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.current
+        } catch {
+            Log.info("wakeCapture: shareableContentFailed error=\(error)")
+            scheduleCaptureRecoveryAfterWakeFailure()
+            return
+        }
+        Log.info("wakeCapture: shareableContentResult displayCount=\(content.displays.count)")
+        let mainID = CGMainDisplayID()
+        for candidate in content.displays {
+            let uuid = MirrorDisplayIdentity.uuidString(for: candidate.displayID) ?? "unknown"
+            let screen = NSScreen.screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID)
+                    == candidate.displayID
+            }
+            let name = screen?.localizedName ?? "Display \(candidate.displayID)"
+            let displayMode = CGDisplayCopyDisplayMode(candidate.displayID)
+            Log.info("wakeCapture: display uuid=\(uuid) id=\(candidate.displayID) name=\(name) "
+                + "logical=\(candidate.width)x\(candidate.height) "
+                + "pixel=\(displayMode?.pixelWidth ?? candidate.width)x\(displayMode?.pixelHeight ?? candidate.height) "
+                + "main=\(candidate.displayID == mainID)")
+        }
+
+        var resolvedDisplay: SCDisplay?
+        if let uuid = mirrorDisplayUUID {
+            Log.info("wakeCapture: selectedUUID=\(uuid)")
+            resolvedDisplay = MirrorDisplayIdentity.resolve(persistentID: uuid, in: content.displays)
+            guard resolvedDisplay != nil else {
+                // Explicit selection: an unresolved UUID must not silently
+                // fall back to a random display just to make a test pass.
+                Log.info("wakeCapture: displayNotFound uuid=\(uuid)")
+                scheduleCaptureRecoveryAfterWakeFailure()
+                return
+            }
+        } else {
+            // Auto mode: preserve existing Automatic behavior.
+            Log.info("wakeCapture: selectedUUID=none(Auto)")
+            resolvedDisplay = content.displays.first
+        }
+        guard let display = resolvedDisplay else {
+            Log.info("wakeCapture: displayNotFound uuid=none")
+            scheduleCaptureRecoveryAfterWakeFailure()
+            return
+        }
+        Log.info("wakeCapture: resolvedDisplay id=\(display.displayID)")
+
+        guard let sessionGeneration = authenticatedSession.liveGeneration,
+              authenticatedSession.isLive(generation: sessionGeneration) else {
+            Log.info("wakeCapture: noLiveSession")
+            return
+        }
+        Log.info("wakeCapture: contentFilterCreated")
+        wakeCaptureAwaitingFirstFrameGeneration = generation
+        wakeCaptureAwaitingEncodedFrameGeneration = generation
+        Log.info("wakeCapture: streamCreated generation=\(generation)")
+        Log.info("wakeCapture: startCaptureRequested")
+        do {
+            try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
+            Log.info("wakeCapture: startCaptureSucceeded")
+        } catch {
+            Log.info("wakeCapture: startCaptureFailed error=\(error)")
+            wakeCaptureAwaitingFirstFrameGeneration = nil
+            wakeCaptureAwaitingEncodedFrameGeneration = nil
+            scheduleCaptureRecoveryAfterWakeFailure()
+        }
+    }
+
+    /// On failure, fall back to the existing generic recovery loop rather
+    /// than leaving the session stuck — the wake path is a best-effort fast
+    /// path, not the only route back to a live capture.
+    private func scheduleCaptureRecoveryAfterWakeFailure() {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            _ = self.updateCaptureState { $0.unexpectedStop() }
+            self.scheduleCaptureRecovery()
+        }
+    }
+
+    /// Logged once, from the SCK sample-buffer callback, for the first
+    /// frame of a wake-recovery generation — never per-frame. Reads
+    /// `SCStreamFrameInfo.status` (idle/blank/suspended vs. complete) so a
+    /// stale/frozen capture is distinguishable from a genuinely fresh one
+    /// without adding per-frame pixel analysis.
+    private func logWakeCaptureFirstFrame(sampleBuffer: CMSampleBuffer, pixelBuffer: CVPixelBuffer) {
+        Log.info("wakeCapture: firstFrame")
+        var statusDescription = "unknown"
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[SCStreamFrameInfo: Any]],
+           let raw = attachments.first?[.status] as? Int,
+           let status = SCFrameStatus(rawValue: raw) {
+            statusDescription = String(describing: status)
+        }
+        Log.info("wakeCapture: firstFrameStatus=\(statusDescription)")
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        Log.info("wakeCapture: firstFramePTS=\(pts.seconds)")
+        Log.info("wakeCapture: frameSize=\(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
+    }
+    #endif
+
     // MARK: - Connection (with retry)
 
     // Guards against a stale async USB dial adopting after a newer one (or a
@@ -2342,6 +2567,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = activeConnectionGeneration
         authenticatedSession.invalidate(generation: generation == 0 ? nil : generation)
         connectionReady = false
+        #if DEBUG
+        wakeStabilizationAssertion?.release()
+        #endif
         Log.info("sessionDebug: invalidated reason=\(reason) generation=\(generation)")
     }
 
@@ -2950,6 +3178,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendWelcome()
                 sendWakeInfo()
                 sendDisplayModeState()
+                if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
+                    sendMirrorDisplayState()
+                }
                 if info.protocolVersion >= WireProtocol.videoControlWireVersion {
                     applyVideoEnabled(desiredVideoEnabled)
                 } else {
@@ -3120,6 +3351,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 Task { @MainActor in self.onVideoEnabledRequest?(requested) }
             }
+        case WireMessage.mirrorDisplayRequest:
+            // Same construction as `promoteInteractiveWake` above: this only
+            // ever runs on data read off an already pinned-TLS/loopback
+            // `connection`, so it is authenticated by construction.
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
+            let requestedUUID = obj["selectedUUID"] as? String
+            Task { @MainActor in self.onMirrorDisplayRequest?(requestedUUID) }
         #if DEBUG
         case WireMessage.promoteInteractiveWake:
             // `handleControl` only ever runs on data read off `connection`,
@@ -3136,6 +3375,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if attempt.result == kIOReturnSuccess, let assertionID = attempt.assertionID {
                 result["success"] = true
                 result["assertionID"] = Int(assertionID)
+                // Only after a successful Promote — see
+                // WakeStabilizationAssertion's doc comment for why this is a
+                // separate, longer hold from the one-shot declaration above.
+                if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
+                wakeStabilizationAssertion?.begin()
             } else {
                 result["success"] = false
                 result["code"] = Int(attempt.result)
@@ -3310,8 +3554,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         switch type {
         case .screen:
-            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                #if DEBUG
+                if wakeCaptureAwaitingFirstFrameGeneration != nil {
+                    Log.info("wakeCapture: frameMissingSurface")
+                }
+                #endif
+                return
+            }
             let generation = captureGenerationNow
+            #if DEBUG
+            if wakeCaptureAwaitingFirstFrameGeneration == generation {
+                wakeCaptureAwaitingFirstFrameGeneration = nil
+                logWakeCaptureFirstFrame(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
+            }
+            #endif
 
             lastPixelBuffer = pixelBuffer
             lastCaptureAt = Date()
@@ -3471,9 +3728,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 )
                 self.pipelineLock.unlock()
                 self.handleEncodeOutputFailureLogAction(logAction)
+                #if DEBUG
+                if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
+                    self.wakeCaptureAwaitingEncodedFrameGeneration = nil
+                    Log.info("wakeCapture: encoderRejectedFirstFrame error=\(status)")
+                }
+                #endif
                 return
             }
             guard generation == self.captureGenerationNow else { return }
+            #if DEBUG
+            if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
+                self.wakeCaptureAwaitingEncodedFrameGeneration = nil
+                Log.info("wakeCapture: firstEncodedFrame")
+                Log.info("wakeCapture: ready")
+            }
+            #endif
             if let data = self.annexB(from: buffer) {
                 let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
                 var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
@@ -3655,6 +3925,55 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let subnet = metadata.subnetMask { dict["subnet"] = subnet }
         if let broadcast = metadata.broadcastAddress { dict["broadcast"] = broadcast }
         sendJSONObject(dict)
+    }
+
+    /// Reports the canonical Mirror capture-source selection (this session's
+    /// own `mirrorDisplayUUID`, resolved the same nil-means-Auto way
+    /// `startMirrorCaptureUsingPreference` does) plus the Mac's current
+    /// display inventory. Mirror-only — Extend always uses MEOW's own
+    /// virtual display, so there is nothing to report there. Async because
+    /// `SCShareableContent` is: hops back onto `queue` before touching any
+    /// sender state or sending, exactly like `runWakeCaptureRecovery` does.
+    private func sendMirrorDisplayState() {
+        guard mode == .mirror else { return }
+        Task { [weak self] in
+            let candidates = await MirrorDisplayCandidate.listCandidates()
+            guard let self else { return }
+            self.queue.async {
+                guard self.mode == .mirror, !self.stopped else { return }
+                let displays = candidates.compactMap { candidate -> [String: Any]? in
+                    guard let uuid = candidate.persistentID else { return nil }
+                    return [
+                        "uuid": uuid, "name": candidate.name, "isMain": candidate.isMain,
+                        "logicalWidth": Int(candidate.logicalSize.width),
+                        "logicalHeight": Int(candidate.logicalSize.height),
+                        "pixelWidth": Int(candidate.pixelSize.width),
+                        "pixelHeight": Int(candidate.pixelSize.height),
+                        "likelyVirtual": candidate.likelyVirtual,
+                    ]
+                }
+                var dict: [String: Any] = [
+                    "type": WireMessage.mirrorDisplayState, "displays": displays,
+                ]
+                if let mirrorDisplayUUID = self.mirrorDisplayUUID { dict["selectedUUID"] = mirrorDisplayUUID }
+                self.sendJSONObject(dict)
+            }
+        }
+    }
+
+    /// A display attaching/detaching must refresh what a connected
+    /// receiver's Manual picker offers — `didChangeScreenParametersNotification`
+    /// is the same signal `PowerLifecycleLogger` already logs (DEBUG-only,
+    /// observation only) for display-topology changes; this reacts to it in
+    /// every build, but only ever to re-report the inventory, never to touch
+    /// capture itself.
+    private func startMirrorDisplayTopologyObserver() {
+        guard mirrorDisplayTopologyObserver == nil else { return }
+        mirrorDisplayTopologyObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.sendMirrorDisplayState()
+        }
     }
 
     /// Ask the receiver to update (built via JSONSerialization because the

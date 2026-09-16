@@ -86,6 +86,11 @@ final class StreamReceiver: ObservableObject {
     @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
     @Published private(set) var displayModeConfirmationGeneration = 0
     private var displayModeRequestState = DisplayModeRequestState()
+    /// The connected Mac's canonical Mirror capture-source report — see
+    /// `MirrorDisplayStateUpdate`. `nil` until a Mac speaking
+    /// `mirrorDisplayWireVersion` has actually reported one (distinct from
+    /// `selectedUUID == nil`, which means Auto).
+    @Published private(set) var mirrorDisplayState: MirrorDisplayStateUpdate?
 
     /// The single authoritative session state the UI derives from. Mutated
     /// only on `queue` via `sessionState`; this is its main-thread mirror.
@@ -719,6 +724,16 @@ final class StreamReceiver: ObservableObject {
     func pairingMacIsPaired(_ result: NWBrowser.Result) -> Bool {
         guard case .bonjour(let txt) = result.metadata, let id = txt["id"] else { return false }
         return TrustStore.shared.hasPin(peerID: id)
+    }
+
+    /// The peer install ID a discovered Mac's Bonjour TXT record advertises —
+    /// the same key `WakeMetadataStore` and `TrustStore` use, so a caller can
+    /// look up that specific Mac's saved wake hint or trust pin. `nil` for a
+    /// result that hasn't published one (predates the handshake, or is mid-
+    /// resolve).
+    func pairingMacPeerID(_ result: NWBrowser.Result) -> String? {
+        guard case .bonjour(let txt) = result.metadata else { return nil }
+        return txt["id"]
     }
 
     /// Recreate the listener if it isn't healthy — called when the app
@@ -1459,6 +1474,9 @@ final class StreamReceiver: ObservableObject {
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
             DispatchQueue.main.async { self.applyConfirmedDisplayMode(mode) }
+        case WireMessage.mirrorDisplayState:
+            guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
+            DispatchQueue.main.async { self.mirrorDisplayState = update }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
@@ -1912,6 +1930,22 @@ final class StreamReceiver: ObservableObject {
         guard displayModeRequestState.expirePending(generation: generation) else { return }
         pendingDisplayMode = nil
         Log.info("display mode request timed out — keeping \(displayModeRequestState.confirmedMode?.rawValue ?? "unknown")")
+    }
+
+    /// Asks the connected Mac to change its Mirror capture source. The Mac
+    /// remains the single canonical owner (`SenderController.mirrorDisplayUUID`,
+    /// the same setting its own Settings picker writes) — this only requests;
+    /// the confirmed state always arrives back via a fresh `mirrorDisplayState`.
+    /// `uuid: nil` requests Auto. A no-op against an older Mac, while
+    /// disconnected, or for a display not in the Mac's own last-reported
+    /// inventory (never trust a stale/local UUID the Mac hasn't vouched for).
+    func requestMirrorDisplaySelection(_ uuid: String?) {
+        guard connected, macProtocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
+        let knownUUIDs = Set(mirrorDisplayState?.displays.map(\.uuid) ?? [])
+        if let uuid, !knownUUIDs.contains(uuid) { return }
+        var dict: [String: Any] = ["type": WireMessage.mirrorDisplayRequest]
+        if let uuid { dict["selectedUUID"] = uuid }
+        sendControl(dict)
     }
 
     /// Deliberate session teardown (stop/sleep/close): the Mac's mode is no
@@ -3290,6 +3324,19 @@ final class StreamReceiver: ObservableObject {
         queue.asyncAfter(deadline: .now() + 8.0, execute: clear)
     }
 
+    #if DEBUG
+    /// Wake & Connect (`WakeConnectCoordinator`): re-publishes the one-shot
+    /// receiver Connect token without touching reconnect/session state —
+    /// unlike `requestConnect()`, this never cancels an in-flight recovery
+    /// or resets `automaticReconnectEnabled`. The underlying token expires
+    /// after ~8s (see `signalConnectRequest`); a real sleep/wake interval can
+    /// easily outlast that, so the coordinator calls this on a bounded
+    /// cadence while a wake attempt is active.
+    func refreshConnectRequest() {
+        queue.async { self.signalConnectRequest() }
+    }
+    #endif
+
     func reconnectNow() {
         queue.async {
             guard self.sessionState.phase == .reconnectFailed
@@ -3348,6 +3395,11 @@ final class StreamReceiver: ObservableObject {
                 // rebuilds the Mac's session, so the drop is part of the
                 // transition and the reply arrives on the next one.
                 self.confirmedDisplayMode = nil
+                // Same reasoning as confirmedDisplayMode: stale inventory/
+                // selection from a dead session must not linger as if it
+                // were still current — a fresh mirrorDisplayState arrives on
+                // the next hello.
+                self.mirrorDisplayState = nil
             }
         }
         if !value {

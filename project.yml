@@ -180,6 +180,7 @@ targets:
       - Mac/RouteOverrides.swift
       - Mac/WakeInspector.swift
       - Mac/MirrorDisplaySelection.swift
+      - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
       - Shared/RemoteEndpointStore.swift
       - Shared/WakeOnLAN.swift

@@ -137,11 +137,11 @@ final class AudioMediaFrameTests: XCTestCase {
 
     // MARK: - Protocol version gating
 
-    func testAudioWireVersionIsTheCurrentProtocolVersion() {
-        // Audio is what bumped the wire this milestone — if this ever
-        // drifts from `version`, a later feature quietly reused a version
-        // number that was never actually shipped as "audio-capable".
-        XCTAssertEqual(WireProtocol.audioWireVersion, WireProtocol.version)
+    func testAudioWireVersionIsFixedAtItsShippedProtocolVersion() {
+        // Audio shipped at wire version 12 — a historical fact that must
+        // never drift, even though a later feature (Mirror display
+        // selection, 13) has since become the one that matches `version`
+        // exactly — see MirrorDisplayWireTests.
         XCTAssertEqual(WireProtocol.audioWireVersion, 12)
     }
 

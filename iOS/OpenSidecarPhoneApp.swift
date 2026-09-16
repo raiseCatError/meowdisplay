@@ -200,7 +200,11 @@ struct ReceiverScreen: View {
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 })
                 } else {
+                    #if DEBUG
+                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings)
+                    #else
                     IdleView(receiver: model.receiver, showSettings: $showSettings)
+                    #endif
                 }
             }
             .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
@@ -473,6 +477,9 @@ struct ReceiverInterruptionOverlay: View {
 
 struct IdleView: View {
     @ObservedObject var receiver: StreamReceiver
+    #if DEBUG
+    @ObservedObject var wakeConnect: WakeConnectCoordinator
+    #endif
     @Binding var showSettings: Bool
 
     var body: some View {
@@ -537,8 +544,7 @@ struct IdleView: View {
                                     // (reconnectNow) — it asks the Mac,
                                     // which is always the dialer, to
                                     // actually start a session for us.
-                                    Button("Connect") { receiver.requestConnect() }
-                                        .buttonStyle(.borderedProminent)
+                                    connectControl(for: result)
                                 }
                             } else {
                                 Button("Pair") { receiver.pairWithMac(result) }
@@ -567,6 +573,42 @@ struct IdleView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemBackground))
+    }
+
+    /// One-tap Wake & Connect when this specific paired Mac has a usable
+    /// saved LAN wake hint (DEBUG-only milestone — see
+    /// `WakeConnectCoordinator`); a plain Connect otherwise, unchanged.
+    @ViewBuilder
+    private func connectControl(for result: NWBrowser.Result) -> some View {
+        #if DEBUG
+        if let peerID = receiver.pairingMacPeerID(result) {
+            if wakeConnect.isRunning(forPeerID: peerID) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(wakeConnect.statusLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { wakeConnect.cancel() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                }
+            } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
+                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect") {
+                    wakeConnect.begin(peerID: peerID)
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button("Connect") { receiver.requestConnect() }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else {
+            Button("Connect") { receiver.requestConnect() }
+                .buttonStyle(.borderedProminent)
+        }
+        #else
+        Button("Connect") { receiver.requestConnect() }
+            .buttonStyle(.borderedProminent)
+        #endif
     }
 }
 
@@ -737,6 +779,10 @@ struct SettingsView: View {
                             LabeledContent("Switching to \(pendingMode.title)") {
                                 ProgressView()
                             }
+                        }
+                        if confirmedMode == .mirror,
+                           receiver.macProtocolVersion >= WireProtocol.mirrorDisplayWireVersion {
+                            mirrorDisplaySourcePicker
                         }
                     } else {
                         LabeledContent("Display Mode",
@@ -1109,6 +1155,56 @@ struct SettingsView: View {
         }
     }
 
+    /// Remote control for the Mac's own canonical Mirror capture source
+    /// (`SenderController.mirrorDisplayUUID`) — never an independent
+    /// iOS-only preference. `nil` selection means Auto, mirroring the Mac's
+    /// own nil-means-automatic semantic exactly (see
+    /// `Mac/MirrorDisplaySelection.swift`).
+    @ViewBuilder
+    private var mirrorDisplaySourcePicker: some View {
+        let state = receiver.mirrorDisplayState
+        Picker("Mirror Display", selection: Binding(
+            get: { state?.selectedUUID == nil ? "auto" : "manual" },
+            set: { newValue in
+                if newValue == "auto" {
+                    receiver.requestMirrorDisplaySelection(nil)
+                } else if let uuid = state?.selectedUUID ?? state?.displays.first?.uuid {
+                    receiver.requestMirrorDisplaySelection(uuid)
+                }
+            })) {
+            Text("Auto").tag("auto")
+            Text("Manual").tag("manual")
+        }
+        .disabled(!receiver.connected || state == nil)
+        if let state, state.selectedUUID != nil {
+            if state.displays.isEmpty {
+                Text("No displays reported.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(state.displays, id: \.uuid) { display in
+                    Button {
+                        receiver.requestMirrorDisplaySelection(display.uuid)
+                    } label: {
+                        HStack {
+                            Text(display.isMain ? "\(display.name) (Main)" : display.name)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if state.selectedUUID == display.uuid {
+                                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                            }
+                        }
+                    }
+                }
+                if let selected = state.selectedUUID, !state.displays.contains(where: { $0.uuid == selected }) {
+                    Text("Selected display unavailable")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
     private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
         Binding(get: { controlStore.preferences[keyPath: keyPath] },
                 set: { value in controlStore.update { $0[keyPath: keyPath] = value } })
@@ -1140,6 +1236,9 @@ private struct DeviceNameField: View {
 @MainActor
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
+    #if DEBUG
+    let wakeConnect: WakeConnectCoordinator
+    #endif
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -1147,6 +1246,9 @@ final class ReceiverModel: ObservableObject {
         receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                   deviceKind: deviceKind,
                                   fallbackServiceName: UIDevice.current.name)
+        #if DEBUG
+        wakeConnect = WakeConnectCoordinator(receiver: receiver)
+        #endif
         // Announce the native panel size to the Mac.
         let native = UIScreen.main.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),

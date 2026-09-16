@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 12
+    static let version = 13
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -69,6 +69,16 @@ enum WireProtocol {
     /// simply stays off, exactly like `keyboard` below pv 4.
     static let audioWireVersion = 12
 
+    /// Protocol version that introduced Mac-authoritative Mirror capture-source
+    /// selection: `mirrorDisplayState` (Mac -> receiver: current Auto/Manual
+    /// selection + display inventory) and `mirrorDisplayRequest` (receiver ->
+    /// Mac: select Auto or a specific stable display UUID). A receiver MUST
+    /// NOT send `mirrorDisplayRequest`, and MUST NOT expect
+    /// `mirrorDisplayState`, when the peer is below this version — the Mac's
+    /// own Settings picker still works regardless, it just isn't mirrored to
+    /// an old receiver.
+    static let mirrorDisplayWireVersion = 13
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -110,6 +120,15 @@ enum WireMessage {
     static let promoteInteractiveWake = "promoteInteractiveWake"
     // Mac -> receiver: result of the above.
     static let promoteInteractiveWakeResult = "promoteInteractiveWakeResult"
+    // Mac -> receiver: current Mirror capture-source selection (Auto/Manual +
+    // stable UUID) plus the Mac's current display inventory. Re-sent on every
+    // hello (same pattern as `wakeInfo`/`displayModeState`) and whenever the
+    // selection or display topology changes.
+    static let mirrorDisplayState = "mirrorDisplayState"
+    // receiver -> Mac: select Auto (absent/null `selectedUUID`) or a specific
+    // stable display UUID as the Mirror capture source. Only ever honored
+    // over the existing authenticated session — see `mirrorDisplayWireVersion`.
+    static let mirrorDisplayRequest = "mirrorDisplayRequest"
 }
 
 enum WireCrypto {
@@ -270,5 +289,70 @@ struct AudioStateUpdate: Equatable {
         guard message["type"] as? String == WireMessage.audioState,
               let enabled = message["enabled"] as? Bool else { return nil }
         self.enabled = enabled
+    }
+}
+
+/// One entry in the Mac's Mirror display inventory, wire shape only — never
+/// a `CGDirectDisplayID` (see `MirrorDisplayIdentity`). `uuid` is the same
+/// stable identity the Mac's own Settings picker persists, so a receiver
+/// selection and the Mac's canonical `mirrorDisplayUUID` always speak the
+/// same identity.
+struct MirrorDisplayEntry: Equatable {
+    let uuid: String
+    let name: String
+    let isMain: Bool
+    let logicalWidth: Int
+    let logicalHeight: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let likelyVirtual: Bool
+
+    init(uuid: String, name: String, isMain: Bool, logicalWidth: Int, logicalHeight: Int,
+        pixelWidth: Int, pixelHeight: Int, likelyVirtual: Bool) {
+        self.uuid = uuid
+        self.name = name
+        self.isMain = isMain
+        self.logicalWidth = logicalWidth
+        self.logicalHeight = logicalHeight
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.likelyVirtual = likelyVirtual
+    }
+
+    init?(entry: [String: Any]) {
+        guard let uuid = entry["uuid"] as? String, !uuid.isEmpty,
+              let name = entry["name"] as? String else { return nil }
+        self.uuid = uuid
+        self.name = name
+        isMain = entry["isMain"] as? Bool ?? false
+        logicalWidth = entry["logicalWidth"] as? Int ?? 0
+        logicalHeight = entry["logicalHeight"] as? Int ?? 0
+        pixelWidth = entry["pixelWidth"] as? Int ?? 0
+        pixelHeight = entry["pixelHeight"] as? Int ?? 0
+        likelyVirtual = entry["likelyVirtual"] as? Bool ?? false
+    }
+}
+
+/// Mac -> receiver Mirror capture-source report. `selectedUUID == nil` means
+/// Auto — the same nil-means-automatic semantic the Mac's own
+/// `mirrorDisplayUUID` already uses, never a separate boolean (see
+/// `MirrorDisplaySelection.swift`).
+struct MirrorDisplayStateUpdate: Equatable {
+    let selectedUUID: String?
+    let displays: [MirrorDisplayEntry]
+
+    init(selectedUUID: String?, displays: [MirrorDisplayEntry]) {
+        self.selectedUUID = selectedUUID
+        self.displays = displays
+    }
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.mirrorDisplayState else { return nil }
+        selectedUUID = message["selectedUUID"] as? String
+        // Element-wise, not `as? [[String: Any]]` on the whole array: a
+        // single malformed entry from a newer/buggy peer must only drop
+        // that entry, never silently empty the whole inventory.
+        let rawDisplays = message["displays"] as? [Any] ?? []
+        displays = rawDisplays.compactMap { ($0 as? [String: Any]).flatMap(MirrorDisplayEntry.init) }
     }
 }
