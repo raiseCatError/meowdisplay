@@ -210,6 +210,102 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// always kept video-on so they never get a frozen, unexplained surface.
     private var desiredVideoEnabled: Bool
     private var videoEnabled = true
+    // Mac system audio (M-audio). Per-receiver, not Mac-wide like
+    // `videoEnabled`: only this session's receiver can turn its own audio
+    // on, via `audioRequest` (PROTOCOL.md `pv` 12). Default off — capturing
+    // system audio is opt-in, never ambient. `audioEnabled` tracks what
+    // ScreenCaptureKit is actually configured to capture right now;
+    // `desiredAudioEnabled` is what the receiver last asked for, reapplied
+    // whenever capture (re)starts.
+    private var desiredAudioEnabled = false
+    private var audioEnabled = false
+    private let audioCaptureEncoder = AudioCaptureEncoder()
+    private var audioPacketSeq: UInt32 = 0
+    private var audioConfigSent = false
+    // Bumped at every point that resets `audioConfigSent`/`audioPacketSeq`
+    // (i.e. every fresh audio generation: capture start, Audio Off→On,
+    // pause, reconnect). Guarded by `pipelineLock` like `captureGeneration`
+    // because it's read from the SCStream audio callback (not `queue`) and
+    // compared again once that callback's async encode work completes back
+    // on `queue` — the same stale-completion guard `captureGenerationNow`
+    // already provides for video, extended to cover an audio-only generation
+    // change too (Audio Off→On doesn't necessarily bump `captureGeneration`).
+    private var audioGeneration: UInt64 = 0
+    private var audioGenerationNow: UInt64 {
+        pipelineLock.lock()
+        defer { pipelineLock.unlock() }
+        return audioGeneration
+    }
+    #if DEBUG
+    // DEBUG-only telemetry, piggybacked on the existing throttled `ping`
+    // (PROTOCOL.md 6.2 — free-form, no version bump). Never raw audio.
+    private var audioPacketsThisWindow = 0
+    private var audioBytesThisWindow = 0
+    // Transport head-of-line-blocking audit (see `sendFramed`): the most
+    // recent video frame's on-wire byte count, for correlating with a slow
+    // audio write completing right after it.
+    private var lastVideoFrameByteCount = 0
+    // DEBUG-only PCM bypass A/B mode (GOAL: isolate remaining intermittent
+    // audio garble to AAC vs. everything upstream of it). Switch with:
+    //   defaults write <bundle id from the `audioTrace: generation=` self-report line> audioDebugMode -string pcm
+    //   defaults write <bundle id> audioDebugMode -string aac   (or delete the key)
+    // FORENSIC NOTE: an earlier version of this read `audioDebugMode` fresh
+    // on every ScreenCaptureKit audio callback, so a live defaults change
+    // mid-session could interleave an in-flight AAC encode Task with a
+    // freshly-started PCM one on the SAME generation — the receiver then
+    // saw AAC config, PCM config, and both codecs' packets arrive
+    // out of their own sequence spaces, which is exactly what produced the
+    // "expected=4856 got=1" discontinuity / -12735 renderer error / non-
+    // monotonic-playout-target evidence from that test. `activeAudioIsPCM`
+    // is now latched ONCE per audio generation, at every site that already
+    // resets `audioConfigSent`/`audioPacketSeq` (`beginAudioGeneration`) —
+    // a live defaults change only takes effect the next time one of those
+    // sites runs (Audio Off→On rebuild, pause/resume, or reconnect), never
+    // mid-generation. Diagnostic only — never affects a Release build, and
+    // production AAC behavior is byte-for-byte unchanged when this is false.
+    private var activeAudioIsPCM = false
+    private var pcmConfigSent = false
+    private var pcmPacketSeq: UInt32 = 0
+    #endif
+
+    /// Call at every point that starts a fresh audio generation (capture
+    /// start, Audio Off→On, pause, stop, reconnect) — resets
+    /// `audioConfigSent`/`audioPacketSeq` (and the PCM counterparts) as one
+    /// atomic unit with bumping `audioGeneration`, and, in DEBUG, latches
+    /// this generation's codec choice from `audioDebugMode` (see
+    /// `activeAudioIsPCM`'s doc comment — never read live per-packet).
+    /// Must run on `queue` (all its call sites already do).
+    private func beginAudioGeneration() {
+        audioConfigSent = false
+        audioPacketSeq = 0
+        pipelineLock.lock()
+        audioGeneration &+= 1
+        let generation = audioGeneration
+        pipelineLock.unlock()
+        #if DEBUG
+        pcmConfigSent = false
+        pcmPacketSeq = 0
+        activeAudioIsPCM = UserDefaults.standard.string(forKey: "audioDebugMode") == "pcm"
+        // FORENSIC NOTE: a previous pass's instructions told the user to
+        // `defaults write com.peetzweg.opensidecar.mac.debug ...` — the
+        // upstream/tracked bundle ID (`project.yml`). This checkout's local
+        // signing override (`project.local.yml`, see repo CLAUDE.md) rebuilds
+        // the Debug target as `com.raisecaterror.opendisplay.mac.debug`, so
+        // every one of those `defaults write` calls silently missed the
+        // running process's actual domain — `UserDefaults.standard` itself
+        // was never the bug, only the hardcoded domain in prior instructions
+        // was. Self-report the REAL running identifier every generation so
+        // this can never go stale again, independent of which project file
+        // built the running binary.
+        Log.info("audioTrace: generation=\(generation) codec=\(activeAudioIsPCM ? "PCM" : "AAC") starting bundleID=\(Bundle.main.bundleIdentifier ?? "?")")
+        let encoder = audioCaptureEncoder
+        Task {
+            let status = await encoder.debugDiagnosticStatus()
+            Log.info("audioTrace: diagnostics audioPCMCompareDump=\(status.pcmCompareDumpEnabled) audioLocalRoundTrip=\(status.localRoundTripEnabled) audioDebugDump=\(status.debugDumpEnabled) dumpDirectory=\(status.dumpDirectory)")
+        }
+        #endif
+    }
+
     private var capturePixelsWide = 0
     private var capturePixelsHigh = 0
     private var connectionReady = false
@@ -360,6 +456,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var bytesSent = 0
     private var statsWindowStart = Date()
 
+    // Outbound-writer liveness (MEDIA DEATH forensics — see `sendFramed`'s
+    // completion handler and `scheduleWatchdog`). The connection's own
+    // read-direction health says nothing about the write direction: a stuck
+    // socket-send buffer (e.g. the peer's own read loop wedged) leaves
+    // `connectionReady` true and inbound control traffic flowing fine —
+    // exactly "connected, input works, but media silently stopped" — with
+    // no NWConnection state transition to notice it by. This tracks the
+    // last time ANY queued write actually completed so the watchdog can
+    // tell "no video right now because the screen is static" apart from
+    // "nothing is draining the socket at all".
+    private var lastSendCompletionAt = Date()
+    private var sendStallReported = false
+
     // ScreenCaptureKit emits frames only when content changes. After a
     // reconnect on a static screen there is nothing to hang the forced
     // keyframe on — so keep the last frame around and re-encode it.
@@ -437,6 +546,124 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         "width": capturePixelsWide,
                         "height": capturePixelsHigh])
     }
+
+    private func sendAudioState() {
+        guard let info = lastHello,
+              info.protocolVersion >= WireProtocol.audioWireVersion else { return }
+        sendJSONObject(["type": WireMessage.audioState, "enabled": audioEnabled])
+    }
+
+    /// Toggles Mac system-audio capture for this receiver. Per-receiver,
+    /// unlike `applyVideoEnabled` (Mac-wide) — only ever driven by this
+    /// session's own `audioRequest`. Prefers reconfiguring the live
+    /// `SCStream` at runtime (PROTOCOL.md 5A / milestone note) over tearing
+    /// down anything video-related.
+    private func applyAudioEnabled(_ enabled: Bool) {
+        desiredAudioEnabled = enabled
+        guard enabled != audioEnabled else {
+            sendAudioState()
+            return
+        }
+        guard let stream else {
+            // No live capture (e.g. video and audio both off, or between
+            // sessions) — the next startCapture() picks up
+            // `desiredAudioEnabled`. Nothing to reconfigure yet.
+            audioEnabled = enabled
+            sendAudioState()
+            return
+        }
+        let config = SCStreamConfiguration()
+        config.capturesAudio = enabled
+        config.sampleRate = 48_000
+        config.channelCount = 2
+        config.excludesCurrentProcessAudio = true
+        Task {
+            do {
+                try await stream.updateConfiguration(config)
+            } catch {
+                Log.info("audio reconfigure failed: \(error)")
+            }
+            self.queue.async {
+                guard self.stream === stream else { return }
+                self.audioEnabled = enabled
+                if !enabled {
+                    Task { await self.audioCaptureEncoder.reset() }
+                }
+                self.beginAudioGeneration()
+                self.sendAudioState()
+                if !enabled, self.videoEnabled == false, self.desiredAudioEnabled == false {
+                    // Nothing wants this stream anymore — release it the
+                    // same way Video Off does on its own.
+                    self.stream = nil
+                    stream.stopCapture { _ in }
+                    _ = self.updateCaptureState { $0.stop(); return true }
+                }
+            }
+        }
+    }
+
+    private func sendAudioConfigIfNeeded() {
+        Task {
+            guard let config = await audioCaptureEncoder.formatConfig else { return }
+            self.queue.async {
+                guard !self.audioConfigSent else { return }
+                self.audioConfigSent = true
+                self.sendFramed(AudioMediaFrame.config(AudioConfigFrame(
+                    sampleRate: config.sampleRate,
+                    channelCount: config.channelCount,
+                    cookie: config.cookie)).encode(), kind: "audio")
+            }
+        }
+    }
+
+    private func sendAudioPacket(_ packet: EncodedAudioPacket) {
+        audioPacketSeq &+= 1
+        #if DEBUG
+        audioPacketsThisWindow += 1
+        audioBytesThisWindow += packet.payload.count
+        // GOAL (receiver-side AAC investigation): a periodic checksum over
+        // the EXACT bytes handed to `sendFramed` — not a re-derivation —
+        // tagged with generation/sequence, so it can be matched against
+        // `StreamReceiver`'s identical periodic log for the same
+        // generation/sequence. A mismatch means transport/framing
+        // corrupted the bytes; a match rules that out entirely, narrowing
+        // any remaining glitch to reconstruction/decode/render on-device.
+        if audioPacketSeq % 100 == 1 {
+            Log.info("audioTrace: AAC integrity side=sender generation=\(audioGenerationNow) seq=\(audioPacketSeq) capturedAtMs=\(packet.capturedAtMs) durationMs=\(packet.durationMs) payloadBytes=\(packet.payload.count) checksum=\(PCMChecksum.fnv1a(packet.payload))")
+        }
+        #endif
+        sendFramed(AudioMediaFrame.packet(AudioPacketFrame(
+            sequence: audioPacketSeq,
+            capturedAtMs: packet.capturedAtMs,
+            durationMs: packet.durationMs,
+            payload: packet.payload)).encode(), kind: "audio")
+    }
+
+    #if DEBUG
+    /// DEBUG-only PCM bypass A/B mode counterparts of
+    /// `sendAudioConfigIfNeeded`/`sendAudioPacket` — see `audioDebugPCMMode`.
+    private func sendPCMConfigIfNeeded() {
+        Task {
+            guard let config = await audioCaptureEncoder.pcmFormatConfig else { return }
+            self.queue.async {
+                guard !self.pcmConfigSent else { return }
+                self.pcmConfigSent = true
+                self.sendFramed(AudioMediaFrame.pcmConfig(PCMConfigFrame(
+                    sampleRate: config.sampleRate,
+                    channelCount: config.channelCount)).encode(), kind: "audio")
+            }
+        }
+    }
+
+    private func sendPCMPacket(_ packet: EncodedPCMPacket) {
+        pcmPacketSeq &+= 1
+        sendFramed(AudioMediaFrame.pcmPacket(PCMPacketFrame(
+            sequence: pcmPacketSeq,
+            capturedAtMs: packet.capturedAtMs,
+            frameCount: UInt32(packet.frameCount),
+            payload: packet.payload)).encode(), kind: "audio")
+    }
+    #endif
 
     /// Public entry point for `AppController.allowInput`'s `didSet` to
     /// broadcast the Mac's new state to this receiver.
@@ -828,7 +1055,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         captureDisplayID = display.displayID
         capturePixelsWide = pixelsWide
         capturePixelsHigh = pixelsHigh
-        guard videoEnabled else {
+        guard videoEnabled || desiredAudioEnabled else {
+            // Nothing wants ScreenCaptureKit right now — stay a no-op
+            // logical session exactly as before audio existed, rather than
+            // paying for a capture stream nobody will read from.
             invalidateCapturePipeline(discardingLastFrame: true)
             _ = updateCaptureState { $0.captureStarted() }
             lastCursorPNGHash = 0
@@ -839,6 +1069,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.sendDisplayModeState()
                 self.sendAllowInputState()
                 self.sendVideoState()
+                self.sendAudioState()
             }
             await status("Video off — controls remain connected")
             return
@@ -861,15 +1092,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // the encoder for ~13ms — headroom prevents SCK starvation drops.
         config.queueDepth = 8
         config.showsCursor = !localCursor
+        // Mac system audio (M-audio): a copy of system audio, never a
+        // reroute of the Mac's physical output. `capturesAudio` gates SCK's
+        // own audio capture work — off means SCK does none of it, not just
+        // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
+        // one SCStream; audio's actual on/off is toggled later at runtime
+        // via `stream.updateConfiguration` rather than tearing this stream
+        // down, and it MUST NOT pick up this Mac's own OpenDisplay audio
+        // (there is none today, but excluding it is the documented,
+        // future-proof way to avoid a feedback loop).
+        config.capturesAudio = desiredAudioEnabled
+        config.sampleRate = 48_000
+        config.channelCount = 2
+        config.excludesCurrentProcessAudio = true
 
         invalidateCapturePipeline(discardingLastFrame: true)
         let generation = captureGenerationNow
         if let encoder { VTCompressionSessionInvalidate(encoder) }
         encoder = nil
-        try setupEncoder(width: pixelsWide, height: pixelsHigh)
+        if videoEnabled {
+            try setupEncoder(width: pixelsWide, height: pixelsHigh)
+        }
+        await audioCaptureEncoder.reset()
+        beginAudioGeneration()
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         self.stream = stream
         do {
             try await stream.startCapture()
@@ -878,7 +1127,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             captureDisplayID = 0   // this attempt never actually started capturing
             throw error
         }
-        guard self.stream === stream, videoEnabled,
+        guard self.stream === stream, videoEnabled || desiredAudioEnabled,
               updateCaptureState({ state in state.captureStarted() }) else {
             if self.stream === stream { self.stream = nil }
             captureDisplayID = 0   // superseded/discarded — not the active capture
@@ -891,6 +1140,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             throw CancellationError()
         }
+        audioEnabled = desiredAudioEnabled
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         startCursorEcho()
@@ -909,8 +1159,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendDisplayModeState()
             self.sendAllowInputState()
             self.sendVideoState()
+            self.sendAudioState()
         }
-        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
+        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor) video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
     }
@@ -930,6 +1181,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorImageTimer = nil
         stream?.stopCapture { _ in }
         stream = nil
+        audioEnabled = false
+        beginAudioGeneration()
+        Task { await self.audioCaptureEncoder.reset() }
         connection?.cancel()
         connection = nil
         // Cursor-channel state is confined to `queue` (the 120Hz poll and the
@@ -1023,6 +1277,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         if self.stream === activeStream { self.stream = nil }
                         if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
                         self.encoder = nil
+                        // Pause stops both media (SESSION BEHAVIOR): the
+                        // stream is gone either way, so audio is not
+                        // capturing — resumeDisplay's resumeCapture() always
+                        // rebuilds the stream and re-applies
+                        // `desiredAudioEnabled`, giving resume a clean,
+                        // freshly-anchored audio timeline.
+                        self.audioEnabled = false
+                        self.beginAudioGeneration()
+                        Task { await self.audioCaptureEncoder.reset() }
                     }
                     _ = self.updateCaptureState { $0.pauseCompleted() }
                     Task { await self.status("Display paused") }
@@ -1053,11 +1316,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 _ = updateCaptureState { $0.captureStarted() }
             }
             invalidateCapturePipeline(discardingLastFrame: true)
-            let activeStream = stream
-            stream = nil
             if let encoder { VTCompressionSessionInvalidate(encoder) }
             encoder = nil
             needsKeyframe = true
+            // Video Off does not mean Audio Off (SESSION BEHAVIOR): if audio
+            // still wants this SCStream, keep it running — the didOutput
+            // callback's `videoEnabled` guard is what actually stops
+            // encoding/sending, not stream teardown.
+            if desiredAudioEnabled, stream != nil {
+                Task { await self.status("Video off — controls remain connected") }
+                return
+            }
+            let activeStream = stream
+            stream = nil
             activeStream?.stopCapture { error in
                 if let error {
                     let nsError = error as NSError
@@ -1072,6 +1343,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard captureStateSnapshot().phase != .paused,
               captureStateSnapshot().phase != .pausing,
               captureStateSnapshot().phase != .stopped else { return }
+        if stream != nil, capturePixelsWide > 0, capturePixelsHigh > 0 {
+            // The stream survived Video Off for audio's sake — resume
+            // encoding on it directly instead of restarting capture (which
+            // would find `stream != nil` and throw "already active").
+            do {
+                try setupEncoder(width: capturePixelsWide, height: capturePixelsHigh)
+            } catch {
+                Log.info("video resume encoder setup failed: \(error) — entering capture recovery")
+                guard updateCaptureState({ $0.unexpectedStop() }) else { return }
+                scheduleCaptureRecovery()
+            }
+            return
+        }
         Task { await self.restartVideoCapture() }
     }
 
@@ -1319,7 +1603,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func handleCaptureStopped(_ stoppedStream: SCStream, error: Error) {
         let lifecycle = captureStateSnapshot()
         let nsError = error as NSError
-        let intentional = lifecycle.ownsCaptureStop || !videoEnabled
+        // FORENSIC FIX: `!videoEnabled` alone used to mean "this stop is
+        // intentional, ignore it" — true before Video Off could keep the
+        // stream alive for audio (see `startCapture`'s
+        // `videoEnabled || desiredAudioEnabled` guard). Since that changed,
+        // an unexpected stop of a Video-Off-but-Audio-On stream hit this
+        // guard, returned early, and left `stream` pointing at a dead
+        // SCStream forever — audio (and video, whenever it was turned back
+        // on) stayed silent/black with no recovery ever scheduled. Only
+        // treat the stop as intentional when NOTHING currently wants this
+        // stream.
+        let intentional = lifecycle.ownsCaptureStop || (!videoEnabled && !desiredAudioEnabled)
         let isCurrentStream = stoppedStream === stream
         // Pause/Resume owns its stream stops. In particular, .userStopped from
         // our Pause button must not be mistaken for the system's Stop Extending.
@@ -1351,7 +1645,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// keeps its existing reattach-first path; Mirror recovery reattaches to
     /// the captured physical display and rebuilds capture alone on fallback.
     private func scheduleCaptureRecovery() {
-        guard videoEnabled, !captureRecoveryScheduled,
+        // Video-Off + Audio-On keeps this stream alive on nothing but the
+        // audio side (see `startCapture`) — recovery must stay reachable
+        // then too, or a dead stream in that combination never comes back
+        // (see the FORENSIC FIX note in `handleCaptureStopped`).
+        guard videoEnabled || desiredAudioEnabled, !captureRecoveryScheduled,
               captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
         let attempt = captureRecoveryBudget.failedAttempts + 1
@@ -1360,7 +1658,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self else { return }
             self.captureRecoveryScheduled = false
-            guard self.videoEnabled, !self.stopped, self.stream == nil,
+            guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped, self.stream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
             Task { await self.runCaptureRecovery(attempt: attempt) }
         }
@@ -1542,6 +1840,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lastCursorPNGHash = 0
         lastCursorSent = (-1, -1, false)
         lastReceived = Date()  // fresh grace period for the watchdog
+        lastSendCompletionAt = Date()   // fresh grace period for the outbound-stall watchdog
+        sendStallReported = false
+        // FORENSIC FIX (media-death-after-reconnect): a reconnecting peer's
+        // `StreamReceiver` always resets its own `audioFormatDescription` to
+        // nil (see `resetStreamState`/`resetAudioPlayback`) because it is a
+        // new session — but before this fix, `audioConfigSent` stayed true
+        // across the reconnect (nothing here reset it), so this sender
+        // never sent the fresh `AudioConfigFrame` the new session needs,
+        // and `scheduleAudioPacket` silently dropped every packet forever
+        // afterward. Video recovers because `needsKeyframe = true` above
+        // forces a fresh SPS/PPS + IDR every reconnect; audio needs the
+        // exact same "resend what a new peer needs" treatment.
+        // A reconnect is also a fresh audio generation (the receiver's own
+        // `resetStreamState` always drops its format description and
+        // audio-codec/sequence tracking too — see `StreamReceiver`) — this
+        // is also the one place a DEBUG `audioDebugMode` change is picked
+        // up if the user chose reconnect over Audio Off→On to switch it.
+        if audioEnabled {
+            beginAudioGeneration()
+        }
         // An established connection whose interface vanishes does NOT get a
         // .failed/.waiting state update — NW keeps it and flags it non-viable
         // (field-tested: pulling the USB-C cable left the state handler
@@ -1993,7 +2311,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let sorted = self.inputLatencies.sorted()
                 let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
                 let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(self.dropsEncTotal),\"netDrops\":\(self.dropsNetTotal),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)}")
+                #if DEBUG
+                let audioBitrateKbps = self.audioBytesThisWindow * 8 / 1000 / 2   // ~2s window
+                let audioSuffix = ",\"audioPkts\":\(self.audioPacketsThisWindow),\"audioKbps\":\(audioBitrateKbps)"
+                self.audioPacketsThisWindow = 0
+                self.audioBytesThisWindow = 0
+                #else
+                let audioSuffix = ""
+                #endif
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(self.dropsEncTotal),\"netDrops\":\(self.dropsNetTotal),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
             }
             self.schedulePing()
         }
@@ -2018,6 +2344,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // Can't tell a backgrounded receiver from a brief stall here
                     // (both go silent while redials still succeed) — hedge.
                     Task { await self.status("\(self.endpointName) is silent — keeping the display (app in background or brief stall)") }
+                    self.scheduleReconnect()
+                }
+            }
+            // MEDIA DEATH forensics: the phone-silence check above says
+            // nothing about OUR write direction — a receiver whose own read
+            // loop has wedged (see `StreamReceiver.receive`'s fix for
+            // exactly that) keeps ACKing at the TCP level and keeps sending
+            // its own control/input traffic (so `lastReceived` stays fresh
+            // and this branch never fires) while never draining what we
+            // write, until the kernel send buffer fills and every further
+            // `sendFramed` queues forever with its completion never called.
+            // `connectionReady` and the NWConnection state handler see
+            // nothing wrong either — the socket is technically still open.
+            // `pendingSends > 0` with no completion in >5s is the signature:
+            // treat it exactly like inbound silence, since silently sitting
+            // on a wedged writer forever is the "connected but frozen"
+            // failure this exists to catch.
+            if self.connectionReady, self.pendingSends > 0,
+               Date().timeIntervalSince(self.lastSendCompletionAt) > 5 {
+                if !self.sendStallReported {
+                    self.sendStallReported = true
+                    Log.info("watchdog: outbound writer stalled — pendingSends=\(self.pendingSends) "
+                        + "idle for >5s — reconnecting")
+                }
+                if self.currentPathDirectLink, case .tcp = self.transport {
+                    self.linkDied("outbound writer stalled")
+                } else {
                     self.scheduleReconnect()
                 }
             }
@@ -2427,6 +2780,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 } else {
                     applyVideoEnabled(true)
                 }
+                // Audio has no legacy fallback (like keyboard, unlike
+                // pointer/pencil): below `audioWireVersion` it just stays
+                // off, and the receiver never sends `audioRequest` to ask.
+                sendAudioState()
                 if info.protocolVersion < WireProtocol.minSupportedPeer {
                     Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer) — requesting update")
                     sendUpdateRequired(kind: info.kind)
@@ -2587,6 +2944,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 Task { @MainActor in self.onVideoEnabledRequest?(requested) }
             }
+        case WireMessage.audioRequest:
+            // Per-receiver, unlike Video/Allow Input: no Mac-wide policy to
+            // check, so this applies directly rather than bouncing through
+            // an app-level callback (SESSION BEHAVIOR — Audio On/Off).
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.audioWireVersion,
+                  let requested = obj["enabled"] as? Bool else { return }
+            applyAudioEnabled(requested)
         case WireMessage.nativeAppGesture:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.nativeAppGestureWireVersion,
@@ -2739,24 +3104,67 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard stream === self.stream,
-              type == .screen,
-              CMSampleBufferIsValid(sampleBuffer),
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
-        else { return }
+        guard stream === self.stream, CMSampleBufferIsValid(sampleBuffer) else { return }
 
-        let generation = captureGenerationNow
+        switch type {
+        case .screen:
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            let generation = captureGenerationNow
 
-        lastPixelBuffer = pixelBuffer
-        lastCaptureAt = Date()
-        capFrames += 1
+            lastPixelBuffer = pixelBuffer
+            lastCaptureAt = Date()
+            capFrames += 1
 
-        // No receiver, or a pipeline stage is backed up: skip this frame.
-        guard connectionReady else { return }
-        if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
-        if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
+            // No receiver, video off, or a pipeline stage is backed up: skip
+            // this frame. Video off never tears down an audio-only stream
+            // (see startCapture), so this guard — not stream teardown — is
+            // what makes "no encoding, no network video packets" true then.
+            guard connectionReady, videoEnabled else { return }
+            if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
+            if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
 
-        encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation)
+            encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation)
+
+        case .audio:
+            guard connectionReady, audioEnabled else { return }
+            let generation = captureGenerationNow
+            let audioGen = audioGenerationNow
+            let encoder = audioCaptureEncoder
+            let boxed = MediaSampleBox(sampleBuffer)
+            #if DEBUG
+            // `activeAudioIsPCM` was latched for `audioGen` by
+            // `beginAudioGeneration` — never re-read live here, so a
+            // defaults change mid-generation cannot steer this specific
+            // callback's encode down the other codec's path.
+            if activeAudioIsPCM {
+                Task {
+                    guard let packet = await encoder.encodePCM(boxed) else { return }
+                    self.queue.async {
+                        guard generation == self.captureGenerationNow,
+                              audioGen == self.audioGenerationNow,
+                              self.audioEnabled else { return }
+                        self.sendPCMConfigIfNeeded()
+                        self.sendPCMPacket(packet)
+                    }
+                }
+                return
+            }
+            #endif
+            Task {
+                let packets = await encoder.encode(boxed)
+                guard !packets.isEmpty else { return }
+                self.queue.async {
+                    guard generation == self.captureGenerationNow,
+                          audioGen == self.audioGenerationNow,
+                          self.audioEnabled else { return }
+                    self.sendAudioConfigIfNeeded()
+                    for packet in packets { self.sendAudioPacket(packet) }
+                }
+            }
+
+        default:
+            break
+        }
     }
 
     private func isPipelineBackedUp() -> Bool {
@@ -3062,21 +3470,48 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         connection.send(content: frame, completion: .contentProcessed { _ in })
     }
 
-    private func sendFramed(_ payload: Data) {
+    /// `kind` is DEBUG-only telemetry (never sent on the wire): identifies
+    /// which media this write carried, so a slow completion can be
+    /// attributed to "audio queued behind a video write already in
+    /// flight" (TCP head-of-line blocking — PROTOCOL.md 5A implementer
+    /// note) rather than guessed at. Video/audio share this single framed
+    /// TCP/TLS stream by design (no separate UDP/second connection); this
+    /// only measures that choice, it doesn't change it.
+    private func sendFramed(_ payload: Data, kind: String = "video") {
         guard let connection, connectionReady else { return }
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
         pendingSends += 1
+        #if DEBUG
+        let queuedAt = Date()
+        let queuedByteCount = frame.count
+        #endif
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             self.pendingSends = TransportSafety.decrementedPendingCount(self.pendingSends)
+            self.lastSendCompletionAt = Date()
+            self.sendStallReported = false
             if let error {
                 Log.info("send error: \(error)")
                 return
             }
             self.framesSent += 1
             self.bytesSent += frame.count
+            #if DEBUG
+            if kind == "audio" {
+                let writeMs = Date().timeIntervalSince(queuedAt) * 1000
+                // A normal LAN write completes in low single-digit ms; a
+                // multi-KB video keyframe already in flight ahead of this
+                // small audio packet is the primary suspect for anything
+                // much slower — this is evidence-gathering, not a fix.
+                if writeMs > 15 {
+                    Log.info("audioTrace: TCP write latency \(String(format: "%.1f", writeMs))ms bytes=\(queuedByteCount) pendingSends=\(self.pendingSends) lastVideoBytes=\(self.lastVideoFrameByteCount)")
+                }
+            } else {
+                self.lastVideoFrameByteCount = queuedByteCount
+            }
+            #endif
             // Report stats roughly once a second.
             let elapsed = Date().timeIntervalSince(self.statsWindowStart)
             if elapsed >= 1.0 {

@@ -1281,6 +1281,46 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
     }
 
+    func testAudioPreferencesMigrateInDisabledAndCentered() throws {
+        let suite = "AudioPreferenceMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 11
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertFalse(loaded.audioPreferred)
+        XCTAssertEqual(loaded.avSyncOffsetMs, 0)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    func testAudioPreferencesPersistAcrossSaveAndLoad() throws {
+        let suite = "AudioPreferencePersistenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var preferences = ReceiverControlPreferences()
+        preferences.audioPreferred = true
+        preferences.avSyncOffsetMs = -250
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        repository.save(preferences)
+        let loaded = repository.load()
+        XCTAssertTrue(loaded.audioPreferred)
+        XCTAssertEqual(loaded.avSyncOffsetMs, -250)
+    }
+
+    func testAudioSyncOffsetClampsOnDecodeOfOutOfRangeValue() throws {
+        let suite = "AudioOffsetClampTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var preferences = ReceiverControlPreferences()
+        preferences.avSyncOffsetMs = 5_000   // out of range if ever written by a future build
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        repository.save(preferences)
+        let loaded = repository.load()
+        XCTAssertEqual(loaded.avSyncOffsetMs, AVSyncOffset.range.upperBound)
+    }
+
     // MARK: - App Gesture Commands
 
     func testAppGestureCommandDefaultsMatchSpec() {

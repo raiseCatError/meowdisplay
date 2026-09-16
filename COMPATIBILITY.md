@@ -62,6 +62,13 @@ the loopback-only iOS USB binding, but require an update for wireless use.
 Bonjour names, addresses, interfaces, and TXT records are discovery hints,
 not identities.
 
+Mac system audio (`pv` 12, PROTOCOL.md section 5A) is media on this same
+single connection: it inherits whatever transport security that connection
+already has — pinned mutual TLS over LAN/AWDL, the usbmux tunnel over USB —
+with no separate channel, no separate Bonjour service, and no
+authentication of its own to get wrong. There is deliberately no wire path
+for unauthenticated or unencrypted audio at any protocol version.
+
 ## 3. Compatibility matrix
 
 Let `iosPV` / `macPV` be the two protocol versions, and `macMinPeer` /
@@ -196,6 +203,16 @@ the floor once a force-capable build has spread.
   `NSEvent.magnification`/`rotation` values are read-only and its public event
   constructors expose no gesture payload/phase. No private event fields or
   keyboard-shortcut emulation are used.
+- **Example: `pv` 12 Mac system audio.** Audio frames use a reserved typed
+  marker byte (PROTOCOL.md section 5A) rather than extending the section-4
+  heuristic — the first genuine use of the "typed frame header" the
+  heuristic's own deprecation note anticipated. It is additive in the same
+  no-legacy-fallback sense as `keyboard`: a `pv < 12` peer never sends
+  `audioRequest` and a `pv < 12` sender never emits an audio media frame, so
+  older peers see nothing new at all, not even a message they ignore.
+  `minPeer` stays at `1` on both sides; a `pv 11` Mac keeps streaming video
+  and accepting input exactly as before, with Audio simply unavailable in
+  the receiver's UI.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

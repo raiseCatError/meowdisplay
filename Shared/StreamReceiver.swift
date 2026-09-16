@@ -124,6 +124,173 @@ final class StreamReceiver: ObservableObject {
     /// True when the connected Mac understands the `pointer` message family (M7).
     var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
 
+    /// True when the connected Mac understands Mac system audio (`pv` 12).
+    /// No legacy fallback, same as keyboard: below this, Audio simply stays
+    /// unavailable rather than degrading to something else.
+    var macSupportsAudio: Bool { macProtocolVersion >= WireProtocol.audioWireVersion }
+
+    // MARK: - Mac system audio playback
+    //
+    // See `AudioMediaFrame` (Shared/AudioMediaFrame.swift) for the wire
+    // shape and `AVSyncOffset` for the sync-offset math. Playback uses
+    // `AVSampleBufferAudioRenderer` on its own `AVSampleBufferRenderSynchronizer`
+    // (never attached to `displayLayer` — the video path's "display
+    // immediately" low-latency behavior would conflict with a shared
+    // timebase, see PROTOCOL.md Appendix B / the milestone note above
+    // `enqueueFrame`). Each audio sample buffer is stamped with an absolute
+    // host-time PTS computed from one stable per-generation `audioAnchor`
+    // (see its doc comment for why this is deliberately NOT recomputed
+    // from every video frame), so the synchronizer plays it out at the
+    // right real moment with only a small bounded preroll.
+
+    /// Mac-confirmed actual audio production state (`audioState`).
+    @Published var audioEnabled = false
+    /// What this receiver last asked for — resent on every `welcome` so it
+    /// survives reconnection and transport migration without the user
+    /// re-enabling it (SESSION BEHAVIOR).
+    private var audioPreferred = false
+    private var audioRenderer: AVSampleBufferAudioRenderer?
+    private var audioSynchronizer: AVSampleBufferRenderSynchronizer?
+    private var audioFormatDescription: CMAudioFormatDescription?
+    private var audioSampleRate: Double = 48_000
+    #if os(iOS)
+    private var audioSessionActive = false
+    private var audioSessionObserversRegistered = false
+    #endif
+    /// Receiver-local A/V sync offset (ms), clamped to `AVSyncOffset.range`.
+    /// Positive delays audio; negative delays video presentation — see
+    /// `setAVSyncOffset`. This is the user's MANUAL term only —
+    /// `establishAudioAnchor` folds in a separate, automatic one-shot
+    /// baseline correction (see `lastVideoLatencySeconds`); the two are
+    /// never conflated so "Reset" (manual only) and "Resync" (automatic
+    /// only) each touch exactly what they claim to.
+    private var avSyncOffsetMs = 0
+
+    /// A stable capture-timeline -> host-time mapping, established ONCE per
+    /// generation (first audio packet after a reset) or on `resync()`, and
+    /// otherwise left alone. FORENSIC NOTE: an earlier version of this
+    /// receiver recomputed this mapping from EVERY displayed video frame's
+    /// own arrival time, which is itself jittery (that jitter is exactly
+    /// why the video path displays immediately instead of scheduling on a
+    /// timebase) — feeding it straight into audio's schedule made audio
+    /// inherit video's arrival jitter, producing the stutter this fix
+    /// addresses. A one-shot anchor plus audio's own evenly-spaced capture
+    /// deltas (real AAC frames are ~21.333 ms apart at 48 kHz) schedules
+    /// smoothly regardless of how jittery video's arrival is.
+    private struct MediaAnchor {
+        var captureMs: Double
+        var hostTime: CFTimeInterval
+    }
+    private var audioAnchor: MediaAnchor?
+    /// Small bounded preroll folded into a fresh anchor's lead time —
+    /// ~3 AAC packets. Enough to absorb ordinary scheduling jitter without
+    /// the renderer starving; nowhere near enough to feel like added
+    /// interactive latency.
+    private let audioPrerollSeconds = 0.064
+    /// A slow, one-shot measurement — "how much later than its own capture
+    /// moment does video actually appear right now" — updated cheaply on
+    /// every displayed video frame but consulted ONLY when establishing a
+    /// fresh `audioAnchor`, never used to nudge an anchor already in play.
+    /// This is `automaticBaseCorrection` in the Resync design: folded into
+    /// the anchor's lead so audio settles near video's real baseline
+    /// latency instead of an arbitrary fixed preroll, without ever
+    /// continuously chasing an instantaneous, noisy measurement.
+    private var lastVideoLatencySeconds: Double?
+    private var lastVideoLatencyUpdatedAtWallMs: Double = 0
+    /// Bumped by `resetStreamState` (new connection) and `resync()`.
+    /// Captured by each negative-offset delayed video presentation
+    /// closure so stale work from a superseded generation can never
+    /// touch a newer session's decoder/display layer — see `enqueueFrame`.
+    private var videoGeneration: UInt64 = 0
+    /// Which codec the currently-active `audioFormatDescription`/renderer
+    /// chain was built for. A config frame for the OTHER codec means the
+    /// sender started a new audio generation (Audio Off→On rebuild or
+    /// reconnect while `audioDebugMode` changed) — never a live mid-session
+    /// codec hot-swap, since `MacSender` only latches its debug codec choice
+    /// at those same generation boundaries. Forces a full teardown/rebuild
+    /// (`resetAudioForCodecChange`) instead of mutating a live renderer,
+    /// which is what produced the -12735 renderer error this fixes.
+    private enum AudioCodecKind: Equatable { case aac, pcm }
+    private var audioCodecKind: AudioCodecKind?
+    #if DEBUG
+    /// GOAL #4/#6: set by `applyPCMConfig`, used to verify the
+    /// payloadBytes==frameCount*channelCount*4 invariant and to compute
+    /// per-channel PCM sanity metrics on the receiver side — see
+    /// `logReceiverPCMSanity`.
+    private var pcmChannelCount: UInt8 = 2
+    private var pcmPacketsSinceSanityLog = 0
+    private var audioGenerationCount = 0
+    private var lastAudioDiagnosticCaptureMs: Double?
+    private var audioDiagnosticLogCounter = 0
+    /// Anomaly-only diagnostics (GOAL section 7/PCM bypass A/B mode):
+    /// throttled/periodic logs stay in `logAudioTimingDiagnostic`; these
+    /// fire only when something is actually unexpected.
+    private var audioFrameDecodeFailureCount = 0
+    private var lastAudioSequence: UInt32?
+    private var lastAudioTarget: CFTimeInterval?
+    private var audioErrorObservation: NSKeyValueObservation?
+    /// Last applied config (AAC sample rate/channels, or PCM sample
+    /// rate/channels) — logged only when a fresh config frame changes it
+    /// mid-session, which should never happen within one generation.
+    private var lastAppliedAudioConfigDescription: String?
+    #endif
+
+    /// The shared AAC→PCM decoder — used both by `PCMPlaybackEngine`
+    /// production playback (`scheduleAudioPacket`, when
+    /// `activePlaybackPath == .pcmEngine`) and by the DEBUG-only
+    /// `analyzeReceivedAACDecode`/`Audio Comparison Dump` diagnostics.
+    /// Deliberately NOT `#if DEBUG` — this became core production
+    /// playback infrastructure once PCM Engine became the default, and
+    /// there must be exactly ONE AAC→PCM conversion chain, not a
+    /// production one and an independently-maintained diagnostic one that
+    /// could silently drift apart.
+    private var receiverAACDecoder: AVAudioConverter?
+    private var receiverAACDecoderFormatDescription: CMAudioFormatDescription?
+    private var receiverDecodeAnomalyCount = 0
+
+    #if DEBUG
+    // MARK: Receiver-side AAC investigation (GOAL: local playback still
+    // glitches intermittently even with clean Mac-side source PCM/locally-
+    // decoded AAC and no video/TCP contention correlation — the suspect is
+    // now this device's own AAC reconstruction/decode/render path, not the
+    // sender). Every flag here reads `UserDefaults.standard` FRESH on each
+    // use (never `lazy`/latched-once) so the in-app "Developer / Audio
+    // Diagnostics" toggles in `SettingsView` (iOS) take effect immediately
+    // — a physical device's sandboxed defaults can't receive a Mac
+    // terminal's `defaults write` the way a Simulator or a Mac-native app
+    // can, so an in-app toggle is the only practical way to flip these on
+    // a real iPhone.
+    private var receiverAACLocalDecodeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "audioReceiverLocalDecode")
+    }
+    /// Separate from `receiverAACLocalDecodeEnabled`: lets a physical
+    /// device run the (cheap) decode+anomaly-log path without also paying
+    /// for the ~5s CAF file write, or vice versa isn't meaningful — the
+    /// dump needs a successful decode — but keeping them independent
+    /// toggles matches what `SettingsView` exposes.
+    private var receiverAACDumpEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "audioReceiverDumpEnabled")
+    }
+    /// Gates the periodic `AAC integrity side=receiver ...` checksum log
+    /// (GOAL: was unconditional before this toggle existed — now default
+    /// OFF, so it must be explicitly enabled for the sender/receiver
+    /// checksum comparison to appear in the next retest's logs).
+    private var aacIntegrityLoggingEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "audioAACIntegrityLogging")
+    }
+    private var lastReceiverDecodedSample: Float?
+    private var receiverDecodeDumpFile: AVAudioFile?
+    private var receiverDecodeDumpFrames = 0
+    private static let receiverDecodeDumpFrameLimit = 48_000 * 5   // ~5s at 48kHz
+    /// Total successful `audioRenderer.enqueue` calls this generation —
+    /// `enqueue` itself returns no status, so this is only useful compared
+    /// against the periodic `PCM sanity`/`AAC integrity` packet counts to
+    /// spot silent enqueue-path attrition (e.g. every packet reaching
+    /// `scheduleDecodedAudio` but a growing fraction failing
+    /// `CMSampleBufferCreateReady` upstream of it).
+    private var audioEnqueueCount = 0
+    #endif
+
     private var listener: NWListener?
     private var tlsListener: NWListener?
     private var pairingListener: NWListener?
@@ -555,6 +722,7 @@ final class StreamReceiver: ObservableObject {
                 self.cancelReconnect()
                 self.setConnected(false, reason: .explicitDisconnect)
                 self.resetDisplayModeState()
+                self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
                 self.setStatus(status)
                 DispatchQueue.main.async {
                     self.displayState = .running
@@ -1134,6 +1302,12 @@ final class StreamReceiver: ObservableObject {
             // Pause is intentional, not a failure: it shares the interruption
             // presentation but must never start automatic recovery.
             mutateSession { state == .paused ? $0.displayPaused() : $0.displayResumed() }
+            // PAUSE stops both media: release/flush audio here so Resume
+            // starts on a clean synchronized timeline (SESSION BEHAVIOR).
+            // The Mac's own capture pipeline dies underneath a pause too, so
+            // no more packets would arrive anyway — this just makes sure
+            // nothing already-scheduled keeps playing into the pause.
+            if state == .paused { resetAudioPlayback() }
             DispatchQueue.main.async {
                 self.displayState = state
                 self.onDisplayStateChange?(state)
@@ -1157,6 +1331,16 @@ final class StreamReceiver: ObservableObject {
                 peerIsIncompatible = true
                 let msg = "The OpenDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenDisplay on your Mac to reconnect."
                 DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
+            }
+            // Reassert this receiver's audio preference on every welcome —
+            // covers first connect, reconnect, and transport migration in
+            // one place, with no separate "did we already ask" state to
+            // fall out of sync (SESSION BEHAVIOR: migration must not reset
+            // the user's Audio preference).
+            if macPV >= WireProtocol.audioWireVersion {
+                sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferred])
+            } else {
+                DispatchQueue.main.async { self.audioEnabled = false }
             }
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
@@ -1189,6 +1373,10 @@ final class StreamReceiver: ObservableObject {
                 }
                 self.videoEnabled = update.enabled
             }
+        case WireMessage.audioState:
+            guard let update = AudioStateUpdate(message: obj) else { return }
+            if !update.enabled { resetAudioPlayback() }
+            DispatchQueue.main.async { self.audioEnabled = update.enabled }
         default:
             break
         }
@@ -1233,6 +1421,11 @@ final class StreamReceiver: ObservableObject {
         }
         decodeWindow.removeAll(keepingCapacity: true)
         photonWindow.removeAll(keepingCapacity: true)
+        // A new connection is a new generation (RECONNECT — never play
+        // stale audio, and never present a video frame delayed by a
+        // negative offset from the superseded connection).
+        videoGeneration &+= 1
+        resetAudioPlayback()
     }
 
     // MARK: - Control messages (phone -> Mac)
@@ -1442,6 +1635,35 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
     }
 
+    /// Turns Mac system audio on/off for this receiver. Persists the
+    /// preference in-memory and resends it on every subsequent `welcome`
+    /// (see the `WireMessage.welcome` handler) so reconnection, transport
+    /// migration, and a fresh pairing after Forget Device all restore it —
+    /// never a stale callback re-enabling audio after those transitions,
+    /// because each one re-derives the request from this single value
+    /// rather than replaying anything queued.
+    func requestAudioEnabled(_ enabled: Bool) {
+        audioPreferred = enabled
+        guard connected, macSupportsAudio else { return }
+        sendControl(["type": WireMessage.audioRequest, "enabled": enabled])
+    }
+
+    /// Seeds the preference to resend on connect/reconnect without sending
+    /// anything yet (e.g. restoring a persisted Settings value at launch,
+    /// before there is a connection). Use `requestAudioEnabled` for a live
+    /// user toggle.
+    func primeAudioPreference(_ enabled: Bool) {
+        audioPreferred = enabled
+    }
+
+    /// Receiver-local A/V sync offset in milliseconds, clamped to
+    /// `AVSyncOffset.range`. Takes effect immediately for audio scheduled
+    /// from this point on and for video frames not yet presented; never
+    /// sent to the Mac and never requires a reconnect.
+    func setAVSyncOffset(_ ms: Int) {
+        queue.async { self.avSyncOffsetMs = AVSyncOffset.clamped(ms) }
+    }
+
     func sendNativeAppGesture(kind: NativeAppGestureKind,
                               phase: NativeAppGesturePhase,
                               delta: Double) {
@@ -1566,7 +1788,20 @@ final class StreamReceiver: ObservableObject {
                 self.drainFrames()
             }
             if let error {
+                // FORENSIC FIX (media-death-with-input-still-working): this
+                // used to just log and return WITHOUT re-arming `receive`
+                // and WITHOUT calling `setConnected(false)` — the read loop
+                // stopped forever while `connected` stayed true and nothing
+                // ever told session state the connection was gone. TCP is
+                // full-duplex: our own outbound writes (touch/pointer input)
+                // keep working fine over the same socket, so from the user's
+                // side "input still works" while nothing we're owed (video,
+                // audio, cursor) ever arrives again, and no automatic
+                // recovery ever kicks in because nothing marked the session
+                // down. Treat any receive error exactly like EOF: it is
+                // this connection's own health, not a per-call fluke.
                 Log.info("receive error: \(error)")
+                self.setConnected(false)
                 return
             }
             if isComplete {
@@ -1587,7 +1822,12 @@ final class StreamReceiver: ObservableObject {
             guard buffer.distance(from: cursor, to: buffer.endIndex) >= 4 + len else { break }
             let start = buffer.index(cursor, offsetBy: 4)
             let end = buffer.index(start, offsetBy: len)
-            handleAnnexB(Data(buffer[start..<end]))
+            let payload = Data(buffer[start..<end])
+            if AudioMediaFrame.isAudioFrame(payload) {
+                handleAudioMediaFrame(payload)
+            } else {
+                handleAnnexB(payload)
+            }
             cursor = end
         }
         buffer.removeSubrange(buffer.startIndex..<cursor)
@@ -1663,6 +1903,792 @@ final class StreamReceiver: ObservableObject {
         // All slices of one wire frame go into ONE sample buffer.
         enqueueFrame(vclNALUs, captureMs: captureMs, sendMs: sendMs)
     }
+
+
+    // MARK: - Mac system audio (PROTOCOL.md section 5A)
+
+    private func handleAudioMediaFrame(_ payload: Data) {
+        guard let frame = AudioMediaFrame.decode(payload) else {
+            #if DEBUG
+            audioFrameDecodeFailureCount += 1
+            Log.info("audioTrace: ⚠️ audio media frame decode failed (count=\(audioFrameDecodeFailureCount)) byteCount=\(payload.count)")
+            #endif
+            return
+        }
+        switch frame {
+        case .config(let config):
+            applyAudioConfig(config)
+        case .packet(let packet):
+            scheduleAudioPacket(packet)
+        case .pcmConfig(let config):
+            applyPCMConfig(config)
+        case .pcmPacket(let packet):
+            schedulePCMPacket(packet)
+        }
+    }
+
+    private func applyAudioConfig(_ config: AudioConfigFrame) {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Double(config.sampleRate),
+            mFormatID: kAudioFormatMPEG4AAC,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: 1024,
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(config.channelCount),
+            mBitsPerChannel: 0,
+            mReserved: 0)
+        var formatDescription: CMAudioFormatDescription?
+        let status = config.cookie.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> OSStatus in
+            CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
+                magicCookieSize: raw.count, magicCookie: raw.baseAddress,
+                extensions: nil, formatDescriptionOut: &formatDescription)
+        }
+        guard status == noErr, let formatDescription else {
+            Log.info("audio format description creation failed: \(status)")
+            return
+        }
+        beginAudioGenerationIfCodecChanged(.aac)
+        #if DEBUG
+        logIfAudioConfigChanged("AAC rate=\(config.sampleRate) ch=\(config.channelCount) cookieBytes=\(config.cookie.count)")
+        #endif
+        audioSampleRate = Double(config.sampleRate)
+        audioFormatDescription = formatDescription
+        ensureAudioPlaybackChain()
+    }
+
+    /// DEBUG-only diagnostic PCM bypass A/B mode counterpart of
+    /// `applyAudioConfig` — see `MacSender.audioDebugPCMMode`. Builds an
+    /// `lpcm` format description (32-bit Float32, interleaved, constant
+    /// bytes-per-frame — same fixed wire layout `AudioCaptureEncoder.encodePCM`
+    /// always produces) and reuses the exact same playback chain/anchor/
+    /// timing machinery as the AAC path.
+    private func applyPCMConfig(_ config: PCMConfigFrame) {
+        let bytesPerFrame = UInt32(4 * Int(config.channelCount))
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Double(config.sampleRate),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: bytesPerFrame,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: bytesPerFrame,
+            mChannelsPerFrame: UInt32(config.channelCount),
+            mBitsPerChannel: 32,
+            mReserved: 0)
+        var formatDescription: CMAudioFormatDescription?
+        let status = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
+            magicCookieSize: 0, magicCookie: nil, extensions: nil,
+            formatDescriptionOut: &formatDescription)
+        guard status == noErr, let formatDescription else {
+            Log.info("PCM bypass format description creation failed: \(status)")
+            return
+        }
+        beginAudioGenerationIfCodecChanged(.pcm)
+        #if DEBUG
+        logIfAudioConfigChanged("PCM rate=\(config.sampleRate) ch=\(config.channelCount)")
+        pcmChannelCount = config.channelCount
+        pcmPacketsSinceSanityLog = 0
+        #endif
+        audioSampleRate = Double(config.sampleRate)
+        audioFormatDescription = formatDescription
+        ensureAudioPlaybackChain()
+    }
+
+    /// A config frame whose codec differs from `audioCodecKind` means the
+    /// sender began a brand-new audio generation (see `audioCodecKind`'s
+    /// doc comment) — tear the whole playback chain down and rebuild fresh
+    /// rather than let a live `AVSampleBufferAudioRenderer` see samples in
+    /// a format it wasn't built for. Also resets every piece of
+    /// generation-scoped monotonicity state (`lastAudioSequence`,
+    /// `lastAudioTarget`) so a new generation's counters, which restart
+    /// from a fresh baseline on the sender, are never compared against the
+    /// previous generation's — that mismatch is exactly what produced the
+    /// "expected=4856 got=1" / "non-monotonic audio playout target" log
+    /// lines from the un-isolated A/B test.
+    private func beginAudioGenerationIfCodecChanged(_ codec: AudioCodecKind) {
+        guard audioCodecKind != codec else { return }
+        if audioCodecKind != nil {
+            resetAudioPlayback()
+        }
+        audioCodecKind = codec
+        #if DEBUG
+        audioGenerationCount += 1
+        lastAudioSequence = nil
+        lastAudioTarget = nil
+        lastAudioDiagnosticCaptureMs = nil
+        audioEnqueueCount = 0
+        Log.info("audioTrace: generation=\(audioGenerationCount) codec=\(codec == .aac ? "AAC" : "PCM") playbackPath=\(activePlaybackPath == .pcmEngine ? "pcmEngine" : "legacyRenderer") starting bundleID=\(Bundle.main.bundleIdentifier ?? "?") audioReceiverLocalDecode=\(receiverAACLocalDecodeEnabled) audioReceiverDumpEnabled=\(receiverAACDumpEnabled) audioAACIntegrityLogging=\(aacIntegrityLoggingEnabled) dumpDirectory=\(Self.receiverDecodeDumpDirectory().path)")
+        #endif
+    }
+
+    #if DEBUG
+    private func logIfAudioConfigChanged(_ description: String) {
+        if let lastAppliedAudioConfigDescription, lastAppliedAudioConfigDescription != description {
+            Log.info("audioTrace: ⚠️ audio config changed mid-session was=[\(lastAppliedAudioConfigDescription)] now=[\(description)]")
+        }
+        lastAppliedAudioConfigDescription = description
+    }
+    #endif
+
+    private func ensureAudioPlaybackChain() {
+        guard audioRenderer == nil else { return }
+        let renderer = AVSampleBufferAudioRenderer()
+        let synchronizer = AVSampleBufferRenderSynchronizer()
+        synchronizer.addRenderer(renderer)
+        // Ties the synchronizer's virtual clock 1:1 to the host clock from
+        // this instant on — every sample buffer's PTS is then simply "the
+        // host time it should play at" (see `targetHostTime`), with no
+        // separate anchor/rate bookkeeping needed on this end.
+        synchronizer.setRate(1, time: CMClockGetTime(CMClockGetHostTimeClock()))
+        audioRenderer = renderer
+        audioSynchronizer = synchronizer
+        activateAudioSessionIfNeeded()
+        #if DEBUG
+        // Anomaly diagnostic (GOAL section 7): `error` is KVO-observable on
+        // AVSampleBufferAudioRenderer and fires if the renderer itself hits
+        // an unrecoverable playback error — exactly the kind of event that
+        // would explain a sudden dead-audio patch without a corresponding
+        // network/framing symptom.
+        audioErrorObservation = renderer.observe(\.error, options: [.new]) { [weak self] _, change in
+            guard let error = change.newValue ?? nil else { return }
+            Log.info("audioTrace: ⚠️ audio renderer reported error: \(error)")
+            self?.queue.async { self?.audioAnchor = nil }
+        }
+        #endif
+    }
+
+    /// Stops and releases playback state. Called on Audio Off, pause, a new
+    /// connection/generation, and session teardown — never leaves a stale
+    /// renderer that could play audio from a previous session (SESSION
+    /// BEHAVIOR: reconnect/pause/Forget Device must not produce stale audio).
+    ///
+    /// `keepingFormat` is true only for a local `resync()`: the Mac's
+    /// capture generation hasn't changed, so its one-time `audioState`
+    /// config frame won't be resent, and this receiver must keep the
+    /// format description it already has to keep decoding the packets that
+    /// keep arriving. A new connection/Audio Off DOES drop it — the next
+    /// audio start (if any) resends a fresh one anyway.
+    private func resetAudioPlayback(keepingFormat: Bool = false) {
+        audioRenderer?.stopRequestingMediaData()
+        if let audioRenderer { audioRenderer.flush() }
+        audioSynchronizer?.setRate(0, time: .zero)
+        audioRenderer = nil
+        audioSynchronizer = nil
+        if !keepingFormat {
+            audioFormatDescription = nil
+            audioCodecKind = nil
+            deactivateAudioSessionIfNeeded()
+        }
+        audioAnchor = nil
+        if !keepingFormat {
+            receiverAACDecoder = nil
+            receiverAACDecoderFormatDescription = nil
+        }
+        // Unconditional (not gated on `!keepingFormat`, not DEBUG-only):
+        // every reset call site — Audio Off, reconnect, pause, codec
+        // change, Resync, playback-path switch, AND AVAudioSession
+        // interruption/route-change recovery — must be able to stop PCM
+        // Engine playback cleanly and flush its queue. Cheap no-op when
+        // the engine was never started.
+        pcmPlaybackEngine.reset()
+        #if DEBUG
+        lastAudioDiagnosticCaptureMs = nil
+        lastAudioSequence = nil
+        lastAudioTarget = nil
+        if !keepingFormat { lastAppliedAudioConfigDescription = nil }
+        audioErrorObservation = nil
+        if !keepingFormat {
+            finalizeReceiverDecodeDump()
+            lastReceiverDecodedSample = nil
+        }
+        #endif
+    }
+
+    /// Deterministic, receiver-local media-clock resynchronization —
+    /// exposed to the UI as "Resync". Never touches the wire, never
+    /// pretends to measure physical speaker/display latency: it just
+    /// discards the current audio anchor (so the next packet re-derives it
+    /// from current capture timing, folding in a fresh baseline
+    /// correction) and invalidates in-flight delayed video work so a
+    /// negative offset can't show a stale frame after the recalibration.
+    /// The user's manual A/V Sync value is untouched — only the automatic
+    /// baseline term changes.
+    func resync() {
+        queue.async {
+            self.videoGeneration &+= 1
+            self.resetAudioPlayback(keepingFormat: true)
+            #if DEBUG
+            Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(self.videoGeneration)")
+            #endif
+        }
+    }
+
+    #if os(iOS)
+    private func activateAudioSessionIfNeeded() {
+        registerAudioSessionObserversIfNeeded()
+        guard !audioSessionActive else { return }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setActive(true)
+            audioSessionActive = true
+        } catch {
+            Log.info("audio session activation failed: \(error)")
+        }
+    }
+
+    /// Real recovery (GOAL requirement 5), not just logging: an
+    /// interruption (phone call, another app's audio) or a route change
+    /// (headphones/AirPods/speaker) that neither playback path reacted to
+    /// at all would produce exactly the "intermittent, uncorrelated with
+    /// video" glitch pattern this investigation chased for several
+    /// passes — this was previously entirely unobserved. Registered once
+    /// per session (`AVAudioSession` notifications aren't scoped to a
+    /// generation), self-guarded by `audioSessionObserversRegistered`.
+    private func registerAudioSessionObserversIfNeeded() {
+        guard !audioSessionObserversRegistered else { return }
+        audioSessionObserversRegistered = true
+        let center = NotificationCenter.default
+        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] note in
+            let typeRaw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+            let type = AVAudioSession.InterruptionType(rawValue: typeRaw)
+            let optionsRaw = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
+            self?.queue.async {
+                Log.info("audioTrace: AVAudioSession interruption type=\(type == .began ? "began" : "ended") shouldResume=\(shouldResume)")
+                // `.began`: the system already silenced/deactivated us —
+                // there is nothing to recover yet, only something to stop
+                // adding to (a stale anchor/engine would otherwise sit
+                // there believing it's still playing). `.ended`: recover
+                // ONLY if the system says resumption is appropriate — do
+                // NOT blindly resume stale audio otherwise (GOAL: "Do not
+                // blindly resume stale audio after an interruption").
+                if type == .began {
+                    self?.handleAudioSessionDisruption(reactivateSession: false)
+                } else if type == .ended, shouldResume {
+                    self?.handleAudioSessionDisruption(reactivateSession: true)
+                }
+            }
+        }
+        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] note in
+            let reasonRaw = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+            let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) ?? .unknown
+            self?.queue.async {
+                Log.info("audioTrace: AVAudioSession route change reason=\(reason)")
+                switch reason {
+                case .newDeviceAvailable, .oldDeviceUnavailable, .routeConfigurationChange, .categoryChange:
+                    // A genuinely new/changed output route needs a fresh
+                    // anchor (the old one's host-time mapping may no
+                    // longer correspond to when the NEW route actually
+                    // renders audio) — reactivate defensively since some
+                    // route changes leave the session inactive.
+                    self?.handleAudioSessionDisruption(reactivateSession: true)
+                default:
+                    break   // e.g. `.noSuitableRouteForCategory`, `.override` — nothing to recover from
+                }
+            }
+        }
+    }
+
+    /// Shared recovery for both interruption-ended and a route change:
+    /// flushes whichever playback path is active (legacy renderer via
+    /// `resetAudioPlayback`, which now also resets `pcmPlaybackEngine`
+    /// unconditionally) and, if requested, force-reactivates the
+    /// `AVAudioSession` category. `audioFormatDescription` is preserved
+    /// (`keepingFormat: true`) — the codec/format hasn't changed, only the
+    /// output device/session state has, so the next packet re-anchors and
+    /// resumes cleanly without waiting for a brand-new `AudioConfigFrame`.
+    private func handleAudioSessionDisruption(reactivateSession: Bool) {
+        if reactivateSession {
+            audioSessionActive = false
+            activateAudioSessionIfNeeded()
+        }
+        resetAudioPlayback(keepingFormat: true)
+    }
+
+    private func deactivateAudioSessionIfNeeded() {
+        guard audioSessionActive else { return }
+        audioSessionActive = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+    #else
+    private func activateAudioSessionIfNeeded() {}
+    private func deactivateAudioSessionIfNeeded() {}
+    #endif
+
+    private func scheduleAudioPacket(_ packet: AudioPacketFrame) {
+        #if DEBUG
+        checkAudioSequenceDiscontinuity(packet.sequence)
+        // Receiver-side counterpart of `MacSender.sendAudioPacket`'s
+        // periodic checksum — same cadence, same generation/sequence keys,
+        // so the two logs line up for a by-eye comparison.
+        if aacIntegrityLoggingEnabled, packet.sequence % 100 == 1 {
+            Log.info("audioTrace: AAC integrity side=receiver generation=\(audioGenerationCount) seq=\(packet.sequence) capturedAtMs=\(packet.capturedAtMs) durationMs=\(packet.durationMs) payloadBytes=\(packet.payload.count) checksum=\(PCMChecksum.fnv1a(packet.payload))")
+        }
+        #endif
+        switchPlaybackPathIfNeeded()
+
+        switch activePlaybackPath {
+        case .pcmEngine:
+            // Production path: decode via the SAME shared decoder DEBUG
+            // diagnostics validated (`decodeReceivedAAC`), then hand the
+            // PCM straight to `PCMPlaybackEngine` — the legacy compressed-
+            // `CMSampleBuffer` path below is not touched at all.
+            guard let audioFormatDescription, let clockOffsetMs else { return }
+            guard let decoded = decodeReceivedAAC(packet.payload, formatDescription: audioFormatDescription) else {
+                Log.info("audioTrace: ⚠️ PCM engine: decode failed, dropping packet seq=\(packet.sequence)")
+                return
+            }
+            #if DEBUG
+            if receiverAACLocalDecodeEnabled { analyzeReceivedAACDecode(decoded) }
+            #endif
+            let receiverCaptureMs = Double(packet.capturedAtMs) - clockOffsetMs
+            pcmPlaybackEngine.enqueue(decoded, captureMs: receiverCaptureMs, avSyncOffsetMs: avSyncOffsetMs)
+            #if DEBUG
+            // GOAL requirement 7: baseline latency/queue instrumentation,
+            // not tuning — same periodic cadence as the AAC integrity log.
+            if packet.sequence % 100 == 1 {
+                let arrivalMs = Date().timeIntervalSince1970 * 1000 - receiverCaptureMs
+                Log.info("audioTrace: PCM engine stats seq=\(packet.sequence) queuedMs=\(Int(pcmPlaybackEngine.queuedMs)) scheduled=\(pcmPlaybackEngine.scheduledCount) starvationCount=\(pcmPlaybackEngine.starvationCount) overflowDropCount=\(pcmPlaybackEngine.overflowDropCount) captureToArrivalMs=\(Int(arrivalMs))")
+            }
+            #endif
+
+        case .legacyRenderer:
+            scheduleDecodedAudio(
+                capturedAtMs: packet.capturedAtMs, payload: packet.payload,
+                sampleCount: 1,   // one AAC access unit = one compressed "sample"
+                duration: AudioPacketTiming.exactSampleDuration(sampleRate: audioSampleRate),
+                sampleSizeEntryCount: 1) { [payload = packet.payload] in [payload.count] }
+            #if DEBUG
+            if receiverAACLocalDecodeEnabled, let audioFormatDescription,
+               let decoded = decodeReceivedAAC(packet.payload, formatDescription: audioFormatDescription) {
+                analyzeReceivedAACDecode(decoded)
+            }
+            #endif
+        }
+        #if DEBUG
+        logAudioTimingDiagnostic(sequence: packet.sequence, capturedAtMs: packet.capturedAtMs,
+                                 durationMs: packet.durationMs, byteCount: packet.payload.count)
+        #endif
+    }
+
+    /// DEBUG-only diagnostic PCM bypass A/B mode counterpart of
+    /// `scheduleAudioPacket` — see `MacSender.audioDebugPCMMode`. Shares the
+    /// exact same anchor/timing/renderer/reconnect-generation machinery via
+    /// `scheduleDecodedAudio`; only the sample-buffer shape differs (many
+    /// constant-size LPCM frames instead of one compressed access unit).
+    private func schedulePCMPacket(_ packet: PCMPacketFrame) {
+        #if DEBUG
+        checkAudioSequenceDiscontinuity(packet.sequence)
+        logReceiverPCMSanityIfDue(packet)
+        #endif
+        scheduleDecodedAudio(
+            capturedAtMs: packet.capturedAtMs, payload: packet.payload,
+            sampleCount: Int(packet.frameCount),
+            duration: CMTime(value: 1, timescale: Int32(audioSampleRate)),
+            // 0/nil: the lpcm format description already declares a
+            // constant `mBytesPerFrame`, so per-sample sizes are implicit —
+            // see `applyPCMConfig`.
+            sampleSizeEntryCount: 0, sampleSizes: { [] })
+        #if DEBUG
+        logAudioTimingDiagnostic(sequence: packet.sequence, capturedAtMs: packet.capturedAtMs,
+                                 durationMs: UInt32(Double(packet.frameCount) / audioSampleRate * 1000),
+                                 byteCount: packet.payload.count)
+        #endif
+    }
+
+    /// Shared core for both the production AAC path (`scheduleAudioPacket`)
+    /// and the DEBUG-only PCM bypass path (`schedulePCMPacket`): resolves
+    /// the capture-timeline anchor, builds one `CMSampleBuffer` from
+    /// `payload` against whatever `audioFormatDescription` is currently
+    /// active, and enqueues it. `sampleSizes` is only consulted when
+    /// `sampleSizeEntryCount > 0` (compressed formats); pass `{ [] }` for an
+    /// uncompressed format whose description already fixes the frame size.
+    private func scheduleDecodedAudio(
+        capturedAtMs: Int64, payload: Data, sampleCount: Int, duration: CMTime,
+        sampleSizeEntryCount: Int, sampleSizes: () -> [Int]
+    ) {
+        guard let audioFormatDescription else { return }
+        ensureAudioPlaybackChain()   // lazily recreates the renderer after resync/reset
+        guard let audioRenderer else { return }
+        guard let clockOffsetMs else { return }   // clock sync not settled yet (first ~2s) — drop
+        // Mac wall-clock ms -> this receiver's equivalent wall-clock ms
+        // (section 8.1: offset = macClock - receiverClock).
+        let receiverCaptureMs = Double(capturedAtMs) - clockOffsetMs
+
+        if audioAnchor == nil {
+            establishAudioAnchor(captureMs: receiverCaptureMs)
+        }
+        guard let anchor = audioAnchor else { return }
+
+        let audioDelaySeconds = Double(AVSyncOffset.audioDelayMs(for: avSyncOffsetMs)) / 1000.0
+        let target = anchor.hostTime + (receiverCaptureMs - anchor.captureMs) / 1000.0 + audioDelaySeconds
+        #if DEBUG
+        checkNonMonotonicTarget(target)
+        #endif
+
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = payload.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> OSStatus in
+            var buffer: CMBlockBuffer?
+            let createStatus = CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: raw.count,
+                blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+                dataLength: raw.count, flags: 0, blockBufferOut: &buffer)
+            guard createStatus == noErr, let buffer else { return createStatus }
+            let copyStatus = CMBlockBufferReplaceDataBytes(
+                with: raw.baseAddress!, blockBuffer: buffer, offsetIntoDestination: 0, dataLength: raw.count)
+            blockBuffer = buffer
+            return copyStatus
+        }
+        guard blockStatus == noErr, let blockBuffer else {
+            #if DEBUG
+            Log.info("audioTrace: ⚠️ CMBlockBuffer creation/copy failed status=\(blockStatus) — sample dropped before reaching the renderer")
+            #endif
+            return
+        }
+
+        let pts = CMTime(seconds: target, preferredTimescale: 1_000_000)
+        var timing = CMSampleTimingInfo(
+            duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        var sizes = sampleSizes()
+        var sample: CMSampleBuffer?
+        let createStatus = sizes.withUnsafeMutableBufferPointer { sizesPtr -> OSStatus in
+            CMSampleBufferCreateReady(
+                allocator: kCFAllocatorDefault, dataBuffer: blockBuffer,
+                formatDescription: audioFormatDescription, sampleCount: sampleCount,
+                sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                sampleSizeEntryCount: sampleSizeEntryCount,
+                sampleSizeArray: sampleSizeEntryCount > 0 ? sizesPtr.baseAddress : nil,
+                sampleBufferOut: &sample)
+        }
+        guard createStatus == noErr, let sample else {
+            #if DEBUG
+            Log.info("audioTrace: ⚠️ CMSampleBufferCreateReady failed status=\(createStatus) — sample dropped before reaching the renderer")
+            #endif
+            return
+        }
+        audioRenderer.enqueue(sample)
+        #if DEBUG
+        audioEnqueueCount += 1
+        #endif
+    }
+
+    /// Establishes the ONE anchor mapping audio's capture timeline to host
+    /// time for this generation (see the `audioAnchor` doc comment) — never
+    /// called again until `resetAudioPlayback` clears it (new packet after
+    /// a reset/resync/Video-Off-only-session).  Folds in a small preroll
+    /// plus, if a recent video-latency measurement exists, an automatic
+    /// baseline correction so audio settles near video's real latency
+    /// instead of an arbitrary fixed lead — computed once, not chased.
+    private func establishAudioAnchor(captureMs: Double) {
+        let now = CACurrentMediaTime()
+        var lead = audioPrerollSeconds
+        var baselineMs = 0.0
+        if let lastVideoLatencySeconds, nowMs - lastVideoLatencyUpdatedAtWallMs < 1_000 {
+            // Sanity-bounded: a video path that is itself somehow stalled
+            // must not inject an enormous lead into audio's schedule.
+            baselineMs = min(max(lastVideoLatencySeconds, 0), 0.3) * 1000
+            lead = max(lead, baselineMs / 1000)
+        }
+        audioAnchor = MediaAnchor(captureMs: captureMs, hostTime: now + lead)
+        #if DEBUG
+        Log.info("audioTrace: anchor established captureMs=\(Int(captureMs)) leadMs=\(Int(lead * 1000)) baselineMs=\(Int(baselineMs))")
+        #endif
+    }
+
+    #if DEBUG
+    /// Throttled to once every ~2s of steady playback, but logs immediately
+    /// whenever the inter-packet capture-time delta looks wrong (not the
+    /// expected ~21.333 ms for a 1024-sample AAC-LC frame at 48 kHz) — the
+    /// signal for a timestamp discontinuity or a framing bug, not ordinary
+    /// jitter, since capture-time deltas are computed from the sender's own
+    /// PTS and are unaffected by network timing.
+    private func logAudioTimingDiagnostic(sequence: UInt32, capturedAtMs: Int64, durationMs: UInt32, byteCount: Int) {
+        guard let clockOffsetMs else { return }
+        let receiverCaptureMs = Double(capturedAtMs) - clockOffsetMs
+        defer { lastAudioDiagnosticCaptureMs = receiverCaptureMs }
+        let deltaMs = lastAudioDiagnosticCaptureMs.map { receiverCaptureMs - $0 }
+        let unexpectedDelta = deltaMs.map { !(10...40).contains($0) } ?? false
+        audioDiagnosticLogCounter += 1
+        guard unexpectedDelta || audioDiagnosticLogCounter % 100 == 0 else { return }
+        var queuedMs = 0.0
+        if let anchor = audioAnchor {
+            let audioDelaySeconds = Double(AVSyncOffset.audioDelayMs(for: avSyncOffsetMs)) / 1000.0
+            let target = anchor.hostTime + (receiverCaptureMs - anchor.captureMs) / 1000.0 + audioDelaySeconds
+            queuedMs = (target - CACurrentMediaTime()) * 1000
+        }
+        // Latency characterization (GOAL "LATENCY" — measurement only, not
+        // tuning): `captureToArrivalMs` is capture→"this packet is being
+        // processed right now" (encode + transport + demux), computed on
+        // the SAME capture-timeline coordinate space `capMs` already uses
+        // (Mac wall clock, translated via `clockOffsetMs`) — never confused
+        // with the A/V Sync slider, which only relates streamed video to
+        // streamed audio on THIS device and has no opinion on how far
+        // behind the Mac's own local speaker either one is.
+        // `captureToPlayoutMs` adds the scheduled queue depth on top, i.e.
+        // capture→the moment this sample buffer is actually due to sound.
+        let captureToArrivalMs = Date().timeIntervalSince1970 * 1000 - receiverCaptureMs
+        let captureToPlayoutMs = captureToArrivalMs + queuedMs
+        let deltaText = deltaMs.map { String(format: "%.1f", $0) } ?? "-"
+        Log.info("audioTrace: seq=\(sequence) capMs=\(Int(receiverCaptureMs)) deltaMs=\(deltaText) durMs=\(durationMs) bytes=\(byteCount) queuedMs=\(Int(queuedMs)) captureToArrivalMs=\(Int(captureToArrivalMs)) captureToPlayoutMs=\(Int(captureToPlayoutMs)) enqueued=\(audioEnqueueCount)\(unexpectedDelta ? " ⚠️ unexpected delta" : "")")
+    }
+
+    /// Anomaly-only (GOAL section 7 "WIRE"): a gap or repeat in the sender's
+    /// monotonic sequence counter means a packet was dropped/reordered
+    /// somewhere between encode and here — framing corruption or a lost TCP
+    /// segment recovered out of order would both show up as this.
+    private func checkAudioSequenceDiscontinuity(_ sequence: UInt32) {
+        defer { lastAudioSequence = sequence }
+        guard let lastAudioSequence, sequence != lastAudioSequence &+ 1 else { return }
+        if sequence == lastAudioSequence {
+            Log.info("audioTrace: ⚠️ duplicate audio sequence \(sequence)")
+        } else {
+            Log.info("audioTrace: ⚠️ audio sequence discontinuity expected=\(lastAudioSequence &+ 1) got=\(sequence)")
+        }
+    }
+
+    /// GOAL #4/#5/#6: verifies the payloadBytes==frameCount*channelCount*4
+    /// wire invariant every packet (cheap), and logs a checksum + sample
+    /// sanity summary every 100th — the receiver-side counterpart of
+    /// `AudioCaptureEncoder.logPCMSanityIfDue`, using the IDENTICAL
+    /// `PCMChecksum.fnv1a` algorithm so a reported sender checksum and
+    /// receiver checksum for corresponding frames can be compared by eye.
+    private func logReceiverPCMSanityIfDue(_ packet: PCMPacketFrame) {
+        let expectedBytes = Int(packet.frameCount) * Int(pcmChannelCount) * 4
+        if packet.payload.count != expectedBytes {
+            Log.info("audioTrace: ⚠️ received PCM payload size invariant violated: got \(packet.payload.count) bytes, expected frameCount(\(packet.frameCount))*channelCount(\(pcmChannelCount))*4=\(expectedBytes)")
+        }
+        pcmPacketsSinceSanityLog += 1
+        guard pcmPacketsSinceSanityLog % 100 == 1 else { return }
+        let samples: [Float] = packet.payload.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self))
+        }
+        guard !samples.isEmpty else { return }
+        var minV: Float = .greatestFiniteMagnitude
+        var maxV: Float = -.greatestFiniteMagnitude
+        var sumSquares: Double = 0
+        var peakAbs: Float = 0
+        var nanCount = 0
+        var infCount = 0
+        for v in samples {
+            if v.isNaN { nanCount += 1; continue }
+            if v.isInfinite { infCount += 1; continue }
+            if v < minV { minV = v }
+            if v > maxV { maxV = v }
+            let a = abs(v)
+            if a > peakAbs { peakAbs = a }
+            sumSquares += Double(v) * Double(v)
+        }
+        let rms = (sumSquares / Double(samples.count)).squareRoot()
+        let checksum = PCMChecksum.fnv1a(samples)
+        Log.info("audioTrace: PCM sanity side=receiver frameCount=\(packet.frameCount) channels=\(pcmChannelCount) min=\(minV) max=\(maxV) rms=\(String(format: "%.4f", rms)) peakAbs=\(peakAbs) nanCount=\(nanCount) infCount=\(infCount) checksum=\(checksum)")
+    }
+    #endif
+
+    /// The shared AAC→PCM decoder (see `receiverAACDecoder`'s doc comment
+    /// on why this is NOT `#if DEBUG`): decodes the EXACT bytes just
+    /// received into PCM, using a plain `AVAudioConverter` rather than the
+    /// legacy compressed-`CMSampleBuffer` path. `PCMPlaybackEngine`
+    /// playback calls this every packet in production; the DEBUG-only
+    /// `analyzeReceivedAACDecode` (anomaly checks + optional CAF dump)
+    /// calls it as an independent validation pass regardless of which
+    /// playback path is active.
+    private func decodeReceivedAAC(_ payload: Data, formatDescription: CMAudioFormatDescription) -> AVAudioPCMBuffer? {
+        if receiverAACDecoderFormatDescription == nil
+            || !CMFormatDescriptionEqual(receiverAACDecoderFormatDescription!, otherFormatDescription: formatDescription) {
+            let compressedFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+            guard let pcmFormat = AVAudioFormat(
+                    commonFormat: .pcmFormatFloat32, sampleRate: compressedFormat.sampleRate,
+                    channels: compressedFormat.channelCount, interleaved: false),
+                  let decoder = AVAudioConverter(from: compressedFormat, to: pcmFormat) else {
+                Log.info("audioTrace: ⚠️ could not build receiver-local AAC decoder from received format description")
+                return nil
+            }
+            receiverAACDecoder = decoder
+            receiverAACDecoderFormatDescription = formatDescription
+        }
+        guard let decoder = receiverAACDecoder else { return nil }
+
+        let compressed = AVAudioCompressedBuffer(
+            format: decoder.inputFormat, packetCapacity: 1, maximumPacketSize: payload.count)
+        payload.withUnsafeBytes { raw in
+            compressed.data.copyMemory(from: raw.baseAddress!, byteCount: payload.count)
+        }
+        compressed.byteLength = UInt32(payload.count)
+        compressed.packetCount = 1
+        compressed.packetDescriptions?[0] = AudioStreamPacketDescription(
+            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(payload.count))
+
+        guard let pcmOut = AVAudioPCMBuffer(
+            pcmFormat: decoder.outputFormat, frameCapacity: 1024) else { return nil }
+        var suppliedInput = false
+        var error: NSError?
+        let status = decoder.convert(to: pcmOut, error: &error) { _, outStatus in
+            if suppliedInput { outStatus.pointee = .noDataNow; return nil }
+            suppliedInput = true
+            outStatus.pointee = .haveData
+            return compressed
+        }
+        guard status == .haveData, pcmOut.floatChannelData != nil else {
+            receiverDecodeAnomalyCount += 1
+            Log.info("audioTrace: ⚠️ receiver-local AAC decode failed status=\(status) error=\(String(describing: error)) (anomaly #\(receiverDecodeAnomalyCount))")
+            return nil
+        }
+        return pcmOut
+    }
+
+    // MARK: - Playback path (PROTOCOL.md 5A milestone note). Mac source
+    // PCM, Mac AAC encode, the wire transport (checksum-verified), and this
+    // device's own AAC decode all proved clean across a multi-pass forensic
+    // investigation, while `AVSampleBufferAudioRenderer` compressed-sample
+    // scheduling ("Legacy SampleBuffer Renderer") kept glitching and a
+    // physical A/B confirmed the SAME decoded PCM played cleanly through
+    // `PCMPlaybackEngine` ("PCM Engine"). PCM Engine is now the default —
+    // the legacy renderer stays fully intact as a selectable DEBUG-only
+    // fallback/reference, never deleted. The wire codec is unchanged: AAC
+    // is still the only thing ever sent over the network. NOT `#if DEBUG`
+    // — this is the production playback path now.
+
+    private enum PlaybackPath: Equatable { case pcmEngine, legacyRenderer }
+
+    private var playbackPath: PlaybackPath {
+        #if DEBUG
+        // Normal users get no picker — this reads a DEBUG-only developer
+        // toggle (Settings → Developer / Audio Diagnostics → Playback
+        // Path). A Release build always returns `.pcmEngine`.
+        return UserDefaults.standard.string(forKey: "audioPlaybackPath") == "legacyRenderer" ? .legacyRenderer : .pcmEngine
+        #else
+        return .pcmEngine
+        #endif
+    }
+    /// Latched, never read live mid-packet — only at a
+    /// `switchPlaybackPathIfNeeded` boundary, so a change never splits one
+    /// packet's handling across both paths.
+    private var activePlaybackPath: PlaybackPath = .pcmEngine
+    private let pcmPlaybackEngine = PCMPlaybackEngine()
+
+    /// Called once per packet — cheap (a property read + enum compare)
+    /// unless the path actually changed. A change is treated exactly like
+    /// any other fresh-generation reset: flush/reset the legacy renderer
+    /// AND bump the PCM engine's generation, so stale audio from whichever
+    /// path was just deactivated can never keep playing after a switch.
+    private func switchPlaybackPathIfNeeded() {
+        let desired = playbackPath
+        guard desired != activePlaybackPath else { return }
+        activePlaybackPath = desired
+        resetAudioPlayback(keepingFormat: true)
+        #if DEBUG
+        Log.info("audioTrace: playbackPath=\(desired == .pcmEngine ? "pcmEngine" : "legacyRenderer")")
+        #endif
+    }
+
+    #if DEBUG
+    /// Anomaly checks + optional CAF dump over an already-decoded packet —
+    /// split from the decode itself (`decodeReceivedAAC`) so the
+    /// production `PCMPlaybackEngine` path can reuse the identical decode
+    /// without also paying for or depending on this DEBUG-only analysis.
+    private func analyzeReceivedAACDecode(_ pcmOut: AVAudioPCMBuffer) {
+        guard let channelData = pcmOut.floatChannelData else { return }
+        let frameLength = Int(pcmOut.frameLength)
+        var hasNaNOrInf = false
+        var maxAbsSample: Float = 0
+        var jumpDetected = false
+        let buf0 = channelData[0]
+        for i in 0..<frameLength {
+            let v = buf0[i]
+            if v.isNaN || v.isInfinite { hasNaNOrInf = true }
+            let a = abs(v)
+            if a > maxAbsSample { maxAbsSample = a }
+            if let last = lastReceiverDecodedSample, abs(v - last) > 1.5 { jumpDetected = true }
+            lastReceiverDecodedSample = v
+        }
+        if hasNaNOrInf {
+            receiverDecodeAnomalyCount += 1
+            Log.info("audioTrace: ⚠️ receiver-local AAC decode produced NaN/Inf (anomaly #\(receiverDecodeAnomalyCount)) — reconstruction/decoder-input defect on THIS device")
+        }
+        if maxAbsSample >= 0.999 {
+            receiverDecodeAnomalyCount += 1
+            Log.info("audioTrace: ⚠️ receiver-local AAC decode near/at full-scale (\(maxAbsSample)) — possible clipping (anomaly #\(receiverDecodeAnomalyCount))")
+        }
+        if jumpDetected {
+            receiverDecodeAnomalyCount += 1
+            Log.info("audioTrace: ⚠️ receiver-local AAC decode inter-sample discontinuity at packet boundary (anomaly #\(receiverDecodeAnomalyCount))")
+        }
+        if receiverAACDumpEnabled { dumpReceiverDecodedPCM(pcmOut) }
+    }
+
+    /// ~5s bounded dump of the receiver-local decode above, for an actual
+    /// listening A/B on-device. Path is platform-specific (see
+    /// `receiverDecodeDumpDirectory`) and self-reports every step — same
+    /// no-silent-failure discipline as `AudioCaptureEncoder`'s dumps on the
+    /// Mac side, after that class of bug bit the PCM diagnostic once
+    /// already.
+    private func dumpReceiverDecodedPCM(_ pcm: AVAudioPCMBuffer) {
+        guard receiverDecodeDumpFrames < Self.receiverDecodeDumpFrameLimit else { return }
+        if receiverDecodeDumpFile == nil {
+            let dir = Self.receiverDecodeDumpDirectory()
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            } catch {
+                Log.info("audioTrace: ⚠️ could not create \(dir.path): \(error)")
+                return
+            }
+            let url = dir.appendingPathComponent("audio-compare-received-decoded-aac.caf")
+            do {
+                receiverDecodeDumpFile = try AVAudioFile(forWriting: url, settings: pcm.format.settings)
+                Log.info("audioTrace: opened receiver-local AAC decode dump \(url.path) — pull it from the Files app (On My iPhone/iPad → OpenDisplay) or Xcode's Devices window on iOS, or open directly on macOS")
+            } catch {
+                Log.info("audioTrace: ⚠️ could not open \(url.path) for writing: \(error)")
+                return
+            }
+        }
+        guard let receiverDecodeDumpFile else { return }
+        do {
+            try receiverDecodeDumpFile.write(from: pcm)
+            receiverDecodeDumpFrames += Int(pcm.frameLength)
+            if receiverDecodeDumpFrames >= Self.receiverDecodeDumpFrameLimit {
+                Log.info("audioTrace: audio-compare-received-decoded-aac.caf reached \(receiverDecodeDumpFrames) frames — finalizing")
+                finalizeReceiverDecodeDump()
+            }
+        } catch {
+            Log.info("audioTrace: ⚠️ audio-compare-received-decoded-aac.caf write failed: \(error)")
+        }
+    }
+
+    private func finalizeReceiverDecodeDump() {
+        if let receiverDecodeDumpFile {
+            Log.info("audioTrace: finalized \(receiverDecodeDumpFile.url.lastPathComponent) frames=\(receiverDecodeDumpFrames)")
+        }
+        receiverDecodeDumpFile = nil
+        receiverDecodeDumpFrames = 0
+    }
+
+    /// iOS: the app's own Documents directory, so the dump is reachable
+    /// from the Files app (On My iPhone/iPad → OpenDisplay) without Xcode.
+    /// macOS (the `OpenSidecarMacReceiver` test target): the same
+    /// `Log.directory` the Mac sender's dumps already use, for one
+    /// consistent place to look.
+    private static func receiverDecodeDumpDirectory() -> URL {
+        #if os(iOS)
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        #else
+        return Log.directory
+        #endif
+    }
+
+    /// Anomaly-only (GOAL section 7 "RECEIVER"): the renderer's playout
+    /// schedule must be monotonic — a packet scheduled to play before the
+    /// previous one means an anchor/offset computation went backwards,
+    /// which would sound like a stutter/glitch right at that instant.
+    private func checkNonMonotonicTarget(_ target: CFTimeInterval) {
+        defer { lastAudioTarget = target }
+        if let lastAudioTarget, target < lastAudioTarget {
+            Log.info("audioTrace: ⚠️ non-monotonic audio playout target \(target) < previous \(lastAudioTarget)")
+        }
+    }
+    #endif
 
     private func buildFormatDescription(sps: Data, pps: Data) {
         sps.withUnsafeBytes { spsBuf in
@@ -1745,24 +2771,50 @@ final class StreamReceiver: ObservableObject {
             loggedDisplayPath = useMetalPath && onDecodedFrame != nil
             Log.info("display path: metal=\(useMetalPath) sink=\(onDecodedFrame != nil)")
         }
-        if useMetalPath, onDecodedFrame != nil {
-            decodeAndRender(sample, captureMs: captureMs)
-        } else {
-            // Display immediately: low latency, no PTS scheduling.
-            if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-               CFArrayGetCount(attachments) > 0 {
-                let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-                CFDictionarySetValue(dict,
-                    Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                    Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-            }
+        // A cheap, one-shot-consulted measurement of video's real latency —
+        // updated every frame at negligible cost, but only ever READ when
+        // `establishAudioAnchor` needs a fresh baseline (never used to
+        // continuously steer an anchor already in play; see its doc
+        // comment for why that was the actual cause of the audio stutter).
+        // Measured before any deliberate negative-offset delay below, so
+        // it reflects video's NATURAL latency, not one this receiver
+        // intentionally added.
+        if let captureMs {
+            lastVideoLatencySeconds = (nowMs - captureMs) / 1000.0
+            lastVideoLatencyUpdatedAtWallMs = nowMs
+        }
+        let scheduledVideoGeneration = videoGeneration
+        let present = { [weak self] in
+            guard let self, self.videoGeneration == scheduledVideoGeneration else { return }
+            if self.useMetalPath, self.onDecodedFrame != nil {
+                self.decodeAndRender(sample, captureMs: captureMs)
+            } else {
+                // Display immediately: low latency, no PTS scheduling.
+                if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
+                   CFArrayGetCount(attachments) > 0 {
+                    let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+                    CFDictionarySetValue(dict,
+                        Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                        Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+                }
 
-            if displayLayer.status == .failed {
-                Log.info("display layer failed (\(String(describing: displayLayer.error))) — flushing")
-                decodeFlushes += 1
-                displayLayer.flush()
+                if self.displayLayer.status == .failed {
+                    Log.info("display layer failed (\(String(describing: self.displayLayer.error))) — flushing")
+                    self.decodeFlushes += 1
+                    self.displayLayer.flush()
+                }
+                self.displayLayer.enqueue(sample)
             }
-            displayLayer.enqueue(sample)
+        }
+        // A/V Sync: negative offset delays video by holding this specific,
+        // already-decoded-or-decodable frame — a genuine per-frame
+        // presentation delay, not a sleep on the network/decode path. The
+        // delay is constant across frames, so arrival order is preserved.
+        let videoDelayMs = AVSyncOffset.videoDelayMs(for: avSyncOffsetMs)
+        if videoDelayMs > 0 {
+            queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: present)
+        } else {
+            present()
         }
 
         // Per-frame timing for the performance overlay.

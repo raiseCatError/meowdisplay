@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 11** &nbsp;|&nbsp; Status: **normative** for `pv <= 11`
+**Protocol version (`pv`): 12** &nbsp;|&nbsp; Status: **normative** for `pv <= 12`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -39,7 +39,7 @@ caused by third-party clients should be reported to those projects.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
-Every requirement applies to `pv` 11 unless a different version is called
+Every requirement applies to `pv` 12 unless a different version is called
 out. "The official apps" means the Mac sender and iOS receiver in this
 repository; their behavior is cited as illustration, not as requirement,
 unless marked normative.
@@ -259,6 +259,86 @@ an IDR (with SPS/PPS, per 5.1). Senders SHOULD also send an IDR unprompted
 whenever a connection is (re)established, including replaying the last
 captured frame if the screen is static and the capturer produces nothing.
 
+## 5A. Mac system audio (`pv` 12)
+
+A copy of the sender's system audio — never a reroute of its physical
+output, and never a third-party virtual audio device — carried as AAC-LC
+alongside the video stream. There is no legacy fallback (like `keyboard`,
+unlike `pencil`/`pointer`): a receiver MUST NOT send `audioRequest`, and a
+sender MUST NOT emit audio media frames, when the peer's `pv` is below 12.
+Audio is opt-in per receiver via `audioRequest`/`audioState` (section 6);
+it is never sent unrequested.
+
+### 5A.1 Framing: the typed marker byte
+
+Section 4's channel demux is a documented heuristic, not a foundation to
+extend: it works only because Annex B start codes guarantee a NUL byte and
+control messages are JSON. Audio frames instead start with a **reserved
+one-byte marker**, `0x01`, that both the JSON-control shape (starts with
+`{`, 0x7B) and the legacy video shape (also starts with `{`, the telemetry
+prefix) can never produce:
+
+```
+[0x01][subtype: 1 byte][subtype-specific body]
+```
+
+A receiver checks this byte **before** running the section 4 demux at all.
+Because audio frames are gated on `pv` 12, a peer below that version never
+receives one, so introducing this discriminator needs no two-phase
+migration — it only ever appears on a wire both ends have already agreed
+can carry it. Senders MUST NOT emit an audio media frame to a peer whose
+`pv` is below 12.
+
+Two subtypes exist:
+
+**`0x01` — config.** Sent once when audio starts (and again if the format
+changes) so the receiver can build a decoder before any packet arrives:
+
+```
+[sampleRate: uint32 BE][channelCount: uint8][cookieLength: uint16 BE][cookie: cookieLength bytes]
+```
+
+`cookie` is the AAC AudioSpecificConfig (the MPEG-4 "magic cookie") a
+receiver needs to construct a `CMAudioFormatDescription` (or equivalent).
+
+**`0x02` — packet.** One encoded AAC-LC access unit:
+
+```
+[sequence: uint32 BE][capturedAtMs: int64 BE][durationMs: uint32 BE][payloadLength: uint32 BE][payload: payloadLength bytes]
+```
+
+* `sequence` starts at 1 and increments by one per packet sent this
+  capture generation; informational (packet loss/reorder detection), not
+  required for playback since TCP does not lose or reorder bytes.
+* `capturedAtMs` is milliseconds since the Unix epoch **on the sender's
+  clock**, taken from the audio sample's own capture presentation
+  timestamp — the same coordinate space as the video telemetry prefix's
+  `cap` field (section 5.1), so a receiver reuses the same ping/pong clock
+  offset (section 8.1) to schedule audio relative to when the video for the
+  same instant is appearing. Senders MUST NOT derive this from send/arrival
+  time.
+* `payload` is a raw AAC-LC access unit with **no ADTS header** — the
+  format description already carries what an ADTS header would repeat.
+
+A malformed or truncated audio frame (wrong marker, unknown subtype, or a
+declared length that does not fit the available bytes) MUST be ignored,
+never treated as fatal — the same tolerance section 6 requires for control
+messages.
+
+### 5A.2 Codec
+
+AAC-LC, 48 kHz, stereo, ~128 kbps. Senders MUST NOT substitute another
+codec; a receiver that cannot decode AAC-LC has no fallback and simply
+does not offer Audio.
+
+### 5A.3 No literal negative latency
+
+Audio cannot play before it has arrived. A receiver-local "play audio
+earlier" offset is therefore implemented by holding *video* back instead
+(non-normative — purely receiver-local presentation timing, described for
+implementers in Appendix B). Nothing about this crosses the wire: the sync
+offset is never sent to the sender.
+
 ## 6. Control messages
 
 Control messages are JSON objects encoded as UTF-8, each in its own frame
@@ -298,6 +378,7 @@ Coordinates use the conventions of section 7.
 | `allowInputRequest` | pv 8 | `allowed` (bool) | Request the Mac-authoritative input gate state |
 | `videoRequest` | pv 9 | `enabled` (bool) | Request Mac video capture/encode/transmission on or off |
 | `nativeAppGesture` | pv 10 | `kind` (`magnify` or `rotate`), `phase` (`began`, `changed`, `ended`, or `cancelled`), `delta` (number) | Continuous foreground-app gesture lifecycle |
+| `audioRequest` | pv 12 | `enabled` (bool) | Request Mac system-audio capture on/off for this receiver |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -516,6 +597,7 @@ section 4.
 | `displayModeState` | pv 7 | `mode` (`mirror` or `extend`) | Mac-authoritative confirmed capture mode |
 | `allowInputState` | pv 8 | `allowed` (bool) | Mac-authoritative input gate state |
 | `videoState` | pv 9 | `enabled` (bool), `width`, `height` | Mac-authoritative video state and retained mapping geometry |
+| `audioState` | pv 12 | `enabled` (bool) | Mac-authoritative confirmed system-audio production state |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -571,6 +653,17 @@ when no decoder format exists. A receiver MUST discard the previously
 presented frame when it receives `enabled: false`. Re-enabling starts a fresh
 encoder stream with SPS/PPS and an IDR. Receivers MUST NOT send `videoRequest`
 below pv 9; senders keep video enabled for older receivers.
+
+**`audioRequest` / `audioState`** (pv 12) control Mac system-audio capture
+independently of video, per receiver — each receiver's own request, not a
+Mac-wide toggle like `videoRequest`. The Mac confirms the actual state with
+`audioState`; a receiver MUST treat `audioState` as authoritative rather
+than assuming its request was honored. Disabling stops capture, encoding,
+and audio-frame transmission — the Mac SHOULD stop ScreenCaptureKit's own
+audio capture, not merely withhold already-captured samples. Video Off does
+NOT imply Audio Off and Audio On does NOT imply Video On; they are
+independent. Receivers MUST NOT send `audioRequest` below pv 12, and a
+sender below pv 12 never emits audio media frames (section 5A) regardless.
 
 **`cursorImg`** delivers the current cursor sprite: `png` is the base64 of
 a PNG (kept under 24000 bytes pre-encoding, see section 4); `nw`, `nh` are
@@ -818,7 +911,7 @@ Rules already stated elsewhere, gathered:
 Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 
 * `pv` is a single integer, bumped **only when the wire changes**, never
-  per release. Current: **9**.
+  per release. Current: **12**.
 * A peer that advertises no `pv` anywhere (TXT, `hello`, `welcome`) **is**
   protocol 1.
 * Each side declares the oldest peer it supports (`welcome.min` on the
@@ -846,6 +939,9 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 7 | Explicit `displayModeRequest` / authoritative `displayModeState` synchronization |
 | 8 | Mac-authoritative `allowInputRequest` / `allowInputState` synchronization |
 | 9 | Session-preserving `videoRequest` / `videoState`, including retained input-mapping geometry |
+| 10 | Continuous `nativeAppGesture` magnify/rotate lifecycle (advertised; not yet injectable — see Appendix B) |
+| 11 | Transcript-authenticated pairing and pinned mutual TLS 1.3 for LAN/AWDL media |
+| 12 | Mac system audio: typed `0x01` media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
 
 ---
 
@@ -892,6 +988,29 @@ recorded as hints for porters:
 * **Receiver, decode/present:** VideoToolbox decode into
   `AVSampleBufferDisplayLayer` (or a Metal layer). Android ports use
   `MediaCodec` + `SurfaceView`.
+* **Receiver, audio (section 5A):** `AVSampleBufferAudioRenderer` on its own
+  `AVSampleBufferRenderSynchronizer` — deliberately not attached to the
+  video layer, since the video path's "display immediately" low-latency
+  behavior (no PTS scheduling, section 5.1) would conflict with a shared
+  timebase. Each audio sample buffer is stamped with an absolute host-time
+  PTS derived from `capturedAtMs` plus the ping/pong clock offset (section
+  8.1), continuously calibrated against the most recent video frame's own
+  presentation moment so audio lines up with when video for the same
+  instant is actually appearing — recalibrated from audio's own timeline
+  alone when no video is flowing (Video Off + Audio On). The receiver-local
+  sync offset (product-level, never on the wire) adds delay on top of that
+  target: a positive offset delays the audio buffer's PTS; a negative one
+  instead holds the *video* frame's presentation call back by the same
+  amount, computed from where video would have shown before any such delay
+  — never both moving together, which would cancel the adjustment out.
+* **Sender, audio capture/encode (section 5A):** ScreenCaptureKit
+  `SCStreamConfiguration.capturesAudio` on the same `SCStream` as video
+  (`excludesCurrentProcessAudio = true`, so a receiver's own future audio
+  playback can't feed back in), encoded with `AVAudioConverter` to AAC-LC.
+  Audio's on/off state is reconfigured on the live stream at runtime
+  (`SCStream.updateConfiguration`) rather than tearing capture down, which
+  is also what makes Video Off + Audio On possible: the stream survives,
+  only its `.screen` output stops being encoded.
 * **USB from non-Mac senders:** libimobiledevice's usbmuxd implementation;
   `iproxy` demonstrates the tunnel. For non-Apple *receivers*, defining an
   analogous binding (e.g. `adb reverse tcp:9000 tcp:9000`) is enough.
@@ -911,3 +1030,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-14 | `pv` 5: `pointer` message family; `pv` 6: adaptive receiver controls and modifier shortcuts |
 | 2026-09-14 | `pv` 7: receiver mode requests and Mac-authoritative Mirror/Extend state |
 | 2026-09-15 | `pv` 11: transcript-authenticated pairing and pinned mutual TLS 1.3 for LAN/AWDL |
+| 2026-09-16 | `pv` 12: Mac system audio — typed media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |

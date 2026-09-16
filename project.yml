@@ -178,6 +178,8 @@ targets:
       - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
+      - Shared/AudioMediaFrame.swift
+      - Shared/PCMPlaybackEngine.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift

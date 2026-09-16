@@ -462,7 +462,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 11
+    static let schemaVersion = 12
 
     var version = schemaVersion
     var trayEnabled = true
@@ -512,6 +512,16 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// changes which target is active, and "Reset to Defaults" on this page
     /// touches only this value.
     var appGestureCommands = AppGestureCommands.defaults
+    /// The receiver's own "I want Mac system audio" preference — resent as
+    /// `audioRequest` on every connection/reconnection so it survives
+    /// transport migration and Forget Device re-pairing without the user
+    /// re-enabling it. Defaults off: capturing system audio is a deliberate
+    /// opt-in, not an ambient default. See `StreamReceiver.requestAudioEnabled`.
+    var audioPreferred = false
+    /// Receiver-local A/V sync offset in milliseconds, clamped to
+    /// `AVSyncOffset.range`. Positive delays audio, negative delays video.
+    /// Never sent to the Mac — it only ever affects local playback timing.
+    var avSyncOffsetMs = 0
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -577,6 +587,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Absent (schema < 11) means "written before App Gesture Commands
         // existed" — default to the canonical Cmd+=/Cmd+-/Cmd+[/Cmd+] chords.
         appGestureCommands = try value(.appGestureCommands, fallback.appGestureCommands)
+        // Absent (schema < 12) means "written before Mac system audio
+        // existed" — default off/centered, matching a brand-new install.
+        audioPreferred = try value(.audioPreferred, fallback.audioPreferred)
+        avSyncOffsetMs = AVSyncOffset.clamped(try value(.avSyncOffsetMs, fallback.avSyncOffsetMs))
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -708,6 +722,12 @@ struct ReceiverControlPreferencesRepository {
         // chords — nothing to transform.
         if value.version < 11 {
             value.version = 11
+        }
+        // Schema 11 predates Mac system audio; the custom decoder above
+        // already defaulted `audioPreferred` to off and `avSyncOffsetMs` to
+        // 0 — nothing to transform.
+        if value.version < 12 {
+            value.version = 12
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

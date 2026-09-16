@@ -23,7 +23,12 @@ enum Log {
     /// The folder is named after the app: the sender logs to `OpenDisplay`,
     /// the receiver app (a separate bundle sharing this file) to
     /// `OpenDisplay Receiver`, so running both on one Mac keeps two logs.
-    private static let directory: URL = {
+    /// Exposed so other DEBUG-only diagnostic writers (`AudioCaptureEncoder`'s
+    /// PCM/AAC A/B dumps) resolve to the SAME folder this log file lives in,
+    /// rather than an independently hardcoded path that can silently drift
+    /// out of sync with it — see `AudioCaptureEncoder.makeDumpFile`'s
+    /// forensic note for what happened the one time that drift occurred.
+    static let directory: URL = {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
         let product = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? ""

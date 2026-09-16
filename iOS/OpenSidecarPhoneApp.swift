@@ -345,6 +345,8 @@ struct ReceiverScreen: View {
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: controlStore.preferences.trayEnabled,
                 keyboardButtonEnabled: controlStore.preferences.keyboardButtonEnabled)
+            model.receiver.primeAudioPreference(controlStore.preferences.audioPreferred)
+            model.receiver.setAVSyncOffset(controlStore.preferences.avSyncOffsetMs)
             model.start()
             // Show the first-run hint unless the device has connected before
             // or the user already dismissed it.
@@ -356,6 +358,7 @@ struct ReceiverScreen: View {
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: preferences.trayEnabled,
                 keyboardButtonEnabled: preferences.keyboardButtonEnabled)
+            model.receiver.setAVSyncOffset(preferences.avSyncOffsetMs)
         }
     }
 }
@@ -632,6 +635,17 @@ struct SettingsView: View {
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
     #if DEBUG
     @AppStorage("notchDebugOverlay") private var notchDebugOverlayEnabled = false
+    // Developer / Audio Diagnostics (receiver-side AAC investigation): a
+    // physical iPhone's sandboxed UserDefaults can't receive a Mac
+    // terminal's `defaults write` the way a Simulator or a Mac-native app
+    // can, so these need an in-app control to be usable during a real
+    // on-device retest — see `StreamReceiver`'s matching keys, all read
+    // fresh (never latched) so a toggle here takes effect immediately.
+    @AppStorage("audioPlaybackPath") private var audioPlaybackPath = "pcmEngine"
+    @AppStorage("audioPCMSchedulingMode") private var audioPCMSchedulingMode = "continuous"
+    @AppStorage("audioReceiverLocalDecode") private var audioReceiverLocalDecode = false
+    @AppStorage("audioReceiverDumpEnabled") private var audioReceiverDumpEnabled = false
+    @AppStorage("audioAACIntegrityLogging") private var audioAACIntegrityLogging = false
     #endif
     @State private var confirmingReset = false
     @State private var confirmingFunctionTrayReset = false
@@ -714,6 +728,57 @@ struct SettingsView: View {
                         LabeledContent("Display Mode",
                                        value: receiver.connected ? "Waiting for Mac" : "Unavailable")
                     }
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Audio", isOn: Binding(
+                            get: { controlStore.preferences.audioPreferred },
+                            set: { value in
+                                controlStore.update { $0.audioPreferred = value }
+                                receiver.requestAudioEnabled(value)
+                            }))
+                            .disabled(!receiver.connected || !receiver.macSupportsAudio)
+                        Text("Plays a copy of what the Mac is playing. It keeps playing there too — this never changes the Mac's output device.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("A/V Sync")
+                            Spacer()
+                            Text(avSyncOffsetLabel(controlStore.preferences.avSyncOffsetMs))
+                                .foregroundStyle(.secondary)
+                            if controlStore.preferences.avSyncOffsetMs != 0 {
+                                Button("Reset") {
+                                    controlStore.update { $0.avSyncOffsetMs = 0 }
+                                }
+                                .font(.footnote)
+                            }
+                        }
+                        Slider(value: Binding(
+                            get: { Double(controlStore.preferences.avSyncOffsetMs) },
+                            set: { value in
+                                let stepped = Int((value / Double(AVSyncOffset.stepMs)).rounded()) * AVSyncOffset.stepMs
+                                controlStore.update { $0.avSyncOffsetMs = AVSyncOffset.clamped(stepped) }
+                            }),
+                            in: Double(AVSyncOffset.range.lowerBound)...Double(AVSyncOffset.range.upperBound),
+                            step: Double(AVSyncOffset.stepMs))
+                        Text("Adjust if sound plays slightly before or after the picture.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button("Resync") {
+                            receiver.resync()
+                        }
+                        .font(.footnote)
+                        .disabled(!receiver.connected || !receiver.audioEnabled)
+                        Text("If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .disabled(!controlStore.preferences.audioPreferred)
+                } header: {
+                    Text("Audio")
                 }
 
                 Section {
@@ -910,6 +975,50 @@ struct SettingsView: View {
                     Text("What this \(deviceKind) saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the \(deviceKind) unless you share it. Attach it to a GitHub issue if a connection won't come up.")
                 }
 
+                #if DEBUG
+                Section {
+                    LabeledContent("Production Codec", value: "AAC")
+                    Picker("Playback Path", selection: $audioPlaybackPath) {
+                        Text("PCM Engine").tag("pcmEngine")
+                        Text("Legacy SampleBuffer Renderer").tag("legacyRenderer")
+                    }
+                    .onChange(of: audioPlaybackPath) { path in
+                        Log.info("audioTrace: playbackPath=\(path)")
+                    }
+                    Picker("PCM Scheduling", selection: $audioPCMSchedulingMode) {
+                        Text("Continuous").tag("continuous")
+                        Text("Precise Scheduled").tag("preciseScheduled")
+                    }
+                    .onChange(of: audioPCMSchedulingMode) { mode in
+                        Log.info("audioTrace: audioPCMSchedulingMode=\(mode)")
+                    }
+                    Toggle("Receiver Local AAC Decode", isOn: $audioReceiverLocalDecode)
+                        .onChange(of: audioReceiverLocalDecode) { enabled in
+                            Log.info("audioTrace: audioReceiverLocalDecode=\(enabled)")
+                        }
+                    Toggle("AAC Integrity Logging", isOn: $audioAACIntegrityLogging)
+                        .onChange(of: audioAACIntegrityLogging) { enabled in
+                            Log.info("audioTrace: audioAACIntegrityLogging=\(enabled)")
+                        }
+                    Toggle("Audio Comparison Dump", isOn: $audioReceiverDumpEnabled)
+                        .onChange(of: audioReceiverDumpEnabled) { enabled in
+                            Log.info("audioTrace: audioReceiverDumpEnabled=\(enabled)")
+                        }
+                    Button("Reset Audio Diagnostics", role: .destructive) {
+                        audioPlaybackPath = "pcmEngine"
+                        audioPCMSchedulingMode = "continuous"
+                        audioReceiverLocalDecode = false
+                        audioAACIntegrityLogging = false
+                        audioReceiverDumpEnabled = false
+                        Log.info("audioTrace: audio diagnostics reset to defaults")
+                    }
+                } header: {
+                    Text("Developer / Audio Diagnostics (DEBUG)")
+                } footer: {
+                    Text("PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this \(deviceKind) and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My \(deviceKind) → OpenDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change.")
+                }
+                #endif
+
                 Section {
                     Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
                           systemImage: "cable.connector")
@@ -972,6 +1081,10 @@ struct SettingsView: View {
     private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
         Binding(get: { controlStore.preferences[keyPath: keyPath] },
                 set: { value in controlStore.update { $0[keyPath: keyPath] = value } })
+    }
+
+    private func avSyncOffsetLabel(_ ms: Int) -> String {
+        ms == 0 ? "0 ms" : (ms > 0 ? "+\(ms) ms" : "\(ms) ms")
     }
 }
 
@@ -1341,6 +1454,9 @@ struct VideoLayerView: UIViewRepresentable {
         private var showSurfaceGrid = true
         private var surfaceSafeInsets = ControlSafeInsets.zero
         private var occupiedControlFrames: [CGRect] = []
+        #if DEBUG
+        private var lastLoggedTrackpadRect: CGRect?
+        #endif
         private var surfaceAdmission = SurfaceTouchAdmission<ObjectIdentifier>()
         private var pinchTarget = ReceiverGestureTarget.viewport
         private var rotateTarget = ReceiverGestureTarget.viewport
@@ -1739,13 +1855,32 @@ struct VideoLayerView: UIViewRepresentable {
                 return .invalid
             }
             if !videoEnabled {
+                let portrait = bounds.height > bounds.width
                 let rect = VideoOffSurfaceGeometry.interactionRect(
                     container: bounds,
                     safeInsets: surfaceSafeInsets,
                     occupiedControlFrames: occupiedControlFrames,
-                    portrait: bounds.height > bounds.width,
+                    portrait: portrait,
                     inputMode: pointerEngine.inputMode,
                     remoteAspectSize: video)
+                #if DEBUG
+                // TRACKPAD REGRESSION forensics: this is the ONE call site
+                // that decides between Trackpad's tall free-form portrait
+                // rect and Direct Touch's aspect-locked one (see
+                // `VideoOffSurfaceGeometry.interactionRect`'s `inputMode ==
+                // .direct` branch). Logging every input here on the next
+                // physical retest tells us immediately whether a wide/
+                // landscape rect in Portrait+Video-Off+Trackpad comes from
+                // `inputMode` unexpectedly reading `.direct`, from
+                // `portrait` being wrong, or from `occupiedControlFrames`
+                // being stale/empty — this file's own logic was audited and
+                // reads correctly for the intended Trackpad case.
+                if rect != lastLoggedTrackpadRect {
+                    lastLoggedTrackpadRect = rect
+                    Log.info("trackpadGeometry: portrait=\(portrait) inputMode=\(pointerEngine.inputMode) "
+                        + "bounds=\(bounds) occupied=\(occupiedControlFrames.count) rect=\(rect)")
+                }
+                #endif
                 return RemoteViewportTransform(
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
                     displayedRect: rect)

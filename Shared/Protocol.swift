@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 11
+    static let version = 12
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -61,6 +61,14 @@ enum WireProtocol {
     /// not expose cross-process magnify/rotate event payloads.
     static let nativeAppGestureWireVersion = 10
 
+    /// Protocol version that introduced Mac system-audio capture: the
+    /// `audioRequest`/`audioState` control messages and the binary audio
+    /// media frame (section 5A). A receiver MUST NOT send `audioRequest`,
+    /// and a sender MUST NOT emit audio media frames, when the peer is
+    /// below this version — there is no legacy audio fallback, the feature
+    /// simply stays off, exactly like `keyboard` below pv 4.
+    static let audioWireVersion = 12
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -87,6 +95,8 @@ enum WireMessage {
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
     static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
     static let nativeAppGesture = "nativeAppGesture" // receiver -> Mac: continuous magnify/rotate lifecycle
+    static let audioRequest = "audioRequest"         // receiver -> Mac: request system-audio capture on/off
+    static let audioState = "audioState"             // Mac -> receiver: confirmed audio production state
     static let unpair = "unpair"
 }
 
@@ -233,5 +243,20 @@ struct VideoStateUpdate: Equatable {
             width = nil
             height = nil
         }
+    }
+}
+
+
+struct AudioStateUpdate: Equatable {
+    let enabled: Bool
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.audioState,
+              let enabled = message["enabled"] as? Bool else { return nil }
+        self.enabled = enabled
     }
 }
