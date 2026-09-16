@@ -135,4 +135,46 @@ final class AutoConnectPolicyTests: XCTestCase {
         XCTAssertTrue(policy.isCurrent(attempt))
         XCTAssertFalse(policy.isPairing([receiver]))
     }
+
+    // MARK: - Auto-Reconnect preference (Settings toggle)
+
+    func testAutoReconnectEnabledByDefault() {
+        let policy = AutoConnectPolicy()
+        XCTAssertTrue(policy.autoReconnectEnabled)
+    }
+
+    func testDisablingAutoReconnectSuppressesAutomaticAttempts() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.setAutoReconnectEnabled(false)
+
+        XCTAssertNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
+    }
+
+    func testDisablingAutoReconnectDoesNotAffectExplicitAttempts() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.setAutoReconnectEnabled(false)
+
+        let attempt = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver])
+        XCTAssertTrue(policy.isCurrent(attempt))
+    }
+
+    func testDisablingAutoReconnectDoesNotAffectContinuationAttempts() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.setAutoReconnectEnabled(false)
+
+        let attempt = policy.beginContinuationAttempt(logicalID: receiver)
+        XCTAssertTrue(policy.isCurrent(attempt))
+    }
+
+    func testReenablingAutoReconnectRestoresAutomaticAttempts() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.setAutoReconnectEnabled(false)
+        XCTAssertNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
+
+        policy.setAutoReconnectEnabled(true)
+        XCTAssertNotNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
+    }
 }

@@ -509,6 +509,14 @@ struct IdleView: View {
                 }
             }
 
+            Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
+                .toggleStyle(.switch)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: 420)
+                .background(Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 12))
+
             VStack(alignment: .leading, spacing: 14) {
                 Label("Plug in the USB cable and start the Mac app",
                       systemImage: "cable.connector")
@@ -741,6 +749,14 @@ struct SettingsView: View {
                         LabeledContent("Stream",
                                        value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
                     }
+                }
+
+                Section {
+                    Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen.")
                 }
 
                 Section("Display") {

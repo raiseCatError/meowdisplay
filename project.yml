@@ -172,6 +172,7 @@ targets:
       - Mac/CaptureLifecycle.swift
       - Mac/TransportSafety.swift
       - Mac/AutoConnectPolicy.swift
+      - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
       - Mac/CanonicalRuntimeStatus.swift
       - Mac/SettingsCategory.swift

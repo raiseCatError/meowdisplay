@@ -355,6 +355,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var everConnected = false
     private var disconnectedSince: Date?
     private let disconnectGraceSeconds: TimeInterval = 10
+    /// Auto-Reconnect preference (Mac Sender's own local Settings toggle).
+    /// `queue`-confined like the rest of this class's connection state; set
+    /// by `SenderController` at session creation and live-updated by
+    /// `applyAutoReconnectPreferenceChange` when the user flips the toggle.
+    /// Gates only `scheduleReconnect`'s automatic in-place retry — see
+    /// `ReconnectPolicy`.
+    var autoReconnectEnabled = true
 
     private var lastHello: PhoneInfo?
     private struct ApplicationReadySession {
@@ -1747,8 +1754,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
             Log.info("manual reconnect requested")
+            Log.info("reconnectPolicy: manualAttempt allowed autoReconnect=\(self.autoReconnectEnabled)")
             self.disconnectedSince = Date()   // fresh grace window
-            self.scheduleReconnect()
+            self.scheduleReconnect(automatic: false)
+        }
+    }
+
+    /// The user flipped the Auto-Reconnect toggle. A currently connected
+    /// session is left running untouched either way. A session in this
+    /// sender's own in-place retry window (already connected once, now
+    /// mid-grace after a loss) is ended immediately when the preference goes
+    /// off, so an already-scheduled automatic redial cannot reconnect behind
+    /// the user's back — `SenderController` leaves it out of `sessions`
+    /// afterward, so the device stays reachable for a manual Connect.
+    func applyAutoReconnectPreferenceChange(enabled: Bool) {
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.autoReconnectEnabled = enabled
+            guard !enabled, self.everConnected, !self.connectionReady,
+                  self.disconnectedSince != nil else { return }
+            // `reportGone` only flips `stopped` asynchronously (it hops
+            // through SenderController on the main actor), so a redial timer
+            // already queued by `scheduleReconnect` could otherwise still
+            // fire and connect in that window. Bumping the generation here,
+            // synchronously on this same queue, invalidates it immediately.
+            self.dialGeneration += 1
+            Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled peer=\(self.endpointName)")
+            self.reportGone("auto-reconnect disabled — ending session")
         }
     }
 
@@ -2628,12 +2660,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func scheduleReconnect() {
+    private func scheduleReconnect(automatic: Bool = true) {
         guard !stopped else { return }
         // Same reasoning as switchTransport/migrate: the connection this
         // session held input on is gone, so nothing may stay held across
         // the reconnect attempt.
         inputInjector?.cancelActiveInput()
+        if automatic, !ReconnectPolicy.automaticRetryAllowed(
+            autoReconnectEnabled: autoReconnectEnabled, everConnected: everConnected) {
+            Log.info("reconnectPolicy: automaticRetry suppressed reason=disabled peer=\(endpointName)")
+            reportGone("auto-reconnect disabled — not retrying")
+            return
+        }
         if everConnected {
             if let since = disconnectedSince {
                 if Date().timeIntervalSince(since) > disconnectGraceSeconds {

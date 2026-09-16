@@ -36,6 +36,17 @@ struct SystemSettingsView: View {
                 WakeForNetworkAccessRow()
             }
 
+            Section {
+                Toggle("Auto-Reconnect", isOn: $controller.autoReconnectEnabled)
+                Text("Automatically connect and reconnect to paired devices when available.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Connection")
+            } footer: {
+                Text("Turning this off only stops automatic connecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected.")
+            }
+
             Section("App Behavior") {
                 VStack(alignment: .leading, spacing: 4) {
                     Picker("Show app in", selection: $controller.presentation) {

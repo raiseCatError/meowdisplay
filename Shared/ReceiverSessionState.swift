@@ -192,7 +192,15 @@ struct ReceiverSessionState: Equatable {
         return true
     }
 
-    mutating func connectionLost(reason: ReceiverSessionLossReason) -> Bool {
+    /// `autoReconnectPreferenceEnabled` is the user-facing Auto-Reconnect
+    /// Settings/Home toggle — distinct from `automaticReconnectEnabled`
+    /// above, which tracks explicit-disconnect suppression for the current
+    /// session. The two must stay separate: turning the preference off must
+    /// not look like an explicit disconnect (Forget/trust semantics unaffected,
+    /// and re-enabling the preference does not need a fresh manual Connect
+    /// the way clearing explicit-disconnect suppression does).
+    mutating func connectionLost(reason: ReceiverSessionLossReason,
+                                 autoReconnectPreferenceEnabled: Bool = true) -> Bool {
         // An already-terminal state is not re-entered by a late callback, and
         // a duplicate loss report (a dying socket reports both a failed state
         // and an EOF) must not restart the run or orphan its pending retry.
@@ -215,7 +223,7 @@ struct ReceiverSessionState: Equatable {
             reconnectAttempt = 0
             phase = .disconnected
         case .transportLost, .listenerFailed:
-            if hasEverConnected, automaticReconnectEnabled {
+            if hasEverConnected, automaticReconnectEnabled, autoReconnectPreferenceEnabled {
                 reconnectAttempt = 0
                 phase = .reconnecting
             } else {

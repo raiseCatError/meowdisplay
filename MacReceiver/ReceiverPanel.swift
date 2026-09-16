@@ -88,6 +88,10 @@ private struct ReceiverStatusSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+            Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
+            Text("Automatically reconnect to paired devices after connection interruptions. This Mac keeps listening for a connection either way.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

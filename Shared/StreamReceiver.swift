@@ -110,6 +110,28 @@ final class StreamReceiver: ObservableObject {
     }
     /// The one timer driving automatic recovery — never a second one.
     private var reconnectTimer: DispatchSourceTimer?
+    /// Auto-Reconnect preference (Settings/Home toggle) — this receiver's own
+    /// local setting, independent of the paired Mac's and not synced with
+    /// it. Default true preserves existing behavior for installs with no
+    /// stored value. Gates only the automatic recovery loop entered from
+    /// `connectionLost`'s transport-loss case (see `ReceiverSessionState`);
+    /// `requestConnect()`/`reconnectNow()` — manual Connect/Reconnect, and
+    /// Wake & Connect on top of them — always bypass it. iOS's Home screen
+    /// and Settings both bind this same published property, so the two stay
+    /// in sync with no separate storage.
+    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: "autoReconnectEnabled") == nil
+        || UserDefaults.standard.bool(forKey: "autoReconnectEnabled") {
+        didSet {
+            guard autoReconnectEnabled != oldValue else { return }
+            UserDefaults.standard.set(autoReconnectEnabled, forKey: "autoReconnectEnabled")
+            Log.info("reconnectPolicy: autoReconnect enabled=\(autoReconnectEnabled)")
+            if autoReconnectEnabled {
+                Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
+            } else {
+                queue.async { [weak self] in self?.cancelAutomaticRecoveryIfNeeded() }
+            }
+        }
+    }
     /// Set when the peer told us the two apps are version-incompatible. The
     /// live session is left alone; the flag only reclassifies the eventual
     /// loss so recovery never loops against a peer that cannot work with us.
@@ -3249,6 +3271,18 @@ final class StreamReceiver: ObservableObject {
         reconnectTimer = nil
     }
 
+    /// Auto-Reconnect turned off mid-recovery: settle into the stable
+    /// "Connection Lost" state immediately rather than let an already-
+    /// scheduled automatic attempt keep retrying behind the user's back.
+    /// Manual Reconnect remains available from here, exactly as after normal
+    /// attempt exhaustion. Must run on `queue`.
+    private func cancelAutomaticRecoveryIfNeeded() {
+        guard sessionState.phase == .reconnecting else { return }
+        Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled")
+        mutateSession { $0.exhaustRecovery() }
+        setStatus("Connection lost")
+    }
+
     /// One automatic recovery step. The Mac is the dialing side (it runs its
     /// own bounded redial loop), so all this side can act on is its own
     /// listening half — re-arm it if it is unhealthy and wait out the
@@ -3414,7 +3448,8 @@ final class StreamReceiver: ObservableObject {
             let wasConnected = sessionState.phase == .connected
                 || sessionState.phase == .paused
             Log.info("reconnectDebug: lost reason=\(classified.rawValue) oldGeneration=\(oldGeneration)")
-            mutateSession { $0.connectionLost(reason: classified) }
+            mutateSession { $0.connectionLost(reason: classified,
+                                              autoReconnectPreferenceEnabled: autoReconnectEnabled) }
             if sessionState.phase != .reconnecting {
                 setStatus(wasConnected && classified != .explicitDisconnect
             ? "Connection lost" : "Waiting for Mac")

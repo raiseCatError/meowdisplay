@@ -14,9 +14,18 @@ struct AutoConnectPolicy {
     private(set) var pairingIdentifiers: Set<String> = []
     private var attempts: [String: UInt64] = [:]
     private var nextGeneration: UInt64 = 0
+    /// The Auto-Reconnect preference (Settings toggle). Gates only automatic
+    /// attempts — `beginExplicitAttempt`/`beginContinuationAttempt` (manual
+    /// Connect/Reconnect, Wake & Connect, settings rebuilds of an owned
+    /// session) are unaffected, matching the app-wide manual/automatic split.
+    private(set) var autoReconnectEnabled = true
 
     init(knownIdentifiers: Set<String> = []) {
         self.knownIdentifiers = knownIdentifiers
+    }
+
+    mutating func setAutoReconnectEnabled(_ enabled: Bool) {
+        autoReconnectEnabled = enabled
     }
 
     mutating func remember(_ identifiers: Set<String>) {
@@ -58,7 +67,8 @@ struct AutoConnectPolicy {
         identifiers: Set<String>,
         hasSessionOwner: Bool
     ) -> Attempt? {
-        guard !hasSessionOwner,
+        guard autoReconnectEnabled,
+              !hasSessionOwner,
               attempts[logicalID] == nil,
               !knownIdentifiers.isDisjoint(with: identifiers),
               pairingIdentifiers.isDisjoint(with: identifiers),

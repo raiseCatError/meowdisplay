@@ -266,6 +266,52 @@ final class ReceiverSessionStateTests: XCTestCase {
         XCTAssertNil(state.beginReconnectAttempt())
     }
 
+    // MARK: - Auto-Reconnect preference (Settings/Home toggle)
+
+    func testAutoReconnectPreferenceOnRecoversNormally() {
+        var state = connectedSession()
+        XCTAssertTrue(state.connectionLost(reason: .transportLost, autoReconnectPreferenceEnabled: true))
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertNotNil(state.beginReconnectAttempt())
+    }
+
+    func testAutoReconnectPreferenceOffGoesStraightToDisconnected() {
+        var state = connectedSession()
+        XCTAssertTrue(state.connectionLost(reason: .transportLost, autoReconnectPreferenceEnabled: false))
+        XCTAssertEqual(state.phase, .disconnected)
+        XCTAssertNil(state.beginReconnectAttempt())
+        XCTAssertNil(state.interruption)
+    }
+
+    func testAutoReconnectPreferenceOffStillOffersManualReconnect() {
+        var state = connectedSession()
+        _ = state.connectionLost(reason: .transportLost, autoReconnectPreferenceEnabled: false)
+        XCTAssertTrue(state.requestManualReconnect())
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertNotNil(state.beginReconnectAttempt())
+    }
+
+    /// Explicit-disconnect suppression and the Auto-Reconnect preference are
+    /// separate concepts — a disabled preference must not read as, or be
+    /// confused with, an explicit Disconnect.
+    func testExplicitDisconnectIsUnaffectedByTheAutoReconnectPreference() {
+        var state = connectedSession()
+        XCTAssertTrue(state.connectionLost(reason: .explicitDisconnect, autoReconnectPreferenceEnabled: false))
+        XCTAssertEqual(state.phase, .disconnected)
+        XCTAssertFalse(state.automaticReconnectEnabled)
+    }
+
+    func testDisablingAutoReconnectMidRunSettlesLikeExhaustedRecovery() {
+        var state = connectedSession()
+        _ = state.connectionLost(reason: .transportLost)
+        XCTAssertEqual(state.phase, .reconnecting)
+        // StreamReceiver.cancelAutomaticRecoveryIfNeeded reuses exactly this
+        // transition when the preference flips off mid-run.
+        XCTAssertTrue(state.exhaustRecovery())
+        XCTAssertEqual(state.phase, .reconnectFailed)
+        XCTAssertTrue(state.interruption!.offersManualReconnect)
+    }
+
     // MARK: - Pause stays distinct from recovery
 
     func testPauseIsNotReconnectingAndStartsNoRecovery() {

@@ -410,9 +410,32 @@ final class SenderController: ObservableObject {
     }
     private let autoConnectEnabled = UserDefaults.standard.object(forKey: "autostart") == nil
         || UserDefaults.standard.bool(forKey: "autostart")
+    /// Auto-Reconnect (Settings toggle, System category): gates only
+    /// automatic connection attempts/retries — `AutoConnectPolicy.
+    /// beginAutomaticAttempt` (discovery/startup auto-connect),
+    /// `onPeerSleeping`'s automatic post-sleep reconnect, and each live
+    /// `MacSender`'s in-place retry after ordinary transport loss
+    /// (`ReconnectPolicy`). Explicit Connect/Reconnect/Wake & Connect always
+    /// bypass it. Default true preserves existing behavior for installs with
+    /// no stored value.
+    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: "autoReconnectEnabled") == nil
+        || UserDefaults.standard.bool(forKey: "autoReconnectEnabled") {
+        didSet {
+            guard autoReconnectEnabled != oldValue else { return }
+            UserDefaults.standard.set(autoReconnectEnabled, forKey: "autoReconnectEnabled")
+            Log.info("reconnectPolicy: autoReconnect enabled=\(autoReconnectEnabled)")
+            autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
+            sessions.forEach { $0.sender.applyAutoReconnectPreferenceChange(enabled: autoReconnectEnabled) }
+            if autoReconnectEnabled {
+                Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
+                scheduleAutoConnect()
+            }
+        }
+    }
 
     init() {
         _ = TrustStore.shared.ownIdentity()
+        autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1026,6 +1049,8 @@ final class SenderController: ObservableObject {
                 hasSessionOwner: hasOwner) else {
                 if autoConnectPolicy.isPairing(candidate.identifiers) {
                     Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
+                } else if !autoConnectPolicy.autoReconnectEnabled {
+                    Log.info("reconnectPolicy: automaticAttempt suppressed reason=disabled peer=\(candidate.logicalID)")
                 }
                 continue
             }
@@ -1308,6 +1333,7 @@ final class SenderController: ObservableObject {
                                awaitingWake: awaitingWake,
                                videoEnabled: videoEnabled,
                                mirrorDisplayUUID: mirrorDisplayUUID)
+        sender.autoReconnectEnabled = autoReconnectEnabled
         let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
                                     target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
@@ -1456,6 +1482,10 @@ final class SenderController: ObservableObject {
             let target = session.target
             Log.info("session \(session.id) asleep — display down, waiting for wake")
             self.end(session)
+            guard self.autoReconnectEnabled else {
+                Log.info("reconnectPolicy: automaticAttempt suppressed reason=disabled peer=\(session.logicalID)")
+                return
+            }
             self.connect(to: target, awaitingWake: true)
         }
         sender.onCaptureStoppedByUser = { [weak self, weak session] in
