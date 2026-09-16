@@ -1,7 +1,7 @@
 import Foundation
 
 /// Thread-safe generation gate separating a transport-level connection from
-/// a peer that has actually spoken the OpenDisplay application protocol.
+/// a peer that has actually spoken the MeowDisplay application protocol.
 final class AuthenticatedSessionState {
     private let lock = NSLock()
     private var generation: UInt64 = 0

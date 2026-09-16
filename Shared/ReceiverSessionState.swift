@@ -70,7 +70,7 @@ enum ReceiverSessionInterruption: Equatable {
 
     var message: String {
         switch self {
-        case .paused: return "Resume from OpenDisplay on your Mac."
+        case .paused: return "Resume from MeowDisplay on your Mac."
         case .reconnecting: return "Trying to restore the connection to your Mac."
         case .reconnectFailed: return "We couldn't restore the connection."
         case .unrecoverable: return "This Mac and this device can't work together yet."

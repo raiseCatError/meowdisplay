@@ -1,6 +1,6 @@
 import Foundation
 
-/// The physical route carrying an established OpenDisplay connection.
+/// The physical route carrying an established MeowDisplay connection.
 /// Discovery targets remain USB or Bonjour; AWDL and LAN are distinguished
 /// only after Network.framework has selected the live path.
 enum ConnectionRoute: String, Equatable {

@@ -8,7 +8,7 @@ struct MenuBarQuickView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("OpenDisplay")
+            Text("MeowDisplay")
                 .font(.headline)
 
             if controller.activeDisplayEntries.isEmpty {

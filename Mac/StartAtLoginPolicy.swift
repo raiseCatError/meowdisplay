@@ -28,7 +28,7 @@ enum StartAtLoginPolicy {
         case .enabled, .notRegistered:
             return nil
         case .requiresApproval:
-            return "Approve OpenDisplay in System Settings → General → Login Items to finish enabling Start at Login."
+            return "Approve MeowDisplay in System Settings → General → Login Items to finish enabling Start at Login."
         case .notFound:
             return "Start at Login is unavailable for this build."
         @unknown default:

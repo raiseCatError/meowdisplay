@@ -24,26 +24,26 @@ platform :mac do
   lane :build_release do
     build_notarized_mac_app(
       scheme:    "OpenSidecarMac",
-      bundle_id: "com.peetzweg.opensidecar.mac",
-      name:      "OpenDisplay"
+      bundle_id: "com.raisecaterror.meowdisplay.mac",
+      name:      "MeowDisplay"
     )
   end
 
   # The standalone receiver app (issue #241): same pipeline, own bundle id and
   # DMG. Its Developer ID profile must exist in the match repo (run
   # `fastlane match developer_id` once locally after adding the bundle id).
-  desc "Build the Developer ID-signed, notarized OpenDisplay Receiver app"
+  desc "Build the Developer ID-signed, notarized MeowDisplay Receiver app"
   lane :build_receiver_release do
     build_notarized_mac_app(
       scheme:    "OpenSidecarMacReceiver",
-      bundle_id: "com.peetzweg.opensidecar.mac.receiver",
-      name:      "OpenDisplay Receiver"
+      bundle_id: "com.raisecaterror.meowdisplay.mac.receiver",
+      name:      "MeowDisplay Receiver"
     )
   end
 
   # Shared body of the two Mac lanes. `name` is the PRODUCT_NAME (the .app
   # basename); the DMG is named without spaces so release-asset URLs stay
-  # clean (`OpenDisplay.dmg`, `OpenDisplayReceiver.dmg`).
+  # clean (`MeowDisplay.dmg`, `MeowDisplayReceiver.dmg`).
   private_lane :build_notarized_mac_app do |options|
     scheme    = options[:scheme]
     bundle_id = options[:bundle_id]
@@ -62,13 +62,13 @@ platform :mac do
     )
     update_code_signing_settings(
       use_automatic_signing: false,
-      path:                  "OpenSidecar.xcodeproj",
+      path:                  "MeowDisplay.xcodeproj",
       code_sign_identity:    "Developer ID Application",
       profile_name:          "match Direct #{bundle_id} macos",
       targets:               [scheme]
     )
     build_mac_app(
-      project:          "OpenSidecar.xcodeproj",
+      project:          "MeowDisplay.xcodeproj",
       scheme:           scheme,
       configuration:    "Release",
       export_method:    "developer-id",
@@ -117,19 +117,19 @@ platform :ios do
     key = asc_api_key
     match(
       type:           "appstore",
-      app_identifier: "com.peetzweg.opensidecar.ios",
+      app_identifier: "com.raisecaterror.meowdisplay.ios",
       api_key:        key,
       readonly:       is_ci
     )
     update_code_signing_settings(
       use_automatic_signing: false,
-      path:                  "OpenSidecar.xcodeproj",
+      path:                  "MeowDisplay.xcodeproj",
       code_sign_identity:    "Apple Distribution",
-      profile_name:          "match AppStore com.peetzweg.opensidecar.ios",
+      profile_name:          "match AppStore com.raisecaterror.meowdisplay.ios",
       targets:               ["OpenSidecariOS"]
     )
     build_app(
-      project:          "OpenSidecar.xcodeproj",
+      project:          "MeowDisplay.xcodeproj",
       scheme:           "OpenSidecariOS",
       configuration:    "Release",
       export_method:    "app-store",
@@ -139,7 +139,7 @@ platform :ios do
     )
     upload_to_testflight(
       api_key:                           key,
-      app_identifier:                    "com.peetzweg.opensidecar.ios",
+      app_identifier:                    "com.raisecaterror.meowdisplay.ios",
       skip_waiting_for_build_processing: true
     )
   end

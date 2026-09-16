@@ -91,7 +91,7 @@ enum MacSettingsWindow {
                 contentRect: NSRect(x: 0, y: 0, width: 820, height: 600),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
-            w.title = "OpenDisplay Settings"
+            w.title = "MeowDisplay Settings"
             w.minSize = NSSize(width: 700, height: 500)
             w.contentView = NSHostingView(
                 rootView: MacSettingsView(controller: SenderController.shared,
@@ -702,7 +702,7 @@ final class SenderController: ObservableObject {
         if case .bonjour(let txt) = result.metadata,
            let raw = txt["pv"], let version = Int(raw),
            version < WireProtocol.securePairingWireVersion {
-            pairingMessage = "Update OpenDisplay on this device to pair securely"
+            pairingMessage = "Update MeowDisplay on this device to pair securely"
             return
         }
         guard let localID = TrustStore.shared.installID() else {

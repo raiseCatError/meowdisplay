@@ -30,7 +30,7 @@ struct SystemSettingsView: View {
                     "Local Network",
                     granted: !controller.discovered.isEmpty,
                     uncertain: controller.discovered.isEmpty,
-                    help: "Required for WiFi mode. If no device appears in the Devices list, allow OpenDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the OpenDisplay app open there.",
+                    help: "Required for WiFi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there.",
                     anchor: "Privacy_LocalNetwork"
                 )
                 WakeForNetworkAccessRow()

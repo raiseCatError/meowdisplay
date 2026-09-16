@@ -1,4 +1,4 @@
-// StreamReceiver — the listening half of OpenDisplay: receive H.264 over
+// StreamReceiver — the listening half of MeowDisplay: receive H.264 over
 // TCP and display it. Compiled into BOTH targets (see project.yml): it is
 // the iOS app's core, and the Mac app's receiver mode (issue #82) reuses it
 // unchanged to turn a spare Mac into a display.
@@ -509,7 +509,7 @@ final class StreamReceiver: ObservableObject {
     // needs an entitlement Apple gates behind approval and personal teams
     // can't get), so this is user-editable in Settings. The USB picker gets
     // the real name host-side via lockdownd regardless.
-    var serviceName = "OpenDisplay"
+    var serviceName = "MeowDisplay"
 
     // Platform identity, injected at init so this file stays UI-framework-free.
     /// "iPhone" / "iPad" / "Mac" — announced in the hello (the sender names
@@ -1514,7 +1514,7 @@ final class StreamReceiver: ObservableObject {
             }
             if macPV < WireProtocol.minSupportedPeer {
                 peerIsIncompatible = true
-                let msg = "The OpenDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenDisplay on your Mac to reconnect."
+                let msg = "The MeowDisplay app on your Mac is too old for this \(deviceKind) app. Update MeowDisplay on your Mac to reconnect."
                 DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
             }
             // Reassert this receiver's audio preference on every welcome —
@@ -1556,7 +1556,7 @@ final class StreamReceiver: ObservableObject {
             // Retrying cannot fix that, so the eventual loss is terminal.
             peerIsIncompatible = true
             let message = obj["message"] as? String
-                ?? "Update OpenDisplay from the App Store to keep using your second display."
+                ?? "Update MeowDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
             DispatchQueue.main.async { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
         case WireMessage.receiverUI:
@@ -2891,7 +2891,7 @@ final class StreamReceiver: ObservableObject {
             let url = dir.appendingPathComponent("audio-compare-received-decoded-aac.caf")
             do {
                 receiverDecodeDumpFile = try AVAudioFile(forWriting: url, settings: pcm.format.settings)
-                Log.info("audioTrace: opened receiver-local AAC decode dump \(url.path) — pull it from the Files app (On My iPhone/iPad → OpenDisplay) or Xcode's Devices window on iOS, or open directly on macOS")
+                Log.info("audioTrace: opened receiver-local AAC decode dump \(url.path) — pull it from the Files app (On My iPhone/iPad → MeowDisplay) or Xcode's Devices window on iOS, or open directly on macOS")
             } catch {
                 Log.info("audioTrace: ⚠️ could not open \(url.path) for writing: \(error)")
                 return
@@ -2919,7 +2919,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// iOS: the app's own Documents directory, so the dump is reachable
-    /// from the Files app (On My iPhone/iPad → OpenDisplay) without Xcode.
+    /// from the Files app (On My iPhone/iPad → MeowDisplay) without Xcode.
     /// macOS (the `OpenSidecarMacReceiver` test target): the same
     /// `Log.directory` the Mac sender's dumps already use, for one
     /// consistent place to look.

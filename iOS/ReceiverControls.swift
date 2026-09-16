@@ -985,7 +985,7 @@ struct AppGestureCommandsView: View {
                 Text("Experimental")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.orange)
-                Text("Some Mac apps use different shortcuts for zooming and rotating. Customize the commands OpenDisplay sends when App mode is selected.")
+                Text("Some Mac apps use different shortcuts for zooming and rotating. Customize the commands MeowDisplay sends when App mode is selected.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

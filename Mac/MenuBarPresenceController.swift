@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 
-/// Owns the single `NSStatusItem` for OpenDisplay's menu-bar presence.
+/// Owns the single `NSStatusItem` for MeowDisplay's menu-bar presence.
 ///
 /// Root cause of the bug this replaces: the menu-bar icon was previously a
 /// SwiftUI `MenuBarExtra(isInserted:)` scene, whose insertion is supposed to
@@ -77,7 +77,7 @@ final class MenuBarPresenceController: NSObject {
         // app logo — per the menu-bar status-item convention. Template mode
         // lets AppKit render it correctly in both light and dark menu bars.
         let name = controller.hasActiveDisplay ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle"
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "OpenDisplay")
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "MeowDisplay")
         image?.isTemplate = true
         statusItem?.button?.image = image
     }

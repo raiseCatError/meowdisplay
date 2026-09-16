@@ -118,7 +118,7 @@ actor AudioCaptureEncoder {
     /// decoupled from the network path entirely: opt in with
     /// `defaults write <bundle id from the `audioTrace: generation=` self-report line> audioDebugDump -bool YES`.
     /// Writes ADTS-framed AAC (playable directly — `afplay`/`ffprobe`/QuickTime
-    /// all understand it) to `~/Library/Logs/OpenDisplay/audio-debug-dump.aac`,
+    /// all understand it) to `~/Library/Logs/MeowDisplay/audio-debug-dump.aac`,
     /// capped at a few hundred packets (~a few seconds) so this can never grow
     /// into a standing recording. DEBUG-only; never runs in a Release build.
     private lazy var debugDumpEnabled = UserDefaults.standard.bool(forKey: "audioDebugDump")
@@ -566,8 +566,8 @@ actor AudioCaptureEncoder {
     /// for "nothing was wrong to report".
     ///
     /// FORENSIC NOTE: the first version of this hardcoded
-    /// `~/Library/Logs/OpenDisplay`, while `Log.swift` actually resolves to
-    /// `~/Library/Logs/<CFBundleName>` — `OpenDisplay Dev` for this
+    /// `~/Library/Logs/MeowDisplay`, while `Log.swift` actually resolves to
+    /// `~/Library/Logs/<CFBundleName>` — `MeowDisplay Dev` for this
     /// checkout's local Debug signing override. The dump silently wrote to
     /// (or failed silently trying to write to) a folder nobody was looking
     /// in, while `AVAudioFile`'s throwing initializer was swallowed by
@@ -788,7 +788,7 @@ actor AudioCaptureEncoder {
                 payloadLength: payload.count, sampleRate: sampleRate, channelCount: channelCount) else { return }
         if debugDumpHandle == nil {
             let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Logs/OpenDisplay", isDirectory: true)
+                .appendingPathComponent("Logs/MeowDisplay", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let url = dir.appendingPathComponent("audio-debug-dump.aac")
             FileManager.default.createFile(atPath: url.path, contents: nil)

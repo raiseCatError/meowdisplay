@@ -281,7 +281,7 @@ enum KeyboardTextFlags {
 /// tray can legitimately latch a modifier (`InputInjector.handleModifier`)
 /// that a subsequent click is supposed to carry (Cmd-click, Shift-click,
 /// …), tracked in `heldModifiers`. So every mouse event explicitly sets
-/// `.flags = heldModifiers.flags` — OpenDisplay's own intentionally-held
+/// `.flags = heldModifiers.flags` — MeowDisplay's own intentionally-held
 /// modifiers, exactly, never more (ambient/stale) and never less (a real
 /// latched one silently dropped).
 enum MouseEventFlags {}

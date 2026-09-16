@@ -14,15 +14,15 @@ import Foundation
 /// the *oldest* bytes and discard everything recent, which is backwards: when a
 /// report comes in, the useful window is what happened just before the problem.
 enum Log {
-    /// `~/Library/Logs/OpenDisplay`. The platform convention, and deliberately
+    /// `~/Library/Logs/MeowDisplay`. The platform convention, and deliberately
     /// not /tmp: macOS clears /tmp on reboot, and rebooting is the first thing
     /// someone tries before filing a bug, so a log there is gone exactly when
     /// it's wanted. Living here also means Console.app lists it under Log
     /// Reports without us doing anything.
     ///
-    /// The folder is named after the app: the sender logs to `OpenDisplay`,
+    /// The folder is named after the app: the sender logs to `MeowDisplay`,
     /// the receiver app (a separate bundle sharing this file) to
-    /// `OpenDisplay Receiver`, so running both on one Mac keeps two logs.
+    /// `MeowDisplay Receiver`, so running both on one Mac keeps two logs.
     /// Exposed so other DEBUG-only diagnostic writers (`AudioCaptureEncoder`'s
     /// PCM/AAC A/B dumps) resolve to the SAME folder this log file lives in,
     /// rather than an independently hardcoded path that can silently drift
@@ -32,7 +32,7 @@ enum Log {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
         let product = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? ""
-        let folder = product.hasPrefix("OpenDisplay") ? product : "OpenDisplay"
+        let folder = product.hasPrefix("MeowDisplay") ? product : "MeowDisplay"
         return library.appendingPathComponent("Logs/\(folder)", isDirectory: true)
     }()
 
@@ -259,6 +259,6 @@ final class RotatingLogFile {
     }
 
     private static func reportToStandardError(_ message: String) {
-        try? FileHandle.standardError.write(contentsOf: Data("OpenDisplay log: \(message)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("MeowDisplay log: \(message)\n".utf8))
     }
 }

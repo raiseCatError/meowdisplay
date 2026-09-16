@@ -32,7 +32,7 @@ jobs:
       - name: Run macOS tests
         run: |
           xcodebuild test \
-            -project OpenSidecar.xcodeproj \
+            -project MeowDisplay.xcodeproj \
             -scheme OpenSidecarMac \
             -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO \
@@ -45,7 +45,7 @@ jobs:
       - name: Build macOS receiver app
         run: |
           xcodebuild build \
-            -project OpenSidecar.xcodeproj \
+            -project MeowDisplay.xcodeproj \
             -scheme OpenSidecarMacReceiver \
             -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO \

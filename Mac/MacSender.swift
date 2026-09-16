@@ -195,7 +195,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // falls back to Automatic (today: SCShareableContent's first display).
     private let mirrorDisplayUUID: String?
     // Stable per-device serial for the virtual display, so macOS can tell
-    // multiple OpenDisplay monitors apart and persist their arrangement.
+    // multiple MeowDisplay monitors apart and persist their arrangement.
     private let displaySerial: UInt32
     // How far this device's identity has already moved off its base serial
     // and productID (identities macOS saved hostile state for are abandoned
@@ -917,8 +917,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // USB sessions can start before lockdown resolves the device name —
         // fall back to the kind from the hello rather than the generic label.
         let displayName = endpointName.hasPrefix("iPhone / iPad")
-            ? "OpenDisplay — \(info.kind)"
-            : "OpenDisplay — \(endpointName)"
+            ? "MeowDisplay — \(info.kind)"
+            : "MeowDisplay — \(endpointName)"
         // Keep one stable identity across rotations. Reconfiguration below
         // applies a new mode to the existing virtual monitor, so macOS keeps
         // its windows and arrangement attached to this physical device.
@@ -1016,7 +1016,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if sawPoisonedIdentity {
                 throw NSError(domain: "MacSender", code: 5, userInfo: [
                     NSLocalizedDescriptionKey: "saved display state in macOS is blocking "
-                        + "OpenDisplay's displays — log out and back in (or restart the Mac), then reconnect"])
+                        + "MeowDisplay's displays — log out and back in (or restart the Mac), then reconnect"])
             }
             throw identityError
         }
@@ -1218,7 +1218,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
         // one SCStream; audio's actual on/off is toggled later at runtime
         // via `stream.updateConfiguration` rather than tearing this stream
-        // down, and it MUST NOT pick up this Mac's own OpenDisplay audio
+        // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
         // (there is none today, but excluding it is the documented,
         // future-proof way to avoid a feedback loop).
         config.capturesAudio = desiredAudioEnabled
@@ -2602,7 +2602,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         helloContinuation?.resume(throwing: PairingError.invalidKey)
         helloContinuation = nil
         Task { @MainActor in
-            self.onTrustFailure?("OpenDisplay could not verify this device. Forget it and pair again if its identity was reset.")
+            self.onTrustFailure?("MeowDisplay could not verify this device. Forget it and pair again if its identity was reset.")
         }
     }
 
@@ -2659,7 +2659,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         self.dialRefused()
                         hint = self.awaitingWake
                             ? "\(self.endpointName) is asleep — reconnects when it wakes…"
-                            : "Device found — open the OpenDisplay app on it…"
+                            : "Device found — open the MeowDisplay app on it…"
                     default:
                         Log.info("usb dial failed: \(error)")
                         hint = "USB connection failed: \(error.localizedDescription)"
@@ -4036,8 +4036,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             "target": isMac ? "mac" : "ios",
             "store": isMac ? "https://opendisplay.app" : AppStore.updateURL.absoluteString,
             "message": isMac
-                ? "The OpenDisplay Receiver app on that Mac is too old for this Mac. Use Check for Updates… there to reconnect."
-                : "This \(kind) app is too old for this Mac. Update OpenDisplay from the App Store to reconnect.",
+                ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Use Check for Updates… there to reconnect."
+                : "This \(kind) app is too old for this Mac. Update MeowDisplay from the App Store to reconnect.",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let json = String(data: data, encoding: .utf8) {

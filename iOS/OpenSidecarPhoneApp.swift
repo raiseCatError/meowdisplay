@@ -492,7 +492,7 @@ struct IdleView: View {
                 .frame(width: 132)
 
             VStack(spacing: 6) {
-                Text("OpenDisplay")
+                Text("MeowDisplay")
                     .font(.largeTitle.bold())
                 HStack(spacing: 8) {
                     Circle()
@@ -622,7 +622,7 @@ struct IdleView: View {
 
 // MARK: - First-run onboarding (the Mac app is required to connect)
 
-/// Shown on first launch / while the device has never connected: OpenDisplay
+/// Shown on first launch / while the device has never connected: MeowDisplay
 /// is two apps, and the iOS side is useless without the Mac app running.
 struct OnboardingView: View {
     @Environment(\.dismiss) private var dismiss
@@ -641,7 +641,7 @@ struct OnboardingView: View {
                         Text("One more app to go")
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
-                        Text("OpenDisplay turns this \(deviceKind) into a second screen for your Mac — but it needs the **OpenDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
+                        Text("MeowDisplay turns this \(deviceKind) into a second screen for your Mac — but it needs the **MeowDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -649,7 +649,7 @@ struct OnboardingView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
-                        Label("Install the OpenDisplay Mac app on your Mac", systemImage: "1.circle.fill")
+                        Label("Install the MeowDisplay Mac app on your Mac", systemImage: "1.circle.fill")
                         Label("Connect the \(deviceKind) by USB, or join the same WiFi", systemImage: "2.circle.fill")
                         Label("Keep this app open — streaming starts on its own", systemImage: "3.circle.fill")
                     }
@@ -1021,7 +1021,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Button("Open iOS Settings for OpenDisplay") {
+                    Button("Open iOS Settings for MeowDisplay") {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
                         }
@@ -1029,7 +1029,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Permissions")
                 } footer: {
-                    Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → OpenDisplay. USB mode works without it.")
+                    Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it.")
                 }
 
                 Section {
@@ -1091,7 +1091,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Developer — Audio Diagnostics")
                 } footer: {
-                    Text("PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this \(deviceKind) and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My \(deviceKind) → OpenDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change.")
+                    Text("PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this \(deviceKind) and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My \(deviceKind) → MeowDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change.")
                 }
                 #endif
 
@@ -1130,7 +1130,7 @@ struct SettingsView: View {
                         Label("Get the Mac app", systemImage: "arrow.down.circle")
                     }
                 } footer: {
-                    Text("OpenDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet.")
+                    Text("MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet.")
                 }
 
                 Section("About") {
@@ -1143,7 +1143,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            .navigationTitle("OpenDisplay")
+            .navigationTitle("MeowDisplay")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

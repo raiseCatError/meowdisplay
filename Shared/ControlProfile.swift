@@ -443,7 +443,7 @@ extension FunctionTrayProfile {
         let commandShift = ModifierChord([.command, .shift])
         // Two default visual clusters: an app-level zoom group (asks the
         // Mac's foreground app to zoom its own content via the standard
-        // ⌘+/⌘− shortcut — entirely separate from OpenDisplay's own local
+        // ⌘+/⌘− shortcut — entirely separate from MeowDisplay's own local
         // two-finger viewport pinch/zoom, which never touches this) and an
         // edit group. Both are just `group` values — nothing about
         // `FunctionTrayProfile` itself knows "zoom" or "edit".

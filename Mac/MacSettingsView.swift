@@ -37,15 +37,15 @@ struct MacSettingsView: View {
                 Button(role: .destructive) {
                     NSApp.terminate(nil)
                 } label: {
-                    Label("Quit OpenDisplay", systemImage: "power")
+                    Label("Quit MeowDisplay", systemImage: "power")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .help("Quit OpenDisplay entirely — equivalent to ⌘Q. Closing just this window keeps MEOW and any active stream running.")
-                .accessibilityLabel("Quit OpenDisplay")
+                .help("Quit MeowDisplay entirely — equivalent to ⌘Q. Closing just this window keeps MEOW and any active stream running.")
+                .accessibilityLabel("Quit MeowDisplay")
                 .accessibilityHint("Terminates the application, ending any active connection.")
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)

@@ -29,7 +29,7 @@
 		<string>_opendisplay-mac-pair._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>OpenDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
+	<string>MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUEnableAutomaticChecks</key>
