@@ -358,6 +358,10 @@ final class SenderController: ObservableObject {
     }
 
     private var browser: NWBrowser?
+    // Last receiver-originated Connect token handled per peer id, so a
+    // browse re-fire with the same still-published token (mDNS is noisy)
+    // doesn't redial a session that's already coming up.
+    private var handledConnectRequestTokens: [String: String] = [:]
     private var receiverPairingBrowser: NWBrowser?
     private var receiverPairingResults: [NWBrowser.Result] = []
     private var pairingListener: NWListener?
@@ -455,6 +459,7 @@ final class SenderController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.discovered = Array(results)
+                self.handleReceiverConnectRequests(in: self.discovered)
                 self.failoverPendingSessions()
                 self.endSessionsWhoseServiceVanished()
                 self.scheduleAutoConnect()
@@ -571,6 +576,41 @@ final class SenderController: ObservableObject {
 
     func isPaired(_ result: NWBrowser.Result) -> Bool {
         txtID(of: result).map { TrustStore.shared.hasPin(peerID: $0) } ?? false
+    }
+
+    private func connectRequestToken(of result: NWBrowser.Result) -> String? {
+        if case .bonjour(let txt) = result.metadata { return txt["cr"] }
+        return nil
+    }
+
+    /// Handles a trusted receiver's explicit Connect tap (see
+    /// `StreamReceiver.requestConnect`). The token itself proves nothing —
+    /// it's discovery metadata, as unauthenticated as the rest of the
+    /// Bonjour TXT record — so this only ever funnels into the same
+    /// `connect(to:userInitiated:)` a Mac-side Connect button uses. That
+    /// path checks the peer against TrustStore's pinned identifiers before
+    /// dialing, and the dial itself still runs full pinned mutual TLS + the
+    /// MEOW hello/welcome handshake, so a spoofed or replayed token can, at
+    /// worst, provoke a dial that then fails trust/TLS — it can never skip
+    /// authentication or connect to the wrong device.
+    private func handleReceiverConnectRequests(in results: [NWBrowser.Result]) {
+        for result in results {
+            guard let token = connectRequestToken(of: result) else { continue }
+            guard let peerID = txtID(of: result) else { continue }
+            guard handledConnectRequestTokens[peerID] != token else { continue }
+            handledConnectRequestTokens[peerID] = token
+            guard isPaired(result) else {
+                Log.info("connectDebug: receiverConnectRequestRejected reason=untrustedPeer")
+                continue
+            }
+            Log.info("connectDebug: receiverConnectRequestAccepted peer=\(peerID)")
+            let target = ConnectionTarget.wifi(result)
+            if let existing = session(for: target.sessionID), !existing.failed {
+                Log.info("connectDebug: senderStartRequested peer=\(peerID) alreadyConnecting=true")
+                continue
+            }
+            connect(to: target, userInitiated: true)
+        }
     }
 
     private func secureWiFiTransport(for result: NWBrowser.Result,
@@ -1172,6 +1212,9 @@ final class SenderController: ObservableObject {
         let targetIdentifiers = identifiers(for: target)
         let attempt: AutoConnectPolicy.Attempt
         if userInitiated {
+            if !autoConnectPolicy.suppressedIdentifiers.isDisjoint(with: targetIdentifiers) {
+                Log.info("connectDebug: explicitConnectClearedSuppression peer=\(logicalID)")
+            }
             attempt = autoConnectPolicy.beginExplicitAttempt(
                 logicalID: logicalID, identifiers: targetIdentifiers)
             persistKnownIdentifiers()
@@ -1467,7 +1510,9 @@ final class SenderController: ObservableObject {
 
     /// User-initiated disconnect: also opt the device out of auto-connect.
     func disconnect(_ session: DeviceSession) {
+        Log.info("connectDebug: explicitDisconnect peer=\(session.logicalID)")
         autoConnectPolicy.suppress(identifiers(for: session))
+        Log.info("connectDebug: reconnectSuppressed peer=\(session.logicalID)")
         end(session)
     }
 

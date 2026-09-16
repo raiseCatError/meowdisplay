@@ -1938,9 +1938,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func connect() {
         guard !stopped else { return }
+        Log.info("connectDebug: senderStartRequested peer=\(endpointName)")
         switch transport {
-        case .tcp(let endpoint, let tls): connectTCP(endpoint, tls: tls)
-        case .usb(let udid, let port): connectUSB(udid: udid, port: port)
+        case .tcp(let endpoint, let tls):
+            Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp")
+            connectTCP(endpoint, tls: tls)
+        case .usb(let udid, let port):
+            Log.info("connectDebug: dialStarted peer=\(endpointName) route=usb")
+            connectUSB(udid: udid, port: port)
         }
     }
 
@@ -1951,6 +1956,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         activeConnectionGeneration = authenticatedSession.beginTransport()
         Log.info("sessionDebug: generation=\(activeConnectionGeneration)")
         Log.info("sessionDebug: tlsReady")
+        Log.info("connectDebug: tlsReady peer=\(endpointName)")
+        Log.info("connectDebug: authenticated peer=\(endpointName) generation=\(activeConnectionGeneration)")
+        Log.info("connectDebug: connected peer=\(endpointName)")
         connectionReady = true
         cursorSeq = 0   // per-session; the receiver rewound its floor with the connection
         consecutiveRefusals = 0
@@ -2401,14 +2409,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if everConnected {
             if let since = disconnectedSince {
                 if Date().timeIntervalSince(since) > disconnectGraceSeconds {
+                    Log.info("connectDebug: lost peer=\(endpointName) reason=graceExpired")
                     reportGone("device gone for >\(Int(disconnectGraceSeconds))s — ending session")
                     return
                 }
             } else {
                 disconnectedSince = Date()
+                Log.info("connectDebug: lost peer=\(endpointName) reason=transportDropped")
                 Task { await status("Connection lost — retrying for \(Int(disconnectGraceSeconds))s…") }
             }
         }
+        Log.info("connectDebug: automaticRetry peer=\(endpointName)")
         invalidateApplicationSession(reason: "reconnectScheduled")
         // Whatever this session rode is gone; deciding to redial means it is
         // an ordinary reconnecting session now. A stale direct-link flag here

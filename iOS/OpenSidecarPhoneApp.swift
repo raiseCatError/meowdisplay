@@ -531,11 +531,13 @@ struct IdleView: View {
                                     // paired-but-not-currently-connected Mac
                                     // that is visible right now must offer a
                                     // way back in rather than a dead-end
-                                    // "Paired" label. This reuses the same
-                                    // canonical reconnect path the Reconnect
-                                    // button uses — no separate Connect
-                                    // protocol.
-                                    Button("Connect") { receiver.reconnectNow() }
+                                    // "Paired" label. A disconnected Mac is
+                                    // never dialing out on its own, so this
+                                    // can't just rearm our own listener
+                                    // (reconnectNow) — it asks the Mac,
+                                    // which is always the dialer, to
+                                    // actually start a session for us.
+                                    Button("Connect") { receiver.requestConnect() }
                                         .buttonStyle(.borderedProminent)
                                 }
                             } else {

@@ -318,6 +318,15 @@ final class StreamReceiver: ObservableObject {
     private var listener: NWListener?
     private var tlsListener: NWListener?
     private var pairingListener: NWListener?
+    // Receiver-originated Connect (see connectDebug): a short-lived token
+    // published in the `_opensidecar._tcp` TXT record. The Mac already
+    // browses that service continuously (it's how "Paired · Nearby" is
+    // known), so this rides the existing discovery channel instead of
+    // opening a new one. It carries no authority of its own — the Mac only
+    // acts on it for an already-trusted/pinned peer, and the resulting
+    // connection still runs the full pinned-TLS + hello handshake.
+    private var connectRequestToken: String?
+    private var connectRequestClearWorkItem: DispatchWorkItem?
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
     private var mediaSuppressedForPairing = false
@@ -504,6 +513,7 @@ final class StreamReceiver: ObservableObject {
         var txt = NWTXTRecord()
         txt["id"] = Self.installID
         txt["pv"] = String(WireProtocol.version)   // issue #132
+        if let connectRequestToken { txt["cr"] = connectRequestToken }
         return NWListener.Service(name: serviceName, type: "_opensidecar._tcp",
                                   domain: nil, txtRecord: txt)
     }
@@ -3243,6 +3253,43 @@ final class StreamReceiver: ObservableObject {
     /// The user tapped Reconnect on the Connection Lost presentation. Runs
     /// one clean recovery run through exactly the same path as automatic
     /// recovery — no second flow, no stacked attempts.
+    /// Explicit receiver-originated Connect: the trusted, paired Mac is
+    /// currently disconnected (e.g. the user pressed Disconnect on the Mac,
+    /// or the Mac's session died and its reconnect grace expired), so there
+    /// is no live connection this side can rearm — the Mac is always the
+    /// dialer. This asks the Mac to actually dial by publishing a one-shot
+    /// token on the existing `_opensidecar._tcp` Bonjour advertisement the
+    /// Mac already browses; see `signalConnectRequest` and the Mac-side
+    /// `receiverConnectRequest` handling in OpenSidecarMacApp.
+    func requestConnect() {
+        queue.async {
+            Log.info("connectDebug: receiverConnectRequest peer=local")
+            self.cancelReconnect()
+            self.peerIsIncompatible = false
+            self.mutateSession { $0.requestManualReconnect() }
+            self.ensureTLSListening()
+            self.restartListener()
+            self.signalConnectRequest()
+        }
+    }
+
+    /// Publishes a fresh one-shot token in the advertised TXT record, then
+    /// clears it after a short window so a stale token can't re-trigger a
+    /// connect on a later, unrelated browse update.
+    private func signalConnectRequest() {
+        let token = UUID().uuidString
+        connectRequestToken = token
+        connectRequestClearWorkItem?.cancel()
+        if let tlsListener { tlsListener.service = advertisedService }
+        let clear = DispatchWorkItem { [weak self] in
+            guard let self, self.connectRequestToken == token else { return }
+            self.connectRequestToken = nil
+            if let tlsListener = self.tlsListener { tlsListener.service = self.advertisedService }
+        }
+        connectRequestClearWorkItem = clear
+        queue.asyncAfter(deadline: .now() + 8.0, execute: clear)
+    }
+
     func reconnectNow() {
         queue.async {
             guard self.sessionState.phase == .reconnectFailed
