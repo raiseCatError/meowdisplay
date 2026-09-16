@@ -172,7 +172,9 @@ targets:
       - Mac/CaptureLifecycle.swift
       - Mac/TransportSafety.swift
       - Mac/AutoConnectPolicy.swift
+      - Mac/RouteOverrides.swift
       - Shared/ConnectionRoute.swift
+      - Shared/RemoteEndpointStore.swift
       - Shared/StreamListenerRestartState.swift
       - Shared/ReceiverSessionState.swift
       - Shared/DisplayState.swift

@@ -95,6 +95,7 @@ enum MainWindow {
 enum ConnectionTarget: Hashable {
     case usb(udid: String?)           // wired via built-in usbmuxd; nil = first device
     case wifi(NWBrowser.Result)       // discovered via Bonjour
+    case remote(peerID: String)       // reached over Tailscale via a persisted endpoint hint
 
     /// Stable identity for sessions and persistence — survives Bonjour
     /// re-discovery (fresh NWBrowser.Result) and USB replugs (new DeviceID).
@@ -104,6 +105,7 @@ enum ConnectionTarget: Hashable {
         case .wifi(let result):
             if case .service(let name, _, _, _) = result.endpoint { return "wifi:\(name)" }
             return "wifi:unknown"
+        case .remote(let peerID): return "remote:\(peerID)"
         }
     }
 }
@@ -339,6 +341,9 @@ final class SenderController: ObservableObject {
             self.failover(detachedUDIDs: detached)
             self.scheduleAutoConnect()
         }
+        #if DEBUG
+        RouteOverrides.shared.onChange = { [weak self] in self?.enforceRouteOverrides() }
+        #endif
     }
 
     private func startBrowsing() {
@@ -467,6 +472,31 @@ final class SenderController: ObservableObject {
               let pin = TrustStore.shared.pin(peerID: peerID),
               let identity = TrustStore.shared.ownIdentity() else { return nil }
         return .tcp(result.endpoint,
+                    tls: TLSSessionConfig(identity: identity,
+                                          pinnedPeerSPKI: pin,
+                                          peerID: peerID))
+    }
+
+    /// Same pinned-mutual-TLS construction as `secureWiFiTransport`, dialing
+    /// a persisted Tailscale connection hint instead of a Bonjour result.
+    /// The endpoint is only ever a hint — `TLSConfigurator`'s SPKI check is
+    /// what actually authorizes the connection.
+    private func secureRemoteTransport(forPeerID peerID: String) -> SenderTransport? {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID),
+              let port = NWEndpoint.Port(rawValue: hint.port) else {
+            Log.info("routeDebug: Remote unavailable for peer=\(peerID) — no persisted endpoint hint")
+            return nil
+        }
+        guard let pin = TrustStore.shared.pin(peerID: peerID),
+              let identity = TrustStore.shared.ownIdentity() else {
+            // A forgotten/unpaired peer must never be dialed over Remote —
+            // an endpoint hint alone never implies trust.
+            Log.info("routeDebug: Remote refused for peer=\(peerID) — no local trust/pin for this peer")
+            return nil
+        }
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(hint.host), port: port)
+        Log.info("routeDebug: dialing Remote candidate peer=\(peerID) endpoint=\(hint.host):\(hint.port)")
+        return .tcp(endpoint,
                     tls: TLSSessionConfig(identity: identity,
                                           pinnedPeerSPKI: pin,
                                           peerID: peerID))
@@ -607,6 +637,8 @@ final class SenderController: ObservableObject {
             if let installID = installIDByUDID[udid] { return "install:\(installID)" }
         case .wifi(let result):
             if let installID = txtID(of: result) { return "install:\(installID)" }
+        case .remote(let peerID):
+            return "install:\(peerID)"
         default:
             break
         }
@@ -636,10 +668,84 @@ final class SenderController: ObservableObject {
             return AutoConnectCandidate(target: target, logicalID: logicalID(for: target),
                                         identifiers: identifiers(for: target), priority: 1)
         }
+        // Remote (Tailscale) is the lowest-priority tier: only a candidate
+        // for peers we're already paired with and have a persisted endpoint
+        // hint for, and only when no better local candidate for the same
+        // logical device exists (the priority sort + de-dupe in autoConnect()
+        // handles that).
+        let localLogicalIDs = Set(candidates.map(\.logicalID))
+        candidates += RemoteEndpointStore.allPeerIDs().compactMap { peerID -> AutoConnectCandidate? in
+            guard TrustStore.shared.hasPin(peerID: peerID) else { return nil }
+            let target = ConnectionTarget.remote(peerID: peerID)
+            let logicalID = logicalID(for: target)
+            guard !localLogicalIDs.contains(logicalID) else { return nil }
+            return AutoConnectCandidate(target: target, logicalID: logicalID,
+                                        identifiers: identifiers(for: target), priority: 2)
+        }
+        #if DEBUG
+        candidates = candidates.filter { candidate in
+            let route = preConnectRoute(for: candidate.target)
+            let allowed = RouteOverrides.shared.isAllowed(route)
+            if !allowed {
+                Log.info("routeDebug: skipped \(route.rawValue) candidate because \(route.rawValue) is disabled")
+            }
+            return allowed
+        }
+        #endif
         return candidates.sorted {
             ($0.priority, $0.target.sessionID) < ($1.priority, $1.target.sessionID)
         }
     }
+
+    #if DEBUG
+    /// Best-effort route classification *before* a connection exists, using
+    /// only what discovery already told us (Bonjour interfaces) — used
+    /// solely to label a route for the DEBUG override gate. The real route
+    /// a live session reports (`DeviceSession.route`) still comes from
+    /// `NWConnection.currentPath` and is unaffected by this.
+    private func preConnectRoute(for target: ConnectionTarget) -> ConnectionRoute {
+        switch target {
+        case .usb: return .usb
+        case .remote: return .remote
+        case .wifi(let result):
+            let names = result.interfaces.map(\.name)
+            return ConnectionRoute.classify(isUSB: false, interfaceNames: names,
+                                            remoteEndpointDescription: nil)
+        }
+    }
+
+    /// The single authoritative admission check every dial site must pass
+    /// through immediately before starting a connection. Never cache this
+    /// result — re-check right at the dial, since a candidate may have been
+    /// built before the override changed.
+    private func routeAdmission(for target: ConnectionTarget) -> Bool {
+        let route = preConnectRoute(for: target)
+        let allowed = RouteOverrides.shared.isAllowed(route)
+        Log.info("routeDebug: candidate route=\(route.rawValue)")
+        Log.info("routeDebug: allowed=\(allowed)")
+        if !allowed {
+            Log.info("routeDebug: BLOCKED connection attempt route=\(route.rawValue) reason=overrideDisabled")
+        }
+        return allowed
+    }
+
+    /// Called immediately after any override toggle changes. Tears down any
+    /// session whose route is no longer allowed rather than waiting for it
+    /// to drop on its own, and lets a still-enabled route take over.
+    private func enforceRouteOverrides() {
+        for session in sessions {
+            let route = session.route ?? preConnectRoute(for: session.target)
+            guard !RouteOverrides.shared.isAllowed(route) else { continue }
+            Log.info("routeDebug: disconnecting active route=\(route.rawValue) because override disabled")
+            // A manual disconnect, not a drop — suppress so autoConnect()
+            // doesn't immediately try to resurrect the same disabled route,
+            // while still leaving it free to try a different, allowed one.
+            autoConnectPolicy.suppress(identifiers(for: session))
+            end(session)
+        }
+        scheduleAutoConnect()
+    }
+    #endif
 
     /// Discovery is noisy. Coalescing it for half a second both prefers an
     /// arriving USB route and makes disappearance/reappearance suppression
@@ -698,6 +804,9 @@ final class SenderController: ObservableObject {
     /// session onto USB. No-op when the session is already cabled.
     private func upgradeToUSB(_ session: DeviceSession, device: UsbmuxDevice) {
         guard !session.onUSB, let portNum = UInt16(port) else { return }
+        #if DEBUG
+        guard routeAdmission(for: .usb(udid: device.udid)) else { return }
+        #endif
         Log.info("cable attached for \(session.id) — migrating to USB")
         session.onUSB = true
         session.usbUDID = device.udid
@@ -715,6 +824,9 @@ final class SenderController: ObservableObject {
         for session in sessions where session.onUSB {
             guard let udid = session.usbUDID, detachedUDIDs.contains(udid),
                   let result = wifiService(for: session) else { continue }
+            #if DEBUG
+            guard routeAdmission(for: .wifi(result)) else { continue }
+            #endif
             Log.info("cable detached for \(session.id) — failing over to WiFi")
             session.onUSB = false
             session.wifiServiceName = serviceName(of: result)
@@ -734,6 +846,9 @@ final class SenderController: ObservableObject {
         for session in sessions where session.onUSB {
             guard let udid = session.usbUDID, !attachedUDIDs.contains(udid),
                   let result = wifiService(for: session) else { continue }
+            #if DEBUG
+            guard routeAdmission(for: .wifi(result)) else { continue }
+            #endif
             Log.info("WiFi appeared for detached USB session \(session.id) — failing over")
             session.onUSB = false
             session.wifiServiceName = serviceName(of: result)
@@ -828,6 +943,9 @@ final class SenderController: ObservableObject {
             return udid == nil ? "Manual (\(host):\(port))" : "iPhone / iPad"
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
+        case .remote(let peerID):
+            let pinned = TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }
+            return pinned?.displayName ?? "Remote device"
         }
     }
 
@@ -874,6 +992,15 @@ final class SenderController: ObservableObject {
                               attempt: AutoConnectPolicy.Attempt,
                               userInitiated: Bool = false,
                               awaitingWake: Bool = false) {
+        #if DEBUG
+        // Central hard gate: every path that can start a session — auto-
+        // connect, explicit user taps, and pairing's immediate connect —
+        // funnels through here, so this single check is authoritative.
+        guard routeAdmission(for: target) else {
+            autoConnectPolicy.finish(attempt)
+            return
+        }
+        #endif
         let id = target.sessionID
         if let existing = session(for: id) {
             // A failed session holds no pipeline — replace the corpse
@@ -925,6 +1052,9 @@ final class SenderController: ObservableObject {
             }
         case .wifi(let result):
             guard let secure = secureWiFiTransport(for: result) else { return }
+            transport = secure
+        case .remote(let peerID):
+            guard let secure = secureRemoteTransport(forPeerID: peerID) else { return }
             transport = secure
         }
 
@@ -1448,6 +1578,17 @@ struct ContentView: View {
                         anchor: "Privacy_LocalNetwork"
                     )
                 }
+
+                #if DEBUG
+                Section("Developer / Diagnostics") {
+                    DisclosureGroup("Route Overrides (DEBUG)") {
+                        RouteOverridesView()
+                    }
+                    DisclosureGroup("Remote Endpoint (DEBUG)") {
+                        RemoteEndpointDebugView(controller: controller)
+                    }
+                }
+                #endif
             }
             .formStyle(.grouped)
             // Scrollable + fixed panel height: MenuBarExtra windows mis-measure
