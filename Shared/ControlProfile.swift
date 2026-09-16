@@ -744,19 +744,58 @@ struct ReceiverControlPreferencesRepository {
     }
 }
 
+/// Mac -> receiver control/UI preference push, carried on `WireMessage.
+/// receiverUI`. Every field is optional and additive, exactly like the
+/// original `trayEnabled`/`keyboardButtonEnabled` pair — an older receiver
+/// simply never receives the newer keys, and a newer receiver applies only
+/// whichever keys a given Mac build actually sent. Deliberately excludes
+/// Audio/A-V Sync (those are receiver-owned playback preferences the Mac
+/// only ever displays, never pushes — see `PhoneInfo`/`sendHello`) and the
+/// Main Tray/Function Tray shortcut *editors* (out of scope for this
+/// milestone; only their existing on/off + target settings are exposed).
 struct ReceiverUIPreferenceUpdate: Equatable {
     var trayEnabled: Bool?
     var keyboardButtonEnabled: Bool?
+    var functionTrayEnabled: Bool?
+    var inputMode: PointerInputMode?
+    var trackpadSensitivity: Double?
+    var hapticsEnabled: Bool?
+    var avoidNotch: Bool?
+    var pinchTarget: ReceiverGestureTarget?
+    var rotateTarget: ReceiverGestureTarget?
+    var snapRotation: Bool?
 
     init?(message: [String: Any]) {
         guard message["type"] as? String == WireMessage.receiverUI else { return nil }
         trayEnabled = message["trayEnabled"] as? Bool
         keyboardButtonEnabled = message["keyboardButtonEnabled"] as? Bool
-        guard trayEnabled != nil || keyboardButtonEnabled != nil else { return nil }
+        functionTrayEnabled = message["functionTrayEnabled"] as? Bool
+        inputMode = (message["inputMode"] as? String).flatMap(PointerInputMode.init(rawValue:))
+        trackpadSensitivity = message["trackpadSensitivity"] as? Double
+        hapticsEnabled = message["hapticsEnabled"] as? Bool
+        avoidNotch = message["avoidNotch"] as? Bool
+        pinchTarget = (message["pinchTarget"] as? String).flatMap(ReceiverGestureTarget.init(rawValue:))
+        rotateTarget = (message["rotateTarget"] as? String).flatMap(ReceiverGestureTarget.init(rawValue:))
+        snapRotation = message["snapRotation"] as? Bool
+        guard trayEnabled != nil || keyboardButtonEnabled != nil || functionTrayEnabled != nil
+            || inputMode != nil || trackpadSensitivity != nil || hapticsEnabled != nil
+            || avoidNotch != nil || pinchTarget != nil || rotateTarget != nil || snapRotation != nil
+        else { return nil }
     }
 
     func apply(to preferences: inout ReceiverControlPreferences) {
         if let trayEnabled { preferences.trayEnabled = trayEnabled }
         if let keyboardButtonEnabled { preferences.keyboardButtonEnabled = keyboardButtonEnabled }
+        if let functionTrayEnabled { preferences.functionTrayEnabled = functionTrayEnabled }
+        if let inputMode { preferences.inputMode = inputMode }
+        if let trackpadSensitivity {
+            let range = PointerGestureConfig.trackpadSensitivityRange
+            preferences.trackpadSensitivity = min(max(trackpadSensitivity, range.lowerBound), range.upperBound)
+        }
+        if let hapticsEnabled { preferences.hapticsEnabled = hapticsEnabled }
+        if let avoidNotch { preferences.avoidNotch = avoidNotch }
+        if let pinchTarget { preferences.pinchTarget = pinchTarget }
+        if let rotateTarget { preferences.rotateTarget = rotateTarget }
+        if let snapRotation { preferences.snapRotation = snapRotation }
     }
 }

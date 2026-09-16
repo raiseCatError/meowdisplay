@@ -11,6 +11,7 @@ struct AutoConnectPolicy {
 
     private(set) var knownIdentifiers: Set<String>
     private(set) var suppressedIdentifiers: Set<String> = []
+    private(set) var pairingIdentifiers: Set<String> = []
     private var attempts: [String: UInt64] = [:]
     private var nextGeneration: UInt64 = 0
 
@@ -33,6 +34,18 @@ struct AutoConnectPolicy {
         suppressedIdentifiers.subtract(identifiers)
     }
 
+    mutating func beginPairing(_ identifiers: Set<String>) {
+        pairingIdentifiers.formUnion(identifiers)
+    }
+
+    mutating func finishPairing(_ identifiers: Set<String>) {
+        pairingIdentifiers.subtract(identifiers)
+    }
+
+    func isPairing(_ identifiers: Set<String>) -> Bool {
+        !pairingIdentifiers.isDisjoint(with: identifiers)
+    }
+
     /// Called after discovery has been stable for the controller's debounce.
     /// Once every alias for a suppressed receiver disappears, its suppression
     /// naturally falls away and a later appearance is a new availability cycle.
@@ -48,6 +61,7 @@ struct AutoConnectPolicy {
         guard !hasSessionOwner,
               attempts[logicalID] == nil,
               !knownIdentifiers.isDisjoint(with: identifiers),
+              pairingIdentifiers.isDisjoint(with: identifiers),
               suppressedIdentifiers.isDisjoint(with: identifiers) else { return nil }
         return beginAttempt(logicalID: logicalID)
     }

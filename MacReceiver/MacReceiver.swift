@@ -27,6 +27,14 @@ final class ReceiverController: ObservableObject {
     // icon, status bar): a sender is connected / frames are on screen.
     @Published private(set) var connected = false
     @Published private(set) var streaming = false
+    // The one canonical status presentation — republished from the
+    // receiver's `session` (phase/interruption), the same state iOS's
+    // interruption overlay already reads. Every status-bearing surface in
+    // this app (the panel's own status row and the bottom status strip)
+    // reads this pair instead of each independently re-deriving "Connected"/
+    // "Waiting for a Mac…" from `connected`, which could otherwise drift.
+    @Published private(set) var statusTitle = "Waiting for a Mac…"
+    @Published private(set) var statusColor: Color = .secondary
 
     var active: Bool { receiver != nil }
 
@@ -60,6 +68,14 @@ final class ReceiverController: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
                 self?.connected = connected
+            }
+            .store(in: &cancellables)
+        receiver.$session
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] session in
+                self?.statusTitle = receiver.canonicalPhaseTitle
+                self?.statusColor = Self.statusColor(for: session.phase)
             }
             .store(in: &cancellables)
         // Streaming = connected and the video format is known — that's when
@@ -123,6 +139,8 @@ final class ReceiverController: ObservableObject {
         self.receiver = nil
         connected = false
         streaming = false
+        statusTitle = "Waiting for a Mac…"
+        statusColor = .secondary
         closeWindow()
         updateSleepAssertion(false)
         Log.info("receiver mode stopped")
@@ -215,6 +233,15 @@ final class ReceiverController: ObservableObject {
     /// dark by the time a sender connects, and frames into a black panel
     /// looked like nothing worked at all. Declaring user activity is what
     /// actually lights the display again.
+    private static func statusColor(for phase: ReceiverSessionPhase) -> Color {
+        switch phase {
+        case .connected: return .green
+        case .reconnectFailed, .unrecoverable: return .red
+        case .connecting, .reconnecting, .paused: return .orange
+        case .disconnected: return .secondary
+        }
+    }
+
     private func updateSleepAssertion(_ receiving: Bool) {
         if receiving, sleepActivity == nil {
             var assertionID = IOPMAssertionID(0)

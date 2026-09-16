@@ -107,4 +107,32 @@ final class AutoConnectPolicyTests: XCTestCase {
         XCTAssertNotNil(policy.beginAutomaticAttempt(
             logicalID: receiver, identifiers: [receiver], hasSessionOwner: false))
     }
+
+    func testExplicitPairingSuppressesAutomaticAttemptForSamePeer() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.beginPairing([receiver])
+
+        XCTAssertNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
+    }
+
+    func testPairingFailureReleasesSuppression() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        policy.beginPairing([receiver])
+        policy.finishPairing([receiver])
+
+        XCTAssertNotNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
+    }
+
+    func testSuccessfulPairingReleasesSuppressionBeforeExplicitConnect() {
+        var policy = AutoConnectPolicy()
+        policy.beginPairing([receiver])
+        policy.finishPairing([receiver])
+
+        let attempt = policy.beginExplicitAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi])
+        XCTAssertTrue(policy.isCurrent(attempt))
+        XCTAssertFalse(policy.isPairing([receiver]))
+    }
 }

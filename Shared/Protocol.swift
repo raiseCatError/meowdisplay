@@ -98,6 +98,18 @@ enum WireMessage {
     static let audioRequest = "audioRequest"         // receiver -> Mac: request system-audio capture on/off
     static let audioState = "audioState"             // Mac -> receiver: confirmed audio production state
     static let unpair = "unpair"
+    // Mac -> receiver: LAN wake-on-LAN hint (MAC/interface/broadcast) for
+    // this Mac, opportunistically re-sent on every hello like `welcome`.
+    // Purely informational — a receiver on an older build ignores it, and
+    // it never grants or implies trust (see `WakeMetadata`).
+    static let wakeInfo = "wakeInfo"
+    // receiver -> Mac (DEBUG-only manual diagnostic): ask the Mac to call
+    // IOPMAssertionDeclareUserActivity. Only ever handled if it arrives on
+    // the existing authenticated/pinned session — there is no separate
+    // unauthenticated channel for it.
+    static let promoteInteractiveWake = "promoteInteractiveWake"
+    // Mac -> receiver: result of the above.
+    static let promoteInteractiveWakeResult = "promoteInteractiveWakeResult"
 }
 
 enum WireCrypto {

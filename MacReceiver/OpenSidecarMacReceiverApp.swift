@@ -167,9 +167,9 @@ struct ReceiverContentView: View {
 
             HStack(spacing: 8) {
                 Circle()
-                    .fill(controller.connected ? Color.green : Color.secondary.opacity(0.5))
+                    .fill(controller.statusColor)
                     .frame(width: 9, height: 9)
-                Text(controller.connected ? "Receiving from a Mac" : "Waiting for a Mac to connect")
+                Text(controller.statusTitle)
                     .font(.callout)
                     .lineLimit(1)
                 Spacer()

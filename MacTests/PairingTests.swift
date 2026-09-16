@@ -64,6 +64,43 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(store.pin(peerID: "mac"), Data([2]))
     }
 
+    // MARK: - Re-pair classification (issue: asymmetric-trust re-pair UX)
+
+    func testTrustPinPolicyClassifiesNewMatchAndIdentityChangeDistinctly() {
+        XCTAssertEqual(TrustPinPolicy.decision(existing: nil, presented: Data([1])), .new)
+        XCTAssertEqual(TrustPinPolicy.decision(existing: Data([1]), presented: Data([1])), .match)
+        XCTAssertEqual(TrustPinPolicy.decision(existing: Data([1]), presented: Data([2])), .identityChanged)
+    }
+
+    func testIdentityChangeIsRefusedWithoutExplicitApprovalButAllowedWith() {
+        let store = InMemoryPeerTrustStore()
+        XCTAssertTrue(store.setPin(peerID: "phone", spki: Data([1]), displayName: "Phone"))
+        // A changed identity presenting under the same peer ID must never
+        // silently replace the pin — only an explicit, confirmed re-pair may.
+        XCTAssertFalse(store.setPin(peerID: "phone", spki: Data([2]), displayName: "Phone",
+                                    allowIdentityChange: false))
+        XCTAssertEqual(store.pin(peerID: "phone"), Data([1]))
+        XCTAssertTrue(store.setPin(peerID: "phone", spki: Data([2]), displayName: "Phone",
+                                   allowIdentityChange: true))
+        XCTAssertEqual(store.pin(peerID: "phone"), Data([2]))
+    }
+
+    func testSameKeyRePairSucceedsWithoutNeedingIdentityChangeApproval() {
+        let store = InMemoryPeerTrustStore()
+        XCTAssertTrue(store.setPin(peerID: "phone", spki: Data([1]), displayName: "Phone"))
+        // A re-pair with the SAME long-term key (one side merely forgot the
+        // other) is a `.match`, not an identity change — it must succeed
+        // without the identity-change escape hatch.
+        XCTAssertTrue(store.setPin(peerID: "phone", spki: Data([1]), displayName: "Phone",
+                                   allowIdentityChange: false))
+        XCTAssertEqual(store.pin(peerID: "phone"), Data([1]))
+    }
+
+    func testPendingPairingDefaultsToNewPeerClassification() {
+        let pending = PendingPairing(peerID: "p", peerName: "Phone", peerSPKI: Data([1]), sas: "000 000")
+        XCTAssertEqual(pending.classification, .newPeer)
+    }
+
     func testNormalDiscoveryAssociatesWithPairingServiceByStableID() {
         let wanted = "11111111-1111-1111-1111-111111111111"
         let records = [PairingServiceRecord(stableID: wanted,

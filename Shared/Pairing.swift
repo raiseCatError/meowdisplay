@@ -48,11 +48,23 @@ struct PairingConfirmation: Codable, Equatable {
     let authenticator: Data
 }
 
+/// How an incoming/outgoing pairing request relates to existing trust for
+/// this peer ID — computed once, before the user is prompted, so the UI can
+/// tell a first-time pairing apart from an explicit re-pair or a changed
+/// identity rather than silently treating "already trusted" as "nothing to
+/// show". Existing trust must never suppress an explicit pairing request.
+enum PairingClassification: Equatable {
+    case newPeer
+    case rePairSameKey
+    case identityChanged
+}
+
 struct PendingPairing: Equatable, Identifiable {
     let peerID: String
     let peerName: String
     let peerSPKI: Data
     let sas: String
+    var classification: PairingClassification = .newPeer
     var id: String { peerID }
 }
 
@@ -177,20 +189,35 @@ enum TrustPinPolicy {
 
 protocol PeerTrustStoring {
     func pin(peerID: String) -> Data?
+    // `allowIdentityChange` replaces a differing pin instead of refusing it.
+    // Callers may only pass true after a *fresh* pairing handshake in which
+    // both sides explicitly confirmed the same SAS for the changed identity
+    // — never on the strength of a matching peer ID alone.
     @discardableResult
-    func setPin(peerID: String, spki: Data, displayName: String) -> Bool
+    func setPin(peerID: String, spki: Data, displayName: String,
+                allowIdentityChange: Bool) -> Bool
     func forget(peerID: String)
+}
+
+extension PeerTrustStoring {
+    @discardableResult
+    func setPin(peerID: String, spki: Data, displayName: String) -> Bool {
+        setPin(peerID: peerID, spki: spki, displayName: displayName, allowIdentityChange: false)
+    }
 }
 
 /// Deterministic, Keychain-free test double for trust lifecycle tests.
 final class InMemoryPeerTrustStore: PeerTrustStoring {
     private(set) var pins: [String: Data] = [:]
     func pin(peerID: String) -> Data? { pins[peerID] }
-    func setPin(peerID: String, spki: Data, displayName: String) -> Bool {
+    func setPin(peerID: String, spki: Data, displayName: String,
+                allowIdentityChange: Bool) -> Bool {
         switch TrustPinPolicy.decision(existing: pins[peerID], presented: spki) {
-        case .new: pins[peerID] = spki; return true
-        case .match: return true
-        case .identityChanged: return false
+        case .new, .match: pins[peerID] = spki; return true
+        case .identityChanged:
+            guard allowIdentityChange else { return false }
+            pins[peerID] = spki
+            return true
         }
     }
     func forget(peerID: String) { pins[peerID] = nil }

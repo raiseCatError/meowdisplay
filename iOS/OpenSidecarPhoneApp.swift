@@ -217,8 +217,8 @@ struct ReceiverScreen: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
         }
-        .sheet(item: Binding(get: { model.receiver.pairingPrompt.pending },
-                             set: { if $0 == nil { model.receiver.pairingPrompt.decide(accept: false) } })) { pending in
+        .sheet(item: Binding(get: { model.receiver.pairingPrompt.pending }, set: { _ in }),
+               onDismiss: { model.receiver.pairingPrompt.notePresentationDismissed() }) { pending in
             VStack(spacing: 20) {
                 Text("Pair with \(pending.peerName)?").font(.title3.bold())
                 Text(pending.sas).font(.system(.largeTitle, design: .monospaced)).bold()
@@ -236,6 +236,7 @@ struct ReceiverScreen: View {
                 }
             }
             .padding(28).presentationDetents([.medium])
+            .interactiveDismissDisabled()
         }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
@@ -327,9 +328,8 @@ struct ReceiverScreen: View {
         }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
-            model.receiver.onReceiverUIPreferences = { trayEnabled, keyboardButtonEnabled in
-                controlStore.applyRemote(trayEnabled: trayEnabled,
-                                         keyboardButtonEnabled: keyboardButtonEnabled)
+            model.receiver.onReceiverUIPreferences = { update in
+                controlStore.applyRemote(update)
             }
             controlStore.onInputResetRequested = {
                 model.receiver.sendCancelActiveInput()
@@ -345,8 +345,8 @@ struct ReceiverScreen: View {
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: controlStore.preferences.trayEnabled,
                 keyboardButtonEnabled: controlStore.preferences.keyboardButtonEnabled)
+            model.receiver.announceReceiverPreferences(controlStore.preferences)
             model.receiver.primeAudioPreference(controlStore.preferences.audioPreferred)
-            model.receiver.setAVSyncOffset(controlStore.preferences.avSyncOffsetMs)
             model.start()
             // Show the first-run hint unless the device has connected before
             // or the user already dismissed it.
@@ -358,7 +358,7 @@ struct ReceiverScreen: View {
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: preferences.trayEnabled,
                 keyboardButtonEnabled: preferences.keyboardButtonEnabled)
-            model.receiver.setAVSyncOffset(preferences.avSyncOffsetMs)
+            model.receiver.announceReceiverPreferences(preferences)
         }
     }
 }
@@ -678,9 +678,8 @@ struct SettingsView: View {
                 }
                 .id(trustRefresh)
                 Section("Status") {
-                    LabeledContent("Receiver", value: "Waiting for Mac")
                     LabeledContent("Connection",
-                                   value: receiver.connected ? receiver.status : "Waiting for Mac")
+                                   value: receiver.connected ? receiver.status : receiver.canonicalPhaseTitle)
                     if receiver.videoSize != .zero {
                         LabeledContent("Stream",
                                        value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
@@ -938,17 +937,10 @@ struct SettingsView: View {
                 Section {
                     Toggle("Performance overlay", isOn: $showAnalytics)
                     Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
-                    #if DEBUG
-                    Toggle("Notch Debug Overlay (DEBUG)", isOn: $notchDebugOverlayEnabled)
-                    #endif
                 } header: {
                     Text("Analytics")
                 } footer: {
-                    #if DEBUG
-                    Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging. Notch Debug Overlay draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
-                    #else
                     Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging.")
-                    #endif
                 }
 
                 Section {
@@ -976,6 +968,13 @@ struct SettingsView: View {
                 }
 
                 #if DEBUG
+                Section {
+                    Toggle("Notch Debug Overlay", isOn: $notchDebugOverlayEnabled)
+                } header: {
+                    Text("Developer")
+                } footer: {
+                    Text("Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
+                }
                 Section {
                     LabeledContent("Production Codec", value: "AAC")
                     Picker("Playback Path", selection: $audioPlaybackPath) {
@@ -1013,9 +1012,26 @@ struct SettingsView: View {
                         Log.info("audioTrace: audio diagnostics reset to defaults")
                     }
                 } header: {
-                    Text("Developer / Audio Diagnostics (DEBUG)")
+                    Text("Developer — Audio Diagnostics")
                 } footer: {
                     Text("PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this \(deviceKind) and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My \(deviceKind) → OpenDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change.")
+                }
+                #endif
+
+                #if DEBUG
+                Section {
+                    WakeTestingView()
+                } header: {
+                    Text("Developer — Wake Testing")
+                } footer: {
+                    Text("Sends a standard Wake-on-LAN magic packet to an already-paired Mac's last-learned local network address. Same-LAN only — this never uses Remote/Tailscale.")
+                }
+                Section {
+                    PromoteInteractiveWakeView(receiver: receiver)
+                } header: {
+                    Text("Developer — Promote Interactive Wake")
+                } footer: {
+                    Text("Manual diagnostic, not automated: asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake.")
                 }
                 #endif
 

@@ -27,12 +27,18 @@ struct OpenSidecarMacApp: App {
             get: { controller.presentation == .menuBar },
             set: { _ in }
         )) {
-            ContentView(controller: controller, updater: appDelegate.updater)
+            MenuBarQuickView(controller: controller)
         } label: {
-            Image(systemName: controller.running
+            Image(systemName: controller.hasActiveDisplay
                   ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle")
         }
         .menuBarExtraStyle(.window)
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { MacSettingsWindow.show() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+        }
     }
 }
 
@@ -46,43 +52,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hand the updater to the control window, which is built outside the
-        // SwiftUI App scene (NSHostingView), so it can offer the same button.
-        MainWindow.updater = updater
+        // Hand the updater to the settings window, which is built outside
+        // the SwiftUI App scene (NSHostingView), so it can offer the same
+        // button.
+        MacSettingsWindow.updater = updater
         let presentation = SenderController.shared.presentation
         NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
         if presentation != .menuBar {
-            MainWindow.show()
+            MacSettingsWindow.show()
         }
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock
-    // click) brings up the control window — Hammerspoon-style.
+    // click) brings up the Settings window — Hammerspoon-style. Also handles
+    // a Dock click while the window already exists: it focuses the same
+    // logical window rather than creating a duplicate.
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows: Bool) -> Bool {
-        MainWindow.show()
+        MacSettingsWindow.show()
         return false
     }
 }
 
-/// The control panel as a regular window, for Dock/background presentation.
+/// The Settings window — the app's PRIMARY GUI, not a secondary dashboard.
+/// One identifiable `NSWindow` instance (`isReleasedWhenClosed = false`, so
+/// closing hides rather than destroys it): Dock click, Cmd+,, and the menu
+/// bar's "Open Settings…" all focus this same window, never a duplicate.
 @MainActor
-enum MainWindow {
+enum MacSettingsWindow {
     private static var window: NSWindow?
-    // Set once at launch by AppDelegate so the control window can share the
+    // Set once at launch by AppDelegate so the settings window can share the
     // app's single Sparkle updater.
     static var updater: SPUStandardUpdaterController?
 
     static func show() {
         if window == nil {
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 540),
-                styleMask: [.titled, .closable, .miniaturizable],
+                contentRect: NSRect(x: 0, y: 0, width: 820, height: 600),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
-            w.title = "OpenDisplay"
+            w.title = "OpenDisplay Settings"
+            w.minSize = NSSize(width: 700, height: 500)
             w.contentView = NSHostingView(
-                rootView: ContentView(controller: SenderController.shared,
-                                      updater: updater))
+                rootView: MacSettingsView(controller: SenderController.shared,
+                                          updater: updater))
             w.isReleasedWhenClosed = false
             w.center()
             window = w
@@ -108,6 +121,12 @@ enum ConnectionTarget: Hashable {
         case .remote(let peerID): return "remote:\(peerID)"
         }
     }
+}
+
+struct ForgetConfirmation: Identifiable, Equatable {
+    let peerID: String
+    let name: String
+    var id: String { peerID }
 }
 
 /// One connected (or connecting) device: its target, its sender pipeline,
@@ -158,10 +177,52 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var route: ConnectionRoute?
     @Published var receiverTrayEnabled = true
     @Published var receiverKeyboardButtonEnabled = true
+    // Mac's live cache of the connected receiver's OWN preferences — the
+    // receiver remains the authoritative store (see `PhoneInfo`/
+    // `StreamReceiver.announceReceiverPreferences`); this is only what Mac
+    // last saw reported, refreshed on every hello. Defaults mirror
+    // `ReceiverControlPreferences`'s own defaults so a pre-report UI never
+    // shows a manufactured zero/false value.
+    @Published var receiverFunctionTrayEnabled = true
+    @Published var receiverInputMode = "direct"
+    @Published var receiverTrackpadSensitivity = 1.0
+    @Published var receiverHapticsEnabled = true
+    @Published var receiverAvoidNotch = true
+    @Published var receiverPinchTarget = "viewport"
+    @Published var receiverRotateTarget = "viewport"
+    @Published var receiverSnapRotation = true
+    @Published var receiverAVSyncOffsetMs = 0
+    // Nil until the first hello with these fields arrives (protocol 6+) —
+    // distinguishes "not yet reported" from "reported and off/default" so
+    // device detail can show "No compatible device connected" honestly
+    // instead of presenting the defaults above as if they were live.
+    @Published var receiverPreferencesReported = false
     @Published var receiverProtocolVersion = WireProtocol.assumedWhenAbsent
+    // True only once the MEOW application handshake (hello/welcome) has
+    // completed on the live connection — never inferred from Bonjour
+    // presence, TrustStore, or a merely-open socket. This, not discovery, is
+    // what "Active Display" is authoritative on.
+    @Published var applicationAuthenticated = false
+    // This session's current media activity/geometry, refreshed on the same
+    // cadence as `mbps`/`framesSent` (see MacSender.onMediaState) — the
+    // source Overview/Active Display read for "Video/Audio Streaming" and
+    // resolution, rather than each re-deriving it independently.
+    @Published var videoActive = false
+    @Published var audioActive = false
+    @Published var videoWidth = 0
+    @Published var videoHeight = 0
 
     var statusWithRoute: String {
         route.map { "\(status) · \($0.rawValue)" } ?? status
+    }
+
+    // Single source for every surface's Pause/Resume affordance (Devices →
+    // Active Display's SessionRow, Overview, Streaming, the menu bar quick
+    // view) — matches MacSender.pauseDisplay/resumeDisplay's own guarded
+    // capture-lifecycle phases, so no surface invents its own gating.
+    var isPaused: Bool { capturePhase == .paused }
+    var canPauseOrResume: Bool {
+        capturePhase == .running || capturePhase == .recovering || capturePhase == .paused
     }
 
     init(id: String, logicalID: String, attempt: AutoConnectPolicy.Attempt,
@@ -192,7 +253,7 @@ final class SenderController: ObservableObject {
             NSApp.setActivationPolicy(presentation == .dock ? .regular : .accessory)
             // Never strand the user without UI: leaving menu-bar mode opens
             // the window immediately.
-            if presentation != .menuBar { MainWindow.show() }
+            if presentation != .menuBar { MacSettingsWindow.show() }
         }
     }
 
@@ -202,6 +263,7 @@ final class SenderController: ObservableObject {
     @Published var usbDevices: [UsbmuxDevice] = []
     let pairingPrompt = PairingPromptModel()
     @Published var pairingMessage: String?
+    @Published private(set) var pendingForget: ForgetConfirmation?
     private var pairingObservation: AnyCancellable?
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
     // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
@@ -224,6 +286,17 @@ final class SenderController: ObservableObject {
     }
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
+    }
+    // Mirror-mode's explicit display choice: a stable UUID (never a raw
+    // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
+    // Automatic. Irrelevant to Extend, which always uses its own virtual
+    // display.
+    @Published var mirrorDisplayUUID = UserDefaults.standard.string(forKey: "mirrorDisplayUUID") {
+        didSet {
+            guard mirrorDisplayUUID != oldValue else { return }
+            UserDefaults.standard.set(mirrorDisplayUUID, forKey: "mirrorDisplayUUID")
+            if mode == .mirror { restartAll() }
+        }
     }
     @Published var allowInput = InputPolicy.allowsInput() {
         didSet {
@@ -289,6 +362,15 @@ final class SenderController: ObservableObject {
     private var receiverPairingResults: [NWBrowser.Result] = []
     private var pairingListener: NWListener?
     private var usbWatcher: UsbmuxDeviceWatcher?
+    private var activePairingPeerIDs: Set<String> = []
+    // Forwards each live session's own @Published changes (status, route,
+    // applicationAuthenticated) into this controller's objectWillChange —
+    // a DeviceSession is a separate ObservableObject, so without this a
+    // SwiftUI view observing only `controller` would never re-render when a
+    // session's authentication/route changes, and Active Display would show
+    // stale state until some unrelated controller-level change (e.g. a
+    // Bonjour update) happened to force a redraw.
+    private var sessionObservations: [ObjectIdentifier: AnyCancellable] = [:]
 
     // Connection policy — one session per physical device, and the cable
     // wins whenever it's available (lower, steadier latency than WiFi):
@@ -330,6 +412,22 @@ final class SenderController: ObservableObject {
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        // An explicit pairing request (new pair, re-pair, or identity-change)
+        // must be seen regardless of Menu Bar/Background presentation or
+        // whether the control window happens to be open — it cannot depend
+        // on the user already having the Devices list in view.
+        pairingPrompt.onPending = { [weak self] pending in
+            guard let self else { return }
+            Log.info("pairDebug: onPending peerID=\(pending.peerID)")
+            Log.info("pairDebug: presenting classification=\(String(describing: pending.classification))")
+            self.beginExplicitPairing(peerID: pending.peerID)
+            // The confirmation panel is a stable AppKit object owned by the
+            // coordinator, not a SwiftUI sheet on a settings page that may
+            // not currently exist (Menu Bar presentation with the window
+            // closed) — it must be seen and stay visible regardless.
+            SecurityPresentationCoordinator.presentPairing(prompt: self.pairingPrompt)
+            Log.info("pairDebug: pairingPanelPresented")
+        }
         persistKnownIdentifiers()
         startBrowsing()
         startReceiverPairingBrowsing()
@@ -343,6 +441,7 @@ final class SenderController: ObservableObject {
         }
         #if DEBUG
         RouteOverrides.shared.onChange = { [weak self] in self?.enforceRouteOverrides() }
+        PowerLifecycleLogger.start()
         #endif
     }
 
@@ -397,11 +496,19 @@ final class SenderController: ObservableObject {
                             connection: connection, localID: localID,
                             localName: Host.current().localizedName ?? "Mac",
                             prompt: self.pairingPrompt)
+                        self.finishExplicitPairing(peerID: paired.peerID, success: true)
                         self.pairingMessage = "Paired with \(paired.peerName)"
                         if let result = self.discovered.first(where: { self.txtID(of: $0) == paired.peerID }) {
                             self.connect(to: .wifi(result), userInitiated: true)
                         }
-                    } catch { self.pairingMessage = error.localizedDescription }
+                    } catch {
+                        if self.pairingPrompt.pending == nil {
+                            self.finishAllExplicitPairing(success: false)
+                            self.pairingMessage = error.localizedDescription
+                        } else {
+                            Log.info("pairDebug: duplicate responder ended without disturbing pending confirmation")
+                        }
+                    }
                 }
             }
             listener.stateUpdateHandler = { state in
@@ -521,11 +628,13 @@ final class SenderController: ObservableObject {
             pairingMessage = "Pairing unavailable — device identity is missing"
             return
         }
+        beginExplicitPairing(peerID: expected!)
         Task { @MainActor in
             let endpoint = await waitForPairingEndpoint(stableID: expected, timeout: 3)
             guard let endpoint else {
                 Log.info("pair unavailable: no _opendisplay-pair._tcp result matched id=\(expected ?? "missing")")
                 pairingMessage = "Pairing unavailable — pairing service was not found"
+                finishExplicitPairing(peerID: expected!, success: false)
                 return
             }
             let connection = NWConnection(to: endpoint, using: .tcp)
@@ -535,20 +644,100 @@ final class SenderController: ObservableObject {
                     connection: connection, localID: localID,
                     localName: Host.current().localizedName ?? "Mac",
                     prompt: pairingPrompt, expectedPeerID: expected)
+                finishExplicitPairing(peerID: paired.peerID, success: true)
                 pairingMessage = "Paired with \(paired.peerName)"
                 objectWillChange.send()
                 connect(to: .wifi(result), userInitiated: true)
             } catch {
-                pairingMessage = error.localizedDescription
+                if pairingPrompt.pending == nil {
+                    finishExplicitPairing(peerID: expected!, success: false)
+                    pairingMessage = error.localizedDescription
+                } else {
+                    Log.info("pairDebug: duplicate initiator ended without disturbing pending confirmation")
+                }
             }
         }
     }
 
+    private func beginExplicitPairing(peerID: String) {
+        guard activePairingPeerIDs.insert(peerID).inserted else { return }
+        Log.info("pairDebug: explicit pairing started peerID=\(peerID)")
+        let identifiers = Set(["install:\(peerID)"])
+        autoConnectPolicy.beginPairing(identifiers)
+        autoConnectWorkItem?.cancel()
+        for session in sessions where session.deviceID == peerID {
+            end(session)
+        }
+    }
+
+    private func finishExplicitPairing(peerID: String, success: Bool) {
+        guard activePairingPeerIDs.remove(peerID) != nil else { return }
+        autoConnectPolicy.finishPairing(["install:\(peerID)"])
+        Log.info("pairDebug: pairing finished success=\(success)")
+        if !success { scheduleAutoConnect() }
+    }
+
+    private func finishAllExplicitPairing(success: Bool) {
+        let peerIDs = activePairingPeerIDs
+        for peerID in peerIDs { finishExplicitPairing(peerID: peerID, success: success) }
+    }
+
     func forgetPairing(peerID: String) {
-        TrustStore.shared.forget(peerID: peerID)
-        for session in sessions where session.deviceID == peerID { end(session) }
+        Log.info("trustDebug: forgetPairingCalled peerID=\(peerID)")
+        Log.info("trustDebug: trustBefore=\(TrustStore.shared.hasPin(peerID: peerID))")
+        Log.info("trustDebug: remoteEndpointBefore=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: wakeMetadataBefore=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        ForgetDeviceAction.perform(
+            peerID: peerID,
+            forgetTrust: { TrustStore.shared.forget(peerID: $0) },
+            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
+            removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
+            removeInputAuthorization: { ReceiverInputAuthorizationStore.removeAuthorization(peerID: $0) })
+        installIDByUDID = installIDByUDID.filter { $0.value != peerID }
+        // Suppress immediate reconnect before anything discovered can beat
+        // the user to it, then end the live session (which also suppresses
+        // its own route aliases).
+        autoConnectPolicy.suppress(["install:\(peerID)"])
+        let matchingSessions = sessions.filter { $0.deviceID == peerID }
+        for session in matchingSessions {
+            autoConnectPolicy.suppress(identifiers(for: session))
+            end(session)
+        }
+        Log.info("trustDebug: sessionsTerminated=\(matchingSessions.count)")
+        let trustAfter = TrustStore.shared.hasPin(peerID: peerID)
+        Log.info("trustDebug: trustDeleteResult=\(!trustAfter)")
+        Log.info("trustDebug: trustAfter=\(trustAfter)")
+        Log.info("trustDebug: pinnedPeersContainsAfter=\(TrustStore.shared.pinnedPeers().contains { $0.peerID == peerID })")
+        Log.info("trustDebug: remoteEndpointAfter=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: wakeMetadataAfter=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        Log.info("deviceUI: knownPeer removed peerID=\(peerID)")
         pairingMessage = "Device forgotten"
         objectWillChange.send()
+        Log.info("trustDebug: uiRefreshTriggered")
+    }
+
+    func requestForget(peerID: String, name: String) {
+        Log.info("trustDebug: forgetButtonTapped peerID=\(peerID)")
+        let request = ForgetConfirmation(peerID: peerID, name: name)
+        pendingForget = request
+        Log.info("trustDebug: confirmationPresented peerID=\(peerID)")
+        // Same rationale as pairing: a destructive trust decision must not
+        // depend on a transient settings page's `.alert` — it is presented
+        // through the stable coordinator instead.
+        SecurityPresentationCoordinator.presentForget(request, controller: self)
+    }
+
+    func confirmForget(_ request: ForgetConfirmation) {
+        guard pendingForget?.peerID == request.peerID else { return }
+        pendingForget = nil
+        Log.info("trustDebug: confirmationAccepted peerID=\(request.peerID)")
+        forgetPairing(peerID: request.peerID)
+    }
+
+    func cancelForget(_ request: ForgetConfirmation) {
+        guard pendingForget?.peerID == request.peerID else { return }
+        pendingForget = nil
+        Log.info("trustDebug: confirmationCancelled peerID=\(request.peerID)")
     }
 
     private func pairingEndpoint(stableID: String?) -> NWEndpoint? {
@@ -794,7 +983,12 @@ final class SenderController: ObservableObject {
             }
             guard let attempt = autoConnectPolicy.beginAutomaticAttempt(
                 logicalID: candidate.logicalID, identifiers: candidate.identifiers,
-                hasSessionOwner: hasOwner) else { continue }
+                hasSessionOwner: hasOwner) else {
+                if autoConnectPolicy.isPairing(candidate.identifiers) {
+                    Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
+                }
+                continue
+            }
             startSession(to: candidate.target, logicalID: candidate.logicalID,
                          attempt: attempt)
         }
@@ -992,6 +1186,12 @@ final class SenderController: ObservableObject {
                               attempt: AutoConnectPolicy.Attempt,
                               userInitiated: Bool = false,
                               awaitingWake: Bool = false) {
+        let targetIdentifiers = identifiers(for: target)
+        guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
+            Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
+            autoConnectPolicy.finish(attempt)
+            return
+        }
         #if DEBUG
         // Central hard gate: every path that can start a session — auto-
         // connect, explicit user taps, and pairing's immediate connect —
@@ -1063,7 +1263,8 @@ final class SenderController: ObservableObject {
                                quality: quality, displaySerial: Self.displaySerial(for: id),
                                identityOffset: identityOffset(for: id),
                                awaitingWake: awaitingWake,
-                               videoEnabled: videoEnabled)
+                               videoEnabled: videoEnabled,
+                               mirrorDisplayUUID: mirrorDisplayUUID)
         let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
                                     target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
@@ -1085,6 +1286,22 @@ final class SenderController: ObservableObject {
         }
         sender.onAllowInputRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }
+            // SECURITY: a receiver may only ENABLE input this way if the
+            // Mac user has permanently authorized that specific peer (see
+            // `ReceiverInputAuthorizationStore` / the Input settings
+            // page's "Devices allowed to enable input" list) — this is the
+            // per-device authorization the global Allow Input toggle alone
+            // used to let ANY connected receiver flip unconditionally.
+            // Relinquishing (`requested == false`) is always honored: that
+            // never grants capability, only gives it up.
+            if requested {
+                guard let peerID = session.deviceID,
+                      ReceiverInputAuthorizationStore.isAuthorized(peerID: peerID) else {
+                    Log.info("inputAuth: denied allowInputRequest(true) from unauthorized peerID=\(session.deviceID ?? "unknown")")
+                    session.sender.pushAllowInputState()
+                    return
+                }
+            }
             self.allowInput = requested
         }
         sender.onVideoEnabledRequest = { [weak self, weak session] requested in
@@ -1095,10 +1312,30 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            // The MEOW application handshake just completed on this live
+            // connection — this, not Bonjour or a merely-open socket, is
+            // what makes the device an Active Display.
+            session.applicationAuthenticated = true
+            Log.info("deviceUI: activeSession added peerID=\(info.id ?? "unknown") route=\(session.route?.rawValue ?? "pending")")
             session.receiverProtocolVersion = info.protocolVersion
             if let value = info.trayEnabled { session.receiverTrayEnabled = value }
             if let value = info.keyboardButtonEnabled {
                 session.receiverKeyboardButtonEnabled = value
+            }
+            // Per-device receiver-controls report (protocol 6+) — see
+            // `PhoneInfo`. All additive/optional: an older receiver simply
+            // never sends these and the device detail's defaults stand in.
+            if let value = info.functionTrayEnabled { session.receiverFunctionTrayEnabled = value }
+            if let value = info.inputMode { session.receiverInputMode = value }
+            if let value = info.trackpadSensitivity { session.receiverTrackpadSensitivity = value }
+            if let value = info.hapticsEnabled { session.receiverHapticsEnabled = value }
+            if let value = info.avoidNotch { session.receiverAvoidNotch = value }
+            if let value = info.pinchTarget { session.receiverPinchTarget = value }
+            if let value = info.rotateTarget { session.receiverRotateTarget = value }
+            if let value = info.snapRotation { session.receiverSnapRotation = value }
+            if let value = info.avSyncOffsetMs { session.receiverAVSyncOffsetMs = value }
+            if info.functionTrayEnabled != nil || info.inputMode != nil {
+                session.receiverPreferencesReported = true
             }
             if let installID = info.id {
                 self.autoConnectPolicy.remember(["install:\(installID)"])
@@ -1142,6 +1379,13 @@ final class SenderController: ObservableObject {
         sender.onStats = { [weak session] frames, mbps in
             session?.framesSent = frames
             session?.mbps = mbps
+        }
+        sender.onMediaState = { [weak session] videoActive, audioActive, width, height in
+            guard let session else { return }
+            session.videoActive = videoActive
+            session.audioActive = audioActive
+            session.videoWidth = width
+            session.videoHeight = height
         }
         sender.onDisconnected = { [weak self, weak session] in
             // MacSender already exhausted its in-place reconnect grace. End
@@ -1197,8 +1441,12 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             session.failed = true
             session.status = message
+            session.sender.stop()
         }
         sessions.append(session)
+        sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
+            self?.objectWillChange.send()
+        }
         Task {
             do {
                 try await sender.start()
@@ -1239,6 +1487,10 @@ final class SenderController: ObservableObject {
     private func end(_ session: DeviceSession) {
         autoConnectPolicy.finish(session.attempt)
         session.sender.stop()
+        if session.applicationAuthenticated {
+            Log.info("deviceUI: activeSession removed peerID=\(session.deviceID ?? "unknown") sessionID=\(session.id)")
+        }
+        sessionObservations.removeValue(forKey: ObjectIdentifier(session))
         // Identity comparison prevents a late callback from an old attempt
         // removing its newer replacement, which can have the same route id.
         sessions.removeAll { $0 === session }
@@ -1334,6 +1586,122 @@ final class SenderController: ObservableObject {
         return entries
     }
 
+    // MARK: - Active Display (runtime) / Known Devices (persistent trust)
+    //
+    // Two independent sources of truth, never conflated: Active Display
+    // comes only from `sessions` that completed the application handshake
+    // (`applicationAuthenticated`), and Known Devices comes only from
+    // TrustStore. A peer can be known-but-offline, known-and-active, or
+    // (transiently, before the first pairing) neither.
+
+    // The one canonical observable runtime projection for a live session —
+    // Overview, Devices → Active Display, the toolbar/menu-bar status, and
+    // the ReceiverPanel-equivalent status on the sender side all read this
+    // (via `activeDisplayEntries`/`canonicalStatus` below) instead of each
+    // re-deriving "connected" from sessions/applicationAuthenticated on
+    // their own.
+    struct ActiveDisplayEntry: Identifiable {
+        let id: String
+        let peerID: String?
+        let name: String
+        let statusText: String
+        let route: ConnectionRoute?
+        let mode: CaptureMode
+        let videoActive: Bool
+        let audioActive: Bool
+        let allowInput: Bool
+        let videoWidth: Int
+        let videoHeight: Int
+        let bitrateBps: Int
+        // The two existing capture-lifecycle signals a session already
+        // tracks (see `DeviceSession.capturePhase`/`.failed`), carried
+        // through so every status surface can derive the same
+        // `CanonicalConnectionPhase` instead of guessing from `statusText`.
+        let capturePhase: CaptureLifecyclePhase
+        let failed: Bool
+
+        var phase: CanonicalConnectionPhase {
+            CanonicalRuntimeStatus.phase(capturePhase: capturePhase, failed: failed)
+        }
+    }
+
+    var activeDisplayEntries: [ActiveDisplayEntry] {
+        sessions
+            .filter(\.applicationAuthenticated)
+            .map { session in
+                ActiveDisplayEntry(id: session.id, peerID: session.deviceID, name: session.name,
+                                   statusText: session.statusWithRoute, route: session.route,
+                                   mode: mode, videoActive: session.videoActive,
+                                   audioActive: session.audioActive, allowInput: allowInput,
+                                   videoWidth: session.videoWidth, videoHeight: session.videoHeight,
+                                   bitrateBps: quality.bitrate, capturePhase: session.capturePhase,
+                                   failed: session.failed)
+            }
+    }
+
+    /// The single global status string every status-bearing surface (main
+    /// window toolbar, menu bar icon/label) must read — gated on the same
+    /// application-authenticated source as Active Display, never on
+    /// `sessions.isEmpty` alone (a dialing/pre-hello session is not yet a
+    /// connected device), AND phase-aware, so a session that's actually
+    /// paused/reconnecting/lost is never reported as plain "connected" —
+    /// the canonical fix for the toolbar staying on "1 device connected"
+    /// through a reconnect.
+    var canonicalStatusText: String {
+        CanonicalRuntimeStatus.aggregateStatusText(
+            entries: activeDisplayEntries.map { (mode: $0.mode, route: $0.route, phase: $0.phase) })
+    }
+
+    var canonicalPhase: CanonicalConnectionPhase {
+        CanonicalRuntimeStatus.aggregatePhase(entryPhases: activeDisplayEntries.map(\.phase))
+    }
+
+    var hasActiveDisplay: Bool { !activeDisplayEntries.isEmpty }
+
+    struct KnownDeviceEntry: Identifiable {
+        let id: String   // peerID
+        let name: String
+        let activeSessionID: String?
+        let resolvedTarget: ConnectionTarget?
+        let inputAuthorized: Bool
+    }
+
+    var knownDeviceEntries: [KnownDeviceEntry] {
+        TrustStore.shared.pinnedPeers().map { peer in
+            let active = sessions.first { $0.deviceID == peer.peerID && $0.applicationAuthenticated }
+            return KnownDeviceEntry(
+                id: peer.peerID, name: peer.displayName, activeSessionID: active?.id,
+                resolvedTarget: active == nil ? resolvedTarget(forPeerID: peer.peerID) : nil,
+                inputAuthorized: ReceiverInputAuthorizationStore.isAuthorized(peerID: peer.peerID))
+        }
+    }
+
+    /// Whether `peerID` may enable Mac input from its own UI without a
+    /// fresh Mac confirmation each time — see the security invariant in
+    /// `onAllowInputRequest`'s wiring. Always Mac-user-granted, never
+    /// auto-granted by connecting or pairing.
+    func isInputAuthorized(peerID: String) -> Bool {
+        ReceiverInputAuthorizationStore.isAuthorized(peerID: peerID)
+    }
+
+    func setInputAuthorized(_ authorized: Bool, peerID: String) {
+        ReceiverInputAuthorizationStore.setAuthorized(authorized, peerID: peerID)
+        objectWillChange.send()
+    }
+
+    /// A currently reachable (but not yet connected) target for a known
+    /// peer, so its row can offer Connect without waiting for it to also
+    /// appear as a Nearby row.
+    private func resolvedTarget(forPeerID peerID: String) -> ConnectionTarget? {
+        if let udid = installIDByUDID.first(where: { $0.value == peerID })?.key {
+            return .usb(udid: udid)
+        }
+        if let result = discovered.first(where: { txtID(of: $0) == peerID }) {
+            return .wifi(result)
+        }
+        return nil
+    }
+
     func session(for entry: DeviceEntry) -> DeviceSession? {
         if let target = entry.usbTarget {
             if let s = session(for: target.sessionID) { return s }
@@ -1359,6 +1727,52 @@ final class SenderController: ObservableObject {
            let id = installIDByUDID[udid], TrustStore.shared.hasPin(peerID: id) { return id }
         return nil
     }
+
+
+    #if DEBUG
+    // MARK: - Debug diagnostics
+    struct PeerDiagnostic: Identifiable {
+        let id: String
+        let name: String
+        let trusted: Bool
+        let normalDiscovered: Bool
+        let pairingDiscovered: Bool
+        let connected: Bool
+        let route: String
+        let sessionGeneration: String
+        let normalEndpoint: String
+        let pairingEndpoint: String
+    }
+
+    /// Per-peer diagnostic snapshot merging all independent sources of truth
+    /// (pinned trust, normal/pairing Bonjour discovery, live sessions) by
+    /// stable peer ID, for Developer / Diagnostics. Never used to derive UI
+    /// state elsewhere — this is read-only introspection.
+    var peerDiagnostics: [PeerDiagnostic] {
+        let pinned = TrustStore.shared.pinnedPeers()
+        var peerIDs = Set(pinned.map(\.peerID))
+        for r in discovered { if let id = txtID(of: r) { peerIDs.insert(id) } }
+        for r in receiverPairingResults { if let id = txtID(of: r) { peerIDs.insert(id) } }
+        for s in sessions { if let id = s.deviceID { peerIDs.insert(id) } }
+        return peerIDs.sorted().map { peerID in
+            let pinnedName = pinned.first { $0.peerID == peerID }?.displayName
+            let normalResult = discovered.first { txtID(of: $0) == peerID }
+            let pairingResult = receiverPairingResults.first { txtID(of: $0) == peerID }
+            let session = sessions.first { $0.deviceID == peerID }
+            return PeerDiagnostic(
+                id: peerID,
+                name: pinnedName ?? session?.name ?? normalResult.flatMap(serviceName) ?? peerID,
+                trusted: TrustStore.shared.hasPin(peerID: peerID),
+                normalDiscovered: normalResult != nil,
+                pairingDiscovered: pairingResult != nil,
+                connected: session != nil,
+                route: session?.route?.rawValue ?? "-",
+                sessionGeneration: session.map { "\($0.attempt.generation)" } ?? "-",
+                normalEndpoint: normalResult.map { "\($0.endpoint)" } ?? "-",
+                pairingEndpoint: pairingResult.map { "\($0.endpoint)" } ?? "-")
+        }
+    }
+    #endif
 }
 
 /// Polls the permission states the app depends on so the UI can surface
@@ -1397,369 +1811,6 @@ final class PermissionMonitor: ObservableObject {
     static func openPrivacyPane(_ anchor: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
             NSWorkspace.shared.open(url)
-        }
-    }
-}
-
-struct ContentView: View {
-    @ObservedObject var controller: SenderController
-    @StateObject private var permissions = PermissionMonitor()
-    // Optional so the view still compiles/previews without an updater (e.g.
-    // if Sparkle ever fails to start); the button just disables itself then.
-    let updater: SPUStandardUpdaterController?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: 44, height: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("OpenDisplay")
-                        .font(.title3.bold())
-                    Text("Your iPads, iPhones and Macs as extra displays")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if controller.running {
-                    Button("Disconnect All") { controller.disconnectAll() }
-                        .controlSize(.large)
-                }
-            }
-            .padding(16)
-
-            Divider()
-
-            // Settings
-            Form {
-                Section("Devices") {
-                    if let message = controller.pairingMessage {
-                        Text(message).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if controller.deviceEntries.isEmpty {
-                        Text("No devices found — plug one in via USB, or open the OpenDisplay app on a device on this WiFi network.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(controller.deviceEntries) { entry in
-                        if let session = controller.session(for: entry) {
-                            // Title from the entry, not the session: the
-                            // session name was snapshotted at connect time,
-                            // often before lockdown resolved the real name.
-                            SessionRow(title: entry.name, session: session,
-                                       controller: controller)
-                                .contextMenu {
-                                    if let peerID = controller.pairedPeerID(for: entry) {
-                                        Button("Forget Device", role: .destructive) {
-                                            controller.forgetPairing(peerID: peerID)
-                                        }
-                                    }
-                                }
-                        } else {
-                            HStack(alignment: .firstTextBaseline) {
-                                Circle()
-                                    .fill(.secondary.opacity(0.5))
-                                    .frame(width: 9, height: 9)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name)
-                                    Text(entry.transportLabel)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if let target = entry.preferredTarget {
-                                    if case .wifi(let result) = target,
-                                       !controller.isPaired(result) {
-                                        Button("Pair") { controller.pair(result) }
-                                            .controlSize(.small)
-                                    } else {
-                                        Button("Connect") {
-                                            controller.connect(to: target, userInitiated: true)
-                                        }
-                                        .controlSize(.small)
-                                    }
-                                }
-                            }
-                            .contextMenu {
-                                if let peerID = controller.pairedPeerID(for: entry) {
-                                    Button("Forget Device", role: .destructive) {
-                                        controller.forgetPairing(peerID: peerID)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Picker("Mode", selection: Binding(
-                    get: { controller.mode },
-                    set: { controller.requestMode($0) })) {
-                    Text("Extend").tag(CaptureMode.extend)
-                        .disabled(!controller.videoEnabled)
-                    Text("Mirror").tag(CaptureMode.mirror)
-                }
-                .pickerStyle(.segmented)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Video", isOn: Binding(
-                        get: { controller.videoEnabled },
-                        set: { controller.requestVideoEnabled($0) }))
-                    Text("Stop screen capture and streaming while keeping connected-device controls active.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Allow Input", isOn: $controller.allowInput)
-                    Text("Allow touch, scrolling, and pointer input from the connected device.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Quality", selection: $controller.quality) {
-                        ForEach(StreamQuality.allCases, id: \.self) { q in
-                            Text(q.label).tag(q)
-                        }
-                    }
-                    .onChange(of: controller.quality) { controller.restartAll() }
-                    Text(controller.quality.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Show app in", selection: $controller.presentation) {
-                        ForEach(AppPresentation.allCases, id: \.self) { p in
-                            Text(p.label).tag(p)
-                        }
-                    }
-                    if controller.presentation == .background {
-                        Text("No menu bar or Dock icon — streaming keeps running. Open the OpenDisplay app again (Spotlight/Finder) to show this window.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                LabeledContent("Display layout") {
-                    Button("Arrange Displays…") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    .controlSize(.small)
-                }
-                .help("Opens System Settings → Displays, where you can position the extended displays relative to your Mac screen (Arrange…). Each device shows up as its own display, named after the device.")
-
-                Section("Permissions") {
-                    permissionRow(
-                        "Screen Recording",
-                        granted: permissions.screenRecording,
-                        help: "Required to capture the display.",
-                        anchor: "Privacy_ScreenCapture",
-                        request: { permissions.requestScreenRecording() }
-                    )
-                    permissionRow(
-                        "Accessibility",
-                        granted: permissions.accessibility,
-                        help: "Required for touch input from the device.",
-                        anchor: "Privacy_Accessibility",
-                        request: { permissions.requestAccessibility() }
-                    )
-                    // macOS offers no API to query Local Network access, so
-                    // infer from discovery results and let the user check.
-                    permissionRow(
-                        "Local Network",
-                        granted: !controller.discovered.isEmpty,
-                        uncertain: controller.discovered.isEmpty,
-                        help: "Required for WiFi mode. If no device appears in the Devices list, allow OpenDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the OpenDisplay app open there.",
-                        anchor: "Privacy_LocalNetwork"
-                    )
-                }
-
-                #if DEBUG
-                Section("Developer / Diagnostics") {
-                    DisclosureGroup("Route Overrides (DEBUG)") {
-                        RouteOverridesView()
-                    }
-                    DisclosureGroup("Remote Endpoint (DEBUG)") {
-                        RemoteEndpointDebugView(controller: controller)
-                    }
-                }
-                #endif
-            }
-            .formStyle(.grouped)
-            // Scrollable + fixed panel height: MenuBarExtra windows mis-measure
-            // grouped Forms (clipping on small displays), so size explicitly
-            // and let the form scroll when it doesn't fit.
-
-            Divider()
-
-            // Status bar
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(controller.running ? .green : .secondary.opacity(0.5))
-                    .frame(width: 9, height: 9)
-                Text(controller.running
-                     ? "\(controller.sessions.count) device\(controller.sessions.count == 1 ? "" : "s") connected"
-                     : "Idle")
-                    .font(.callout)
-                    .lineLimit(1)
-                Spacer()
-                // Support affordance: bug reports are much easier to act on
-                // with the log attached, and users shouldn't have to be told a
-                // filesystem path to find it.
-                Button("Logs") { Log.revealInFinder() }
-                    .controlSize(.small)
-                    .help("Reveal the OpenDisplay log files in Finder")
-                if let updater {
-                    CheckForUpdatesView(updater: updater)
-                }
-                Button("Quit") { NSApp.terminate(nil) }
-                    .controlSize(.small)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-        .sheet(item: Binding(get: { controller.pairingPrompt.pending },
-                             set: { if $0 == nil { controller.pairingPrompt.decide(accept: false) } })) { pending in
-            VStack(spacing: 16) {
-                Text("Pair with \(pending.peerName)?").font(.headline)
-                Text(pending.sas).font(.system(.title, design: .monospaced)).bold()
-                Text("Confirm only if this code matches on both devices.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Cancel", role: .cancel) { controller.pairingPrompt.decide(accept: false) }
-                    Button("Codes Match") { controller.pairingPrompt.decide(accept: true) }
-                        .keyboardShortcut(.defaultAction)
-                }
-            }
-            .padding(24).frame(minWidth: 360)
-        }
-        .frame(width: 440, height: 540)
-    }
-
-    @ViewBuilder
-    private func permissionRow(_ title: String, granted: Bool, uncertain: Bool = false,
-                               help: String, anchor: String,
-                               request: (() -> Void)? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Image(systemName: uncertain ? "questionmark.circle.fill"
-                            : granted ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(uncertain ? .orange : granted ? .green : .red)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                if uncertain || !granted {
-                    Text(help)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            if uncertain || !granted {
-                if let request {
-                    Button("Grant…") { request() }
-                        .controlSize(.small)
-                        .help("Ask macOS for this permission. If the system dialog was already dismissed once, this registers the app under \(title) in System Settings — flip the toggle there.")
-                }
-                Button("Open Settings") {
-                    PermissionMonitor.openPrivacyPane(anchor)
-                }
-                .controlSize(.small)
-            }
-        }
-    }
-}
-
-/// One connected device: live status, throughput, reconnect + disconnect.
-@MainActor
-struct SessionRow: View {
-    let title: String
-    @ObservedObject var session: DeviceSession
-    let controller: SenderController
-
-    private var statusColor: Color {
-        if session.status.hasPrefix("Extending") || session.status.hasPrefix("Mirroring")
-            || session.status.hasPrefix("Connected") || session.status.hasPrefix("Video off") {
-            return .green
-        }
-        if session.status.hasPrefix("Failed") || session.status.contains("stopped") {
-            return .red
-        }
-        return .orange
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(session.statusWithRoute)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Spacer()
-            if session.mbps > 0 {
-                Text("\(String(format: "%.1f", session.mbps)) Mbit/s")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Button {
-                if session.failed {
-                    controller.retry(session)
-                } else {
-                    session.sender.forceReconnect()
-                }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .controlSize(.small)
-            .help(session.failed
-                ? "Start this connection over"
-                : "Drop the connection and pair with the device again")
-            Button(session.capturePhase == .paused ? "Resume" : "Pause") {
-                if session.capturePhase == .paused {
-                    session.sender.resumeDisplay()
-                } else {
-                    session.sender.pauseDisplay()
-                }
-            }
-            .controlSize(.small)
-            .disabled(session.capturePhase != .running
-                && session.capturePhase != .recovering
-                && session.capturePhase != .paused)
-            if session.deviceKind != "Mac",
-               session.receiverProtocolVersion >= WireProtocol.receiverControlsWireVersion {
-                Menu {
-                    Toggle("Show Control Tray", isOn: Binding(
-                        get: { session.receiverTrayEnabled },
-                        set: { value in
-                            session.receiverTrayEnabled = value
-                            session.sender.setReceiverUIPreferences(
-                                trayEnabled: value,
-                                keyboardButtonEnabled: session.receiverKeyboardButtonEnabled)
-                        }))
-                    Toggle("Show Keyboard Button", isOn: Binding(
-                        get: { session.receiverKeyboardButtonEnabled },
-                        set: { value in
-                            session.receiverKeyboardButtonEnabled = value
-                            session.sender.setReceiverUIPreferences(
-                                trayEnabled: session.receiverTrayEnabled,
-                                keyboardButtonEnabled: value)
-                        }))
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .controlSize(.small)
-                .help("Receiver controls")
-            }
-            Button("Disconnect") { controller.disconnect(session) }
-                .controlSize(.small)
         }
     }
 }

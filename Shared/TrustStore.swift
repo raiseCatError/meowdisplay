@@ -111,14 +111,15 @@ final class TrustStore: PeerTrustStoring {
     /// Persist a new pin, or accept an exact existing match. A changed key is
     /// never overwritten; recovery requires an explicit forget first.
     @discardableResult
-    func setPin(peerID: String, spki: Data, displayName: String) -> Bool {
+    func setPin(peerID: String, spki: Data, displayName: String,
+                allowIdentityChange: Bool) -> Bool {
         switch TrustPinPolicy.decision(existing: pin(peerID: peerID), presented: spki) {
         case .match:
             return true
-        case .identityChanged:
+        case .identityChanged where !allowIdentityChange:
             Log.info("SECURITY: refused changed identity for peer \(peerID)")
             return false
-        case .new:
+        case .identityChanged, .new:
             break
         }
         let deleteQuery: [CFString: Any] = [

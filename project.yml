@@ -172,9 +172,17 @@ targets:
       - Mac/CaptureLifecycle.swift
       - Mac/TransportSafety.swift
       - Mac/AutoConnectPolicy.swift
+      - Mac/AuthenticatedSessionState.swift
+      - Mac/CanonicalRuntimeStatus.swift
+      - Mac/SettingsCategory.swift
+      - Mac/ForgetDeviceAction.swift
+      - Mac/ReceiverInputAuthorizationStore.swift
       - Mac/RouteOverrides.swift
+      - Mac/WakeInspector.swift
+      - Mac/MirrorDisplaySelection.swift
       - Shared/ConnectionRoute.swift
       - Shared/RemoteEndpointStore.swift
+      - Shared/WakeOnLAN.swift
       - Shared/StreamListenerRestartState.swift
       - Shared/ReceiverSessionState.swift
       - Shared/DisplayState.swift
@@ -190,6 +198,7 @@ targets:
       - Shared/ControlInteraction.swift
       - Shared/ControlTrayGeometry.swift
       - Shared/Pairing.swift
+      - Shared/PairingPromptModel.swift
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight

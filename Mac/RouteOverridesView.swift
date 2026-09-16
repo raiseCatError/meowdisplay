@@ -55,4 +55,62 @@ struct RemoteEndpointDebugView: View {
         .controlSize(.small)
     }
 }
+
+/// Local Wake-on-LAN proof-of-concept for this Mac: shows the interface/MAC
+/// this device would be woken at, and a way to sleep it deliberately to test
+/// that. Logs everything non-secret before sleeping so the exact target of
+/// the follow-up wake attempt is on record.
+struct WakeTestingDebugView: View {
+    @State private var metadata = WakeInspector.currentInterfaceWakeMetadata()
+    @State private var wakeStatus = WakeInspector.wakeForNetworkAccessStatus()
+    @State private var promotionResult: String?
+
+    var body: some View {
+        if let metadata {
+            LabeledContent("Interface", value: metadata.interfaceName)
+            LabeledContent("IPv4", value: metadata.ipv4 ?? "unknown")
+            LabeledContent("Subnet mask", value: metadata.subnetMask ?? "unknown")
+            LabeledContent("Broadcast", value: metadata.broadcastAddress ?? "unknown")
+            LabeledContent("MAC address", value: metadata.macAddress)
+        } else {
+            Text("No active LAN interface found").foregroundStyle(.secondary)
+        }
+        LabeledContent("Wake for Network Access", value: wakeStatus.rawValue)
+        HStack {
+            Button("Recheck") {
+                metadata = WakeInspector.currentInterfaceWakeMetadata()
+                wakeStatus = WakeInspector.wakeForNetworkAccessStatus()
+            }
+            Button("Sleep This Mac for WoL Test") {
+                if let metadata {
+                    Log.info("wakeDebug: sleeping for WoL test interface=\(metadata.interfaceName) mac=\(metadata.macAddress) ipv4=\(metadata.ipv4 ?? "unknown") broadcast=\(metadata.broadcastAddress ?? "unknown") wakeForNetworkAccess=\(wakeStatus.rawValue)")
+                } else {
+                    Log.info("wakeDebug: sleeping for WoL test — no LAN interface metadata available")
+                }
+                WakeInspector.sleepNow()
+            }
+        }
+        .controlSize(.small)
+
+        Divider()
+
+        // Isolates one question: does declaring remote user activity promote
+        // a dark/network wake into a graphical/interactive one? Makes only
+        // the single public IOPMAssertionDeclareUserActivity call — no
+        // synthesized input, no capture/display rebuild, not wired to
+        // reconnect yet.
+        VStack(alignment: .leading, spacing: 4) {
+            Button("Promote to Interactive Wake") {
+                let attempt = InteractiveWakePromotion.promote()
+                promotionResult = attempt.result == kIOReturnSuccess
+                    ? "Success (assertionID=\(attempt.assertionID ?? 0))"
+                    : "Failed: \(attempt.result)"
+            }
+            .controlSize(.small)
+            if let promotionResult {
+                Text(promotionResult).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
 #endif

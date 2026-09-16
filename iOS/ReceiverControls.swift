@@ -58,11 +58,11 @@ final class ReceiverControlStore: ObservableObject {
         update { $0.updateFunctionTrayProfile(profile) }
     }
 
-    func applyRemote(trayEnabled: Bool?, keyboardButtonEnabled: Bool?) {
-        update {
-            if let trayEnabled { $0.trayEnabled = trayEnabled }
-            if let keyboardButtonEnabled { $0.keyboardButtonEnabled = keyboardButtonEnabled }
-        }
+    /// Reuses `ReceiverUIPreferenceUpdate.apply(to:)` — the exact same
+    /// mapping `MacSender`'s push and this receiver's decode both already
+    /// agree on — rather than re-enumerating the field list a third time.
+    func applyRemote(_ preferenceUpdate: ReceiverUIPreferenceUpdate) {
+        update { preferenceUpdate.apply(to: &$0) }
     }
 
     /// The connected Mac is authoritative for Allow Input (a security-

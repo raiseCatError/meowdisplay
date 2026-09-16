@@ -77,6 +77,21 @@ struct PhoneInfo: Decodable {
     let maxEncodeHigh: Int?  //  6.5): cap the stream, keep the desktop size
     let trayEnabled: Bool?   // receiver-local control UI state (protocol 6)
     let keyboardButtonEnabled: Bool?
+    // Per-device receiver settings the connected receiver reports on every
+    // hello — see `StreamReceiver.announceReceiverPreferences`/`sendHello`.
+    // Read-only visibility for Mac's device detail; Mac may push most of
+    // these back via `MacSender.setReceiverUIPreferences` (see
+    // `ReceiverUIPreferenceUpdate`), except `avSyncOffsetMs`, which only the
+    // receiver ever sets.
+    let functionTrayEnabled: Bool?
+    let inputMode: String?
+    let trackpadSensitivity: Double?
+    let hapticsEnabled: Bool?
+    let avoidNotch: Bool?
+    let pinchTarget: String?
+    let rotateTarget: String?
+    let snapRotation: Bool?
+    let avSyncOffsetMs: Int?
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
@@ -101,6 +116,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Status surfaced to the UI (updated on main thread).
     @MainActor var onStatus: ((String) -> Void)?
     @MainActor var onStats: ((Int, Double) -> Void)?   // framesSent, mbps
+    // Refreshed on the same ~1s cadence as onStats: this session's current
+    // video/audio activity and capture geometry, for the canonical runtime
+    // projection (Overview / Active Display / menu bar all read from the
+    // one place this feeds — DeviceSession — rather than re-deriving it).
+    @MainActor var onMediaState: ((_ videoActive: Bool, _ audioActive: Bool,
+                                   _ width: Int, _ height: Int) -> Void)?
     @MainActor var onCaptureLifecycleChanged: ((CaptureLifecyclePhase) -> Void)?
     // Fired when a previously connected device stays gone past the grace
     // period — the controller ends the session (capture, virtual display,
@@ -160,6 +181,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let endpointName: String
     private var mode: CaptureMode
     private let quality: StreamQuality
+    // The user's persisted Mirror-mode display choice (a stable UUID, never
+    // a raw CGDirectDisplayID — see MirrorDisplaySelection.swift). Resolved
+    // against the live display list at capture start; unresolvable or nil
+    // falls back to Automatic (today: SCShareableContent's first display).
+    private let mirrorDisplayUUID: String?
     // Stable per-device serial for the virtual display, so macOS can tell
     // multiple OpenDisplay monitors apart and persist their arrangement.
     private let displaySerial: UInt32
@@ -309,6 +335,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var capturePixelsWide = 0
     private var capturePixelsHigh = 0
     private var connectionReady = false
+    private let authenticatedSession = AuthenticatedSessionState()
+    private var activeConnectionGeneration: UInt64 = 0
     private var stopped = false
     // The liveness monitors are self-rescheduling chains guarded only by
     // `stopped`; arm them at most once per instance so a double start() can't
@@ -324,7 +352,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let disconnectGraceSeconds: TimeInterval = 10
 
     private var lastHello: PhoneInfo?
-    private var helloContinuation: CheckedContinuation<PhoneInfo, Error>?
+    private struct ApplicationReadySession {
+        let info: PhoneInfo
+        let generation: UInt64
+    }
+    private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
     private var inputInjector: InputInjector?
     private var nativeAppGestureState = NativeAppGestureSessionState()
     private var loggedNativeGestureLimitation = false
@@ -481,11 +513,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
          identityOffset: UInt32 = 0, awaitingWake: Bool = false,
-         videoEnabled: Bool = true) {
+         videoEnabled: Bool = true, mirrorDisplayUUID: String? = nil) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
         self.quality = quality
+        self.mirrorDisplayUUID = mirrorDisplayUUID
         self.displaySerial = displaySerial
         self.baseIdentityOffset = identityOffset
         self.awaitingWake = awaitingWake
@@ -701,7 +734,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.virtualDisplay = nil
                     Task {
                         do {
-                            try await self.startMirrorCapture(preferredDisplayID: nil)
+                            try await self.startMirrorCaptureUsingPreference()
                         } catch {
                             Log.info("Extend to Mirror transition failed before Video Off: \(error)")
                         }
@@ -742,9 +775,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("Screen Recording permission granted")
         }
 
+        let ready = try await waitForHello()
+        guard authenticatedSession.isLive(generation: ready.generation) else {
+            Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
+            throw CancellationError()
+        }
+
         switch mode {
         case .mirror:
-            try await startMirrorCapture(preferredDisplayID: nil)
+            try await startMirrorCaptureUsingPreference(sessionGeneration: ready.generation)
 
         case .extend:
             // awaitingWake is queue-confined — read it there before surfacing.
@@ -755,8 +794,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     : "Waiting for the device to connect…"
                 Task { await self.status(text) }
             }
-            let info = try await waitForHello()
-            try await setupExtend(info)
+            try await setupExtend(ready.info, sessionGeneration: ready.generation)
 
             // Touch back-channel (Milestone 3). Needs Accessibility trust;
             // streaming works without it, so don't interrupt with a prompt —
@@ -774,7 +812,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func startMirrorCapture(preferredDisplayID: CGDirectDisplayID?) async throws {
+    private func startMirrorCapture(preferredDisplayID: CGDirectDisplayID?,
+                                    sessionGeneration: UInt64? = nil) async throws {
         let content = try await SCShareableContent.current
         let display = preferredDisplayID.flatMap { id in
             content.displays.first(where: { $0.displayID == id })
@@ -783,13 +822,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw NSError(domain: "MacSender", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "no displays found"])
         }
-        try await startMirrorCapture(display: display)
+        try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
+    }
+
+    /// Entry point for the user's persisted Mirror-display choice (as
+    /// opposed to `preferredDisplayID`, used by the recovery path to
+    /// reattach to whatever was already active). Resolves the stable UUID
+    /// against the current display list — an unresolvable or absent
+    /// preference logs the decision and falls back to Automatic.
+    private func startMirrorCaptureUsingPreference(sessionGeneration: UInt64? = nil) async throws {
+        let content = try await SCShareableContent.current
+        var display = content.displays.first
+        if let uuid = mirrorDisplayUUID {
+            if let resolved = MirrorDisplayIdentity.resolve(persistentID: uuid, in: content.displays) {
+                display = resolved
+            } else {
+                Log.info("displayDebug: mirrorSelection unavailable persistentID=\(uuid) — falling back to Automatic")
+            }
+        }
+        guard let display else {
+            throw NSError(domain: "MacSender", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "no displays found"])
+        }
+        try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
     }
 
     /// Build (or rebuild) the virtual display + capture for the announced
     /// phone dimensions. Called at startup and again whenever the phone
     /// rotates (it re-sends hello with swapped dimensions).
-    private func setupExtend(_ info: PhoneInfo) async throws {
+    private func setupExtend(_ info: PhoneInfo, sessionGeneration: UInt64? = nil) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
 
         // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
@@ -926,7 +987,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             captureH = (Int(Double(captureH) * s)) & ~1
             Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling \(maxW)x\(maxH)")
         }
-        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
+                               sessionGeneration: sessionGeneration)
 
         // Debug aid (`defaults write com.peetzweg.opensidecar.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
@@ -1043,7 +1105,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                       userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent"])
     }
 
-    private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int) async throws {
+    private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int,
+                              sessionGeneration requestedGeneration: UInt64? = nil) async throws {
+        guard let sessionGeneration = requestedGeneration ?? authenticatedSession.liveGeneration,
+              authenticatedSession.isLive(generation: sessionGeneration) else {
+            Log.info("sessionDebug: ignored stale capture start generation=\(requestedGeneration.map(String.init) ?? "none")")
+            throw CancellationError()
+        }
         let initialPhase = captureStateSnapshot().phase
         guard initialPhase != .pausing, initialPhase != .paused, initialPhase != .stopped else {
             throw CancellationError()
@@ -1127,7 +1195,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             captureDisplayID = 0   // this attempt never actually started capturing
             throw error
         }
-        guard self.stream === stream, videoEnabled || desiredAudioEnabled,
+        guard authenticatedSession.isLive(generation: sessionGeneration),
+              self.stream === stream, videoEnabled || desiredAudioEnabled,
               updateCaptureState({ state in state.captureStarted() }) else {
             if self.stream === stream { self.stream = nil }
             captureDisplayID = 0   // superseded/discarded — not the active capture
@@ -1138,6 +1207,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let nsError = error as NSError
                 Log.info("capture discarded after pause/disconnect failed to stop domain=\(nsError.domain) code=\(nsError.code)")
             }
+            Log.info("sessionDebug: ignored stale capture start generation=\(sessionGeneration)")
             throw CancellationError()
         }
         audioEnabled = desiredAudioEnabled
@@ -1161,6 +1231,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendVideoState()
             self.sendAudioState()
         }
+        guard authenticatedSession.isLive(generation: sessionGeneration) else {
+            Log.info("sessionDebug: ignored stale capture status generation=\(sessionGeneration)")
+            return
+        }
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor) video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
@@ -1168,6 +1242,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stop() {
         stopped = true
+        authenticatedSession.invalidate()
         inputInjector?.cancelActiveInput()
         _ = updateCaptureState { state in
             state.stop()
@@ -1218,6 +1293,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 "keyboardButtonEnabled": keyboardButtonEnabled,
             ])
         }
+    }
+
+    /// Per-device receiver-controls push — the same `WireMessage.receiverUI`
+    /// path `setReceiverUIPreferences` uses, extended to the rest of the
+    /// fields `ReceiverUIPreferenceUpdate` understands. Every parameter is
+    /// optional and omitted-if-nil, so a caller only ever sends the field(s)
+    /// actually being edited rather than re-broadcasting every value.
+    func setReceiverControlOverrides(
+        functionTrayEnabled: Bool? = nil,
+        inputMode: String? = nil,
+        trackpadSensitivity: Double? = nil,
+        hapticsEnabled: Bool? = nil,
+        avoidNotch: Bool? = nil,
+        pinchTarget: String? = nil,
+        rotateTarget: String? = nil,
+        snapRotation: Bool? = nil
+    ) {
+        var message: [String: Any] = ["type": WireMessage.receiverUI]
+        if let functionTrayEnabled { message["functionTrayEnabled"] = functionTrayEnabled }
+        if let inputMode { message["inputMode"] = inputMode }
+        if let trackpadSensitivity { message["trackpadSensitivity"] = trackpadSensitivity }
+        if let hapticsEnabled { message["hapticsEnabled"] = hapticsEnabled }
+        if let avoidNotch { message["avoidNotch"] = avoidNotch }
+        if let pinchTarget { message["pinchTarget"] = pinchTarget }
+        if let rotateTarget { message["rotateTarget"] = rotateTarget }
+        if let snapRotation { message["snapRotation"] = snapRotation }
+        guard message.count > 1 else { return }
+        queue.async { [weak self] in self?.sendJSONObject(message) }
     }
 
     func resetReceiverInputState() {
@@ -1450,7 +1553,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // session ends like any other disconnect instead of dialing
             // a dead transport forever.
             self.disconnectedSince = Date()
-            self.connectionReady = false
+            self.invalidateApplicationSession(reason: "transportSwitch")
             self.currentPathDirectLink = false   // the new transport re-classifies
             Task { @MainActor in self.onTransportPath?(nil) }
             self.dialGeneration += 1   // a dial still in flight must not adopt
@@ -1732,7 +1835,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         try await startMirrorCapture(display: display)
     }
 
-    private func startMirrorCapture(display: SCDisplay) async throws {
+    private func startMirrorCapture(display: SCDisplay,
+                                    sessionGeneration: UInt64? = nil) async throws {
         if let targetID = InputTargetResolver.displayID(
             mode: .mirror,
             mirrorDisplayID: display.displayID,
@@ -1746,7 +1850,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let pixelsH = displayMode?.pixelHeight ?? display.height
         let captureW = (Int(Double(pixelsW) * quality.scale)) & ~1
         let captureH = (Int(Double(pixelsH) * quality.scale)) & ~1
-        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+
+        // Logical (point) size vs. native backing-pixel size are frequently
+        // different (HiDPI @2x, or a virtual display like BetterDisplay
+        // configured with a large backing framebuffer) — log both plus the
+        // actual capture/encode target distinctly so a huge backing store
+        // is visible as exactly that, not confused with the encoded size.
+        // NB: unlike Extend mode, Mirror does not currently clamp to the
+        // receiver's advertised decode ceiling (PROTOCOL.md 6.5) — Mirror
+        // starts capture before any hello is available to read it from.
+        let displayName = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
+        }?.localizedName ?? "Display \(display.displayID)"
+        Log.info("displayDebug: mirrorSelection name=\(displayName)")
+        Log.info("displayDebug: persistentID=\(MirrorDisplayIdentity.uuidString(for: display.displayID) ?? "unknown")")
+        Log.info("displayDebug: resolvedCGDisplayID=\(display.displayID)")
+        Log.info("displayDebug: logicalSize=\(display.width)x\(display.height)")
+        Log.info("displayDebug: pixelSize=\(pixelsW)x\(pixelsH)")
+        Log.info("displayDebug: main=\(display.displayID == CGMainDisplayID())")
+        Log.info("displayDebug: captureSize=\(captureW)x\(captureH)")
+
+        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
+                               sessionGeneration: sessionGeneration)
     }
 
     private func rebuildMirrorCapturePipeline() async throws {
@@ -1821,11 +1946,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Bookkeeping shared by both transports once a connection is live.
     private func becomeReady(_ conn: NWConnection) {
+        guard connection === conn, !stopped else { return }
         Log.info("connection ready to \(endpointName)")
+        activeConnectionGeneration = authenticatedSession.beginTransport()
+        Log.info("sessionDebug: generation=\(activeConnectionGeneration)")
+        Log.info("sessionDebug: tlsReady")
         connectionReady = true
         cursorSeq = 0   // per-session; the receiver rewound its floor with the connection
-        everConnected = true
-        awaitingWake = false
         consecutiveRefusals = 0
         disconnectedSince = nil
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
@@ -1888,7 +2015,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             stopUpgradeProbing()   // already off WiFi — nothing better to find
         }
-        Task { await self.status("Connected") }
     }
 
     // MARK: - Cable upgrade (PROTOCOL.md 6.4)
@@ -2057,14 +2183,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             switch state {
             case .failed(let error):
                 Log.info("connection failed: \(error)")
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: "connectionFailed")
                 self.linkDied("failed: \(error)")
             case .waiting(let error):
                 Log.info("connection waiting: \(error) — will retry")
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: "connectionWaiting")
                 self.linkDied("waiting: \(error)")
             case .cancelled:
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: "connectionCancelled")
             default: break
             }
         }
@@ -2141,13 +2267,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.scheduleReconnect()
         }
         conn.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+            guard let self, self.connection === conn else { return }
             switch state {
             case .ready:
                 self.becomeReady(conn)
             case .failed(let error):
                 Log.info("connection failed: \(error)")
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: Self.isTLSFailure(error)
+                    ? "certificateRejected" : "connectionFailed")
                 if tls != nil, Self.isTLSFailure(error) {
                     self.reportTrustFailure()
                     return
@@ -2164,7 +2291,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // (e.g. a manual -host tunnel not started yet) — treat
                 // waiting as failure and poll by reconnecting.
                 Log.info("connection waiting: \(error) — will retry")
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: Self.isTLSFailure(error)
+                    ? "certificateRejected" : "connectionWaiting")
                 if tls != nil, Self.isTLSFailure(error) {
                     self.reportTrustFailure()
                     return
@@ -2177,7 +2305,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { await self.status(text) }
                 self.scheduleReconnect()
             case .cancelled:
-                self.connectionReady = false
+                self.invalidateApplicationSession(reason: "connectionCancelled")
             default:
                 break
             }
@@ -2192,11 +2320,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func reportTrustFailure() {
         guard !stopped else { return }
+        invalidateApplicationSession(reason: "certificateRejected")
         stopped = true
         connection?.cancel()
+        helloContinuation?.resume(throwing: PairingError.invalidKey)
+        helloContinuation = nil
         Task { @MainActor in
             self.onTrustFailure?("OpenDisplay could not verify this device. Forget it and pair again if its identity was reset.")
         }
+    }
+
+    private func invalidateApplicationSession(reason: String) {
+        let generation = activeConnectionGeneration
+        authenticatedSession.invalidate(generation: generation == 0 ? nil : generation)
+        connectionReady = false
+        Log.info("sessionDebug: invalidated reason=\(reason) generation=\(generation)")
     }
 
     /// Dial through macOS's built-in usbmuxd — no external tunnel needed.
@@ -2215,14 +2353,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     self.connection = conn
                     conn.stateUpdateHandler = { [weak self] state in
-                        guard let self else { return }
+                        guard let self, self.connection === conn else { return }
                         switch state {
                         case .failed(let error):
                             Log.info("usb connection failed: \(error)")
-                            self.connectionReady = false
+                            self.invalidateApplicationSession(reason: "usbConnectionFailed")
                             self.scheduleReconnect()
                         case .cancelled:
-                            self.connectionReady = false
+                            self.invalidateApplicationSession(reason: "usbConnectionCancelled")
                         default:
                             break
                         }
@@ -2271,7 +2409,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { await status("Connection lost — retrying for \(Int(disconnectGraceSeconds))s…") }
             }
         }
-        connectionReady = false
+        invalidateApplicationSession(reason: "reconnectScheduled")
         // Whatever this session rode is gone; deciding to redial means it is
         // an ordinary reconnecting session now. A stale direct-link flag here
         // would let the first dial hiccup end the session via linkDied.
@@ -2669,7 +2807,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func receiveControl(on conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, _, error in
-            guard let self, error == nil, let data, data.count == 4 else {
+            guard let self, self.connection === conn,
+                  error == nil, let data, data.count == 4 else {
                 if let error {
                     Log.info("control receive ended: \(error)")
                     // A receive error on the live connection is fatal to it.
@@ -2682,20 +2821,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     if let self, self.connection === conn, !isOwnCancel {
                         self.linkDied("receive failed: \(error)")
                     }
+                } else if let self, self.connection === conn {
+                    Log.info("control receive ended: EOF")
+                    self.invalidateApplicationSession(reason: "controlEOF")
+                    self.linkDied("control EOF")
                 }
                 return
             }
             let len = Int(UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
             guard len > 0, len < 1 << 20 else { return }
             conn.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] payload, _, _, error in
-                guard let self, error == nil, let payload, payload.count == len else { return }
-                self.handleControl(payload)
+                guard let self, self.connection === conn,
+                      error == nil, let payload, payload.count == len else {
+                    if let self, self.connection === conn {
+                        Log.info("control payload receive ended: \(error.map(String.init(describing:)) ?? "EOF")")
+                        self.invalidateApplicationSession(reason: error == nil ? "controlEOF" : "controlReceiveFailed")
+                        self.linkDied("control receive ended")
+                    }
+                    return
+                }
+                self.handleControl(payload, from: conn)
                 self.receiveControl(on: conn)
             }
         }
     }
 
-    private func handleControl(_ payload: Data) {
+    private func handleControl(_ payload: Data, from conn: NWConnection) {
+        guard connection === conn else { return }
         lastReceived = Date()
         guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
               let type = obj["type"] as? String else {
@@ -2735,6 +2887,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
                 if case .tcp(_, let tls?) = transport, info.id != tls.peerID {
                     Log.info("SECURITY: authenticated key claimed unexpected peer id")
+                    invalidateApplicationSession(reason: "applicationIdentityMismatch")
                     stopped = true
                     connection?.cancel()
                     Task { @MainActor in
@@ -2742,6 +2895,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     return
                 }
+                let generation = activeConnectionGeneration
+                guard authenticatedSession.markApplicationReady(generation: generation) else {
+                    Log.info("sessionDebug: ignored stale application handshake generation=\(generation)")
+                    return
+                }
+                everConnected = true
+                awaitingWake = false
+                disconnectedSince = nil
+                Log.info("sessionDebug: applicationReady generation=\(generation)")
+                Task { await self.status("Connected") }
                 let previous = lastHello
                 lastHello = info
                 // A fresh dial classifies before the hello names the device —
@@ -2774,6 +2937,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
+                sendWakeInfo()
                 sendDisplayModeState()
                 if info.protocolVersion >= WireProtocol.videoControlWireVersion {
                     applyVideoEnabled(desiredVideoEnabled)
@@ -2790,7 +2954,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 if let continuation = helloContinuation {
                     helloContinuation = nil
-                    continuation.resume(returning: info)
+                    continuation.resume(returning: ApplicationReadySession(
+                        info: info, generation: generation))
                 } else if mode == .extend, virtualDisplay != nil, let previous,
                           previous.pixelsWide != info.pixelsWide
                           || previous.pixelsHigh != info.pixelsHigh {
@@ -2944,6 +3109,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 Task { @MainActor in self.onVideoEnabledRequest?(requested) }
             }
+        #if DEBUG
+        case WireMessage.promoteInteractiveWake:
+            // `handleControl` only ever runs on data read off `connection`,
+            // which for wireless media is always the pinned-mutual-TLS
+            // secure transport (TLSConfigurator) and for USB is loopback —
+            // there is no other path into this switch, so this is already
+            // gated to an authenticated session by construction.
+            let peerID = lastHello?.id ?? "unknown"
+            Log.info("wakeDebug: remote promoteInteractiveWake requested")
+            Log.info("wakeDebug: peerID=\(peerID)")
+            Log.info("wakeDebug: userActivityType=remote")
+            let attempt = InteractiveWakePromotion.promote()
+            var result: [String: Any] = ["type": WireMessage.promoteInteractiveWakeResult]
+            if attempt.result == kIOReturnSuccess, let assertionID = attempt.assertionID {
+                result["success"] = true
+                result["assertionID"] = Int(assertionID)
+            } else {
+                result["success"] = false
+                result["code"] = Int(attempt.result)
+            }
+            sendJSONObject(result)
+        #endif
         case WireMessage.audioRequest:
             // Per-receiver, unlike Video/Allow Input: no Mac-wide policy to
             // check, so this applies directly rather than bouncing through
@@ -3016,12 +3203,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func waitForHello() async throws -> PhoneInfo {
-        if let lastHello { return lastHello }
+    private func waitForHello() async throws -> ApplicationReadySession {
+        if let lastHello, let generation = authenticatedSession.liveGeneration {
+            return ApplicationReadySession(info: lastHello, generation: generation)
+        }
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
-                if let hello = self.lastHello {
-                    continuation.resume(returning: hello)
+                if let hello = self.lastHello,
+                   let generation = self.authenticatedSession.liveGeneration {
+                    continuation.resume(returning: ApplicationReadySession(
+                        info: hello, generation: generation))
                 } else {
                     self.helloContinuation = continuation
                 }
@@ -3435,6 +3626,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
     }
 
+    /// Best-effort LAN wake hint (Remote Wake-on-LAN foundation): this Mac's
+    /// own MAC/interface/broadcast, self-labeled with our own install ID so
+    /// the receiver can key its local `WakeMetadataStore` cache. Additive
+    /// and non-authoritative like `sendWelcome` — an older receiver ignores
+    /// unknown message types, and the label is never used for trust.
+    private func sendWakeInfo() {
+        guard let metadata = WakeInspector.currentInterfaceWakeMetadata(),
+              let peerID = TrustStore.shared.installID() else { return }
+        var dict: [String: Any] = [
+            "type": WireMessage.wakeInfo,
+            "peer": peerID,
+            "mac": metadata.macAddress,
+            "interface": metadata.interfaceName,
+        ]
+        if let ipv4 = metadata.ipv4 { dict["ipv4"] = ipv4 }
+        if let subnet = metadata.subnetMask { dict["subnet"] = subnet }
+        if let broadcast = metadata.broadcastAddress { dict["broadcast"] = broadcast }
+        sendJSONObject(dict)
+    }
+
     /// Ask the receiver to update (built via JSONSerialization because the
     /// message text is user-facing prose). Dormant while minSupportedPeer is
     /// 1, but the copy must fit the platform the day a floor is raised: a
@@ -3519,7 +3730,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let frames = self.framesSent
                 self.bytesSent = 0
                 self.statsWindowStart = Date()
-                Task { @MainActor in self.onStats?(frames, mbps) }
+                let videoActive = self.videoEnabled
+                let audioActive = self.audioEnabled
+                let width = self.capturePixelsWide
+                let height = self.capturePixelsHigh
+                Task { @MainActor in
+                    self.onStats?(frames, mbps)
+                    self.onMediaState?(videoActive, audioActive, width, height)
+                }
             }
         })
     }

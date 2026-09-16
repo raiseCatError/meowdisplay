@@ -93,6 +93,16 @@ final class StreamReceiver: ObservableObject {
     /// Queue-confined authority. Every transition goes through
     /// `mutateSession` so there is exactly one logging and publishing path.
     private var sessionState = ReceiverSessionState()
+
+    /// Coarse, interruption-aware connection headline — "Connected", an
+    /// interruption title ("Reconnecting…", "Display Paused", …), or
+    /// "Waiting for a Mac…". Every receiver surface (iOS and Mac Receiver)
+    /// that needs a phase-level label reads this instead of independently
+    /// re-deriving it from `connected` alone, which used to miss states
+    /// like reconnecting/paused.
+    var canonicalPhaseTitle: String {
+        session.interruption?.title ?? (session.phase == .connected ? "Connected" : "Waiting for a Mac…")
+    }
     /// The one timer driving automatic recovery — never a second one.
     private var reconnectTimer: DispatchSourceTimer?
     /// Set when the peer told us the two apps are version-incompatible. The
@@ -101,9 +111,21 @@ final class StreamReceiver: ObservableObject {
     private var peerIsIncompatible = false
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
-    var onReceiverUIPreferences: ((_ trayEnabled: Bool?, _ keyboardButtonEnabled: Bool?) -> Void)?
+    var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
     private var announcedTrayEnabled = true
     private var announcedKeyboardButtonEnabled = true
+    // The rest of the receiver-controls report — see `announceReceiverPreferences`/
+    // `sendHello`. Same "resend on every hello, receiver stays authoritative"
+    // pattern as tray/keyboard above, just for the fields a connected Mac's
+    // per-device Settings detail also wants live visibility into.
+    private var announcedFunctionTrayEnabled = true
+    private var announcedInputMode = PointerInputMode.direct
+    private var announcedTrackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
+    private var announcedHapticsEnabled = true
+    private var announcedAvoidNotch = true
+    private var announcedPinchTarget = ReceiverGestureTarget.viewport
+    private var announcedRotateTarget = ReceiverGestureTarget.viewport
+    private var announcedSnapRotation = true
 
     /// The connected Mac's confirmed Allow Input state — pushed on connect
     /// and whenever it changes on the Mac (its own toggle, or an honored
@@ -158,8 +180,10 @@ final class StreamReceiver: ObservableObject {
     private var audioSessionObserversRegistered = false
     #endif
     /// Receiver-local A/V sync offset (ms), clamped to `AVSyncOffset.range`.
-    /// Positive delays audio; negative delays video presentation — see
-    /// `setAVSyncOffset`. This is the user's MANUAL term only —
+    /// Positive delays audio; negative delays video presentation — set via
+    /// `announceReceiverPreferences`, which also reports the current value
+    /// to a connected Mac (read-only there; only this receiver ever sets
+    /// it). This is the user's MANUAL term only —
     /// `establishAudioAnchor` folds in a separate, automatic one-shot
     /// baseline correction (see `lastVideoLatencySeconds`); the two are
     /// never conflated so "Reset" (manual only) and "Resync" (automatic
@@ -296,6 +320,7 @@ final class StreamReceiver: ObservableObject {
     private var pairingListener: NWListener?
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
+    private var mediaSuppressedForPairing = false
     @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
     private var macPairingBrowser: NWBrowser?
     private var listenerHealthy = false
@@ -533,6 +558,28 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    /// Same "update the announced value(s), resend hello now if connected"
+    /// contract as `setReceiverUIPreferencesForHello`, generalized to the
+    /// rest of `ReceiverControlPreferences` a connected Mac's per-device
+    /// Settings detail reports — called alongside it on every local
+    /// preference change so Mac visibility never lags what's actually set.
+    func announceReceiverPreferences(_ preferences: ReceiverControlPreferences) {
+        queue.async {
+            self.announcedFunctionTrayEnabled = preferences.functionTrayEnabled
+            self.announcedInputMode = preferences.inputMode
+            self.announcedTrackpadSensitivity = preferences.trackpadSensitivity
+            self.announcedHapticsEnabled = preferences.hapticsEnabled
+            self.announcedAvoidNotch = preferences.avoidNotch
+            self.announcedPinchTarget = preferences.pinchTarget
+            self.announcedRotateTarget = preferences.rotateTarget
+            self.announcedSnapRotation = preferences.snapRotation
+            self.avSyncOffsetMs = AVSyncOffset.clamped(preferences.avSyncOffsetMs)
+            if let connection = self.connection, connection.state == .ready {
+                self.sendHello(on: connection)
+            }
+        }
+    }
+
     /// Announce the panel this receiver renders onto. Called before start()
     /// and again whenever it changes (iOS rotation via setOrientation, macOS
     /// display-mode changes) — a live connection re-sends hello so the sender
@@ -558,6 +605,10 @@ final class StreamReceiver: ObservableObject {
             guard let self else { return }
             self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
                 self?.objectWillChange.send()
+            }
+            self.pairingPrompt.onPending = { [weak self] pending in
+                Log.info("pairDebug: onPending peerID=\(pending.peerID)")
+                self?.beginExplicitPairing(peerID: pending.peerID)
             }
         }
         displayLayer.videoGravity = .resizeAspect
@@ -605,15 +656,48 @@ final class StreamReceiver: ObservableObject {
     }
 
     func pairWithMac(_ result: NWBrowser.Result) {
+        let expectedPeerID: String? = if case .bonjour(let txt) = result.metadata {
+            txt["id"]
+        } else {
+            nil
+        }
+        beginExplicitPairing(peerID: expectedPeerID)
         let connection = NWConnection(to: result.endpoint, using: .tcp)
         Task {
             defer { connection.cancel() }
             do {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: Self.installID,
-                    localName: serviceName, prompt: pairingPrompt)
+                    localName: serviceName, prompt: pairingPrompt,
+                    expectedPeerID: expectedPeerID)
                 await pairingPrompt.finish("Paired with \(paired.peerName)")
-            } catch { await pairingPrompt.finish(error.localizedDescription) }
+                finishExplicitPairing(success: true)
+            } catch {
+                await pairingPrompt.finish(error.localizedDescription)
+                let promptStillPending = await MainActor.run { pairingPrompt.pending != nil }
+                if !promptStillPending {
+                    finishExplicitPairing(success: false)
+                } else {
+                    Log.info("pairDebug: duplicate initiator ended without disturbing pending confirmation")
+                }
+            }
+        }
+    }
+
+    private func beginExplicitPairing(peerID: String?) {
+        Log.info("pairDebug: explicit pairing started peerID=\(peerID ?? "unknown")")
+        queue.async {
+            self.mediaSuppressedForPairing = true
+            self.connection?.cancel()
+            self.connection = nil
+            self.setConnected(false, reason: .explicitDisconnect)
+        }
+    }
+
+    private func finishExplicitPairing(success: Bool) {
+        queue.async {
+            self.mediaSuppressedForPairing = false
+            Log.info("pairDebug: pairing finished success=\(success)")
         }
     }
 
@@ -1007,6 +1091,11 @@ final class StreamReceiver: ObservableObject {
             listener.service = advertisedService
             listener.newConnectionHandler = { [weak self, weak listener] connection in
                 guard let self, self.tlsListener === listener else { connection.cancel(); return }
+                guard !self.mediaSuppressedForPairing else {
+                    Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
+                    connection.cancel()
+                    return
+                }
                 self.adopt(connection)
             }
             listener.stateUpdateHandler = { state in
@@ -1057,9 +1146,16 @@ final class StreamReceiver: ObservableObject {
                             localName: localName, prompt: prompt,
                             autoConfirm: autoConfirm)
                         await prompt.finish("Paired with \(paired.peerName)")
+                        self?.finishExplicitPairing(success: true)
                         self?.scheduleTLSListenerRefresh()
                     } catch {
                         await prompt.finish(error.localizedDescription)
+                        let promptStillPending = await MainActor.run { prompt.pending != nil }
+                        if !promptStillPending {
+                            self?.finishExplicitPairing(success: false)
+                        } else {
+                            Log.info("pairDebug: duplicate responder ended without disturbing pending confirmation")
+                        }
                     }
                 }
             }
@@ -1342,6 +1438,30 @@ final class StreamReceiver: ObservableObject {
             } else {
                 DispatchQueue.main.async { self.audioEnabled = false }
             }
+        case WireMessage.wakeInfo:
+            // The Mac self-labels this with its own install ID purely as a
+            // cache key — this is a network hint only (Remote Wake-on-LAN
+            // foundation) and never affects trust or pairing.
+            guard let peerID = obj["peer"] as? String, let mac = obj["mac"] as? String,
+                  let interface = obj["interface"] as? String else { return }
+            let metadata = WakeMetadata(macAddress: mac, interfaceName: interface,
+                                        ipv4: obj["ipv4"] as? String,
+                                        subnetMask: obj["subnet"] as? String,
+                                        broadcastAddress: obj["broadcast"] as? String,
+                                        updatedAt: Date())
+            WakeMetadataStore.setMetadata(metadata, forPeerID: peerID)
+        #if DEBUG
+        case WireMessage.promoteInteractiveWakeResult:
+            let text: String
+            if obj["success"] as? Bool == true {
+                let assertionID = obj["assertionID"] as? Int ?? 0
+                text = "Success (assertionID=\(assertionID))"
+            } else {
+                text = "Failed: \(obj["code"] as? Int ?? -1)"
+            }
+            Log.info("wakeDebug: promoteInteractiveWake result=\(text)")
+            DispatchQueue.main.async { self.promoteInteractiveWakeResult = text }
+        #endif
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             // Retrying cannot fix that, so the eventual loss is terminal.
@@ -1352,9 +1472,7 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
         case WireMessage.receiverUI:
             guard let update = ReceiverUIPreferenceUpdate(message: obj) else { return }
-            DispatchQueue.main.async {
-                self.onReceiverUIPreferences?(update.trayEnabled, update.keyboardButtonEnabled)
-            }
+            DispatchQueue.main.async { self.onReceiverUIPreferences?(update) }
         case WireMessage.inputReset:
             DispatchQueue.main.async { self.inputResetGeneration &+= 1 }
         case WireMessage.allowInputState:
@@ -1443,6 +1561,23 @@ final class StreamReceiver: ObservableObject {
         if deviceKind != "Mac" {
             hello["trayEnabled"] = announcedTrayEnabled
             hello["keyboardButtonEnabled"] = announcedKeyboardButtonEnabled
+            // Read visibility for the connected Mac's per-device Settings
+            // detail (PRODUCT: per-device receiver settings) — the receiver
+            // stays the authoritative store for all of these; this only
+            // reports the current value, exactly like tray/keyboard above.
+            hello["functionTrayEnabled"] = announcedFunctionTrayEnabled
+            hello["inputMode"] = announcedInputMode.rawValue
+            hello["trackpadSensitivity"] = announcedTrackpadSensitivity
+            hello["hapticsEnabled"] = announcedHapticsEnabled
+            hello["avoidNotch"] = announcedAvoidNotch
+            hello["pinchTarget"] = announcedPinchTarget.rawValue
+            hello["rotateTarget"] = announcedRotateTarget.rawValue
+            hello["snapRotation"] = announcedSnapRotation
+            // Receiver-local playback timing — never Mac-pushed (only the
+            // receiver can judge its own speaker/headphone latency), but
+            // reported so Streaming/device detail can show the real value
+            // instead of a fake always-zero placeholder.
+            hello["avSyncOffsetMs"] = avSyncOffsetMs
         }
         // Additive capability: only offered while the UDP listener is bound,
         // so a sender never dials a port nobody answers on.
@@ -1656,13 +1791,20 @@ final class StreamReceiver: ObservableObject {
         audioPreferred = enabled
     }
 
-    /// Receiver-local A/V sync offset in milliseconds, clamped to
-    /// `AVSyncOffset.range`. Takes effect immediately for audio scheduled
-    /// from this point on and for video frames not yet presented; never
-    /// sent to the Mac and never requires a reconnect.
-    func setAVSyncOffset(_ ms: Int) {
-        queue.async { self.avSyncOffsetMs = AVSyncOffset.clamped(ms) }
+    #if DEBUG
+    /// DEBUG-only manual diagnostic (not automated): asks the connected Mac
+    /// to call IOPMAssertionDeclareUserActivity, over the same authenticated
+    /// session as every other control message — there is no separate
+    /// channel for it, so an unauthenticated/unpaired peer could never send
+    /// this even if it wanted to.
+    @Published var promoteInteractiveWakeResult: String?
+
+    func requestPromoteInteractiveWake() {
+        guard connected else { return }
+        Log.info("wakeDebug: promoteInteractiveWake request sent")
+        sendControl(["type": WireMessage.promoteInteractiveWake])
     }
+    #endif
 
     func sendNativeAppGesture(kind: NativeAppGestureKind,
                               phase: NativeAppGesturePhase,

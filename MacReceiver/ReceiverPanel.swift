@@ -1,12 +1,18 @@
 import SwiftUI
 
 // MARK: - Receiver panel (issues #82/#17)
+//
+// Mac Receiver has far less configuration than Mac Sender, so it keeps its
+// existing single grouped-Form panel rather than a sidebar — the taxonomy
+// still applies (same section names/ownership as Mac Sender/iOS where the
+// concept is shared), just without the page-per-category chrome that would
+// be clutter here. This target's macOS 12 floor also rules out
+// NavigationSplitView (macOS 13+).
 
-/// The receiver-mode sections of the panel: live status, the advertised
-/// name, and how-to copy. Lives inside the shared grouped Form.
+/// The receiver-mode sections of the panel: live status, display identity,
+/// system/app behavior, and how-to copy. Lives inside the shared grouped Form.
 struct ReceiverSections: View {
     @ObservedObject var controller: ReceiverController
-    @AppStorage("showAnalytics") private var showAnalytics = false
 
     var body: some View {
         // The receiver exists only while receiver mode is on; observed in a
@@ -18,16 +24,12 @@ struct ReceiverSections: View {
         Section {
             ReceiverNameField { controller.setAdvertisedName($0) }
         } header: {
-            Text("Name")
+            Text("Display")
         } footer: {
             Text("How this Mac appears in the other Mac's Devices list.")
         }
 
-        Section {
-            Toggle("Performance overlay", isOn: $showAnalytics)
-        } footer: {
-            Text("FPS, bitrate, frame timing, and latency graphs at the bottom of the video window while streaming — the same HUD the iPhone app has.")
-        }
+        SystemSection()
 
         Section("How to connect") {
             Label("Install and open OpenDisplay on the Mac whose screen you want to extend.",
@@ -38,23 +40,29 @@ struct ReceiverSections: View {
                   systemImage: "arrow.up.left.and.arrow.down.right")
         }
         .font(.subheadline)
+
+        #if DEBUG
+        DeveloperSection(controller: controller)
+        #endif
     }
 }
 
 /// Live state of the running receiver: connection, stream format, and any
-/// compatibility signal from the connected Mac.
+/// compatibility signal from the connected Mac. Status text/color come from
+/// `controller.statusTitle`/`statusColor` — the same canonical projection
+/// the bottom status strip reads, so the two can never disagree.
 private struct ReceiverStatusSection: View {
     @ObservedObject var receiver: StreamReceiver
-    let controller: ReceiverController
+    @ObservedObject var controller: ReceiverController
 
     var body: some View {
-        Section("This Mac as a display") {
+        Section("Connection") {
             HStack(alignment: .firstTextBaseline) {
                 Circle()
-                    .fill(receiver.connected ? Color.green : Color.orange)
+                    .fill(controller.statusColor)
                     .frame(width: 9, height: 9)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(receiver.connected ? "Connected" : "Waiting for a Mac…")
+                    Text(controller.statusTitle)
                     Text(receiver.status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -93,6 +101,45 @@ private struct ReceiverStatusSection: View {
         }
     }
 }
+
+/// The macOS application itself — matches Mac Sender's System category.
+private struct SystemSection: View {
+    @AppStorage("showAnalytics") private var showAnalytics = false
+
+    var body: some View {
+        Section {
+            Toggle("Performance overlay", isOn: $showAnalytics)
+        } header: {
+            Text("System")
+        } footer: {
+            Text("FPS, bitrate, frame timing, and latency graphs at the bottom of the video window while streaming — the same HUD the iPhone app has.")
+        }
+    }
+}
+
+#if DEBUG
+/// DEBUG only — matches Mac Sender's Developer category naming/scope.
+private struct DeveloperSection: View {
+    @ObservedObject var controller: ReceiverController
+
+    var body: some View {
+        Section {
+            DisclosureGroup("Wake Testing") {
+                WakeTestingView()
+            }
+            if let receiver = controller.receiver {
+                DisclosureGroup("Promote Interactive Wake") {
+                    PromoteInteractiveWakeView(receiver: receiver)
+                }
+            }
+        } header: {
+            Text("Developer")
+        } footer: {
+            Text("Wake Testing sends a standard Wake-on-LAN magic packet to an already-paired Mac's last-learned local network address (same-LAN only). Promote Interactive Wake asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake.")
+        }
+    }
+}
+#endif
 
 /// The advertised-name editor — kept out of any high-frequency observed
 /// object so streaming updates can't rebuild it mid-edit (same reasoning as
