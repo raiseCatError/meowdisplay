@@ -164,6 +164,27 @@ final class ReceiverSessionStateTests: XCTestCase {
         XCTAssertGreaterThan(state.generation, lost)
     }
 
+    /// The core WoL/reconnect-regression invariant: once a session has
+    /// settled all the way into "Connection Lost" (reconnect budget spent),
+    /// a fresh authenticated connection for the same trusted peer must still
+    /// be able to become current. Connection Lost is a session state, not a
+    /// refusal to ever connect again.
+    func testFreshConnectionSupersedesAConnectionThatReachedLost() {
+        var state = connectedSession()
+        _ = state.connectionLost(reason: .transportLost)
+        exhaustRecovery(&state)
+        XCTAssertEqual(state.phase, .reconnectFailed)
+        let lostGeneration = state.generation
+
+        XCTAssertTrue(state.connectionAdopted())
+        XCTAssertGreaterThan(state.generation, lostGeneration)
+        XCTAssertEqual(state.phase, .connecting)
+
+        XCTAssertTrue(state.connectionEstablished())
+        XCTAssertEqual(state.phase, .connected)
+        XCTAssertTrue(state.allowsLiveInput)
+    }
+
     func testDuplicateLossReportsDoNotRestartTheRecoveryRun() {
         var state = connectedSession()
         _ = state.connectionLost(reason: .transportLost)

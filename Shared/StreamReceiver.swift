@@ -716,6 +716,7 @@ final class StreamReceiver: ObservableObject {
     /// or enterSleep deliberately took it down on lock).
     func ensureListening() {
         queue.async {
+            self.ensureTLSListening()
             guard !self.listenerHealthy else { return }
             guard !self.listenerRestartState.shouldDeferEnsureListening else {
                 Log.info("listener start/restart already in flight — letting it finish")
@@ -724,6 +725,20 @@ final class StreamReceiver: ObservableObject {
             Log.info("listener not healthy — restarting")
             self.restartListener()
         }
+    }
+
+    /// The pinned-TLS listener (LAN/WoL reconnection path) has no restart
+    /// state machine of its own like the plaintext listener does — it is
+    /// long-lived and only ever torn down by an explicit `closeSession`
+    /// (device lock, Forget, app quit). Wake/foreground and every automatic
+    /// reconnect attempt must re-arm it if that happened, or a trusted Mac
+    /// redialing in has nothing to connect to (`reconnectDebug: listenerReady`
+    /// never fires again and the session gets stuck oscillating in/out of
+    /// Reconnecting).
+    private func ensureTLSListening() {
+        guard tlsListener == nil else { return }
+        Log.info("reconnectDebug: retryScheduled TLS listener rearm")
+        startTLSListener()
     }
 
     /// iOS lifecycle seam. Backgrounding parks an in-flight recovery run
@@ -1096,10 +1111,26 @@ final class StreamReceiver: ObservableObject {
                     connection.cancel()
                     return
                 }
+                Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
                 self.adopt(connection)
             }
-            listener.stateUpdateHandler = { state in
-                if case .failed(let error) = state { Log.info("secure listener failed: \(error)") }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                switch state {
+                case .ready:
+                    Log.info("reconnectDebug: listenerReady TLS port=\(WireCrypto.tlsPort)")
+                case .failed(let error):
+                    Log.info("secure listener failed: \(error)")
+                    guard let self, self.tlsListener === listener else { return }
+                    self.tlsListener = nil
+                    // Fixed short backoff: mirrors the plaintext listener's
+                    // retry cadence and avoids a busy loop if the port stays
+                    // unavailable for a moment (e.g. right after a sleep/wake
+                    // teardown/rebind race).
+                    self.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        self?.startTLSListener()
+                    }
+                default: break
+                }
             }
             listener.start(queue: queue)
         } catch {
@@ -1216,12 +1247,18 @@ final class StreamReceiver: ObservableObject {
     /// back in `initialData`; a second hello would make the sender rebuild.
     private func adopt(_ conn: NWConnection, greeted: Bool = false, initialData: Data? = nil) {
         if greeted { Log.info("newcomer proved itself — adopting it as the session") }
+        let supersededGeneration = sessionState.generation
+        let hadPriorConnection = connection != nil
         connection?.cancel()
         connection = conn
         // A new session supersedes any recovery run: retries scheduled
         // against the old generation can no longer win.
         cancelReconnect()
         mutateSession { $0.connectionAdopted() }
+        if hadPriorConnection {
+            Log.info("reconnectDebug: superseded oldGeneration=\(supersededGeneration)"
+                     + " newGeneration=\(sessionState.generation)")
+        }
         // The race is decided: rival candidates die here.
         for pending in pendingConnections where pending !== conn { pending.cancel() }
         pendingConnections.removeAll()
@@ -3178,6 +3215,7 @@ final class StreamReceiver: ObservableObject {
         let delay = sessionState.nextReconnectDelay
         guard let attempt = sessionState.beginReconnectAttempt() else {
             mutateSession { $0.exhaustRecovery() }
+            Log.info("reconnectDebug: retryExhausted generation=\(sessionState.generation)")
             setStatus("Connection lost")
             return
         }
@@ -3186,7 +3224,9 @@ final class StreamReceiver: ObservableObject {
         DispatchQueue.main.async { self.session = snapshot }
         Log.info("reconnect attempt \(attempt)/\(ReceiverSessionState.maximumReconnectAttempts)"
                  + " generation=\(generation) in \(delay)s")
+        Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
         setStatus("Reconnecting…")
+        ensureTLSListening()
         if !listenerHealthy { restartListener() }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
@@ -3197,6 +3237,7 @@ final class StreamReceiver: ObservableObject {
         }
         timer.resume()
         reconnectTimer = timer
+        Log.info("reconnectDebug: retryScheduled generation=\(generation) in \(delay)s")
     }
 
     /// The user tapped Reconnect on the Connection Lost presentation. Runs
@@ -3263,6 +3304,7 @@ final class StreamReceiver: ObservableObject {
             }
         }
         if !value {
+            let oldGeneration = sessionState.generation
             transport = "—"
             // A peer that already told us the two apps are incompatible must
             // not be retried; every other loss is transport-shaped.
@@ -3272,6 +3314,7 @@ final class StreamReceiver: ObservableObject {
             }()
             let wasConnected = sessionState.phase == .connected
                 || sessionState.phase == .paused
+            Log.info("reconnectDebug: lost reason=\(classified.rawValue) oldGeneration=\(oldGeneration)")
             mutateSession { $0.connectionLost(reason: classified) }
             if sessionState.phase != .reconnecting {
                 setStatus(wasConnected && classified != .explicitDisconnect
@@ -3281,6 +3324,7 @@ final class StreamReceiver: ObservableObject {
         else {
             peerIsIncompatible = false
             mutateSession { $0.connectionEstablished() }
+            Log.info("reconnectDebug: authenticated generation=\(sessionState.generation)")
             setStatus("Connected · \(transport)")
             // Remember the first ever successful connection to a Mac so the
             // first-run onboarding hint never reappears (issue #49).

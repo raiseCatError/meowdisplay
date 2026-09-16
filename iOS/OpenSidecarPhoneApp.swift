@@ -524,7 +524,20 @@ struct IdleView: View {
                             Text(receiver.pairingMacName(result))
                             Spacer()
                             if receiver.pairingMacIsPaired(result) {
-                                Text("Paired").foregroundStyle(.secondary)
+                                if receiver.connected {
+                                    Text("Connected").foregroundStyle(.secondary)
+                                } else {
+                                    // Trust and connectivity are different: a
+                                    // paired-but-not-currently-connected Mac
+                                    // that is visible right now must offer a
+                                    // way back in rather than a dead-end
+                                    // "Paired" label. This reuses the same
+                                    // canonical reconnect path the Reconnect
+                                    // button uses — no separate Connect
+                                    // protocol.
+                                    Button("Connect") { receiver.reconnectNow() }
+                                        .buttonStyle(.borderedProminent)
+                                }
                             } else {
                                 Button("Pair") { receiver.pairWithMac(result) }
                                     .buttonStyle(.borderedProminent)

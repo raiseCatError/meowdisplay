@@ -19,11 +19,34 @@ struct MacSettingsView: View {
             // binding: rows rendered, but there was no `.tag()` telling the
             // list which selection value each row corresponds to, so every
             // click was a no-op.
-            List(selection: $selection) {
-                ForEach(SettingsCategory.allCases) { category in
-                    Label(category.label, systemImage: category.systemImage)
-                        .tag(category)
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(SettingsCategory.allCases) { category in
+                        Label(category.label, systemImage: category.systemImage)
+                            .tag(category)
+                    }
                 }
+                // Deliberately not a `SettingsCategory` and not part of the
+                // selectable list: the red window-close button must keep
+                // meaning "close this window, MEOW keeps running" (App Exit
+                // Policy). This is a separate, visually-detached action for
+                // the rare case the user actually wants to end the app —
+                // same effect as Cmd+Q, reusing NSApp's own termination path
+                // rather than a bespoke shutdown route.
+                Divider()
+                Button(role: .destructive) {
+                    NSApp.terminate(nil)
+                } label: {
+                    Label("Quit OpenDisplay", systemImage: "power")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .help("Quit OpenDisplay entirely — equivalent to ⌘Q. Closing just this window keeps MEOW and any active stream running.")
+                .accessibilityLabel("Quit OpenDisplay")
+                .accessibilityHint("Terminates the application, ending any active connection.")
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
         } detail: {
