@@ -1,16 +1,16 @@
 // WakeConnectAttempt — pure state/timing policy for the iOS "Wake & Connect"
 // one-tap orchestration (WoL + receiver Connect request + authenticated
-// reconnect + Promote Interactive Wake). DEBUG-only: it exists to drive
+// reconnect + Promote Interactive Wake). Release feature: it drives
 // `WakeConnectCoordinator` (Shared/WakeConnectCoordinator.swift), and every
-// wire message it eventually triggers (`promoteInteractiveWake`) is itself
-// DEBUG-only — see PROTOCOL.md and WakeTestingView.swift.
+// wire message it eventually triggers (`promoteInteractiveWake`) ships in
+// Release too — see PROTOCOL.md. The manual test surfaces that exercise it
+// by hand (WakeTestingView, RouteOverrides) remain Debug-only diagnostics.
 //
 // This is a UI/workflow projection layered ON TOP OF the canonical
 // `ReceiverSessionState` connection state machine, never a replacement for
 // it — see the coordinator for how the two are kept in sync. Deliberately
 // pure and platform-free (same shape as `ReceiverSessionState`) so the whole
 // lifecycle is unit-testable without real WoL/Bonjour/WindowServer networking.
-#if DEBUG
 import Foundation
 
 /// The one-tap flow's own bounded stages — see RTK/`WakeConnectCoordinator`
@@ -92,9 +92,16 @@ struct WakeConnectAttempt: Equatable {
 
     /// Bounded: refuses once `maxWOLBursts` have been recorded for this
     /// attempt, even across a `connectionLost` fallback back to `.waking`.
+    /// Accepts both `.waking` (before the first packet) and
+    /// `.waitingForConnection` (after `beginWaitingForConnection()` has
+    /// already fired once) — the burst's 2nd/3rd packets are sent from
+    /// `.waitingForConnection`, since the very first `recordWOLSent()` call
+    /// is what drives that transition. Requiring `.waking` alone here was a
+    /// bug: it silently capped every burst at 1 packet instead of 3.
     @discardableResult
     mutating func recordWOLSent() -> Bool {
-        guard stage == .waking, wolBurstsSent < Self.maxWOLBursts else { return false }
+        guard stage == .waking || stage == .waitingForConnection,
+              wolBurstsSent < Self.maxWOLBursts else { return false }
         wolBurstsSent += 1
         return true
     }
@@ -175,4 +182,3 @@ struct WakeConnectAttempt: Equatable {
         return true
     }
 }
-#endif
