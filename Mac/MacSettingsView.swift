@@ -9,63 +9,48 @@ struct MacSettingsView: View {
     @StateObject private var permissions = PermissionMonitor()
     let updater: SPUStandardUpdaterController?
     @State private var selection: SettingsCategory? = .overview
-    @State private var sidebarExpanded = true
 
     var body: some View {
-        HStack(spacing: 0) {
+        NavigationSplitView {
+            // Explicit `ForEach` + `.tag(category)` per row — the form that
+            // reliably drives `List(selection:)` on macOS. The single-closure
+            // `List(data, selection:rowContent:)` initializer used here
+            // previously compiled but never actually wired row clicks to the
+            // binding: rows rendered, but there was no `.tag()` telling the
+            // list which selection value each row corresponds to, so every
+            // click was a no-op.
             VStack(spacing: 0) {
                 List(selection: $selection) {
                     ForEach(SettingsCategory.allCases) { category in
-                        Group {
-                            if sidebarExpanded {
-                                Label(category.label, systemImage: category.systemImage)
-                            } else {
-                                Image(systemName: category.systemImage)
-                                    .frame(maxWidth: .infinity)
-                                    .help(category.label)
-                            }
-                        }
-                        .tag(category)
+                        Label(category.label, systemImage: category.systemImage)
+                            .tag(category)
                     }
                 }
+                // Deliberately not a `SettingsCategory` and not part of the
+                // selectable list: the red window-close button must keep
+                // meaning "close this window, MEOW keeps running" (App Exit
+                // Policy). This is a separate, visually-detached action for
+                // the rare case the user actually wants to end the app —
+                // same effect as Cmd+Q, reusing NSApp's own termination path
+                // rather than a bespoke shutdown route.
                 Divider()
-                Image("MeowBrand")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: sidebarExpanded ? 112 : 42, height: sidebarExpanded ? 112 : 48)
-                    .padding(.vertical, 8)
-                    .animation(.easeInOut(duration: 0.18), value: sidebarExpanded)
-                Button(role: .destructive) { NSApp.terminate(nil) } label: {
-                    Group {
-                        if sidebarExpanded { Label("Quit MeowDisplay", systemImage: "power") }
-                        else { Image(systemName: "power").frame(maxWidth: .infinity) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: sidebarExpanded ? .leading : .center)
+                Button(role: .destructive) {
+                    NSApp.terminate(nil)
+                } label: {
+                    Label("Quit MeowDisplay", systemImage: "power")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .help("Quit MeowDisplay")
+                .help("Quit MeowDisplay entirely — equivalent to ⌘Q. Closing just this window keeps MEOW and any active stream running.")
+                .accessibilityLabel("Quit MeowDisplay")
+                .accessibilityHint("Terminates the application, ending any active connection.")
             }
-            .frame(width: sidebarExpanded ? 190 : collapsedSidebarWidth)
-            .animation(.easeInOut(duration: 0.18), value: sidebarExpanded)
-
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Button { withAnimation(.easeInOut(duration: 0.18)) { sidebarExpanded.toggle() } } label: {
-                        Image(systemName: sidebarExpanded ? "sidebar.leading" : "sidebar.left")
-                    }
-                    .buttonStyle(.borderless)
-                    StatusBadge(controller: controller)
-                    Spacer()
-                    Text("MeowDisplay v\(appVersion)").font(.callout).foregroundStyle(.secondary)
-                    if let updater { CheckForUpdatesView(updater: updater) }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                Divider()
-                NavigationStack {
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
+        } detail: {
+            NavigationStack {
                 Group {
                     switch selection ?? .overview {
                     case .overview:
@@ -92,6 +77,18 @@ struct MacSettingsView: View {
                     #endif
                     }
                 }
+                .navigationTitle((selection ?? .overview).label)
+                .toolbar {
+                    // Trailing/utility position — `.principal` centers and
+                    // competes with the page title; a status indicator reads
+                    // as a stable trailing item instead, like the rest of
+                    // macOS's own toolbar status affordances.
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if let session = soleActiveSession {
+                            ToolbarQuickActions(session: session, controller: controller)
+                        }
+                        StatusBadge(controller: controller)
+                    }
                 }
             }
         }
@@ -99,12 +96,6 @@ struct MacSettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             permissions.refresh()
         }
-    }
-
-    private let collapsedSidebarWidth: CGFloat = 60
-
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 
     /// Quick actions only appear when there's exactly one active display —

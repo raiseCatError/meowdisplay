@@ -34,6 +34,8 @@ struct OverviewSettingsView: View {
             if controller.activeDisplayEntries.isEmpty {
                 Section {
                     VStack(alignment: .leading, spacing: 4) {
+                        Image("MeowBrand")
+                            .resizable().scaledToFit().frame(width: 72)
                         Text("No active display")
                             .font(.headline)
                         Text("Ready to connect")
