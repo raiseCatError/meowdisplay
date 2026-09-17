@@ -134,6 +134,12 @@ enum WireMessage {
 enum WireCrypto {
     static let tlsPort: UInt16 = 9001
     static let pairingPort: UInt16 = 9002
+    /// Mac-side pinned-mutual-TLS listener a paired peer "knocks" on to
+    /// request that the Mac dial it back — see `RemoteConnectRequestPolicy`
+    /// and `SenderController.handleRemoteConnectRequest`. The knock itself
+    /// carries no payload: establishing this connection at all, as an
+    /// already-pinned peer, is the entire request.
+    static let remoteRequestPort: UInt16 = 9003
     static let maxPairingFrameBytes = 64 * 1024
     static let identityKeychainLabel = "com.opendisplay.identity.v1"
     static let pinKeychainService = "com.opendisplay.trust.v1"

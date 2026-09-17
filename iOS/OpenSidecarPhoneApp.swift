@@ -483,6 +483,22 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     #endif
     @Binding var showSettings: Bool
+    @State private var showRemoteAccessSetup = false
+
+    /// The one paired Mac to drive the unified primary Connect action for.
+    /// Multiple paired Macs keep using the existing per-row "Nearby Macs"
+    /// list below (a global single-button action can't disambiguate which
+    /// Mac to reach when more than one is paired) — this only covers the
+    /// common single-Mac setup the whole unified-Connect feature targets.
+    private var singlePairedMacPeerID: String? {
+        let peers = TrustStore.shared.pinnedPeers()
+        guard peers.count == 1 else { return nil }
+        return peers[0].peerID
+    }
+
+    private func isLocallyVisible(_ peerID: String) -> Bool {
+        receiver.discoveredMacs.contains { receiver.pairingMacPeerID($0) == peerID }
+    }
 
     var body: some View {
         VStack(spacing: 28) {
@@ -532,6 +548,16 @@ struct IdleView: View {
             .frame(maxWidth: 420)
             .background(Color(.secondarySystemBackground),
                         in: RoundedRectangle(cornerRadius: 16))
+
+            // Unified primary Connect: only shown for the single-paired-Mac
+            // setup, and only when that Mac isn't already visible/handled by
+            // the "Nearby Macs" list below (P0/P4 — one primary action, no
+            // unnecessary Remote takeover of an available local route).
+            if !receiver.connected,
+               let peerID = singlePairedMacPeerID,
+               !isLocallyVisible(peerID) {
+                primaryConnectControl(peerID: peerID)
+            }
 
             if !receiver.discoveredMacs.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
@@ -583,6 +609,76 @@ struct IdleView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemBackground))
+        .sheet(isPresented: $showRemoteAccessSetup) {
+            NavigationStack { RemoteAccessSettingsView(receiver: receiver) }
+        }
+    }
+
+    /// One primary Connect action for the single-paired-Mac case (P0), plus
+    /// a small overflow menu (P7) instead of separate "Connect Locally" /
+    /// "Connect Remotely" buttons. Label follows P6: "Wake & Connect" only
+    /// when a local LAN wake hint exists (DEBUG-only milestone, never claims
+    /// remote WoL); otherwise plain "Connect", which — via
+    /// `connectPrimary(peerID:)` — rearms the local listener/Bonjour `cr`
+    /// and, if Remote Access is configured, knocks this one Mac only (never
+    /// every paired Mac).
+    @ViewBuilder
+    private func primaryConnectControl(peerID: String) -> some View {
+        let remoteConfigured = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        HStack(spacing: 10) {
+            #if DEBUG
+            if wakeConnect.isRunning(forPeerID: peerID) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(wakeConnect.statusLabel).font(.caption).foregroundStyle(.secondary)
+                    Button("Cancel") { wakeConnect.cancel() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                }
+            } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
+                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect") {
+                    wakeConnect.begin(peerID: peerID)
+                    if remoteConfigured { receiver.requestRemoteConnect(peerID: peerID) }
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button("Connect") { receiver.connectPrimary(peerID: peerID) }
+                    .buttonStyle(.borderedProminent)
+            }
+            #else
+            Button("Connect") { receiver.connectPrimary(peerID: peerID) }
+                .buttonStyle(.borderedProminent)
+            #endif
+
+            Menu {
+                if remoteConfigured {
+                    Button("Remote Access…") { showRemoteAccessSetup = true }
+                    Button("Edit Remote Details…") { showRemoteAccessSetup = true }
+                    Button("Remove Remote Details", role: .destructive) {
+                        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+                    }
+                } else {
+                    Button("Set Up Remote Access…") { showRemoteAccessSetup = true }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
+            }
+            .buttonStyle(.bordered)
+        }
+        if remoteConfigured, !receiver.connected {
+            Text(remoteStatusText(peerID: peerID))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func remoteStatusText(peerID: String) -> String {
+        switch receiver.session.phase {
+        case .connecting, .reconnecting: return "Connecting…"
+        case .reconnectFailed, .disconnected: return "Waiting for Mac…"
+        default: return "Remote endpoint unavailable"
+        }
     }
 
     /// One-tap Wake & Connect when this specific paired Mac has a usable
@@ -742,6 +838,13 @@ struct SettingsView: View {
                             }
                         }
                     }
+                }
+                .id(trustRefresh)
+                Section {
+                    NavigationLink("Remote Access") {
+                        RemoteAccessSettingsView(receiver: receiver)
+                    }
+                    .disabled(TrustStore.shared.pinnedPeers().isEmpty)
                 }
                 .id(trustRefresh)
                 Section("Status") {

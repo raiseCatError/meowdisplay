@@ -180,6 +180,7 @@ targets:
       - Shared/ConnectionRoute.swift
       - Shared/RemoteEndpointStore.swift
       - Shared/RemoteEndpointValidation.swift
+      - Shared/RemoteConnectRequestPolicy.swift
       - Shared/WakeOnLAN.swift
       - Shared/StreamListenerRestartState.swift
       - Shared/ReceiverSessionState.swift
