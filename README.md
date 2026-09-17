@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/AppIcon-master.png" alt="MeowDisplay icon" width="128" height="128">
+<img src="assets/MeowDisplay-mark.png" alt="MeowDisplay icon" width="140">
 
 # MeowDisplay
 
@@ -48,6 +48,17 @@ The goal isn't to be "another second-monitor clone" — it's a Mac you can
 reach from whatever display or device you have on hand, on your own network
 terms.
 
+**Scope, on purpose:** MeowDisplay focuses on remote display and control. It
+does not try to become a general file-transfer suite, a cloud-drive
+replacement, or a clipboard-sync ecosystem — use iCloud, a cable, or whatever
+you already use for that, alongside MeowDisplay for the display/control part.
+
+**No MeowDisplay-hosted account or relay:** normal connectivity doesn't
+depend on a MeowDisplay-hosted account, cloud relay, or subscription
+service. Local operation uses USB or LAN; remote operation can use a
+user-provided reachable private network such as Tailscale — see
+[Remote Access](#remote-access).
+
 ## Features
 
 ### Display & media
@@ -73,11 +84,13 @@ terms.
 - **Auto-Reconnect**, configurable.
 
 ### Wake & reliability
-- Local Wake-on-LAN groundwork (tested core logic) and a one-tap "Wake &
-  Connect" flow with post-wake interactive promotion are in active
-  development — currently available in Debug builds while this stabilizes
-  for a general release (see [Roadmap](#roadmap)).
-- Session/generation-guarded reconnect so a dropped route resumes cleanly.
+- **Wake & Connect — Developer Preview, Debug builds only.** Local
+  Wake-on-LAN groundwork (tested core logic) plus a one-tap wake/reconnect
+  flow with post-wake interactive promotion exist and are being validated,
+  but this is not yet shipped in a Release build — see
+  [Roadmap](#roadmap).
+- Session/generation-guarded reconnect so a dropped route resumes cleanly
+  (this part ships today).
 
 ### Experience
 - Dock, Menu Bar, or Dock & Menu Bar operating modes.
@@ -125,11 +138,14 @@ evolves across releases is in [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ## Getting Started
 
-**macOS** — build from source today (see below); signed/notarized direct
-downloads are planned.
+**macOS** — build from source today (see below); a signed, Developer
+ID–notarized direct download is planned. The Mac App Store isn't the
+immediate distribution target (MeowDisplay relies on `CGVirtualDisplay`, a
+private API — see the FAQ).
 
 **iOS** — build and install through Xcode today; a TestFlight beta is
-planned.
+planned, with the App Store to follow after broader validation and review.
+Cold-boot/LoginWindow support is not required for either.
 
 ```sh
 git clone <your fork URL>
@@ -178,9 +194,14 @@ the same as any other route.
 
 One current honest limitation: MeowDisplay can't magically send a
 local-network Wake-on-LAN packet through a sleeping Mac's Tailscale node —
-WoL is a LAN broadcast, and a sleeping Mac's Tailscale link isn't reachable
-to relay one in. Waking a Mac remotely over Tailscale isn't solved yet; see
-[Roadmap](#roadmap).
+WoL is a link-layer LAN broadcast, and a sleeping Mac's Tailscale node isn't
+itself online to relay one in. Today's practical remote-wake path, where it
+works at all, looks like: something else on the Mac's own LAN (a router
+feature, another always-on device) sends the actual WoL broadcast → the Mac
+wakes → its Tailscale link comes back → MeowDisplay connects. An integrated
+remote-WoL relay/router solution is future work — see
+[Roadmap](#roadmap) and [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md#remote-wake-on-lan)
+for the detail.
 
 ## FAQ
 
@@ -226,7 +247,11 @@ and [Roadmap](#roadmap).
 **Why does MeowDisplay use `CGVirtualDisplay`, a private API?**
 It's the same technique used by other virtual-display tools (e.g.
 BetterDisplay, DeskPad) to create a genuine extended display rather than a
-mirror. There's no public API for this yet.
+mirror — there's no public third-party API for host-side virtual display
+creation yet. This use is deliberately isolated to one place in the
+codebase, and MeowDisplay should switch to a supported public equivalent if
+Apple ever exposes one. See [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) for the
+detail.
 
 **Does closing the Settings window stop the app?**
 No — the Mac app keeps running (Dock, Menu Bar, or both, depending on your
@@ -249,6 +274,17 @@ it's used, and [PROTOCOL.md](PROTOCOL.md) for the underlying handshake.
 - **Tailscale** (or an equivalent private network) is optional, recommended
   networking for Remote Access — not itself an authentication mechanism.
 - There is **no plaintext wireless fallback**.
+- **Session model today:** MeowDisplay targets a Mac with an existing
+  logged-in (Aqua) user session that sleeps or locks — wake, reconnect,
+  capture recovery, and remote input are built and validated around that
+  lifecycle. A fully logged-out, cold-boot / LoginWindow session is a
+  different architecture and isn't required for the first public beta; see
+  [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md#sleeplock-vs-cold-boot) for the
+  distinction.
+
+A broader pre-release security/code review is part of the current release
+roadmap (see below) — the summary above describes what's implemented today,
+not the outcome of a completed audit.
 
 ## Roadmap
 
@@ -257,26 +293,28 @@ Distinguishing **planned** work (intended, not merely an idea) from
 
 ### Planned
 
-- **Wake & Connect out of Debug** — take the current Debug-only one-tap
-  wake/reconnect/interactive-promotion flow to a shipped, general-release
-  feature.
-- **Headless / display-topology support** — external-display configurations,
-  built-in-only, true clamshell/headless, a deterministic MeowDisplay-owned
-  virtual-display fallback where needed. The private `CGVirtualDisplay` path
-  stays isolated until a public equivalent exists.
-- **Release preparation** — final branding/assets, Sparkle/update
-  validation, Developer ID signing/notarization, packaging, setup/permission
-  polish.
-- **Security/release review** — full code/security review, pairing/trust
+- **Promote Wake & Connect from Developer Preview to Release** — take the
+  current Debug-only one-tap wake/reconnect/interactive-promotion flow to a
+  validated, shipped, general-release feature.
+- **Release readiness / packaging** — final branding/assets, Developer ID
+  signing + notarization, packaging, setup/permission polish.
+- **Sparkle/update validation** — once MeowDisplay hosts its own appcast and
+  signing key (see [SETUP.md](SETUP.md)); Sparkle checks are inert until then.
+- **TestFlight preparation** — getting the iOS receiver ready for a beta.
+- **Security/code review** — full code/security review, pairing/trust
   review, remote/session review, authenticated peer-identity hardening,
-  protocol/versioning review.
-- **iOS public distribution** — TestFlight planned as soon as possible;
-  broader device/multi-Mac validation before wider release or App Store
-  submission.
-- **Broader platform/hardware validation** — multiple Macs, MeowDisplay
-  Receiver, different display/network combinations.
-- **Android support.**
-- **Linux support.**
+  protocol/versioning review, ahead of wider distribution.
+- **Headless / display-topology validation + fallback** — some clamshell
+  configurations already work; what's left is systematic validation across
+  (1) physical external display only, (2) built-in display only, and (3)
+  true clamshell/headless with no usable physical display, with a
+  deterministic MeowDisplay-owned virtual-display fallback for case 3. The
+  private `CGVirtualDisplay` path stays isolated until a public equivalent
+  exists.
+- **Broader iPad / MeowDisplay Receiver / multi-Mac validation** — different
+  display/network combinations.
+- **Android support** (planned/community area).
+- **Linux support** (planned/community area).
 
 ### Future
 
@@ -291,6 +329,7 @@ Longer-term direction, not required for the first public beta:
   wake limitation above).
 - Apple Pencil / stylus improvements, including Android/Linux pen-device
   support.
+- Display-shape/resolution presets, where appropriate.
 - Cat Mode and other later extras.
 
 ## Want to contribute?

@@ -132,26 +132,26 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
   border-radius: var(--download-control-radius);
   text-decoration: none; border: 1px solid var(--download-control-border); cursor: pointer; }
 .download-option .btn { display: flex; width: fit-content; margin-inline: auto; }
-.download-option .btn, .app-store-button {
+.download-option .btn {
   transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
   box-shadow: 0 1px 1px rgb(0 0 0 / 12%);
 }
-.download-option .btn:hover, .app-store-button:hover {
+.download-option .btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 3px 7px rgb(0 0 0 / 16%);
   filter: brightness(1.04);
 }
-.download-option .btn:active, .app-store-button:active {
+.download-option .btn:active {
   transform: translateY(1px) scale(0.98);
   box-shadow: 0 1px 1px rgb(0 0 0 / 10%);
   transition-duration: 70ms;
 }
-.download-option .btn:focus-visible, .app-store-button:focus-visible {
+.download-option .btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .download-option .btn, .app-store-button { transition: none; }
+  .download-option .btn { transition: none; }
 }
 .btn.primary { background: var(--fg); color: var(--bg); }
 .btn.primary:hover { background: #000; }
@@ -164,13 +164,6 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
 .note a, .download-option .sub a { color: var(--muted); text-decoration-color: var(--line); }
 .note a:hover, .download-option .sub a:hover { color: var(--fg); text-decoration-color: var(--line-strong); }
 .btn-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
-
-/* Apple's original badge is transparent around the pill. Its wrapper has the
-   same radius and clips its contents, so the interactive shadow follows the
-   pill rather than the SVG's rectangular viewbox. */
-.app-store-button { display: block; width: 132px; height: var(--download-control-height);
-  margin-inline: auto; border-radius: var(--download-control-radius); overflow: hidden; line-height: 0; }
-.app-store-button img { display: block; width: auto; height: 100%; }
 
 /* Demo video: responsive 16:9 embed matching the bordered, squared aesthetic. */
 .video-embed { position: relative; aspect-ratio: 16 / 9;

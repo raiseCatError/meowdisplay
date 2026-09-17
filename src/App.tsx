@@ -14,16 +14,7 @@ const HERO_WORDS = [
   "iPad",
 ]
 
-function AppStoreButton() {
-  return (
-    <a className="app-store-button" href="https://apps.apple.com/app/id6780264891" aria-label="Download on the App Store">
-      <img src="app-store-badge.svg" alt="" width="120" height="40" />
-    </a>
-  )
-}
-
 export default function App() {
-  const [macVer, setMacVer] = useState<string | null>(null)
   const [starCount, setStarCount] = useState<string | null>(null)
   // Show the brand icon in the navbar only once the big hero logo has
   // scrolled up behind the sticky nav — it "hands off" from hero to navbar.
@@ -42,18 +33,9 @@ export default function App() {
     return () => io.disconnect()
   }, [])
 
-  // Progressive enhancement: current release version + live star count.
+  // Progressive enhancement: live GitHub star count.
   // Fails silent (offline / rate-limited) — the page works without it.
   useEffect(() => {
-    fetch("https://api.github.com/repos/raiseCatError/MeowDisplay/releases/latest", {
-      headers: { Accept: "application/vnd.github+json" },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data && data.tag_name) setMacVer(data.tag_name)
-      })
-      .catch(() => {})
-
     fetch("https://api.github.com/repos/raiseCatError/MeowDisplay", {
       headers: { Accept: "application/vnd.github+json" },
     })
@@ -177,36 +159,33 @@ export default function App() {
           </h1>
           <p className="tagline">
             A free, open-source alternative to Apple Sidecar, Duet Display and Luna Display.
-            Use your iPhone and iPad as a second — and even a third — screen for your Mac.
-            A true extended display, not a mirror: USB or WiFi, Retina-sharp, with touch and
-            scroll. No subscription. No dongle. No account.
+            Use your iPhone and iPad as a second — and even a third — screen for your Mac,
+            with real touch, mouse and keyboard input routed back, locally over USB/WiFi or
+            remotely through a private network like Tailscale. No subscription. No dongle.
+            No MeowDisplay-hosted account or relay.
           </p>
           <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 16+ &nbsp;·&nbsp; iOS 16+ &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; GPL-3.0</p>
+          <p className="meta">Primary tested configuration: <strong>Mac host → iPhone receiver.</strong> Other combinations may already work but aren't as thoroughly validated yet.</p>
         </div>
       </section>
 
       <section className="downloads-sec">
         <div className="wrap">
           <p className="needs-both">
-            MeowDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac and a <strong>Receiver</strong> on the device you want to use as a display. Install both to get going.
+            MeowDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac and a <strong>Receiver</strong> on the device you want to use as a display. Public prebuilt downloads aren't live yet — build from source today.
           </p>
           <div className="download-group sender-group">
             <h2 className="download-role">Sender</h2>
             <p className="download-group-intro">Install this on the Mac whose desktop you want to extend or mirror.</p>
             <div className="download-options sender-download">
               <div className="download-option">
-                <div className="platform">macOS <span className="ver">{macVer}</span></div>
-                <p className="dl-sub">Captures a virtual display and streams it.</p>
-                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay/releases/latest/download/MeowDisplay.dmg">
-                  Download
+                <div className="platform">macOS</div>
+                <p className="dl-sub">Captures a virtual display and streams it. Build from source today — a signed, notarized direct download is planned.</p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
                 </a>
                 <p className="note">
-                  Signed &amp; notarized — opens normally on macOS&nbsp;14+. Prefer to compile it yourself?{" "}
-                  <a href="https://github.com/raiseCatError/MeowDisplay#quick-start">Build from source ↗</a>
-                </p>
-                <p className="note">
-                  Looking for an older version?{" "}
-                  <a href="https://github.com/raiseCatError/MeowDisplay/releases">Browse all releases ↗</a>
+                  <a href="https://github.com/raiseCatError/MeowDisplay">View on GitHub ↗</a>
                 </p>
               </div>
             </div>
@@ -220,27 +199,30 @@ export default function App() {
                 <div className="platform">
                   <span className="platform-name">iOS</span><span className="platform-separator">&amp;</span><span className="platform-name">iPadOS</span>
                 </div>
-                <p className="dl-sub">The receiver app for your iPhone and iPad.</p>
-                <AppStoreButton />
-                <p className="sub">
-                  Want early builds? <a id="testflight" href="https://testflight.apple.com/join/3NYaY11c">Join the TestFlight beta</a>, or <a href="https://github.com/raiseCatError/MeowDisplay#quick-start">compile from source ↗</a>.
-                </p>
+                <p className="dl-sub">The receiver app for your iPhone and iPad. Build and install through Xcode today — a TestFlight beta is planned, with the App Store to follow.</p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
+                </a>
               </div>
               <div className="download-option">
                 <div className="platform">macOS</div>
-                <p className="dl-sub">Turns an older Mac into a second display.</p>
-                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay/releases/latest/download/MeowDisplayReceiver.dmg">
-                  Download
+                <p className="dl-sub">
+                  Got a spare <em>Mac</em> to use as the display? The separate <strong>MeowDisplay Receiver</strong> app
+                  turns an older Mac into a second display — runs on macOS&nbsp;12+, so older Macs qualify. Build from source today.
+                </p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
                 </a>
-                <p className="note">
-                  Got a spare <em>Mac</em> to use as the display? Install MeowDisplay Receiver on it instead of the iOS app — runs on macOS&nbsp;12+, so older Macs qualify.
-                </p>
-                <p className="note">
-                  <a href="https://github.com/raiseCatError/MeowDisplay/releases">Browse all releases ↗</a>
-                </p>
               </div>
             </div>
           </div>
+
+          <p className="note" style={{ marginTop: "16px" }}>
+            Setup, signing, permissions, and pairing: see the{" "}
+            <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/SETUP.md">Setup Guide ↗</a>.
+            Want to see what's coming? Check the{" "}
+            <a href="https://github.com/raiseCatError/MeowDisplay#roadmap">Roadmap ↗</a>.
+          </p>
         </div>
       </section>
 
@@ -329,12 +311,13 @@ export default function App() {
             </details>
             <details>
               <summary>Is this on the App Store?</summary>
-              <p>Yes — the iPhone &amp; iPad receiver is{" "}
-              <a href="https://apps.apple.com/app/id6780264891">live on the App Store</a>. The Mac
-              app ships as a signed, notarized direct download rather than through the Mac App Store
-              because it relies on <code>CGVirtualDisplay</code>, a private API — that's the deal for
-              every virtual-display product: use it or ship a dongle. You can also build either app
-              from source with your own (free) Apple developer account in a few minutes.</p>
+              <p>Not yet. The iPhone &amp; iPad receiver is planned for TestFlight and later the App
+              Store, after broader validation. The Mac app is planned to ship as a signed, notarized
+              direct download rather than through the Mac App Store, because it relies on{" "}
+              <code>CGVirtualDisplay</code>, a private API — that's the deal for every virtual-display
+              product: use it or ship a dongle. You can build either app from source today with your
+              own (free) Apple developer account in a few minutes — see the{" "}
+              <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/SETUP.md">Setup Guide</a>.</p>
             </details>
             <details>
               <summary>Why do I see the purple screen-recording indicator on my Mac?</summary>
@@ -358,8 +341,20 @@ export default function App() {
               (Apple Pencil, pressure) are on the roadmap.</p>
             </details>
             <details>
+              <summary>Can I use it away from home, not just on the same WiFi?</summary>
+              <p>Yes — Remote Access lets you connect to a paired Mac through any reachable address,
+              such as a <a href="https://tailscale.com">Tailscale</a> endpoint. Tailscale (or an
+              equivalent private network) is only used for reachability, not authentication — the
+              actual trust still comes from the same pinned, encrypted session established during
+              pairing. There's no MeowDisplay-hosted account or relay involved. One honest limitation:
+              waking a sleeping Mac remotely over Tailscale isn't solved yet (Wake-on-LAN is a
+              local-network broadcast) — see the{" "}
+              <a href="https://github.com/raiseCatError/MeowDisplay#roadmap">roadmap</a>.</p>
+            </details>
+            <details>
               <summary>Can another Mac be the display?</summary>
-              <p>Yes. Install <em>OpenDisplay Receiver</em>, a separate small app from the same release, on
+              <p>Yes, where implemented — it needs broader validation than the primary Mac→iPhone setup.
+              Install <em>MeowDisplay Receiver</em>, a separate small app built from the same source tree, on
               the spare Mac. It needs only macOS 12 Monterey or newer (the sending Mac needs 14), so Macs
               from around 2015 onward qualify. It appears on the sending Mac like a phone would and
               becomes a real extended Retina display. WiFi works out of the box. For a cable, use a

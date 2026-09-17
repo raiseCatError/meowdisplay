@@ -11,8 +11,9 @@
        hosted domain (the previous opendisplay.app CNAME has been removed).
        Add rel="canonical" and the og:url/og:image/twitter:image absolute
        URLs back once this site is deployed to a MeowDisplay-owned domain. -->
-  <!-- Smart App Banner: offers the iOS receiver to visitors on iPhone/iPad Safari. -->
-  <meta name="apple-itunes-app" content="app-id=6780264891" />
+  <!-- No Smart App Banner: the iOS receiver isn't live on the App Store yet
+       (TestFlight/App Store are planned — see the FAQ). Add it back once
+       there's a real listing to point to. -->
 
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
@@ -82,7 +83,7 @@
         "name": "Is this on the App Store?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Yes — the iPhone & iPad receiver is live on the App Store. The Mac app ships as a signed, notarized direct download rather than through the Mac App Store because it relies on CGVirtualDisplay, a private API — that's the deal for every virtual-display product: use it or ship a dongle. You can also build either app from source with your own (free) Apple developer account in a few minutes."
+          "text": "Not yet. The iPhone & iPad receiver is planned for TestFlight and later the App Store, after broader validation. The Mac app is planned to ship as a signed, notarized direct download rather than through the Mac App Store because it relies on CGVirtualDisplay, a private API — that's the deal for every virtual-display product: use it or ship a dongle. You can build either app from source today with your own (free) Apple developer account in a few minutes."
         }
       },
       {
@@ -107,6 +108,14 @@
         "acceptedAnswer": {
           "@type": "Answer",
           "text": "The receiver is a universal iOS app — it runs on iPad today. Run the Mac, an iPhone and an iPad at once for a second and a third screen. iPad-specific features (Apple Pencil, pressure) are on the roadmap."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I use it away from home, not just on the same WiFi?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes — Remote Access lets you connect to a paired Mac through any reachable address, such as a Tailscale endpoint. Tailscale is only used for reachability, not authentication — trust still comes from the same pinned, encrypted session established during pairing. There's no MeowDisplay-hosted account or relay involved."
         }
       },
       {
