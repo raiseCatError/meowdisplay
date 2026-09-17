@@ -53,6 +53,18 @@ struct DeveloperSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                Button("Reset Cat Mode", role: .destructive) {
+                    UserDefaults.standard.removeObject(forKey: CatMode.unlockedDefaultsKey)
+                    UserDefaults.standard.removeObject(forKey: CatMode.enabledDefaultsKey)
+                    UserDefaults.standard.removeObject(forKey: CatMode.tapCountDefaultsKey)
+                }
+            } header: {
+                Text("Cat Mode")
+            } footer: {
+                Text("Re-locks the About/version row's nine-tap easter egg for retesting the unlock flow.")
+            }
         }
         .formStyle(.grouped)
     }

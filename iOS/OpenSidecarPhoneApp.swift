@@ -478,6 +478,12 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
     @State private var showRemoteAccessSetup = false
+    // Cat Mode's only effect here: a purely decorative paw accent next to
+    // the MeowDisplay wordmark. Reads straight from storage rather than
+    // going through `CatMode.resolveEnabled` — this value is only ever
+    // written by SettingsView's already-gated toggle, so it can't be true
+    // while locked.
+    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabled = false
 
     /// The one paired Mac to drive the unified primary Connect action for.
     /// Multiple paired Macs keep using the existing per-row "Nearby Macs"
@@ -504,8 +510,16 @@ struct IdleView: View {
                 .frame(width: 132)
 
             VStack(spacing: 6) {
-                Text("MeowDisplay")
-                    .font(.largeTitle.bold())
+                HStack(spacing: 6) {
+                    Text("MeowDisplay")
+                        .font(.largeTitle.bold())
+                    if catModeEnabled {
+                        Image(systemName: "pawprint.fill")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                }
                 HStack(spacing: 8) {
                     Circle()
                         .fill(receiver.connected ? Color.green : Color.orange)
@@ -796,6 +810,36 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var confirmingFunctionTrayReset = false
     @State private var trustRefresh = 0
+
+    // Cat Mode (hidden easter egg — nine taps on the About/version row
+    // below). Local-only presentation state: never synced, never on the
+    // wire. `catModeTapCount` intentionally isn't persisted — a relaunch
+    // mid-tapping just resets the count, it's not meant to be a puzzle
+    // across sessions.
+    @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
+    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
+    @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
+    @State private var showCatModeUnlockedAlert = false
+
+    private var catModeEnabled: Bool {
+        CatMode.resolveEnabled(requestedEnabled: catModeEnabledStorage, unlocked: catModeUnlocked)
+    }
+
+    private var catModeToggleBinding: Binding<Bool> {
+        Binding(
+            get: { catModeEnabled },
+            set: { catModeEnabledStorage = CatMode.resolveEnabled(requestedEnabled: $0, unlocked: catModeUnlocked) }
+        )
+    }
+
+    private func registerCatModeTap() {
+        let result = CatMode.registerTap(tapCount: catModeTapCount, alreadyUnlocked: catModeUnlocked)
+        catModeTapCount = result.tapCount
+        if result.justUnlocked {
+            catModeUnlocked = true
+            showCatModeUnlockedAlert = true
+        }
+    }
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -1198,6 +1242,17 @@ struct SettingsView: View {
                 } footer: {
                     Text("Manual diagnostic, not automated: asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake.")
                 }
+                Section {
+                    Button("Reset Cat Mode", role: .destructive) {
+                        catModeUnlocked = false
+                        catModeEnabledStorage = false
+                        catModeTapCount = 0
+                    }
+                } header: {
+                    Text("Developer — Cat Mode")
+                } footer: {
+                    Text("Re-locks the About/version row's nine-tap easter egg for retesting the unlock flow.")
+                }
                 #endif
 
                 Section {
@@ -1221,10 +1276,29 @@ struct SettingsView: View {
                     Text("MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet.")
                 }
 
-                Section("About") {
+                Section {
                     LabeledContent("Version", value: version)
+                        // Hidden unlock gesture: nine taps here (a cat's
+                        // nine lives) reveals Cat Mode below. No visible
+                        // affordance before unlock — this reads like an
+                        // ordinary, non-interactive detail row.
+                        .contentShape(Rectangle())
+                        .onTapGesture { registerCatModeTap() }
                     Link(destination: macAppURL) {
                         Label("GitHub — raiseCatError/MeowDisplay", systemImage: "link")
+                    }
+                    if catModeUnlocked {
+                        Toggle(isOn: catModeToggleBinding) {
+                            Label("Cat Mode", systemImage: "pawprint.fill")
+                        }
+                    }
+                } header: {
+                    HStack(spacing: 4) {
+                        Text("About")
+                        if catModeEnabled {
+                            Image(systemName: "pawprint.fill")
+                                .accessibilityHidden(true)
+                        }
                     }
                 }
             }
@@ -1234,6 +1308,9 @@ struct SettingsView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .alert("Cat Mode unlocked 🐾", isPresented: $showCatModeUnlockedAlert) {
+                Button("Nice", role: .cancel) {}
             }
         }
         .confirmationDialog("Reset \(controlStore.preferences.activeControlProfile.title)?",

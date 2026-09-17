@@ -7,6 +7,39 @@ struct SystemSettingsView: View {
     @ObservedObject var permissions: PermissionMonitor
     let updater: SPUStandardUpdaterController?
 
+    // Cat Mode (hidden easter egg — nine taps on the About/version row
+    // below). Local-only presentation state: never synced, never on the
+    // wire. `catModeTapCount` intentionally isn't persisted — a relaunch
+    // mid-tapping just resets the count.
+    @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
+    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
+    @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
+    @State private var showCatModeUnlockedAlert = false
+
+    private var catModeEnabled: Bool {
+        CatMode.resolveEnabled(requestedEnabled: catModeEnabledStorage, unlocked: catModeUnlocked)
+    }
+
+    private var catModeToggleBinding: Binding<Bool> {
+        Binding(
+            get: { catModeEnabled },
+            set: { catModeEnabledStorage = CatMode.resolveEnabled(requestedEnabled: $0, unlocked: catModeUnlocked) }
+        )
+    }
+
+    private func registerCatModeTap() {
+        let result = CatMode.registerTap(tapCount: catModeTapCount, alreadyUnlocked: catModeUnlocked)
+        catModeTapCount = result.tapCount
+        if result.justUnlocked {
+            catModeUnlocked = true
+            showCatModeUnlockedAlert = true
+        }
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
     var body: some View {
         Form {
             Section("Permissions") {
@@ -74,8 +107,34 @@ struct SystemSettingsView: View {
                 Button("Reveal Log Files in Finder") { Log.revealInFinder() }
                     .controlSize(.small)
             }
+
+            Section {
+                LabeledContent("Version", value: appVersion)
+                    // Hidden unlock gesture: nine taps here (a cat's nine
+                    // lives) reveals Cat Mode below. No visible affordance
+                    // before unlock — this reads like an ordinary,
+                    // non-interactive detail row.
+                    .contentShape(Rectangle())
+                    .onTapGesture { registerCatModeTap() }
+                if catModeUnlocked {
+                    Toggle(isOn: catModeToggleBinding) {
+                        Label("Cat Mode", systemImage: "pawprint.fill")
+                    }
+                }
+            } header: {
+                HStack(spacing: 4) {
+                    Text("About")
+                    if catModeEnabled {
+                        Image(systemName: "pawprint.fill")
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+        .alert("Cat Mode unlocked 🐾", isPresented: $showCatModeUnlockedAlert) {
+            Button("Nice", role: .cancel) {}
+        }
     }
 
     @ViewBuilder
