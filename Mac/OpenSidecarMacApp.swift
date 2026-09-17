@@ -2,6 +2,8 @@ import SwiftUI
 import Network
 import Combine
 import Sparkle
+import Security
+import CryptoKit
 
 // `AppPresentation` lives in its own file (Mac/AppPresentation.swift) — a
 // pure, dependency-free policy type, same shape as `ReconnectPolicy`/
@@ -109,6 +111,12 @@ enum ConnectionTarget: Hashable {
     case usb(udid: String?)           // wired via built-in usbmuxd; nil = first device
     case wifi(NWBrowser.Result)       // discovered via Bonjour
     case remote(peerID: String)       // reached over Tailscale via a persisted endpoint hint
+    /// Reached over Tailscale using a host/port resolved from an
+    /// authenticated remote connect-request "knock" rather than a persisted
+    /// hint — see `SenderController.handleRemoteConnectRequest`. Shares
+    /// `.remote`'s sessionID/logicalID/route so it can never coexist with
+    /// (or duplicate) a `.remote` session for the same peer.
+    case remoteCallback(peerID: String, host: String, port: UInt16)
 
     /// Stable identity for sessions and persistence — survives Bonjour
     /// re-discovery (fresh NWBrowser.Result) and USB replugs (new DeviceID).
@@ -119,6 +127,7 @@ enum ConnectionTarget: Hashable {
             if case .service(let name, _, _, _) = result.endpoint { return "wifi:\(name)" }
             return "wifi:unknown"
         case .remote(let peerID): return "remote:\(peerID)"
+        case .remoteCallback(let peerID, _, _): return "remote:\(peerID)"
         }
     }
 }
@@ -391,6 +400,13 @@ final class SenderController: ObservableObject {
     private var receiverPairingBrowser: NWBrowser?
     private var receiverPairingResults: [NWBrowser.Result] = []
     private var pairingListener: NWListener?
+    /// Pinned-mutual-TLS listener a paired peer's authenticated remote
+    /// connect-request "knock" arrives on — see `WireCrypto.remoteRequestPort`
+    /// and `handleRemoteConnectRequest`.
+    private var remoteConnectRequestListener: NWListener?
+    /// Last time an accepted knock from each peer triggered a dial-back —
+    /// `RemoteConnectRequestPolicy`'s rate-limit input.
+    private var remoteConnectRequestAccepted: [String: Date] = [:]
     private var usbWatcher: UsbmuxDeviceWatcher?
     private var activePairingPeerIDs: Set<String> = []
     // Forwards each live session's own @Published changes (status, route,
@@ -485,6 +501,7 @@ final class SenderController: ObservableObject {
         startBrowsing()
         startReceiverPairingBrowsing()
         startPairingListener()
+        startRemoteConnectRequestListener()
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
             let detached = Set(self.usbDevices.map(\.udid)).subtracting(devices.map(\.udid))
@@ -583,6 +600,182 @@ final class SenderController: ObservableObject {
         }
     }
 
+    /// Pinned-mutual-TLS listener for authenticated remote connect-request
+    /// "knocks" (see `WireCrypto.remoteRequestPort`). Unlike the pairing
+    /// listener above, this never runs an unauthenticated bootstrap — it
+    /// reuses the exact same `TLSConfigurator.mutualTLSOptions` construction
+    /// as `StreamReceiver`'s own TLS listener, so only an already-pinned
+    /// peer's client certificate can complete the handshake at all.
+    private func startRemoteConnectRequestListener() {
+        guard remoteConnectRequestListener == nil,
+              let identity = TrustStore.shared.ownIdentity(),
+              let tls = TLSConfigurator.mutualTLSOptions(
+                identity: identity,
+                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                isListener: true, queue: .main) else {
+            Log.info("remote connect-request listener unavailable — no identity/pins yet")
+            return
+        }
+        do {
+            let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
+            let params = NWParameters(tls: tls, tcp: tcp)
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: params,
+                on: NWEndpoint.Port(rawValue: WireCrypto.remoteRequestPort)!)
+            remoteConnectRequestListener = listener
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, self.remoteConnectRequestListener === listener else {
+                        connection.cancel(); return
+                    }
+                    self.acceptRemoteConnectRequest(connection)
+                }
+            }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                Task { @MainActor [weak self, weak listener] in
+                    switch state {
+                    case .ready:
+                        Log.info("remote connect-request listener ready: port=\(WireCrypto.remoteRequestPort)")
+                    case .failed(let error):
+                        Log.info("remote connect-request listener failed: \(error)")
+                        guard let self, self.remoteConnectRequestListener === listener else { return }
+                        self.remoteConnectRequestListener = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                            self?.startRemoteConnectRequestListener()
+                        }
+                    default: break
+                    }
+                }
+            }
+            listener.start(queue: .main)
+        } catch {
+            Log.info("remote connect-request listener could not be created: \(error)")
+        }
+    }
+
+    /// Rebuilds the remote connect-request listener after a trust change
+    /// (specifically Forget/revocation). `TLSConfigurator`'s verify block
+    /// already re-reads `TrustStore`'s live pin snapshot on every full
+    /// handshake — closures, not captured values — so a forgotten peer's
+    /// next *new* handshake is rejected without this. This exists as
+    /// defense-in-depth against TLS-layer session-resumption state (session
+    /// tickets) potentially outliving the listener socket that issued them,
+    /// mirroring the exact rebuild `StreamReceiver.scheduleTLSListenerRefresh`
+    /// already performs on its own TLS listener after a trust change.
+    private func scheduleRemoteConnectRequestListenerRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.remoteConnectRequestListener?.cancel()
+            self.remoteConnectRequestListener = nil
+            self.startRemoteConnectRequestListener()
+        }
+    }
+
+    /// Accepts one knock connection, resolves the caller's pinned peerID
+    /// from its TLS client certificate, and closes it — the connection's
+    /// mere completion (as an already-pinned peer) is the entire request; no
+    /// payload from it is ever trusted. A caller whose certificate isn't
+    /// currently pinned never completes the handshake at all (see
+    /// `TLSConfigurator`'s verify block), so failure to resolve a peerID
+    /// here only happens if the pin set changed between handshake and
+    /// resolution — treated as a reject, never a crash.
+    private func acceptRemoteConnectRequest(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor [weak self] in
+                guard let self else { connection.cancel(); return }
+                switch state {
+                case .ready:
+                    let observedHost = Self.hostString(from: connection.currentPath?.remoteEndpoint ?? connection.endpoint)
+                    let peerID = Self.resolvePinnedPeerID(from: connection)
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    guard let peerID else {
+                        Log.info("SECURITY: remote connect-request from unresolvable/unpinned peer rejected")
+                        return
+                    }
+                    self.handleRemoteConnectRequest(peerID: peerID, observedHost: observedHost)
+                case .failed, .cancelled:
+                    connection.stateUpdateHandler = nil
+                default: break
+                }
+            }
+        }
+        connection.start(queue: .main)
+    }
+
+    /// Extracts the completed handshake's leaf certificate SPKI (same
+    /// same-source re-encode `TrustStore`/`TLSConfigurator` use elsewhere)
+    /// and resolves it to a pinned peerID. Returns nil if the connection has
+    /// no TLS metadata or the SPKI matches no current pin.
+    private static func resolvePinnedPeerID(from connection: NWConnection) -> String? {
+        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+            return nil
+        }
+        var resolved: String?
+        sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
+            guard resolved == nil else { return }
+            let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
+            guard let key = SecCertificateCopyKey(secCert),
+                  let x963 = SecKeyCopyExternalRepresentation(key, nil) as Data?,
+                  let pub = try? P256.Signing.PublicKey(x963Representation: x963) else { return }
+            resolved = TrustStore.shared.peerID(forSPKI: pub.derRepresentation)
+        }
+        return resolved
+    }
+
+    /// Host-only string (no port) for an inbound knock's observed network
+    /// source — used only as a last-resort dial-back candidate, and only
+    /// after the peer's identity is already authenticated (see
+    /// `handleRemoteConnectRequest`). Never used for identity.
+    private static func hostString(from endpoint: NWEndpoint?) -> String? {
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        return String(describing: host)
+    }
+
+    /// Routes an authenticated remote connect-request to the best available
+    /// path, in the same preference order as the rest of unified Connect: a
+    /// currently visible local peer wins outright (no unnecessary Remote
+    /// takeover), then a persisted Remote Access hint the user configured
+    /// for this peer, then the network source address the authenticated
+    /// knock itself arrived from — safe because it comes from a connection
+    /// that has already passed pinned mutual TLS, never a claimed or
+    /// unauthenticated value. `RemoteConnectRequestPolicy` bounds how often
+    /// repeated knocks from the same peer can trigger a fresh dial.
+    private func handleRemoteConnectRequest(peerID: String, observedHost: String?) {
+        let now = Date()
+        guard RemoteConnectRequestPolicy.shouldHandle(
+            peerID: peerID, now: now, lastAccepted: remoteConnectRequestAccepted) else {
+            Log.info("routeDebug: remote connect-request peer=\(peerID) ignored (rate-limited)")
+            return
+        }
+        remoteConnectRequestAccepted[peerID] = now
+
+        func dial(_ target: ConnectionTarget, via routeDescription: String) {
+            if let existing = session(for: target.sessionID), !existing.failed {
+                Log.info("routeDebug: remote connect-request peer=\(peerID) already connecting/connected via \(routeDescription)")
+                return
+            }
+            Log.info("routeDebug: remote connect-request peer=\(peerID) resolved via \(routeDescription)")
+            connect(to: target, userInitiated: true)
+        }
+
+        if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
+            dial(.wifi(localResult), via: "local Bonjour")
+            return
+        }
+        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil {
+            dial(.remote(peerID: peerID), via: "persisted Remote hint")
+            return
+        }
+        guard let observedHost else {
+            Log.info("routeDebug: remote connect-request peer=\(peerID) has no usable route")
+            return
+        }
+        dial(.remoteCallback(peerID: peerID, host: observedHost, port: WireCrypto.tlsPort),
+             via: "observed source \(observedHost)")
+    }
+
     private func startReceiverPairingBrowsing() {
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
@@ -674,13 +867,29 @@ final class SenderController: ObservableObject {
     }
 
     /// Same pinned-mutual-TLS construction as `secureWiFiTransport`, dialing
-    /// a persisted Tailscale connection hint instead of a Bonjour result.
-    /// The endpoint is only ever a hint — `TLSConfigurator`'s SPKI check is
-    /// what actually authorizes the connection.
-    private func secureRemoteTransport(forPeerID peerID: String) -> SenderTransport? {
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID),
-              let port = NWEndpoint.Port(rawValue: hint.port) else {
+    /// either a persisted Tailscale connection hint or, when
+    /// `hostOverride`/`portOverride` are given (an authenticated remote
+    /// connect-request's observed source — see `handleRemoteConnectRequest`),
+    /// that address instead. Either way the endpoint is only ever a hint —
+    /// `TLSConfigurator`'s SPKI check is what actually authorizes the
+    /// connection.
+    private func secureRemoteTransport(forPeerID peerID: String,
+                                       hostOverride: String? = nil,
+                                       portOverride: UInt16? = nil) -> SenderTransport? {
+        let resolvedHost: String
+        let resolvedPort: UInt16
+        if let hostOverride, let portOverride {
+            resolvedHost = hostOverride
+            resolvedPort = portOverride
+        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) {
+            resolvedHost = hint.host
+            resolvedPort = hint.port
+        } else {
             Log.info("routeDebug: Remote unavailable for peer=\(peerID) — no persisted endpoint hint")
+            return nil
+        }
+        guard let port = NWEndpoint.Port(rawValue: resolvedPort) else {
+            Log.info("routeDebug: Remote unavailable for peer=\(peerID) — invalid port \(resolvedPort)")
             return nil
         }
         guard let pin = TrustStore.shared.pin(peerID: peerID),
@@ -690,8 +899,8 @@ final class SenderController: ObservableObject {
             Log.info("routeDebug: Remote refused for peer=\(peerID) — no local trust/pin for this peer")
             return nil
         }
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(hint.host), port: port)
-        Log.info("routeDebug: dialing Remote candidate peer=\(peerID) endpoint=\(hint.host):\(hint.port)")
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(resolvedHost), port: port)
+        Log.info("routeDebug: dialing Remote candidate peer=\(peerID) endpoint=\(resolvedHost):\(resolvedPort)")
         return .tcp(endpoint,
                     tls: TLSSessionConfig(identity: identity,
                                           pinnedPeerSPKI: pin,
@@ -782,6 +991,10 @@ final class SenderController: ObservableObject {
             removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
             removeInputAuthorization: { ReceiverInputAuthorizationStore.removeAuthorization(peerID: $0) })
+        // Forget must take effect immediately for a still-open listener
+        // socket, not just for the next connection this process happens to
+        // build fresh TLS options for — see `scheduleRemoteConnectRequestListenerRefresh`.
+        scheduleRemoteConnectRequestListenerRefresh()
         installIDByUDID = installIDByUDID.filter { $0.value != peerID }
         // Suppress immediate reconnect before anything discovered can beat
         // the user to it, then end the live session (which also suppresses
@@ -915,7 +1128,7 @@ final class SenderController: ObservableObject {
             if let installID = installIDByUDID[udid] { return "install:\(installID)" }
         case .wifi(let result):
             if let installID = txtID(of: result) { return "install:\(installID)" }
-        case .remote(let peerID):
+        case .remote(let peerID), .remoteCallback(let peerID, _, _):
             return "install:\(peerID)"
         default:
             break
@@ -984,7 +1197,7 @@ final class SenderController: ObservableObject {
     private func preConnectRoute(for target: ConnectionTarget) -> ConnectionRoute {
         switch target {
         case .usb: return .usb
-        case .remote: return .remote
+        case .remote, .remoteCallback: return .remote
         case .wifi(let result):
             let names = result.interfaces.map(\.name)
             return ConnectionRoute.classify(isUSB: false, interfaceNames: names,
@@ -1228,7 +1441,7 @@ final class SenderController: ObservableObject {
             return udid == nil ? "Manual (\(host):\(port))" : "iPhone / iPad"
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
-        case .remote(let peerID):
+        case .remote(let peerID), .remoteCallback(let peerID, _, _):
             let pinned = TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }
             return pinned?.displayName ?? "Remote device"
         }
@@ -1349,6 +1562,9 @@ final class SenderController: ObservableObject {
             transport = secure
         case .remote(let peerID):
             guard let secure = secureRemoteTransport(forPeerID: peerID) else { return }
+            transport = secure
+        case .remoteCallback(let peerID, let host, let port):
+            guard let secure = secureRemoteTransport(forPeerID: peerID, hostOverride: host, portOverride: port) else { return }
             transport = secure
         }
 
