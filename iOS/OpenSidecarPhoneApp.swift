@@ -202,11 +202,7 @@ struct ReceiverScreen: View {
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 })
                 } else {
-                    #if DEBUG
                     IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings)
-                    #else
-                    IdleView(receiver: model.receiver, showSettings: $showSettings)
-                    #endif
                 }
             }
             .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
@@ -479,9 +475,7 @@ struct ReceiverInterruptionOverlay: View {
 
 struct IdleView: View {
     @ObservedObject var receiver: StreamReceiver
-    #if DEBUG
     @ObservedObject var wakeConnect: WakeConnectCoordinator
-    #endif
     @Binding var showSettings: Bool
     @State private var showRemoteAccessSetup = false
     // Cat Mode's only effect here: a purely decorative paw accent next to
@@ -631,16 +625,14 @@ struct IdleView: View {
     /// One primary Connect action for the single-paired-Mac case (P0), plus
     /// a small overflow menu (P7) instead of separate "Connect Locally" /
     /// "Connect Remotely" buttons. Label follows P6: "Wake & Connect" only
-    /// when a local LAN wake hint exists (DEBUG-only milestone, never claims
-    /// remote WoL); otherwise plain "Connect", which — via
-    /// `connectPrimary(peerID:)` — rearms the local listener/Bonjour `cr`
-    /// and, if Remote Access is configured, knocks this one Mac only (never
-    /// every paired Mac).
+    /// when a local LAN wake hint exists (never claims remote WoL);
+    /// otherwise plain "Connect", which — via `connectPrimary(peerID:)` —
+    /// rearms the local listener/Bonjour `cr` and, if Remote Access is
+    /// configured, knocks this one Mac only (never every paired Mac).
     @ViewBuilder
     private func primaryConnectControl(peerID: String) -> some View {
         let remoteConfigured = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
         HStack(spacing: 10) {
-            #if DEBUG
             if wakeConnect.isRunning(forPeerID: peerID) {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
@@ -659,10 +651,6 @@ struct IdleView: View {
                 Button("Connect") { receiver.connectPrimary(peerID: peerID) }
                     .buttonStyle(.borderedProminent)
             }
-            #else
-            Button("Connect") { receiver.connectPrimary(peerID: peerID) }
-                .buttonStyle(.borderedProminent)
-            #endif
 
             Menu {
                 if remoteConfigured {
@@ -696,11 +684,10 @@ struct IdleView: View {
     }
 
     /// One-tap Wake & Connect when this specific paired Mac has a usable
-    /// saved LAN wake hint (DEBUG-only milestone — see
-    /// `WakeConnectCoordinator`); a plain Connect otherwise, unchanged.
+    /// saved LAN wake hint (see `WakeConnectCoordinator`); a plain Connect
+    /// otherwise, unchanged.
     @ViewBuilder
     private func connectControl(for result: NWBrowser.Result) -> some View {
-        #if DEBUG
         if let peerID = receiver.pairingMacPeerID(result) {
             if wakeConnect.isRunning(forPeerID: peerID) {
                 HStack(spacing: 6) {
@@ -725,10 +712,6 @@ struct IdleView: View {
             Button("Connect") { receiver.requestConnect() }
                 .buttonStyle(.borderedProminent)
         }
-        #else
-        Button("Connect") { receiver.requestConnect() }
-            .buttonStyle(.borderedProminent)
-        #endif
     }
 }
 
@@ -1431,9 +1414,7 @@ private struct DeviceNameField: View {
 @MainActor
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
-    #if DEBUG
     let wakeConnect: WakeConnectCoordinator
-    #endif
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -1445,9 +1426,7 @@ final class ReceiverModel: ObservableObject {
                                   deviceKind: deviceKind,
                                   fallbackServiceName: UIDevice.current.name,
                                   maxFPS: UIScreen.main.maximumFramesPerSecond)
-        #if DEBUG
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
-        #endif
         // Announce the native panel size to the Mac.
         let native = UIScreen.main.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),

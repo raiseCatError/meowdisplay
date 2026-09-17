@@ -20,6 +20,8 @@ import VideoToolbox
 import QuartzCore
 import ImageIO
 import Combine
+import Security
+import CryptoKit
 
 /// One-second window of pipeline health, plus per-frame timing samples for
 /// the performance overlay graph.
@@ -98,6 +100,22 @@ final class StreamReceiver: ObservableObject {
     /// Queue-confined authority. Every transition goes through
     /// `mutateSession` so there is exactly one logging and publishing path.
     private var sessionState = ReceiverSessionState()
+
+    /// The pinned peerID that actually completed mutual TLS for the CURRENT
+    /// `session` — derived from the connection's own certificate (SPKI →
+    /// `TrustStore.peerID(forSPKI:)`), exactly like `MacSender`'s
+    /// `SenderApplicationAuthorization` binding on the dialer side. `nil`
+    /// while disconnected, or for a connection with no TLS layer (the
+    /// loopback-only USB path). `WakeConnectCoordinator` requires this to
+    /// equal its attempt's target peerID before treating a session as having
+    /// satisfied that specific wake attempt — a Bonjour peerID, a requested
+    /// peerID, a hostname, or wake metadata are never sufficient on their
+    /// own (see `resolveAuthenticatedPeerID`).
+    @Published private(set) var authenticatedPeerID: String?
+    /// Set by `forgetPeer(_:)` so `WakeConnectCoordinator` can end an attempt
+    /// targeting a peer whose trust was just revoked instead of letting a
+    /// late/stale authentication complete it (P13).
+    @Published private(set) var lastForgottenPeerID: String?
 
     /// Coarse, interruption-aware connection headline — "Connected", an
     /// interruption title ("Reconnecting…", "Display Paused", …), or
@@ -691,6 +709,7 @@ final class StreamReceiver: ObservableObject {
 
     func forgetPeer(_ peerID: String) {
         TrustStore.shared.forget(peerID: peerID)
+        DispatchQueue.main.async { self.lastForgottenPeerID = peerID }
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
@@ -1335,6 +1354,8 @@ final class StreamReceiver: ObservableObject {
             if let path = conn.currentPath {
                 self.updateTransport(for: conn, path: path)
             }
+            let resolvedPeerID = Self.resolveAuthenticatedPeerID(from: conn)
+            DispatchQueue.main.async { self.authenticatedPeerID = resolvedPeerID }
             self.setConnected(true)
             if !greeted { self.sendHello(on: conn) }
         }
@@ -1382,6 +1403,30 @@ final class StreamReceiver: ObservableObject {
     private static func isFailed(_ state: NWConnection.State) -> Bool {
         if case .failed = state { return true }
         return false
+    }
+
+    /// Same same-source SPKI re-encode `TrustStore`/`TLSConfigurator` use
+    /// everywhere else, mirroring `OpenSidecarMacApp.resolvePinnedPeerID`
+    /// (the Mac's own remote-connect-request listener) and `MacSender`'s
+    /// hello-time SPKI check. `TLSConfigurator`'s verify block already
+    /// refused the handshake for any certificate that isn't currently
+    /// pinned, so a `nil` here only means "no TLS metadata" (the loopback
+    /// USB transport, which never negotiates TLS) — never an unpinned peer
+    /// that somehow still connected.
+    private static func resolveAuthenticatedPeerID(from connection: NWConnection) -> String? {
+        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+            return nil
+        }
+        var resolved: String?
+        sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
+            guard resolved == nil else { return }
+            let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
+            guard let key = SecCertificateCopyKey(secCert),
+                  let x963 = SecKeyCopyExternalRepresentation(key, nil) as Data?,
+                  let pub = try? P256.Signing.PublicKey(x963Representation: x963) else { return }
+            resolved = TrustStore.shared.peerID(forSPKI: pub.derRepresentation)
+        }
+        return resolved
     }
 
     // MARK: - Liveness (ping + watchdog)
@@ -1545,7 +1590,6 @@ final class StreamReceiver: ObservableObject {
                                         broadcastAddress: obj["broadcast"] as? String,
                                         updatedAt: Date())
             WakeMetadataStore.setMetadata(metadata, forPeerID: peerID)
-        #if DEBUG
         case WireMessage.promoteInteractiveWakeResult:
             let text: String
             if obj["success"] as? Bool == true {
@@ -1556,7 +1600,6 @@ final class StreamReceiver: ObservableObject {
             }
             Log.info("wakeDebug: promoteInteractiveWake result=\(text)")
             DispatchQueue.main.async { self.promoteInteractiveWakeResult = text }
-        #endif
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             // Retrying cannot fix that, so the eventual loss is terminal.
@@ -1897,12 +1940,12 @@ final class StreamReceiver: ObservableObject {
         audioPreferred = enabled
     }
 
-    #if DEBUG
-    /// DEBUG-only manual diagnostic (not automated): asks the connected Mac
-    /// to call IOPMAssertionDeclareUserActivity, over the same authenticated
-    /// session as every other control message — there is no separate
-    /// channel for it, so an unauthenticated/unpaired peer could never send
-    /// this even if it wanted to.
+    /// Asks the connected Mac to call IOPMAssertionDeclareUserActivity, over
+    /// the same authenticated session as every other control message — there
+    /// is no separate channel for it, so an unauthenticated/unpaired peer
+    /// could never send this even if it wanted to. Driven automatically by
+    /// `WakeConnectCoordinator`; `PromoteInteractiveWakeView` (DEBUG-only)
+    /// also exposes it as a manual diagnostic.
     @Published var promoteInteractiveWakeResult: String?
 
     func requestPromoteInteractiveWake() {
@@ -1910,7 +1953,6 @@ final class StreamReceiver: ObservableObject {
         Log.info("wakeDebug: promoteInteractiveWake request sent")
         sendControl(["type": WireMessage.promoteInteractiveWake])
     }
-    #endif
 
     func sendNativeAppGesture(kind: NativeAppGestureKind,
                               phase: NativeAppGesturePhase,
@@ -3377,7 +3419,6 @@ final class StreamReceiver: ObservableObject {
         queue.asyncAfter(deadline: .now() + 8.0, execute: clear)
     }
 
-    #if DEBUG
     /// Wake & Connect (`WakeConnectCoordinator`): re-publishes the one-shot
     /// receiver Connect token without touching reconnect/session state —
     /// unlike `requestConnect()`, this never cancels an in-flight recovery
@@ -3388,7 +3429,6 @@ final class StreamReceiver: ObservableObject {
     func refreshConnectRequest() {
         queue.async { self.signalConnectRequest() }
     }
-    #endif
 
     /// Unified primary Connect for one specific paired Mac: rearms the
     /// local listener and Bonjour `cr` signal exactly as `requestConnect()`
@@ -3501,6 +3541,7 @@ final class StreamReceiver: ObservableObject {
         DispatchQueue.main.async {
             self.connected = value
             if !value {
+                self.authenticatedPeerID = nil
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
                 self.videoEnabled = true
                 // The mode is only ever known from a live Mac. A request

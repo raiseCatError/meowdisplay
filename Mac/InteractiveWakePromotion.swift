@@ -1,10 +1,11 @@
-#if DEBUG
 import IOKit.pwr_mgt
 
-/// DEBUG-only probe for one question: does declaring remote user activity
-/// promote a dark/network wake into a graphical/interactive one? This calls
-/// exactly one public IOKit API and nothing else — no synthesized input, no
-/// capture/display rebuild, no pmset changes, no private APIs.
+/// Answers one question: does declaring remote user activity promote a
+/// dark/network wake into a graphical/interactive one? This calls exactly
+/// one public IOKit API and nothing else — no synthesized input, no
+/// capture/display rebuild, no pmset changes, no private APIs. Called from
+/// `MacSender`'s `promoteInteractiveWake` wire handler in response to the
+/// iOS Wake & Connect coordinator's Promote request.
 enum InteractiveWakePromotion {
     struct Attempt {
         let result: IOReturn
@@ -81,4 +82,3 @@ final class WakeStabilizationAssertion {
         Log.info("wakeDebug: wakeStabilizationAssertionReleased")
     }
 }
-#endif

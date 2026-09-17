@@ -1,9 +1,11 @@
 // WakeConnectCoordinator — drives `WakeConnectAttempt` (the pure state/timing
 // policy) against a real `StreamReceiver`: WoL, the receiver Connect-request
 // token, and Promote Interactive Wake, in the order and with the bounded
-// retries described in the orchestration spec. DEBUG-only, like every piece
-// it touches (`InteractiveWakePromotion`, `WireMessage.promoteInteractiveWake`,
-// `WakeTestingView`) — see that milestone note for why.
+// retries described in the orchestration spec. Release feature, like every
+// piece it touches (`InteractiveWakePromotion`,
+// `WireMessage.promoteInteractiveWake`) — the manual test surfaces that
+// exercise those by hand (`WakeTestingView`, `RouteOverrides`) remain
+// Debug-only diagnostics.
 //
 // This is a UI/workflow projection layered on top of the canonical
 // `ReceiverSessionState` connection state machine — it never dials, never
@@ -12,27 +14,25 @@
 // public request methods (`requestConnect`, `refreshConnectRequest`,
 // `requestPromoteInteractiveWake`) at the right moments.
 //
-// KNOWN LIMITATION (evaluated, deliberately deferred — not a small/local
-// change): `StreamReceiver` does not currently expose which pinned peer
-// actually authenticated a given session. `TLSConfigurator`'s verify block
-// (Shared/TLSConfigurator.swift) only returns accept/reject — it never
-// surfaces which pinned SPKI matched. On the Mac (dialer) side, `peerID` is
-// known a priori (it chose who to dial — see `TLSSessionConfig.peerID`); the
-// receiver is the TLS *listener*, so it has no such a priori identity and
-// would need genuinely new code to recover one: extracting the completed
-// connection's peer certificate via `sec_protocol_metadata` (a pattern not
-// used anywhere in this codebase today), re-deriving its SPKI the same way
-// `TLSConfigurator` does, resolving it through `TrustStore.peerID(forSPKI:)`,
-// and threading a new published, lifecycle-managed identity through
-// `adopt()`/reconnect/forget. That is real security-adjacent surface, not a
-// local tweak — left deferred rather than rushed. `applicationAuthenticated`
-// below is therefore called with the attempt's own target peer ID rather
-// than a verified one; with more than one paired Mac, a different already-
-// paired Mac dialing in mid-attempt could in principle be mistaken for the
-// one this attempt woke. `WakeConnectAttempt` itself does check the peer ID
-// it's given, so this narrows to exactly that one gap rather than having no
-// check at all.
-#if DEBUG
+// AUTHENTICATED TARGET-PEER BINDING: `applicationAuthenticated` below is
+// called with `receiver.authenticatedPeerID` — the pinned peerID that
+// actually completed mutual TLS for the current session, derived from the
+// connection's own certificate (SPKI → `TrustStore.peerID(forSPKI:)`; see
+// `StreamReceiver.resolveAuthenticatedPeerID`) — never with this attempt's
+// own requested/target peerID. `WakeConnectAttempt.applicationAuthenticated`
+// then requires that to equal the attempt's target peerID before treating
+// the session as having satisfied this specific wake attempt. A different
+// already-paired Mac dialing in mid-attempt, a stale previous-peer session
+// still settling, a Bonjour peerID, a hostname, or wake metadata are all
+// insufficient on their own — only the cryptographically-verified identity
+// counts. A `nil` `authenticatedPeerID` (no TLS metadata — the loopback-only
+// USB path) can never satisfy an attempt either, since `nil` cannot equal a
+// non-nil target peerID.
+//
+// TRUST REVOCATION (P13): if `Forget` is pressed against the peer this
+// attempt is targeting, `receiver.lastForgottenPeerID` fires and the attempt
+// is failed immediately — a late/stale authentication arriving after Forget
+// must never complete it.
 import Foundation
 import Combine
 import Network
@@ -176,17 +176,31 @@ final class WakeConnectCoordinator: ObservableObject {
         receiver.$promoteInteractiveWakeResult
             .sink { [weak self] result in self?.handlePromoteResult(result) }
             .store(in: &cancellables)
+        // dropFirst(): Combine replays the current value on subscribe, and a
+        // peer forgotten before this coordinator's first `begin()` must not
+        // immediately fail a brand-new attempt for an unrelated peer.
+        receiver.$lastForgottenPeerID
+            .dropFirst()
+            .compactMap { $0 }
+            .sink { [weak self] forgottenPeerID in self?.handlePeerForgotten(forgottenPeerID) }
+            .store(in: &cancellables)
     }
 
     private func handleSessionChange(_ session: ReceiverSessionState) {
-        guard attempt.isActive, let peerID = activePeerID else { return }
+        guard attempt.isActive, activePeerID != nil else { return }
         switch session.phase {
         case .connecting:
             if attempt.transportReady() {
                 Log.info("wakeConnect: transportReady")
             }
         case .connected:
-            if attempt.applicationAuthenticated(generation: session.generation, peerID: peerID) {
+            // Authenticated target-peer binding (P4) — see the file header.
+            // A `nil`/mismatched authenticatedPeerID simply fails this guard
+            // and leaves the attempt exactly where it was; it does not fail
+            // the attempt outright, since the real dial may still be in
+            // flight on a different candidate connection.
+            guard let authenticatedPeerID = receiver.authenticatedPeerID else { return }
+            if attempt.applicationAuthenticated(generation: session.generation, peerID: authenticatedPeerID) {
                 Log.info("wakeConnect: applicationAuthenticated generation=\(session.generation)")
                 tokenRefreshTimer?.cancel(); tokenRefreshTimer = nil
                 if attempt.stage == .waitingForVideo {
@@ -225,6 +239,20 @@ final class WakeConnectCoordinator: ObservableObject {
         stopAllTimers()
     }
 
+    // MARK: - Trust revocation (P13)
+
+    /// Forgetting the peer this attempt targets must end the attempt
+    /// immediately — a late/stale authentication arriving after Forget must
+    /// never be allowed to complete it. A forget for an unrelated peer (a
+    /// different paired Mac) is a no-op here.
+    private func handlePeerForgotten(_ peerID: String) {
+        guard activePeerID == peerID, attempt.isActive else { return }
+        if attempt.fail("peerForgotten") {
+            Log.info("wakeConnect: failed reason=peerForgotten")
+        }
+        stopAllTimers()
+    }
+
     // MARK: - Promote (authenticated-only, bounded, generation-scoped)
 
     private func sendPromoteIfNeeded() {
@@ -233,8 +261,18 @@ final class WakeConnectCoordinator: ObservableObject {
         receiver.requestPromoteInteractiveWake()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + WakeConnectAttempt.promoteRetryInterval)
+        // Bound to the generation this retry was scheduled for, not just the
+        // stage: `cancel()` on a `DispatchSourceTimer` does not retroactively
+        // withdraw a handler that GCD has already handed to the queue, so a
+        // stale timer from an OLD generation could otherwise still fire after
+        // a NEW generation has already re-entered `.promoting` (e.g. a fast
+        // reconnect racing this timer's deadline) and be mistaken for that
+        // new generation's own scheduled retry — consuming its retry budget
+        // without it having asked for one. Checking `promoteGeneration`
+        // here, not just `stage`, closes that gap.
         timer.setEventHandler { [weak self] in
-            guard let self, self.attempt.stage == .promoting else { return }
+            guard let self, self.attempt.stage == .promoting,
+                  self.attempt.promoteGeneration == generation else { return }
             self.sendPromoteIfNeeded()
         }
         timer.resume()
@@ -277,4 +315,3 @@ final class WakeConnectCoordinator: ObservableObject {
         overallTimeoutTimer?.cancel(); overallTimeoutTimer = nil
     }
 }
-#endif
