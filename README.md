@@ -84,11 +84,14 @@ user-provided reachable private network such as Tailscale — see
 - **Auto-Reconnect**, configurable.
 
 ### Wake & reliability
-- **Wake & Connect — Developer Preview, Debug builds only.** Local
-  Wake-on-LAN groundwork (tested core logic) plus a one-tap wake/reconnect
-  flow with post-wake interactive promotion exist and are being validated,
-  but this is not yet shipped in a Release build — see
-  [Roadmap](#roadmap).
+- **Wake & Connect — Release-capable.** A one-tap "Wake & Connect" action
+  sends bounded local Wake-on-LAN packets, requests interactive wake
+  promotion, and reconnects/recovers capture automatically, authenticated
+  against the same pinned-mutual-TLS identity as every other connection.
+  Waking a Mac depends on its hardware/firmware supporting Wake-on-LAN and
+  Wake for Network Access being enabled — see [FAQ](#faq) for the local-only
+  limitation and the [Roadmap](#roadmap) for physical-hardware validation
+  still in progress.
 - Session/generation-guarded reconnect so a dropped route resumes cleanly
   (this part ships today).
 
@@ -228,9 +231,12 @@ No. Tailscale is only needed for Remote Access; USB and same-network WiFi
 work without it.
 
 **Can it wake a sleeping Mac?**
-Local Wake-on-LAN groundwork exists and a one-tap wake/reconnect flow is in
-active development (currently Debug-build only). Waking a Mac remotely over
-Tailscale isn't solved yet — see [Remote Access](#remote-access).
+Yes, over the local network: "Wake & Connect" sends a standard Wake-on-LAN
+packet and reconnects automatically once the Mac responds — this requires
+Wake for Network Access to be enabled on the Mac and hardware/firmware that
+supports it. Waking a Mac remotely over Tailscale isn't solved yet (a
+sleeping Mac's Tailscale node isn't itself reachable to relay a wake) — see
+[Remote Access](#remote-access).
 
 **Does iPad work?**
 The receiver runs on iPad, but it isn't the primary tested configuration
@@ -293,9 +299,11 @@ Distinguishing **planned** work (intended, not merely an idea) from
 
 ### Planned
 
-- **Promote Wake & Connect from Developer Preview to Release** — take the
-  current Debug-only one-tap wake/reconnect/interactive-promotion flow to a
-  validated, shipped, general-release feature.
+- **Wake & Connect physical validation** — the one-tap wake/reconnect/
+  interactive-promotion flow ships in Release builds; what's left is
+  systematic physical retesting across sleep/lock/display-selection/
+  Remote-Access combinations (see the physical retest plan in this repo's
+  engineering notes) before calling it fully validated in the field.
 - **Release readiness / packaging** — final branding/assets, Developer ID
   signing + notarization, packaging, setup/permission polish.
 - **Sparkle/update validation** — once MeowDisplay hosts its own appcast and
