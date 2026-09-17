@@ -39,3 +39,5 @@ node_modules/
 dist-ssr/
 docs/
 .mcp.json
+
+MacTests/CatModeTests.swift.plist
