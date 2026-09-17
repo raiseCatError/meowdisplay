@@ -3379,6 +3379,66 @@ final class StreamReceiver: ObservableObject {
     }
     #endif
 
+    /// Unified primary Connect for one specific paired Mac: rearms the
+    /// local listener and Bonjour `cr` signal exactly as `requestConnect()`
+    /// always has (covers same-LAN/"Mac visible locally", for any paired
+    /// Mac), then, only if `peerID` itself has a saved Remote Access
+    /// endpoint, also fires one authenticated remote connect-request knock
+    /// (`requestRemoteConnect`) at that Mac so it can dial back over
+    /// Tailscale/private networking. Deliberately never broadcasts a knock
+    /// to every paired Mac — the caller always has one deterministic
+    /// target, matching the row/button that was actually tapped. All of it
+    /// is explicit/user-initiated, so it runs regardless of the
+    /// Auto-Reconnect preference (see `requestConnect`), and whichever
+    /// route's dial completes first simply becomes the session — `adopt(_:)`
+    /// already replaces any in-flight connection, so there is no risk of a
+    /// duplicate session from racing routes.
+    func connectPrimary(peerID: String) {
+        requestConnect()
+        guard RemoteEndpointStore.endpoint(forPeerID: peerID) != nil else { return }
+        requestRemoteConnect(peerID: peerID)
+    }
+
+    /// Sends one authenticated "please connect" knock to a paired Mac's
+    /// saved Remote Access endpoint (`WireCrypto.remoteRequestPort`). The
+    /// knock carries no payload — completing pinned mutual TLS against the
+    /// Mac's remote connect-request listener, as this device's own already-
+    /// pinned identity, *is* the entire request; the Mac resolves which
+    /// peer knocked from the certificate itself, never from anything sent
+    /// over the wire. This device never claims the Mac's identity and never
+    /// sends host/port information the Mac is expected to trust — it only
+    /// dials a locally-persisted hint the user configured themselves.
+    func requestRemoteConnect(peerID: String) {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID),
+              let port = NWEndpoint.Port(rawValue: hint.port),
+              let pin = TrustStore.shared.pin(peerID: peerID),
+              let identity = TrustStore.shared.ownIdentity(),
+              let tls = TLSConfigurator.mutualTLSOptions(
+                identity: identity,
+                pinnedSPKIs: { [pin] },
+                isListener: false, queue: queue) else {
+            Log.info("routeDebug: remote connect-request not sent for peer=\(peerID) — no endpoint/trust available")
+            return
+        }
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(hint.host), port: port)
+        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        params.includePeerToPeer = true
+        let connection = NWConnection(to: endpoint, using: params)
+        Log.info("routeDebug: remote connect-request knock peer=\(peerID) endpoint=\(hint.host):\(hint.port)")
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .failed, .cancelled:
+                connection.cancel()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        // Bounded: never leave a knock connection open waiting on a Mac that
+        // never answers — the handshake either completes or this tears it
+        // down itself.
+        queue.asyncAfter(deadline: .now() + 8.0) { connection.cancel() }
+    }
+
     func reconnectNow() {
         queue.async {
             guard self.sessionState.phase == .reconnectFailed
