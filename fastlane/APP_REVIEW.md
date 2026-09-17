@@ -3,6 +3,16 @@
 Reference copy of the text we send to App Review, kept in version control alongside the
 listing. Update when the situation changes.
 
+> **Historical record, not current MeowDisplay submission text.** Everything below
+> documents a real App Review exchange for the **upstream OpenDisplay** app
+> (submission ID, dates, and the linked demo video all belong to that submission).
+> It's kept for context on how the "OpenSidecar → OpenDisplay" name issue was
+> resolved. MeowDisplay is its own App Store Connect app (see
+> `APP_STORE_LISTING.md`'s "Fork rebrand" note) and will need its **own** App
+> Review Information, demo video, and Resolution Center replies if it hits a
+> similar review question — do not paste this verbatim into a MeowDisplay
+> submission.
+
 Context: Submission `9bb8780f-dda0-4939-b013-255d400b3bd1`, reviewed 2026-06-30 on iPad
 Air 11" (M3), v1.0 (74). Rejected on three guidelines — all addressed in the resubmission:
 

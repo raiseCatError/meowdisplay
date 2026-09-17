@@ -46,8 +46,10 @@ and wake handling, pairing, and settings — on top of it.
 - **MeowDisplay Receiver** — use a spare Mac itself as a display, where
   implemented.
 
-Hardware/platform combinations not listed above have not been validated;
-see [Want to contribute?](#want-to-contribute) if you can help test one.
+**Primary tested configuration: Mac host → iPhone receiver.** Everything
+above is validated on that pairing. Other hardware/platform combinations not
+listed above have not been validated; see
+[Want to contribute?](#want-to-contribute) if you can help test one.
 
 ## Architecture & security summary
 
@@ -125,6 +127,7 @@ MeowDisplay is actively developed, and community hardware testing is very
 welcome — especially on hardware the maintainer can't currently test
 reliably:
 
+- iPad receiver behavior
 - Android devices
 - Linux
 - Multiple-Mac environments

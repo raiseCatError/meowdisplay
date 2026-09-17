@@ -44,7 +44,12 @@ final class VersionGate: ObservableObject {
     private var remoteStatus: Status = .ok
     private var peerStatus: Status = .ok
 
-    private let manifestURL = URL(string: "https://opendisplay.app/ios-version.json")!
+    // MeowDisplay does not yet have its own hosted manifest, and must not
+    // point at or be governed by upstream OpenDisplay's opendisplay.app
+    // policy file. The remote check below is disabled (inert, no request
+    // ever fires) until MeowDisplay-owned manifest infrastructure exists —
+    // set `manifestURL` and drop the early return to re-enable.
+    private let manifestURL: URL? = nil
 
     /// The running app's marketing version. Local/dev builds ship "0.0.0"
     /// (the project.yml default), which we treat as "skip the gate".
@@ -53,6 +58,8 @@ final class VersionGate: ObservableObject {
     }
 
     func check() async {
+        guard let manifestURL else { return }   // disabled — no MeowDisplay manifest yet
+
         let current = currentVersion
         guard current != "0.0.0" else { return }   // dev build — never gate
 

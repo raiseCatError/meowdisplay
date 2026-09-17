@@ -3,38 +3,39 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenDisplay — Turn your spare Apple devices into second monitors for your Mac (free &amp; open source)</title>
-  <meta name="description" content="OpenDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare Apple devices — iPhone and iPad today, Macs on the roadmap — into true extended displays for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account." />
+  <title>MeowDisplay — Turn your spare Apple devices into second monitors for your Mac (free &amp; open source)</title>
+  <meta name="description" content="MeowDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare Apple devices — iPhone and iPad today, Macs on the roadmap — into true extended displays for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account." />
   <meta name="keywords" content="iPhone second monitor, iPad external display, Sidecar alternative, Duet Display alternative, free second screen Mac, open source, virtual display macOS, USB second display, use iPhone as monitor" />
   <link rel="icon" type="image/png" href="./icon-256.png" />
-  <link rel="canonical" href="https://opendisplay.app/" />
+  <!-- No canonical/OG absolute URL yet: MeowDisplay does not have its own
+       hosted domain (the previous opendisplay.app CNAME has been removed).
+       Add rel="canonical" and the og:url/og:image/twitter:image absolute
+       URLs back once this site is deployed to a MeowDisplay-owned domain. -->
   <!-- Smart App Banner: offers the iOS receiver to visitors on iPhone/iPad Safari. -->
   <meta name="apple-itunes-app" content="app-id=6780264891" />
 
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="OpenDisplay" />
+  <meta property="og:site_name" content="MeowDisplay" />
   <meta property="og:locale" content="en_US" />
-  <meta property="og:title" content="OpenDisplay — free, open-source Sidecar/Duet alternative" />
+  <meta property="og:title" content="MeowDisplay — free, open-source Sidecar/Duet alternative" />
   <meta property="og:description" content="Use your iPhone or iPad as a second monitor for your Mac. A true extended display over USB or WiFi — Retina-sharp, low latency, with touch and scroll. No subscription, no dongle, no account." />
-  <meta property="og:url" content="https://opendisplay.app/" />
-  <meta property="og:image" content="https://opendisplay.app/og.png" />
+  <meta property="og:image" content="./og.png" />
   <meta property="og:image:type" content="image/png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="OpenDisplay — use your partner's iPad as your Mac's second monitor. Free, open source, macOS &amp; iOS." />
+  <meta property="og:image:alt" content="MeowDisplay — use your partner's iPad as your Mac's second monitor. Free, open source, macOS &amp; iOS." />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="OpenDisplay — free, open-source Sidecar/Duet alternative" />
+  <meta name="twitter:title" content="MeowDisplay — free, open-source Sidecar/Duet alternative" />
   <meta name="twitter:description" content="Use your iPhone or iPad as a second monitor for your Mac. True extended display over USB or WiFi — Retina-sharp, low latency, with touch. No subscription, no dongle, no account." />
-  <meta name="twitter:image" content="https://opendisplay.app/og.png" />
-  <meta name="twitter:image:alt" content="OpenDisplay — use your partner's iPad as your Mac's second monitor. Free, open source, macOS &amp; iOS." />
+  <meta name="twitter:image" content="./og.png" />
+  <meta name="twitter:image:alt" content="MeowDisplay — use your partner's iPad as your Mac's second monitor. Free, open source, macOS &amp; iOS." />
 
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
-    "name": "OpenDisplay",
-    "alternateName": "Open Display",
+    "name": "MeowDisplay",
     "operatingSystem": "macOS 14+, iPadOS 16+, iOS 16+",
     "applicationCategory": "UtilitiesApplication",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -49,16 +50,14 @@
       "Hardware H.264 (VideoToolbox) low-latency pipeline",
       "Self-hosted and private — no servers, accounts or telemetry"
     ],
-    "url": "https://opendisplay.app/",
-    "image": "https://opendisplay.app/icon.png",
-    "downloadUrl": "https://github.com/peetzweg/opendisplay/releases/latest",
-    "softwareHelp": "https://github.com/peetzweg/opendisplay#quick-start",
+    "downloadUrl": "https://github.com/raiseCatError/MeowDisplay/releases/latest",
+    "softwareHelp": "https://github.com/raiseCatError/MeowDisplay#quick-start",
     "isAccessibleForFree": true,
     "license": "https://www.gnu.org/licenses/gpl-3.0.html",
     "author": {
       "@type": "Person",
-      "name": "peetzweg",
-      "url": "https://github.com/peetzweg"
+      "name": "raiseCatError",
+      "url": "https://github.com/raiseCatError"
     }
   }
   </script>
@@ -123,7 +122,7 @@
         "name": "What's the license? Can I fork it or use it commercially?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "OpenDisplay is licensed under GPL-3.0. You can use, study, and adapt it freely — including commercially. If you distribute a modified version, it must remain open source under the same license with the original attribution intact, so improvements flow back to everyone instead of into closed forks. (Releases up to v0.4.x were MIT-licensed and remain available under those terms.)"
+          "text": "MeowDisplay is licensed under GPL-3.0, the same license as the OpenDisplay project it's built on. You can use, study, and adapt it freely — including commercially. If you distribute a modified version, it must remain open source under the same license with the original attribution intact, so improvements flow back to everyone instead of into closed forks. (Upstream OpenDisplay releases up to v0.4.x were MIT-licensed and remain available under those terms.)"
         }
       }
     ]
@@ -132,9 +131,9 @@
 
   <meta name="theme-color" content="#ffffff" />
 
-  <!-- Privacy-friendly, cookieless analytics (self-hosted Plausible). -->
-  <link rel="preconnect" href="https://analytics.drdrip.xyz" crossorigin />
-  <script defer data-domain="opendisplay.app" src="https://analytics.drdrip.xyz/js/script.hash.outbound-links.js"></script>
+  <!-- Analytics disabled: the previous tag pointed at upstream OpenDisplay's
+       own self-hosted Plausible instance/domain, which MeowDisplay must not
+       use. Add MeowDisplay-owned analytics here if/when needed. -->
 </head>
 <body>
   <div id="root"></div>

@@ -324,7 +324,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // `defaults write com.peetzweg.opensidecar.mac.debug ...` — the
         // upstream/tracked bundle ID (`project.yml`). This checkout's local
         // signing override (`project.local.yml`, see repo CLAUDE.md) rebuilds
-        // the Debug target as `com.raisecaterror.opendisplay.mac.debug`, so
+        // the Debug target as `com.raisecaterror.meowdisplay.mac.debug`, so
         // every one of those `defaults write` calls silently missed the
         // running process's actual domain — `UserDefaults.standard` itself
         // was never the bug, only the hardcoded domain in prior instructions
@@ -4028,13 +4028,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Ask the receiver to update (built via JSONSerialization because the
     /// message text is user-facing prose). Dormant while minSupportedPeer is
     /// 1, but the copy must fit the platform the day a floor is raised: a
-    /// Mac receiver updates via Sparkle/the site, not the App Store.
+    /// Mac receiver updates via Sparkle (once MeowDisplay hosts its own
+    /// appcast) or the GitHub repo, not the App Store.
     private func sendUpdateRequired(kind: String) {
         let isMac = kind == "Mac"
         let dict: [String: Any] = [
             "type": WireMessage.updateRequired,
             "target": isMac ? "mac" : "ios",
-            "store": isMac ? "https://opendisplay.app" : AppStore.updateURL.absoluteString,
+            "store": isMac ? "https://github.com/raiseCatError/MeowDisplay" : AppStore.updateURL.absoluteString,
             "message": isMac
                 ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Use Check for Updates… there to reconnect."
                 : "This \(kind) app is too old for this Mac. Update MeowDisplay from the App Store to reconnect.",

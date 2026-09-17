@@ -15,7 +15,7 @@ This covers building MeowDisplay from source in this repository. See the
 
 ```sh
 git clone <your fork URL>
-cd opendisplay
+cd MeowDisplay
 ```
 
 ## Project generation

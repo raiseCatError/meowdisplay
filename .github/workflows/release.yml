@@ -127,10 +127,13 @@ jobs:
       # Builds appcast.xml (sender) and appcast-receiver.xml (receiver app)
       # from the just-released, notarized DMGs and commits them to public/ on
       # main. One feed per app: each bundle has its own SUFeedURL, and a mixed
-      # feed would offer the wrong app's update. The Pages workflow (pages.yml) triggers
-      # on public/** changes, copies public/ into docs/ via the Vite build, and
-      # deploys it — so https://opendisplay.app/appcast.xml (the SUFeedURL in
-      # project.yml) resolves.
+      # feed would offer the wrong app's update.
+      #
+      # Currently a no-op regardless: client-side Sparkle checks are disabled
+      # (no SUFeedURL/SUPublicEDKey in project.yml — see its Sparkle comment)
+      # until MeowDisplay has its own hosted domain and a signing key pair
+      # that isn't upstream OpenDisplay's. Re-wire this step's target URL/feed
+      # once that infrastructure exists.
       #
       # No-ops gracefully until the maintainer adds the SPARKLE_PRIVATE_KEY
       # secret (the EdDSA private key from Sparkle's `generate_keys`), so this

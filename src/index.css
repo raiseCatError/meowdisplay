@@ -18,8 +18,6 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.55;
   font-size: 16px; -webkit-font-smoothing: antialiased;
-  /* The showcase strip is 100vw wide; on browsers with classic scrollbars
-     that overshoots by the scrollbar width — clip it instead of scrolling. */
   overflow-x: clip;
 }
 .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
@@ -47,10 +45,8 @@ nav .gh-stars { font-variant-numeric: tabular-nums; }
 
 /* ---- section scaffolding ---- */
 section { border-top: 1px solid var(--line); }
-/* Hero is the first section on the page — no divider above it. It's nested in
-   .nudge-scope (the sticky-bar containing block), so scope the reset there;
-   an unscoped :first-of-type would also strip #support's top border. */
-.nudge-scope section:first-of-type { border-top: 0; }
+/* Hero is the first section on the page — no divider above it. */
+section:first-of-type { border-top: 0; }
 /* Vertical only — horizontal padding comes from .wrap. Using the padding
    shorthand here would reset .wrap's left/right padding to 0 (same
    specificity, later rule wins), making content run edge-to-edge on mobile. */
@@ -63,12 +59,9 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
   font-weight: 600; }
 
 /* ---- hero ---- */
-/* Bottom padding is light because the Ko-fi bar + downloads section follow
-   directly; the bar supplies the visual break, not a big hero gap. */
 .hero { padding-top: 48px; padding-bottom: 40px; }   /* vertical only — see .sec note */
-/* Downloads live in their own borderless section so the sticky Ko-fi bar can
-   sit as a full-width sibling between it and the hero. No top divider — the
-   hero → bar → downloads run reads as one block, like before the split. */
+/* Downloads live in their own borderless section directly under the hero —
+   no top divider, so the hero → downloads run reads as one block. */
 .downloads-sec { border-top: 0; padding: 44px 0 84px; }
 .downloads-sec .needs-both { margin-top: 0; }
 .hero-logo { display: block; width: 160px; height: 160px; margin-bottom: 24px; }
@@ -184,65 +177,6 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
   border: 1px solid var(--line-strong); background: #000; overflow: hidden; }
 .video-embed iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 
-/* ---- demo showcase: horizontally snapping strip of demo media ---- */
-/* Items keep fixed widths and the strip scrolls, so future videos and tweets
-   slot in without squeezing the existing ones. The next card peeks in from
-   the right as the scroll affordance. The strip itself breaks out of .wrap
-   to span the full viewport; matching inline padding keeps the first card
-   (and the nav arrows) aligned with the contained headings above. */
-.showcase { margin-top: 28px; width: 100vw; margin-left: calc(50% - 50vw);
-  --bleed-pad: max(28px, calc(50vw - var(--maxw) / 2 + 28px)); }
-.showcase-track { display: flex; gap: 20px; align-items: flex-start;
-  overflow-x: auto; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch;
-  scrollbar-width: none; padding-inline: var(--bleed-pad);
-  scroll-padding-inline: var(--bleed-pad); }
-.showcase-track::-webkit-scrollbar { display: none; }
-.showcase-item { flex: 0 0 auto; scroll-snap-align: start; }
-.showcase-item.is-video { width: min(84vw, 640px); }
-.showcase-item.is-coverage { width: min(84vw, 350px); }
-/* External links use their publication's own Open Graph title, description,
-   and image when available. This is intentionally a generic preview rather
-   than a fragile recreation of an article or X post. */
-a.showcase-item.is-coverage { display: flex; min-height: 312px; flex-direction: column;
-  border: 1px solid var(--line); text-decoration: none; color: var(--fg); background: var(--bg); }
-a.showcase-item.is-coverage:hover { border-color: var(--line-strong); }
-.coverage-image, .coverage-placeholder { display: block; width: 100%; height: 150px; object-fit: cover;
-  border-bottom: 1px solid var(--line); }
-.coverage-placeholder { background: linear-gradient(135deg, #eef7ff, #d7edff 48%, #f8fbfd); }
-.coverage-body { display: flex; flex: 1; flex-direction: column; padding: 18px 20px; }
-.coverage-site { display: flex; align-items: center; gap: 6px; color: var(--faint); font-family: var(--mono);
-  font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
-.coverage-external { width: 13px; height: 13px; fill: currentColor; }
-.coverage-body h3 { font-size: 1rem; line-height: 1.28; letter-spacing: -0.01em; margin-top: 10px; }
-.coverage-body p { color: var(--muted); font-size: 0.86rem; line-height: 1.45; margin-top: 8px; }
-.coverage-cta { color: var(--muted); font-family: var(--mono); font-size: 0.72rem;
-  letter-spacing: 0.04em; margin-top: auto; padding-top: 16px; }
-a.showcase-item.is-coverage:hover .coverage-cta { color: var(--fg); }
-/* X posts use the public oEmbed copy at curation time. Keeping the original
-   language (and a contained excerpt) makes each recommendation recognisable
-   without pulling X's widget or trying to recreate its full interface. */
-a.showcase-item.is-post { min-height: 0; padding: 18px 20px 0; }
-.post-head { display: flex; align-items: center; gap: 10px; }
-.post-monogram { display: grid; flex: none; place-items: center; width: 38px; height: 38px;
-  border-radius: 50%; background: var(--accent); color: #fff; font-size: 0.95rem; font-weight: 700; }
-.post-head > div { display: flex; min-width: 0; flex-direction: column; line-height: 1.25; }
-.post-head strong { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.post-head span:not(.post-monogram):not(.post-x) { color: var(--muted); font-size: 0.8rem; }
-.post-x { margin-left: auto; color: var(--faint); font-size: 1.1rem; }
-.post-quote { display: -webkit-box; margin-top: 16px; overflow: hidden; color: var(--fg);
-  font-size: 0.93rem; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 6; }
-.post-date { margin-top: 12px; color: var(--faint); font-family: var(--mono); font-size: 0.7rem;
-  letter-spacing: 0.04em; }
-a.showcase-item.is-post .coverage-body { min-height: 52px; padding: 0; }
-.showcase-nav { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end;
-  padding-inline: var(--bleed-pad); }
-.showcase-nav button { font-family: var(--mono); font-size: 1rem; line-height: 1;
-  width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center;
-  background: transparent; color: var(--fg); border: 1px solid var(--line-strong);
-  cursor: pointer; }
-.showcase-nav button:hover:not(:disabled) { background: var(--fg); color: var(--bg); }
-.showcase-nav button:disabled { color: var(--faint); border-color: var(--line); cursor: default; }
-
 .btn.disabled { opacity: 0.5; cursor: not-allowed; border-style: dashed; }
 
 /* ---- feature grid ---- */
@@ -260,7 +194,7 @@ a.showcase-item.is-post .coverage-body { min-height: 52px; padding: 0; }
 
 /* ---- "why" comparison rows ---- */
 .compare { border-top: 1px solid var(--line); margin-top: 28px; }
-/* 24px horizontal padding = the boxed OpenDisplay row's 2px border + 22px padding,
+/* 24px horizontal padding = the boxed MeowDisplay row's 2px border + 22px padding,
    so every product name and description lines up with the highlighted one */
 .compare .row { display: grid; grid-template-columns: 150px 1fr; gap: 24px;
   padding: 22px 24px; border-bottom: 1px solid var(--line); align-items: start; }
@@ -279,7 +213,7 @@ code { font-family: var(--mono); }
 p code { font-size: 0.88em; background: #f2f2f2; padding: 1px 5px; }
 
 /* ---- comparison table ---- */
-/* no outer frame — keep only the inner row lines (and the boxed OpenDisplay column) */
+/* no outer frame — keep only the inner row lines (and the boxed MeowDisplay column) */
 .tbl-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-width: 660px; }
 th, td { padding: 13px 16px; text-align: left; border-bottom: 1px solid var(--line);
@@ -291,7 +225,7 @@ thead th { text-align: center; font-size: 1rem; color: var(--fg); font-weight: 6
 tbody td:first-child { color: var(--muted); }
 .mark-yes { color: var(--fg); font-weight: 600; }
 .mark-no { color: var(--faint); }
-/* highlight the OpenDisplay column — framed in brand blue */
+/* highlight the MeowDisplay column — framed in brand blue */
 th.os, td.os { border-left: 2px solid var(--accent); border-right: 2px solid var(--accent);
   background: #fafafa; }
 thead th.os { border-top: 2px solid var(--accent); color: var(--fg); }
@@ -331,50 +265,6 @@ a.compat-item:hover { background: #fafafa; }
   a.compat-item { padding: 20px; }
 }
 
-/* ---- support / ko-fi ---- */
-.support { text-align: center; }
-.support h2 { max-width: 22ch; margin: 0 auto; }
-.support p { color: var(--muted); max-width: 62ch; margin: 20px auto 30px; }
-/* Personal-letter block: justified column, centered as a whole. */
-.support-note { max-width: 56ch; margin: 22px auto 30px; text-align: justify;
-  hyphens: auto; color: var(--muted); }
-.support-note p { max-width: none; margin: 0; }
-.support-note p + p { margin-top: 14px; }
-.support-note strong { color: var(--fg); }
-.support .kofi-logo { display: block; height: 46px; width: auto; margin: 4px auto 22px; }
-/* Ko-fi CTA: light button so the full-colour logomark stays legible. */
-.btn.kofi { background: #fff; color: var(--fg); cursor: pointer; }
-.btn.kofi:hover { background: #fafafa; }
-.btn.kofi .kofi-mark { height: 22px; width: auto; display: block; }
-/* Ko-fi nudge → jumps to #support. <SupportNudge /> renders it as a centered,
-   bordered pill that sits between the hero and the downloads and pins under the
-   sticky nav (top = 60px nav height) once you scroll past it. It lives inside
-   .nudge-scope, whose box ends at #support, so the pill stops sticking exactly
-   when the real support section arrives. Solid bg so content scrolls behind it
-   cleanly. Mobile: full width, stacked into two centered lines. */
-.support-nudge { position: sticky; top: 60px; z-index: 9;
-  display: flex; width: fit-content; margin: 0 auto;
-  align-items: center; gap: 14px; padding: 10px 18px;
-  border: 1px solid var(--line);
-  background: var(--bg); text-decoration: none; color: var(--fg); }
-.support-nudge:hover { background: #fafafa; }
-/* Pinned under the nav: drop the top border so it doesn't double up against the
-   nav's bottom rule. Border stays 1px but transparent — no layout shift, and
-   the nav's opaque border paints over that row anyway. */
-.support-nudge.is-stuck { border-top-color: transparent; }
-.kofi-banner-left { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
-.support-nudge .kofi-mark { height: 24px; width: auto; display: block; flex: none; }
-.kofi-banner-text { font-size: 0.9rem; color: var(--muted); }
-.kofi-banner-cta { font-size: 0.92rem; font-weight: 600; white-space: nowrap; }
-.kofi-banner-arrow { display: inline-block; margin-left: 6px; color: var(--faint);
-  transition: transform 0.15s ease; }
-.support-nudge:hover .kofi-banner-arrow { transform: translateY(3px); }
-@media (max-width: 560px) {
-  /* Full-width band: drop the side borders so only the top/bottom rules remain. */
-  .support-nudge { width: auto; flex-direction: column; gap: 6px; text-align: center;
-    border-left: 0; border-right: 0; }
-}
-
 /* ---- footer ---- */
 footer { border-top: 1px solid var(--line); padding: 48px 0 64px;
   color: var(--muted); font-size: 0.9rem; }
@@ -385,7 +275,6 @@ footer .fine { color: var(--faint); font-size: 0.84rem; }
 /* ---- mobile: tighter gutters + less vertical air ---- */
 @media (max-width: 560px) {
   .wrap { padding: 0 20px; }
-  .showcase { --bleed-pad: 20px; }   /* match the tighter .wrap gutter */
   .sec { padding-top: 56px; padding-bottom: 56px; }
   .hero { padding-top: 56px; padding-bottom: 60px; }
   .hero h1 .l1 { white-space: normal; }   /* let the long words wrap on small screens */

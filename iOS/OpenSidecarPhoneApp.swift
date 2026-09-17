@@ -6,8 +6,10 @@ import Combine
 /// "iPad" or "iPhone" — so UI copy names the device the user is holding.
 let deviceKind = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
 
-/// Landing page — hosts the Mac app download and explains the two-app setup.
-let macAppURL = URL(string: "https://peetzweg.github.io/opendisplay/")!
+/// Repository — hosts the Mac app download and explains the two-app setup.
+/// MeowDisplay does not yet have its own landing-page domain, so this points
+/// at the GitHub repo rather than a hosted site.
+let macAppURL = URL(string: "https://github.com/raiseCatError/MeowDisplay")!
 
 @main
 struct OpenSidecarPhoneApp: App {
@@ -1135,11 +1137,8 @@ struct SettingsView: View {
 
                 Section("About") {
                     LabeledContent("Version", value: version)
-                    Link(destination: URL(string: "https://github.com/peetzweg/opendisplay")!) {
-                        Label("GitHub — peetzweg/opendisplay", systemImage: "link")
-                    }
                     Link(destination: macAppURL) {
-                        Label("Website", systemImage: "globe")
+                        Label("GitHub — raiseCatError/MeowDisplay", systemImage: "link")
                     }
                 }
             }
