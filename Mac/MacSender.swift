@@ -3220,7 +3220,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let pixelBuffer = self.lastPixelBuffer {
                 Log.info("static screen after reconnect to \(self.endpointName) — replaying last frame as keyframe")
                 self.encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
-                            generation: self.captureGenerationNow)
+                            generation: self.captureGenerationNow, connectionGeneration: self.activeConnectionGeneration)
             }
             self.scheduleWatchdog()
         }
@@ -4124,7 +4124,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // see `FrameRateLimiter`.
             guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
 
-            encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation)
+            encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation, connectionGeneration: activeConnectionGeneration)
 
         case .audio:
             guard connectionReady, audioEnabled else { return }
@@ -4201,7 +4201,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
-               generation: captureGenerationNow)
+               generation: captureGenerationNow, connectionGeneration: activeConnectionGeneration)
     }
 
     /// Drop when encode or send pipeline is busy.
@@ -4235,7 +4235,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
-    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64) {
+    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64) {
         guard generation == captureGenerationNow, let encoder else { return }
         pipelineLock.lock()
         pendingEncodes += 1
@@ -4318,10 +4318,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     + "bytes=\(CMSampleBufferGetTotalSampleSize(buffer)) keyframe=\(self.isKeyframe(buffer))")
             }
             #endif
-            if let data = self.annexB(from: buffer) {
-                let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
-                var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
-                framed.append(data)
+            guard let data = self.annexB(from: buffer) else { return }
+            let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
+            var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
+            framed.append(data)
+            // The encode above ran asynchronously on VideoToolbox's own
+            // callback thread. `activeConnectionGeneration` and `connection`
+            // are `queue`-confined, so hop back before touching either — and
+            // re-check both the capture AND connection generation there: a
+            // live-migrate/reconnect (which bumps `activeConnectionGeneration`
+            // via `becomeReady` without rebuilding capture) can complete this
+            // encode after the old connection is gone, and this frame must
+            // not be delivered onto the new one.
+            self.queue.async {
+                guard generation == self.captureGenerationNow,
+                      connectionGeneration == self.activeConnectionGeneration else { return }
                 self.sendFramed(framed)
             }
         }
