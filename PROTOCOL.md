@@ -417,6 +417,9 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
 * `maxEncodeWide` / `maxEncodeHigh` (int, optional): the receiver's decode
   ceiling in pixels (section 6.5) — the largest stream it can sustain,
   independent of the panel size it announced. Additive at `pv` 3, no bump.
+* `maxFPS` (int, optional): the receiver's real maximum display refresh
+  rate in Hz (section 6.6) — e.g. 60, or up to 120 on a ProMotion panel.
+  Additive, no bump. Absent means the sender assumes a safe 60.
 * `trayEnabled` / `keyboardButtonEnabled` (bool, optional, pv 6): the
   receiver's persisted local UI preferences. They let the sender present
   per-receiver controls initialized to the receiver's actual state.
@@ -795,6 +798,35 @@ nothing, and a receiver that omits the fields gets the previous
 behavior (stream size follows the announced pixels and the sender's
 quality setting). Derive advertised ceilings from measured playback: a
 decode session that merely creates successfully proves nothing.
+
+### 6.6 High-refresh streaming (`hello.maxFPS`, Streaming Profile)
+
+`maxFPS` is optional and additive (no `pv` bump), exactly like
+`maxEncodeWide`/`maxEncodeHigh` above. A receiver SHOULD advertise its
+screen's actual maximum refresh rate (e.g. `UIScreen.maximumFramesPerSecond`
+on iOS) — never a guess, and never simply 120 because the device model
+*might* be ProMotion.
+
+The sender picks a per-session effective frame rate from its local
+Streaming Profile setting (Efficiency / Performance / Custom) and this
+field:
+
+```
+usableFPS = min(profile/customFPS, hello.maxFPS ?? 60, 120)
+```
+
+* **Efficiency** requests at most 60.
+* **Performance** and **Custom "Auto"** request up to 120.
+* **Custom** with a manual pick (30/60/90/120) requests that number.
+
+120 is a hard product ceiling for this milestone regardless of what a
+receiver advertises or Custom requests. A receiver that omits `maxFPS`
+(any pre-milestone install) gets the same safe-default treatment as a 60Hz
+receiver — the sender never treats "unknown" as "unlimited." This field is
+purely informational, like `maxEncodeWide`/`maxEncodeHigh`: it changes what
+rate the sender *requests* from its own capture/encode pipeline, never
+what the receiver promises to decode at (H.264 frames carry no inherent
+rate requirement — any cadence decodes).
 
 ## 7. Coordinate spaces and units
 

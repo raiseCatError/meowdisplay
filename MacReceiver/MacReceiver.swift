@@ -56,7 +56,8 @@ final class ReceiverController: ObservableObject {
         let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                       deviceKind: "Mac",
                                       fallbackServiceName: fallbackName,
-                                      maxEncodeWide: 4096, maxEncodeHigh: 2304)
+                                      maxEncodeWide: 4096, maxEncodeHigh: 2304,
+                                      maxFPS: NSScreen.screens.first?.maximumFramesPerSecond)
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)

@@ -18,6 +18,31 @@ struct StreamingSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 4) {
+                    Picker("Streaming Profile", selection: $controller.streamingProfile) {
+                        ForEach(StreamingProfile.allCases) { p in
+                            Text(p.label).tag(p)
+                        }
+                    }
+                    .onChange(of: controller.streamingProfile) { controller.restartAll() }
+                    Text(controller.streamingProfile.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if controller.streamingProfile == .custom {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Frame Rate", selection: $controller.customFrameRate) {
+                            ForEach(CustomFrameRateSelection.allCases) { r in
+                                Text(r.label).tag(r)
+                            }
+                        }
+                        .onChange(of: controller.customFrameRate) { controller.restartAll() }
+                        Text("Clamped to the connected device's actual maximum refresh rate. "
+                            + "Auto uses the same ceiling as Performance.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 4) {
                     Picker("Quality", selection: $controller.quality) {
                         ForEach(StreamQuality.allCases, id: \.self) { q in
                             Text(q.label).tag(q)
@@ -45,7 +70,14 @@ struct StreamingSettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.name).font(.subheadline.bold())
                             if entry.videoWidth > 0, entry.videoHeight > 0 {
-                                LabeledContent("Video", value: "\(entry.videoWidth) × \(entry.videoHeight)")
+                                // "Stream", not "Video": in Extend mode this can be
+                                // smaller than the desktop's own resolution (Quality
+                                // below 100%, or the receiver's decode ceiling) —
+                                // the virtual display itself always stays native.
+                                LabeledContent("Stream Resolution", value: "\(entry.videoWidth) × \(entry.videoHeight)")
+                            }
+                            if entry.videoFPS > 0 {
+                                LabeledContent("Frame Rate", value: "\(entry.videoFPS) fps")
                             }
                             LabeledContent("Bitrate", value: "\(entry.bitrateBps / 1_000_000) Mbps")
                             LabeledContent("Audio", value: entry.audioActive ? "On" : "Off")

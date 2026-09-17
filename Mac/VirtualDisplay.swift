@@ -11,6 +11,7 @@ final class VirtualDisplay {
     private let maxPointsPerAxis: Int
     private(set) var pointsWide: Int
     private(set) var pointsHigh: Int
+    private var refreshRate: Int
 
     private var restoreTarget: CGPoint?
     private var restoreUntil: Date
@@ -25,13 +26,19 @@ final class VirtualDisplay {
     /// device keeps its position in System Settings across sessions.
     /// `restoreOrigin` overrides that saved arrangement (see manageOrigin);
     /// `onOriginChange` reports where the display sits afterwards, so the
-    /// caller can persist user drags.
+    /// caller can persist user drags. `refreshRate` is the virtual monitor's
+    /// mode refresh rate in Hz — the caller (MacSender) is responsible for
+    /// keeping it within `StreamingFPSPolicy.hardCapFPS` and matching it to
+    /// the receiver's actual capability; this class just publishes whatever
+    /// it's given.
     init?(name: String, pointsWide: Int, pointsHigh: Int, sizeInMillimeters: CGSize,
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
+          refreshRate: Int = 60,
           restoreOrigin: CGPoint? = nil,
           onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
+        self.refreshRate = refreshRate
         // Reserve the longer orientation on both axes. That lets a phone or
         // tablet change orientation by applying a new mode to this *same*
         // virtual monitor instead of removing it and stranding its windows.
@@ -60,7 +67,7 @@ final class VirtualDisplay {
         settings = CGVirtualDisplaySettings()
         settings.hiDPI = 1
         settings.modes = [
-            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: 60)
+            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: Double(refreshRate))
         ]
         guard display.apply(settings) else {
             Log.info("CGVirtualDisplay applySettings FAILED")
@@ -97,18 +104,24 @@ final class VirtualDisplay {
     /// it may choose a sibling virtual display. Applying a new mode avoids
     /// that reassignment entirely.
     ///
+    /// `refreshRate` defaults to whatever this display is already running
+    /// (a plain rotation resize doesn't need to touch it); pass a value to
+    /// change it in the same mode-apply as the resize (a Streaming Profile
+    /// change mid-session).
+    ///
     /// Must be called on the main thread.
     @discardableResult
-    func resize(pointsWide: Int, pointsHigh: Int, movingTo origin: CGPoint?) -> Bool {
+    func resize(pointsWide: Int, pointsHigh: Int, refreshRate: Int? = nil, movingTo origin: CGPoint?) -> Bool {
         guard pointsWide <= maxPointsPerAxis, pointsHigh <= maxPointsPerAxis else {
             Log.info("virtual display \(display.displayID) cannot resize beyond its descriptor")
             return false
         }
+        let mode = refreshRate ?? self.refreshRate
 
         let newSettings = CGVirtualDisplaySettings()
         newSettings.hiDPI = 1
         newSettings.modes = [
-            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: 60)
+            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: Double(mode))
         ]
         guard display.apply(newSettings) else {
             Log.info("virtual display \(display.displayID) applySettings FAILED during resize")
@@ -117,6 +130,7 @@ final class VirtualDisplay {
         settings = newSettings
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
+        self.refreshRate = mode
 
         if let origin {
             var config: CGDisplayConfigRef?
