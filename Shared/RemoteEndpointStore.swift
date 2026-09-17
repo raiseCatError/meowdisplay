@@ -41,6 +41,14 @@ enum RemoteEndpointStore {
         return (hint.host, hint.port)
     }
 
+    /// The saved port is the media connection port. Remote Wake & Connect
+    /// knocks use the Mac's separate authenticated request listener instead.
+    /// Keep the host hint, but never reuse the media port for the knock.
+    static func connectRequestEndpoint(forPeerID peerID: String) -> (host: String, port: UInt16)? {
+        guard let hint = endpoint(forPeerID: peerID) else { return nil }
+        return (hint.host, WireCrypto.remoteRequestPort)
+    }
+
     static func setEndpoint(_ host: String, port: UInt16, forPeerID peerID: String) {
         var hints = load()
         hints[peerID] = Hint(host: host, port: port)

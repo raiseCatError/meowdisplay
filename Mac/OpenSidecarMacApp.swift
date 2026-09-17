@@ -1647,6 +1647,12 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestVideoEnabled(requested)
         }
+        sender.onStreamingProfileRequest = { [weak self, weak session] profile, custom in
+            guard let self, let session, self.owns(session) else { return }
+            self.streamingProfile = profile
+            self.customFrameRate = custom
+            self.restartAll()
+        }
         sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in
             guard let self, let session, self.owns(session) else { return }
             // Same authoritative setter the Mac's own MirrorDisplayPickerView
@@ -2040,9 +2046,20 @@ final class SenderController: ObservableObject {
         ReceiverInputAuthorizationStore.isAuthorized(peerID: peerID)
     }
 
-    func setInputAuthorized(_ authorized: Bool, peerID: String) {
-        ReceiverInputAuthorizationStore.setAuthorized(authorized, peerID: peerID)
-        objectWillChange.send()
+    /// Whether permanent per-device input authorization can be changed right
+    /// now. False whenever Allow Input is on: at that point a remote peer
+    /// already controls the Mac's screen, so any "Always Allow" control
+    /// stops being a real security boundary unless it's also locked below
+    /// the UI layer (`ReceiverInputAuthorizationStore.setAuthorized`).
+    var isPermanentInputAuthorizationEditable: Bool { !allowInput }
+
+    /// Returns whether the change actually took effect. Fails while Allow
+    /// Input is on — see `isPermanentInputAuthorizationEditable`.
+    @discardableResult
+    func setInputAuthorized(_ authorized: Bool, peerID: String) -> Bool {
+        let applied = ReceiverInputAuthorizationStore.setAuthorized(authorized, peerID: peerID)
+        if applied { objectWillChange.send() }
+        return applied
     }
 
     /// A currently reachable (but not yet connected) target for a known

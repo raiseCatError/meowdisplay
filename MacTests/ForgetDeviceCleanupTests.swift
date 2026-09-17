@@ -9,9 +9,19 @@ import XCTest
 final class ForgetDeviceCleanupTests: XCTestCase {
     private func peerID() -> String { "forget-test-peer-\(UUID().uuidString)" }
 
+    // Granting permanent input authorization now requires Allow Input to be
+    // off (a fresh UserDefaults.standard otherwise defaults to "on" — see
+    // `InputPolicy.allowsInput`'s "missing means enabled") — pin it off so
+    // these pre-existing cleanup tests can still set up their fixtures.
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.set(false, forKey: InputPolicy.defaultsKey)
+    }
+
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "remoteEndpointHints.v1")
         UserDefaults.standard.removeObject(forKey: "wakeMetadataHints.v1")
+        UserDefaults.standard.removeObject(forKey: InputPolicy.defaultsKey)
         super.tearDown()
     }
 

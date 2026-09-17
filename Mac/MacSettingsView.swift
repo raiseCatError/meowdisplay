@@ -55,8 +55,10 @@ struct MacSettingsView: View {
                     switch selection ?? .overview {
                     case .overview:
                         OverviewSettingsView(controller: controller,
+                                             permissions: permissions,
                                              onOpenDisplays: { selection = .displays },
-                                             onOpenDevices: { selection = .devices })
+                                             onOpenDevices: { selection = .devices },
+                                             onOpenSystem: { selection = .system })
                     case .displays:
                         DisplaysSettingsView(controller: controller)
                     case .streaming:
@@ -91,6 +93,9 @@ struct MacSettingsView: View {
             }
         }
         .frame(minWidth: 700, minHeight: 500)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            permissions.refresh()
+        }
     }
 
     /// Quick actions only appear when there's exactly one active display —

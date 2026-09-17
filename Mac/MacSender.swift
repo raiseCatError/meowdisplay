@@ -151,6 +151,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
+    @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection) -> Void)?
     // Fired when the user stopped the capture from the system UI (menu-bar
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
@@ -3284,6 +3285,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
+                sendStreamingProfileState()
                 sendWakeInfo()
                 sendDisplayModeState()
                 if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
@@ -3459,6 +3461,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 Task { @MainActor in self.onVideoEnabledRequest?(requested) }
             }
+        case WireMessage.streamingProfileRequest:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.version,
+                  let raw = obj["profile"] as? String,
+                  let profile = StreamingProfile(rawValue: raw) else { return }
+            let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
+            Task { @MainActor in self.onStreamingProfileRequest?(profile, custom) }
         case WireMessage.mirrorDisplayRequest:
             // Same construction as `promoteInteractiveWake` above: this only
             // ever runs on data read off an already pinned-TLS/loopback
@@ -4003,6 +4012,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// receiver version we still support.
     private func sendWelcome() {
         sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
+    }
+
+    private func sendStreamingProfileState() {
+        sendJSONFrame("{\"type\":\"\(WireMessage.streamingProfileState)\",\"profile\":\"\(streamingProfile.rawValue)\"}")
     }
 
     /// Best-effort LAN wake hint (Remote Wake-on-LAN foundation): this Mac's

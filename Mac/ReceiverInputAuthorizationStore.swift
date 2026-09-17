@@ -14,38 +14,58 @@ import Foundation
 /// just by connecting — it is added only by an explicit Mac-user toggle
 /// (Input settings / device detail), and `ForgetDeviceAction` removes it
 /// alongside trust so a revoked or re-paired identity never inherits it.
+///
+/// SECURITY INVARIANT: while `InputPolicy.allowsInput()` is true, a remote
+/// peer already controls the Mac's screen (per current session/per-peer
+/// authorization) and could otherwise drive this exact toggle itself —
+/// there is no user-present gesture that distinguishes "the Mac's owner
+/// clicked Always Allow" from "the remote peer's own input clicked it". So
+/// `setAuthorized` refuses to grant or revoke a *permanent* record while
+/// remote input capability is on, enforced here at the store layer (not
+/// only by disabling the UI control) so no other call site can bypass it.
+/// This never blocks `removeAuthorization`: revoking a permanent grant only
+/// narrows capability, exactly like relinquishing a live session, and must
+/// always be free to happen (e.g. Forget, or an owner revoking mid-session).
 enum ReceiverInputAuthorizationStore {
     private static let defaultsKey = "receiverInputAuthorization.v1"
 
-    private static func load() -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+    private static func load(defaults: UserDefaults) -> Set<String> {
+        Set(defaults.stringArray(forKey: defaultsKey) ?? [])
     }
 
-    private static func save(_ peerIDs: Set<String>) {
-        UserDefaults.standard.set(Array(peerIDs), forKey: defaultsKey)
+    private static func save(_ peerIDs: Set<String>, defaults: UserDefaults) {
+        defaults.set(Array(peerIDs), forKey: defaultsKey)
     }
 
-    static func isAuthorized(peerID: String) -> Bool {
-        load().contains(peerID)
+    static func isAuthorized(peerID: String, defaults: UserDefaults = .standard) -> Bool {
+        load(defaults: defaults).contains(peerID)
     }
 
-    static func setAuthorized(_ authorized: Bool, peerID: String) {
-        var peerIDs = load()
+    /// Returns whether the change was actually applied. Fails (without
+    /// touching storage) whenever `InputPolicy.allowsInput(defaults:)` is
+    /// true — see the type's security invariant above.
+    @discardableResult
+    static func setAuthorized(_ authorized: Bool, peerID: String, defaults: UserDefaults = .standard) -> Bool {
+        guard !InputPolicy.allowsInput(defaults: defaults) else { return false }
+        var peerIDs = load(defaults: defaults)
         if authorized {
             peerIDs.insert(peerID)
         } else {
             peerIDs.remove(peerID)
         }
-        save(peerIDs)
+        save(peerIDs, defaults: defaults)
+        return true
     }
 
-    static func removeAuthorization(peerID: String) {
-        var peerIDs = load()
+    /// Always permitted regardless of Allow Input state — see the type's
+    /// security invariant above.
+    static func removeAuthorization(peerID: String, defaults: UserDefaults = .standard) {
+        var peerIDs = load(defaults: defaults)
         peerIDs.remove(peerID)
-        save(peerIDs)
+        save(peerIDs, defaults: defaults)
     }
 
-    static func allAuthorizedPeerIDs() -> Set<String> {
-        load()
+    static func allAuthorizedPeerIDs(defaults: UserDefaults = .standard) -> Set<String> {
+        load(defaults: defaults)
     }
 }

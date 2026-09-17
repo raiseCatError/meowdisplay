@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/MeowDisplay-mark.png" alt="MeowDisplay icon" width="140">
+<img src="assets/Github Readme Icon.png" alt="MeowDisplay icon" width="140">
 
 # MeowDisplay
 

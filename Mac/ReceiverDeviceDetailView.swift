@@ -55,12 +55,19 @@ struct ReceiverDeviceDetailView: View {
                 Toggle("Allow this device to enable input from the receiver", isOn: Binding(
                     get: { controller.isInputAuthorized(peerID: peerID) },
                     set: { controller.setInputAuthorized($0, peerID: peerID) }))
+                    .disabled(!controller.isPermanentInputAuthorizationEditable)
             } header: {
                 Text("Input Authorization")
             } footer: {
-                Text("Never bypasses this Mac's Allow Input master switch on the Input page.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if controller.isPermanentInputAuthorizationEditable {
+                    Text("Never bypasses this Mac's Allow Input master switch on the Input page.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Disable Allow Input to change permanent device permissions.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {

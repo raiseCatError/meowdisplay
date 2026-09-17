@@ -19,6 +19,20 @@ final class RemoteEndpointStoreTests: XCTestCase {
         XCTAssertEqual(hint?.port, 9001)
     }
 
+    func testConnectRequestUsesDedicatedAuthenticatedRequestPort() {
+        let peer = peerID()
+        RemoteEndpointStore.setEndpoint("100.101.102.103", port: WireCrypto.tlsPort, forPeerID: peer)
+
+        let requestEndpoint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peer)
+        XCTAssertEqual(requestEndpoint?.host, "100.101.102.103")
+        XCTAssertEqual(requestEndpoint?.port, WireCrypto.remoteRequestPort)
+        XCTAssertNotEqual(requestEndpoint?.port, WireCrypto.tlsPort)
+    }
+
+    func testConnectRequestEndpointRequiresConfiguredHint() {
+        XCTAssertNil(RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID()))
+    }
+
     func testChangingTheAddressForTheSamePeerIDOverwritesOnlyTheHint() {
         let peer = peerID()
         RemoteEndpointStore.setEndpoint("100.1.1.1", port: 9001, forPeerID: peer)

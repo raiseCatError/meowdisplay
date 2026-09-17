@@ -5,14 +5,37 @@ import SwiftUI
 /// projection Devices → Active Display and the menu bar use.
 struct OverviewSettingsView: View {
     @ObservedObject var controller: SenderController
+    @ObservedObject var permissions: PermissionMonitor
     let onOpenDisplays: () -> Void
     let onOpenDevices: () -> Void
+    let onOpenSystem: () -> Void
 
     var body: some View {
         Form {
+            if !permissions.screenRecording || !permissions.accessibility {
+                Section {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("More Permissions Required").font(.headline)
+                            Text("MEOW needs Screen Recording and Accessibility permissions to work fully.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Missing: " + [
+                                !permissions.screenRecording ? "Screen Recording" : nil,
+                                !permissions.accessibility ? "Accessibility" : nil
+                            ].compactMap { $0 }.joined(separator: ", "))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Review Permissions", action: onOpenSystem).controlSize(.small)
+                    }
+                }
+            }
             if controller.activeDisplayEntries.isEmpty {
                 Section {
                     VStack(alignment: .leading, spacing: 4) {
+                        Image("MeowBrand")
+                            .resizable().scaledToFit().frame(width: 72)
                         Text("No active display")
                             .font(.headline)
                         Text("Ready to connect")

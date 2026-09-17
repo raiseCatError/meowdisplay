@@ -22,6 +22,8 @@ struct ReceiverSections: View {
         }
 
         Section {
+            Image("MeowBrand")
+                .resizable().scaledToFit().frame(width: 72)
             ReceiverNameField { controller.setAdvertisedName($0) }
         } header: {
             Text("Display")

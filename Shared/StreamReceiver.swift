@@ -69,6 +69,8 @@ final class StreamReceiver: ObservableObject {
 
     @Published var status = "Starting…"
     @Published var fps = 0
+    @Published private(set) var streamingProfile: StreamingProfile = .performance
+    @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
     @Published var connected = false
     @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @Published private(set) var displayState = DisplayState.running
@@ -1552,6 +1554,10 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.mirrorDisplayState:
             guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
             DispatchQueue.main.async { self.mirrorDisplayState = update }
+        case WireMessage.streamingProfileState:
+            guard let raw = obj["profile"] as? String,
+                  let profile = StreamingProfile(rawValue: raw) else { return }
+            DispatchQueue.main.async { self.streamingProfile = profile }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
@@ -1917,6 +1923,17 @@ final class StreamReceiver: ObservableObject {
     func requestVideoEnabled(_ enabled: Bool) {
         guard connected, macSupportsVideoControl else { return }
         sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
+    }
+
+    /// Requests a Mac-side streaming profile over the existing authenticated
+    /// control channel. The Mac remains authoritative and reports the
+    /// accepted profile back through `streamingProfileState`.
+    func requestStreamingProfile(_ profile: StreamingProfile,
+                                 customFrameRate: CustomFrameRateSelection = .auto) {
+        guard connected else { return }
+        sendControl(["type": WireMessage.streamingProfileRequest,
+                     "profile": profile.rawValue,
+                     "customFrameRate": customFrameRate.rawValue])
     }
 
     /// Turns Mac system audio on/off for this receiver. Persists the
@@ -3460,7 +3477,7 @@ final class StreamReceiver: ObservableObject {
     /// sends host/port information the Mac is expected to trust — it only
     /// dials a locally-persisted hint the user configured themselves.
     func requestRemoteConnect(peerID: String) {
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID),
+        guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
               let port = NWEndpoint.Port(rawValue: hint.port),
               let pin = TrustStore.shared.pin(peerID: peerID),
               let identity = TrustStore.shared.ownIdentity(),

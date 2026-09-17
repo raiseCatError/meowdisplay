@@ -41,14 +41,21 @@ struct InputSettingsView: View {
                         Toggle(entry.name, isOn: Binding(
                             get: { entry.inputAuthorized },
                             set: { controller.setInputAuthorized($0, peerID: entry.id) }))
+                            .disabled(!controller.isPermanentInputAuthorizationEditable)
                     }
                 }
             } header: {
                 Text("Devices allowed to enable input")
             } footer: {
-                Text("A permanently allowed device can turn Allow Input on from its own screen without asking here every time. It can never do this while Allow Input is off for a reason other than that device's own request, and it never bypasses this Mac's Allow Input master switch above.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if controller.isPermanentInputAuthorizationEditable {
+                    Text("A permanently allowed device can turn Allow Input on from its own screen without asking here every time. It can never do this while Allow Input is off for a reason other than that device's own request, and it never bypasses this Mac's Allow Input master switch above.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Disable Allow Input to change permanent device permissions.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)

@@ -1094,11 +1094,7 @@ struct SettingsView: View {
                     Toggle("Show Keyboard Button", isOn: preferenceBinding(\.keyboardButtonEnabled))
                     Toggle("Haptics", isOn: preferenceBinding(\.hapticsEnabled))
                     Toggle("Collapse Control Tray", isOn: preferenceBinding(\.trayCollapsed))
-                    Picker("Landscape Tray Side",
-                           selection: preferenceBinding(\.preferredLandscapeSide)) {
-                        ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
+                    landscapeTraySidePicker
                     Picker("Active Profile", selection: Binding(
                         get: { controlStore.preferences.activeControlProfile },
                         set: { profile in
@@ -1114,6 +1110,8 @@ struct SettingsView: View {
                         confirmingReset = true
                     }
                 }
+
+                streamingProfileSection
 
                 Section {
                     Toggle("Show Function Tray", isOn: preferenceBinding(\.functionTrayEnabled))
@@ -1381,6 +1379,42 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var streamingProfileSection: some View {
+        Section("Streaming") {
+            let profileBinding = Binding<StreamingProfile>(
+                get: { receiver.streamingProfile },
+                set: { receiver.requestStreamingProfile($0, customFrameRate: receiver.customFrameRate) })
+            Picker("Streaming Profile", selection: profileBinding) {
+                ForEach(StreamingProfile.allCases) { profile in
+                    Text(profile.label).tag(profile)
+                }
+            }
+            Text(receiver.streamingProfile.explanation)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if receiver.streamingProfile == .custom {
+                let frameRateBinding = Binding<CustomFrameRateSelection>(
+                    get: { receiver.customFrameRate },
+                    set: { receiver.requestStreamingProfile(.custom, customFrameRate: $0) })
+                Picker("Frame Rate", selection: frameRateBinding) {
+                    ForEach(CustomFrameRateSelection.allCases) { frameRate in
+                        Text(frameRate.label).tag(frameRate)
+                    }
+                }
+            }
+        }
+    }
+
+    private var landscapeTraySidePicker: some View {
+        Picker("Landscape Tray Side", selection: preferenceBinding(\.preferredLandscapeSide)) {
+            ForEach(LandscapeTraySide.allCases) { side in
+                Text(side.title).tag(side)
+            }
+        }
+        .pickerStyle(.segmented)
     }
 
     private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {

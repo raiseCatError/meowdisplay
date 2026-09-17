@@ -129,6 +129,8 @@ enum WireMessage {
     // stable display UUID as the Mirror capture source. Only ever honored
     // over the existing authenticated session — see `mirrorDisplayWireVersion`.
     static let mirrorDisplayRequest = "mirrorDisplayRequest"
+    static let streamingProfileRequest = "streamingProfileRequest"
+    static let streamingProfileState = "streamingProfileState"
 }
 
 enum WireCrypto {
