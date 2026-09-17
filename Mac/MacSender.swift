@@ -16,6 +16,7 @@
 @preconcurrency import ScreenCaptureKit
 import VideoToolbox
 import Network
+import CryptoKit
 import Security
 import CoreMedia
 import AppKit
