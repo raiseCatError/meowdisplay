@@ -146,6 +146,9 @@ struct ForgetConfirmation: Identifiable, Equatable {
 final class DeviceSession: ObservableObject, Identifiable {
     nonisolated let id: String
     let logicalID: String
+    /// Stable peer selected before dialing. Unlike `deviceID`, this exists
+    /// while the application hello is still pending.
+    let intendedPeerID: String?
     let attempt: AutoConnectPolicy.Attempt
     let target: ConnectionTarget
     let name: String
@@ -236,10 +239,11 @@ final class DeviceSession: ObservableObject, Identifiable {
         capturePhase == .running || capturePhase == .recovering || capturePhase == .paused
     }
 
-    init(id: String, logicalID: String, attempt: AutoConnectPolicy.Attempt,
+    init(id: String, logicalID: String, intendedPeerID: String?, attempt: AutoConnectPolicy.Attempt,
          target: ConnectionTarget, name: String, sender: MacSender) {
         self.id = id
         self.logicalID = logicalID
+        self.intendedPeerID = intendedPeerID
         self.attempt = attempt
         self.target = target
         self.name = name
@@ -1014,7 +1018,9 @@ final class SenderController: ObservableObject {
         // the user to it, then end the live session (which also suppresses
         // its own route aliases).
         autoConnectPolicy.suppress(["install:\(peerID)"])
-        let matchingSessions = sessions.filter { $0.deviceID == peerID }
+        let matchingSessions = sessions.filter {
+            $0.deviceID == peerID || $0.intendedPeerID == peerID
+        }
         for session in matchingSessions {
             autoConnectPolicy.suppress(identifiers(for: session))
             end(session)
@@ -1592,7 +1598,13 @@ final class SenderController: ObservableObject {
                                streamingProfile: streamingProfile,
                                customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil)
         sender.autoReconnectEnabled = autoReconnectEnabled
-        let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
+        let intendedPeerID: String? = {
+            if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
+            if case .wifi(let result) = target { return txtID(of: result) }
+            return nil
+        }()
+        let session = DeviceSession(id: id, logicalID: logicalID, intendedPeerID: intendedPeerID,
+                                    attempt: attempt,
                                     target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
             session.wifiServiceName = serviceName(of: result)

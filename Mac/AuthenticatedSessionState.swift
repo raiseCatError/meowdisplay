@@ -1,5 +1,19 @@
 import Foundation
 
+/// The final, pure authorization rule for a sender application handshake.
+/// Keeping this separate from Keychain and Network.framework makes revocation
+/// semantics directly testable.
+enum SenderApplicationAuthorization {
+    static func isAllowed(intendedPeerID: String?, authenticatedPeerID: String,
+                          authenticatedSPKI: Data?, currentPinnedSPKI: Data?) -> Bool {
+        guard let intendedPeerID,
+              intendedPeerID == authenticatedPeerID,
+              let authenticatedSPKI,
+              let currentPinnedSPKI else { return false }
+        return authenticatedSPKI == currentPinnedSPKI
+    }
+}
+
 /// Thread-safe generation gate separating a transport-level connection from
 /// a peer that has actually spoken the MeowDisplay application protocol.
 final class AuthenticatedSessionState {
