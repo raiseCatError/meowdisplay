@@ -3215,6 +3215,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
+                let authenticatedSPKI: Data? = {
+                    guard let conn = connection,
+                          let metadata = conn.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
+                    var result: Data?
+                    sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
+                        guard result == nil else { return }
+                        let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
+                        guard let key = SecCertificateCopyKey(secCert),
+                              let x963 = SecKeyCopyExternalRepresentation(key, nil) as Data?,
+                              let pub = try? P256.Signing.PublicKey(x963Representation: x963) else { return }
+                        result = pub.derRepresentation
+                    }
+                    return result
+                }()
+                if case .tcp(_, let tls?) = transport,
+                   !SenderApplicationAuthorization.isAllowed(
+                       intendedPeerID: tls.peerID, authenticatedPeerID: info.id ?? "",
+                       authenticatedSPKI: authenticatedSPKI,
+                       currentPinnedSPKI: TrustStore.shared.pin(peerID: tls.peerID)) {
+                    Log.info("SECURITY: current trust no longer authorizes application session")
+                    invalidateApplicationSession(reason: "trustRevokedOrChanged")
+                    stopped = true
+                    connection?.cancel()
+                    Task { @MainActor in
+                        self.onTrustFailure?("This device is no longer trusted. Pair it again if needed.")
+                    }
+                    return
+                }
                 if case .tcp(_, let tls?) = transport, info.id != tls.peerID {
                     Log.info("SECURITY: authenticated key claimed unexpected peer id")
                     invalidateApplicationSession(reason: "applicationIdentityMismatch")
