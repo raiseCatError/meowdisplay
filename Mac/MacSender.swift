@@ -254,20 +254,41 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // poisoned one.
     private var baseIdentityOffset: UInt32
 
-    // ── Encoder parallelism limiter (maxPendingEncodes = 1) ─────────────────
+    // ── Encoder parallelism limiter (maxPendingEncodes = 2) ─────────────────
     //
     // VTCompressionSessionEncodeFrame returns immediately; the hardware H.264
-    // encoder runs asynchronously. If ScreenCaptureKit delivers the next frame
-    // before the previous encode callback fires, VideoToolbox will run multiple
-    // encodes in parallel inside the same session.
+    // encoder runs asynchronously, and one encode round trip (submit →
+    // callback) routinely takes longer than a single frame interval at
+    // 60fps+. A cap of 1 turns that per-frame latency into a hard admission
+    // ceiling — a *second* frame can never even be submitted until the first
+    // one's callback fires, so real throughput is capped at 1/(encode
+    // latency), not by the requested FPS or by hardware capacity. That
+    // ceiling was the confirmed cause of VideoToolbox topping out at
+    // ~25-45fps on BOTH USB and LAN regardless of target (LAN diagnostics
+    // pass, dev/opendisplay-next): purely a same-machine, same-transport
+    // pipelining limit, not a network problem.
     //
-    // Capping pendingEncodes at 1 enforces “latest frame wins” on the encoder:
-    // skip captures while an encode is in flight (enc drops), then feed the next
-    // fresh buffer when the callback clears the slot. The H.264 reference chain
-    // stays valid (pre-encode skip → normal P-frame n→n+2); we do NOT force
-    // keyframes on enc drops.
+    // Raising the cap to 2 lets one frame encode while the previous one is
+    // still finishing — real pipelining instead of the FrameRateLimiter's
+    // cadence being gated by encode latency — while still bounding
+    // in-flight work to a small, fixed number (never unbounded), and still
+    // dropping (never queuing) once even that small pipeline is full. Two
+    // was chosen over three-plus because `kVTCompressionPropertyKey_
+    // MaxFrameDelayCount = 0` already asks the session to minimize its own
+    // internal buffering/lookahead, and `AllowFrameReordering = false`
+    // means VideoToolbox emits completions in submission order — so a
+    // deeper app-level queue would only add latency the encoder itself
+    // isn't using, not more real parallelism. Re-measure with the
+    // senderPipeline DEBUG log (`vtSub`/`vtOK`/`peakPending`) before going
+    // higher.
+    //
+    // "Latest frame wins" no longer applies at the encoder stage the way it
+    // did at cap 1 (both in-flight frames now genuinely get encoded and
+    // sent, not just the most recent); it still applies at the admission
+    // gate one level up — `FrameRateLimiter` — which decides which SCK
+    // samples are even eligible to reach here.
     private var pendingEncodes = 0
-    private let maxPendingEncodes = 1
+    private let maxPendingEncodes = 2
 
     // ── Outstanding send backpressure (maxPendingSends = 3) ──────────────────
     //
@@ -289,6 +310,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsEncTotal = 0
     private var dropsNetTotal = 0
     private var needsKeyframe = true
+    #if DEBUG
+    // Rolling ~1s sender-pipeline instrumentation (LAN FPS-collapse
+    // diagnosis). All touched from `queue` except the two marked, which the
+    // VideoToolbox callback thread also writes and so share `pipelineLock`
+    // with `pendingEncodes`/drops above.
+    private var debugSCKWindow = 0
+    private var debugAdmittedWindow = 0
+    private var debugVTSubmittedWindow = 0   // pipelineLock
+    private var debugVTCompletedWindow = 0   // pipelineLock
+    private var debugSendsStartedWindow = 0
+    private var debugSendsCompletedWindow = 0
+    private var debugPeakPendingSends = 0
+    private var debugSendTimingsMs: [Double] = []
+    #endif
     #if DEBUG
     // BLACK-VIDEO forensics (encoder stage) — guarded by `pipelineLock`
     // like the other counters the VideoToolbox callback queue touches; see
@@ -4086,6 +4121,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastPixelBuffer = pixelBuffer
             lastCaptureAt = Date()
             capFrames += 1
+            #if DEBUG
+            debugSCKWindow += 1
+            #endif
 
             #if DEBUG
             // BLACK-VIDEO forensics: answers "did ScreenCaptureKit itself
@@ -4114,15 +4152,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // (see startCapture), so this guard — not stream teardown — is
             // what makes "no encoding, no network video packets" true then.
             guard connectionReady, videoEnabled else { return }
+            // Rate-gate BEFORE backpressure: SCK's capture headroom means
+            // frames can arrive up to ~2x the target rate, and neither
+            // `minimumFrameInterval` nor `kVTCompressionPropertyKey_
+            // ExpectedFrameRate` stops VideoToolbox from being handed more
+            // than the authoritative effective FPS — see `FrameRateLimiter`.
+            // A frame the limiter would reject anyway was never going to be
+            // encoded, so it must not count as an enc↓/net↓ backpressure
+            // drop (that mislabels normal rate-limiting as a stalled
+            // pipeline) or arm the drop-replay timer for a frame nobody
+            // wanted in the first place.
+            guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
+            #if DEBUG
+            debugAdmittedWindow += 1
+            #endif
             if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
             if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
-            // Actual encode ADMISSION gate (not just capture pacing/VT's own
-            // hint): SCK's capture headroom means frames can arrive up to
-            // ~2x the target rate, and neither `minimumFrameInterval` nor
-            // `kVTCompressionPropertyKey_ExpectedFrameRate` stops VideoToolbox
-            // from being handed more than the authoritative effective FPS —
-            // see `FrameRateLimiter`.
-            guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
 
             encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation, connectionGeneration: activeConnectionGeneration)
 
@@ -4221,7 +4266,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         pipelineLock.unlock()
         guard drop else { return false }
-        scheduleDropReplayTimer()
+        // Only arm the replay for genuine network backpressure. With
+        // `maxPendingEncodes` now a real (>1) pipeline and the
+        // FrameRateLimiter already gating admission upstream, an
+        // encoder-busy drop here means the next rate-eligible SCK sample —
+        // due in a few ms, not 30 — will simply flow through normally once
+        // a slot frees. Replaying it too would bypass the limiter and
+        // inject an extra, arbitrarily-timed frame outside its cadence.
+        // A send-queue drop is different: TCP backpressure on a real link
+        // can outlast a frame interval, so proactively retrying once it
+        // clears (rather than waiting on the limiter's next tick) still
+        // earns its keep recovering from genuine LAN stalls.
+        if reason == "pending_sends" {
+            scheduleDropReplayTimer()
+        }
         switch reason {
         case "pending_encode":
             dropsEncThisWindow += 1
@@ -4290,6 +4348,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.pipelineLock.lock()
             self.encodeLastSuccessGeneration = generation
+            #if DEBUG
+            self.debugVTCompletedWindow += 1
+            #endif
             self.pipelineLock.unlock()
             guard generation == self.captureGenerationNow else { return }
             if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
@@ -4340,6 +4401,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Encode submission commits this frame to the pipeline; stale in-flight
             // encodes started before a drop won't reach here again, so cancel replay.
             cancelDropReplayTimer()
+            #if DEBUG
+            pipelineLock.lock()
+            debugVTSubmittedWindow += 1
+            pipelineLock.unlock()
+            #endif
         } else {
             pipelineLock.lock()
             pendingEncodes = max(0, pendingEncodes - 1)
@@ -4676,6 +4742,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         #if DEBUG
         let queuedAt = Date()
         let queuedByteCount = frame.count
+        debugSendsStartedWindow += 1
+        debugPeakPendingSends = max(debugPeakPendingSends, pendingSends)
         #endif
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
@@ -4689,6 +4757,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.framesSent += 1
             self.bytesSent += frame.count
             #if DEBUG
+            self.debugSendsCompletedWindow += 1
             if kind == "audio" {
                 let writeMs = Date().timeIntervalSince(queuedAt) * 1000
                 // A normal LAN write completes in low single-digit ms; a
@@ -4700,6 +4769,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             } else {
                 self.lastVideoFrameByteCount = queuedByteCount
+                self.debugSendTimingsMs.append(Date().timeIntervalSince(queuedAt) * 1000)
             }
             #endif
             // Report stats roughly once a second.
@@ -4718,6 +4788,32 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.onStats?(frames, mbps)
                     self.onMediaState?(videoActive, audioActive, width, height, fps)
                 }
+                #if DEBUG
+                self.pipelineLock.lock()
+                let vtSubmitted = self.debugVTSubmittedWindow
+                let vtCompleted = self.debugVTCompletedWindow
+                self.debugVTSubmittedWindow = 0
+                self.debugVTCompletedWindow = 0
+                self.pipelineLock.unlock()
+                let sendTimings = self.debugSendTimingsMs.sorted()
+                let sendP50 = sendTimings.isEmpty ? 0 : sendTimings[sendTimings.count / 2]
+                let sendP95 = sendTimings.isEmpty ? 0 :
+                    sendTimings[min(sendTimings.count - 1, Int(Double(sendTimings.count) * 0.95))]
+                let sendMax = sendTimings.last ?? 0
+                Log.info("senderPipeline: sck=\(self.debugSCKWindow) admit=\(self.debugAdmittedWindow) "
+                    + "vtSub=\(vtSubmitted) vtOK=\(vtCompleted) "
+                    + "encDrop=\(self.dropsEncThisWindow) netDrop=\(self.dropsNetThisWindow) "
+                    + "pending=\(self.pendingSends) peakPending=\(self.debugPeakPendingSends) "
+                    + "sendStart=\(self.debugSendsStartedWindow) sendOK=\(self.debugSendsCompletedWindow) "
+                    + "sendMs(p50=\(String(format: "%.1f", sendP50)) p95=\(String(format: "%.1f", sendP95)) max=\(String(format: "%.1f", sendMax))) "
+                    + "frames=\(frames) mbps=\(String(format: "%.2f", mbps))")
+                self.debugSCKWindow = 0
+                self.debugAdmittedWindow = 0
+                self.debugSendsStartedWindow = 0
+                self.debugSendsCompletedWindow = 0
+                self.debugPeakPendingSends = self.pendingSends
+                self.debugSendTimingsMs.removeAll(keepingCapacity: true)
+                #endif
             }
         })
     }

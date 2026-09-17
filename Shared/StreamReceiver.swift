@@ -484,6 +484,19 @@ final class StreamReceiver: ObservableObject {
     private var macInputP95 = 0.0
     private var macCapFps = 0
 
+    #if DEBUG
+    // Rolling ~1s receiver-pipeline instrumentation (LAN FPS-collapse
+    // diagnosis). All touched only from `queue` — the VTDecompressionSession
+    // output callback here does not lock, same as the existing `decodeWindow`
+    // counter it sits beside, so this follows that convention.
+    private var debugFramesReceivedWindow = 0    // complete AnnexB frames off the wire
+    private var debugFramesToDecoderWindow = 0   // submitted to VTDecompressionSession
+    private var debugFramesDecodedWindow = 0     // decode succeeded
+    private var debugFramesPresentedWindow = 0   // handed to the display layer
+    private var debugArrivalIntervals: [Double] = []
+    private var debugLastArrivalAt: Date?
+    #endif
+
     private var nowMs: Double { Date().timeIntervalSince1970 * 1000 }
 
     // Local cursor echo (both called on the main thread): position is
@@ -2364,6 +2377,15 @@ final class StreamReceiver: ObservableObject {
             buildFormatDescription(sps: sps, pps: pps)
         }
         guard !vclNALUs.isEmpty else { return }
+        #if DEBUG
+        debugFramesReceivedWindow += 1
+        let arrivalNow = Date()
+        if let last = debugLastArrivalAt {
+            debugArrivalIntervals.append(arrivalNow.timeIntervalSince(last) * 1000)
+            if debugArrivalIntervals.count > maxSamples { debugArrivalIntervals.removeFirst() }
+        }
+        debugLastArrivalAt = arrivalNow
+        #endif
         // All slices of one wire frame go into ONE sample buffer.
         enqueueFrame(vclNALUs, captureMs: captureMs, sendMs: sendMs)
     }
@@ -3282,6 +3304,9 @@ final class StreamReceiver: ObservableObject {
                     self.displayLayer.flush()
                 }
                 self.displayLayer.enqueue(sample)
+                #if DEBUG
+                self.debugFramesPresentedWindow += 1
+                #endif
             }
         }
         // A/V Sync: negative offset delays video by holding this specific,
@@ -3358,6 +3383,22 @@ final class StreamReceiver: ObservableObject {
             cursorLostThisWindow = 0
             fpsWindowStart = now
 
+            #if DEBUG
+            let arrivalSorted = debugArrivalIntervals.sorted()
+            let arrivalP50 = arrivalSorted.isEmpty ? 0 : arrivalSorted[arrivalSorted.count / 2]
+            let arrivalP95 = arrivalSorted.isEmpty ? 0 :
+                arrivalSorted[min(arrivalSorted.count - 1, Int(Double(arrivalSorted.count) * 0.95))]
+            let arrivalMax = arrivalSorted.last ?? 0
+            Log.info("receiverPipeline: recv=\(debugFramesReceivedWindow) toDecoder=\(debugFramesToDecoderWindow) "
+                + "decoded=\(debugFramesDecodedWindow) presented=\(debugFramesPresentedWindow) "
+                + "arrivalMs(p50=\(String(format: "%.1f", arrivalP50)) p95=\(String(format: "%.1f", arrivalP95)) max=\(String(format: "%.1f", arrivalMax))) "
+                + "fps=\(fps) stalls=\(stats.stalls)")
+            debugFramesReceivedWindow = 0
+            debugFramesToDecoderWindow = 0
+            debugFramesDecodedWindow = 0
+            debugFramesPresentedWindow = 0
+            #endif
+
             // Every 5s, report the aggregate to the Mac so its log holds the
             // full pipeline picture for offline analysis.
             statsReportCounter += 1
@@ -3428,12 +3469,18 @@ final class StreamReceiver: ObservableObject {
         ensureDecompressionSession()
         guard let session = decompressionSession else { return }
         let t0 = nowMs
+        #if DEBUG
+        debugFramesToDecoderWindow += 1
+        #endif
         let status = VTDecompressionSessionDecodeFrame(
             session, sampleBuffer: sample, flags: [], infoFlagsOut: nil
         ) { [weak self] status, _, imageBuffer, _, _ in
             guard let self else { return }
             if status == noErr, let imageBuffer {
                 self.decodeWindow.append(self.nowMs - t0)
+                #if DEBUG
+                self.debugFramesDecodedWindow += 1
+                #endif
                 self.onDecodedFrame?(imageBuffer, captureMs)
             } else {
                 if self.decodeErrorCount % 60 == 0 {
