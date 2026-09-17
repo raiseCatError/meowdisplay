@@ -932,6 +932,10 @@ struct SettingsView: View {
                            receiver.macProtocolVersion >= WireProtocol.mirrorDisplayWireVersion {
                             mirrorDisplaySourcePicker
                         }
+                        if confirmedMode == .extend,
+                           receiver.macProtocolVersion >= WireProtocol.extendShapeWireVersion {
+                            extendShapePicker
+                        }
                     } else {
                         LabeledContent("Display Mode",
                                        value: receiver.connected ? "Waiting for Mac" : "Unavailable")
@@ -1112,6 +1116,7 @@ struct SettingsView: View {
                 }
 
                 streamingProfileSection
+                maxFPSSection
 
                 Section {
                     Toggle("Show Function Tray", isOn: preferenceBinding(\.functionTrayEnabled))
@@ -1381,6 +1386,65 @@ struct SettingsView: View {
         }
     }
 
+    /// Requests an Extend virtual-display shape change (PROTOCOL.md 6.7).
+    /// The Mac remains authoritative — this only requests; the shown value
+    /// always tracks `confirmedExtendShape`/`pendingExtendShape`, the same
+    /// request/confirm contract as `requestDisplayMode` above.
+    @ViewBuilder
+    private var extendShapePicker: some View {
+        if let confirmed = receiver.confirmedExtendShape {
+            let current = receiver.pendingExtendShape ?? confirmed
+            Picker("Extend Shape", selection: Binding(
+                get: { current.shape },
+                set: { shape in
+                    var preference = current
+                    preference.shape = shape
+                    receiver.requestExtendShape(preference)
+                })) {
+                ForEach(ExtendDisplayShape.allCases) { shape in
+                    Text(shape.title).tag(shape)
+                }
+            }
+            .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
+            if current.shape == .automatic {
+                Toggle("Use Full Display", isOn: Binding(
+                    get: { current.useFullDisplay },
+                    set: { value in
+                        var preference = current
+                        preference.useFullDisplay = value
+                        receiver.requestExtendShape(preference)
+                    }))
+                .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
+            }
+            if receiver.pendingExtendShape != nil {
+                LabeledContent("Updating Extend shape…") { ProgressView() }
+            }
+            if let text = fpsLimitationText {
+                Text(text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            LabeledContent("Extend Shape", value: receiver.connected ? "Waiting for Mac" : "Unavailable")
+        }
+    }
+
+    /// PART 5/6 exact user-facing text, re-sent by the Mac on every capture
+    /// (re)start — including right after an Extend shape change — so this
+    /// updates with the picker rather than needing a manual refresh.
+    /// Derived entirely from `receiver.lastMaxFPSState` (the Mac's own
+    /// `EncoderCapability`/`StreamingFPSPolicy` result for the CURRENT final
+    /// encode size), never guessed from the shape/ratio alone. Nil (no text)
+    /// when nothing is actually limiting the request below what was asked.
+    private var fpsLimitationText: String? {
+        guard let state = receiver.lastMaxFPSState else { return nil }
+        if state.encoderSafeFPS >= state.requestedFPS {
+            return nil
+        }
+        return "\(receiver.streamingProfile.label) requests \(state.requestedFPS) FPS. "
+            + "Limited to \(state.encoderSafeFPS) FPS at this display size."
+    }
+
     @ViewBuilder
     private var streamingProfileSection: some View {
         Section("Streaming") {
@@ -1404,6 +1468,54 @@ struct SettingsView: View {
                         Text(frameRate.label).tag(frameRate)
                     }
                 }
+            }
+        }
+    }
+
+    /// PART 2/3/4/6: receiver-enforced max-FPS control, request/confirm-aware
+    /// same as `extendShapePicker` above — disabled while a request is in
+    /// flight, and the picker only offers tiers `receiver.lastMaxFPSState`
+    /// (the Mac's own capability/encoder calculation) says are actually
+    /// reachable right now.
+    @ViewBuilder
+    private var maxFPSSection: some View {
+        if receiver.macProtocolVersion >= WireProtocol.maxFPSWireVersion {
+            Section {
+                if let confirmed = receiver.confirmedMaxFPS {
+                    let current = receiver.pendingMaxFPS ?? confirmed
+                    Toggle("Enforce Maximum FPS", isOn: Binding(
+                        get: { current.enabled },
+                        set: { enabled in
+                            var preference = current
+                            preference.enabled = enabled
+                            receiver.requestMaxFPS(preference)
+                        }))
+                        .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
+                    if current.enabled {
+                        let tiers = receiver.lastMaxFPSState?.availableTiers ?? EncoderCapability.supportedFPSTiers
+                        Picker("Maximum FPS", selection: Binding(
+                            get: { current.maxFPS },
+                            set: { fps in
+                                var preference = current
+                                preference.maxFPS = fps
+                                receiver.requestMaxFPS(preference)
+                            })) {
+                            ForEach(tiers, id: \.self) { fps in
+                                Text("\(fps)").tag(fps)
+                            }
+                        }
+                        .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
+                    }
+                    if receiver.pendingMaxFPS != nil {
+                        LabeledContent("Updating Maximum FPS…") { ProgressView() }
+                    }
+                } else {
+                    LabeledContent("Maximum FPS", value: receiver.connected ? "Waiting for Mac" : "Unavailable")
+                }
+            } footer: {
+                Text("Caps how fast this Mac streams to this device, on top of its normal profile/display limits.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1443,6 +1555,22 @@ private struct DeviceNameField: View {
     }
 }
 
+/// The receiver decode ceiling this build advertises via
+/// `hello.maxEncodeWide/High` (PROTOCOL.md 6.5). iOS has no public API that
+/// reports the VideoToolbox H.264 hardware decoder's actual pixel ceiling,
+/// so this is a conservative, well-documented number rather than a measured
+/// one — the same value `MacReceiver` already advertises for the same
+/// reason. Every A9-or-later Apple Silicon chip (iPhone 6s onward, the
+/// floor for this app's iOS 16.4 deployment target) decodes H.264 up to 4K
+/// (4096x2304) reliably; this deliberately does NOT report a panel's own
+/// physical resolution, which says nothing about decode headroom. Isolated
+/// here so a future measured-per-device capability can replace it without
+/// touching call sites.
+enum iOSDecodeCeiling {
+    static let maxEncodeWide = 4096
+    static let maxEncodeHigh = 2304
+}
+
 // MARK: - Model
 
 @MainActor
@@ -1459,6 +1587,8 @@ final class ReceiverModel: ObservableObject {
         receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                   deviceKind: deviceKind,
                                   fallbackServiceName: UIDevice.current.name,
+                                  maxEncodeWide: iOSDecodeCeiling.maxEncodeWide,
+                                  maxEncodeHigh: iOSDecodeCeiling.maxEncodeHigh,
                                   maxFPS: UIScreen.main.maximumFramesPerSecond)
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         // Announce the native panel size to the Mac.

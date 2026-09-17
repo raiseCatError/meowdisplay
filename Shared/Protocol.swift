@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 13
+    static let version = 15
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -79,6 +79,26 @@ enum WireProtocol {
     /// an old receiver.
     static let mirrorDisplayWireVersion = 13
 
+    /// Protocol version that introduced Mac-authoritative Extend display
+    /// shape: `extendShapeState` (Mac -> receiver: confirmed active
+    /// shape/Full-Display) and `extendShapeRequest` (receiver -> Mac: request
+    /// a shape change). A receiver MUST NOT send `extendShapeRequest`, and
+    /// MUST NOT expect `extendShapeState`, when the peer is below this
+    /// version — the Mac keeps extending at its existing (pre-shape-picker)
+    /// size regardless, exactly the same fallback shape as
+    /// `mirrorDisplayWireVersion`.
+    static let extendShapeWireVersion = 14
+
+    /// Protocol version that introduced receiver-enforced maximum FPS:
+    /// `maxFPSState` (Mac -> receiver: confirmed enforcement + limit, plus
+    /// the encoder-safe ceiling for the current encode size) and
+    /// `maxFPSRequest` (receiver -> Mac: request enforcement on/off + a
+    /// limit). A receiver MUST NOT send `maxFPSRequest`, and MUST NOT
+    /// expect `maxFPSState`, when the peer is below this version — the Mac
+    /// still applies `EncoderCapability`'s encoder-safe ceiling regardless,
+    /// exactly the same fallback shape as `extendShapeWireVersion`.
+    static let maxFPSWireVersion = 15
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -131,6 +151,25 @@ enum WireMessage {
     static let mirrorDisplayRequest = "mirrorDisplayRequest"
     static let streamingProfileRequest = "streamingProfileRequest"
     static let streamingProfileState = "streamingProfileState"
+    // receiver -> Mac: request an Extend display shape change (`shape`,
+    // `useFullDisplay`) — see `ExtendDisplayShapePreference`.
+    static let extendShapeRequest = "extendShapeRequest"
+    // Mac -> receiver: confirmed active Extend shape. Re-sent on every
+    // successful capture start (same pattern as `displayModeState`) so the
+    // receiver never infers shape from stream dimensions.
+    static let extendShapeState = "extendShapeState"
+    // receiver -> Mac: request receiver-enforced max-FPS enforcement on/off
+    // + a limit (`enabled`, `maxFPS`) — see `ReceiverMaxFPSPreference`. Only
+    // ever honored over the existing authenticated session — see
+    // `maxFPSWireVersion`.
+    static let maxFPSRequest = "maxFPSRequest"
+    // Mac -> receiver: confirmed max-FPS enforcement state, plus diagnostic
+    // ceilings (`encoderSafeFPS`, `effectiveFPS`) so a receiver can show
+    // PART 5's limitation text without recomputing `EncoderCapability`
+    // itself. Re-sent on every successful capture start (same pattern as
+    // `extendShapeState`) so the receiver never infers it from stream
+    // dimensions alone.
+    static let maxFPSState = "maxFPSState"
 }
 
 enum WireCrypto {
@@ -362,5 +401,55 @@ struct MirrorDisplayStateUpdate: Equatable {
         // that entry, never silently empty the whole inventory.
         let rawDisplays = message["displays"] as? [Any] ?? []
         displays = rawDisplays.compactMap { ($0 as? [String: Any]).flatMap(MirrorDisplayEntry.init) }
+    }
+}
+
+/// Mac -> receiver `maxFPSState` (PART 4/5/9): the confirmed enforcement
+/// preference plus enough of `StreamingFPSPolicy`'s last calculation for the
+/// receiver to render PART 5's limitation text without re-deriving
+/// `EncoderCapability` itself (which would need the encode dimensions the
+/// receiver never sees). `reason` is `StreamingFPSPolicy.LimitReason.rawValue`.
+struct MaxFPSStateUpdate: Equatable {
+    let preference: ReceiverMaxFPSPreference
+    let availableTiers: [Int]
+    let encoderSafeFPS: Int
+    let requestedFPS: Int
+    let effectiveFPS: Int
+    let reason: String
+
+    init(preference: ReceiverMaxFPSPreference, availableTiers: [Int], encoderSafeFPS: Int,
+         requestedFPS: Int, effectiveFPS: Int, reason: String) {
+        self.preference = preference
+        self.availableTiers = availableTiers
+        self.encoderSafeFPS = encoderSafeFPS
+        self.requestedFPS = requestedFPS
+        self.effectiveFPS = effectiveFPS
+        self.reason = reason
+    }
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.maxFPSState,
+              let enabled = message["enabled"] as? Bool,
+              let maxFPS = message["maxFPS"] as? Int, maxFPS > 0,
+              let encoderSafeFPS = message["encoderSafeFPS"] as? Int,
+              let requestedFPS = message["requestedFPS"] as? Int,
+              let effectiveFPS = message["effectiveFPS"] as? Int,
+              let reason = message["reason"] as? String else { return nil }
+        preference = ReceiverMaxFPSPreference(enabled: enabled, maxFPS: maxFPS)
+        availableTiers = (message["availableTiers"] as? [Int]) ?? EncoderCapability.supportedFPSTiers
+        self.encoderSafeFPS = encoderSafeFPS
+        self.requestedFPS = requestedFPS
+        self.effectiveFPS = effectiveFPS
+        self.reason = reason
+    }
+
+    var wireFields: [String: Any] {
+        var fields = preference.wireFields
+        fields["availableTiers"] = availableTiers
+        fields["encoderSafeFPS"] = encoderSafeFPS
+        fields["requestedFPS"] = requestedFPS
+        fields["effectiveFPS"] = effectiveFPS
+        fields["reason"] = reason
+        return fields
     }
 }

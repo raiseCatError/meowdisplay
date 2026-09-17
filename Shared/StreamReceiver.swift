@@ -95,6 +95,21 @@ final class StreamReceiver: ObservableObject {
     /// `mirrorDisplayWireVersion` has actually reported one (distinct from
     /// `selectedUUID == nil`, which means Auto).
     @Published private(set) var mirrorDisplayState: MirrorDisplayStateUpdate?
+    /// The Mac's confirmed active Extend display shape (`extendShapeState`,
+    /// `pv` 14) — same request/confirm bookkeeping as `confirmedDisplayMode`.
+    @Published private(set) var confirmedExtendShape: ExtendDisplayShapePreference?
+    @Published private(set) var pendingExtendShape: ExtendDisplayShapePreference?
+    private var extendShapeRequestState = ExtendShapeRequestState()
+    // Receiver-enforced max FPS (PART 2/3/4) — same request/confirm shape as
+    // Extend shape above. `maxFPSState` (`lastMaxFPSState`) additionally
+    // carries the diagnostic ceilings (encoder-safe FPS, available tiers,
+    // limitation reason) PART 5's UI text needs; it is NOT itself the
+    // confirmed preference — that stays in `confirmedMaxFPS`/`pendingMaxFPS`
+    // via the same `MaxFPSRequestState` bookkeeping.
+    @Published private(set) var confirmedMaxFPS: ReceiverMaxFPSPreference?
+    @Published private(set) var pendingMaxFPS: ReceiverMaxFPSPreference?
+    @Published private(set) var lastMaxFPSState: MaxFPSStateUpdate?
+    private var maxFPSRequestState = MaxFPSRequestState()
 
     /// The single authoritative session state the UI derives from. Mutated
     /// only on `queue` via `sessionState`; this is its main-thread mirror.
@@ -494,6 +509,18 @@ final class StreamReceiver: ObservableObject {
     private var photonWindow: [Double] = []
     private var loggedDisplayPath = false
     private var decodeErrorCount = 0
+    #if DEBUG
+    // BLACK-VIDEO forensics: an independent, diagnostic-only decode of the
+    // first few frames after every format-description change (see
+    // `debugProbeDecodedLuma`) — separate from `decompressionSession`
+    // (the production Metal-path decoder) and from the actual render path
+    // (`displayLayer.enqueue`, which decodes internally and is never
+    // bypassed by this). Answers "did the receiver's OWN H.264 decode of
+    // these NALUs produce a real image, or black?" independent of whatever
+    // `AVSampleBufferDisplayLayer` does with the same bytes.
+    private var debugProbeDecompressionSession: VTDecompressionSession?
+    private var debugDecodedFramesSinceFormatChange = 0
+    #endif
     // Default OFF: A/B measurement showed the system video layer reaches
     // glass faster than our CAMetalLayer path (iOS gives AVSBDL a dedicated
     // compositor plane). Kept as an experimental toggle + for its metrics.
@@ -897,6 +924,8 @@ final class StreamReceiver: ObservableObject {
                 self.cancelReconnect()
                 self.setConnected(false, reason: .explicitDisconnect)
                 self.resetDisplayModeState()
+                self.resetExtendShapeState()
+                self.resetMaxFPSState()
                 self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
                 self.setStatus(status)
                 DispatchQueue.main.async {
@@ -1554,10 +1583,16 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.mirrorDisplayState:
             guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
             DispatchQueue.main.async { self.mirrorDisplayState = update }
+        case WireMessage.extendShapeState:
+            guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
+            DispatchQueue.main.async { self.applyConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
             guard let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
             DispatchQueue.main.async { self.streamingProfile = profile }
+        case WireMessage.maxFPSState:
+            guard let update = MaxFPSStateUpdate(message: obj) else { return }
+            DispatchQueue.main.async { self.applyConfirmedMaxFPS(update) }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
@@ -1676,7 +1711,14 @@ final class StreamReceiver: ObservableObject {
         lastFrameAt = nil
         frameIntervals.removeAll()
         decodeFlushes = 0
-        displayLayer.flush()
+        // A new session replaces the old one wholesale here (`adopt`) — a
+        // different sender, or the same one after a full reconnect, may
+        // never send a geometry this old frame's dimensions even loosely
+        // match. `flushAndRemoveImage()`, unlike plain `flush()`, also
+        // retires the currently-DISPLAYED image, so the previous session's
+        // last frame can't linger on screen through the gap before the new
+        // session's first IDR decodes.
+        displayLayer.flushAndRemoveImage()
         if let session = decompressionSession {
             VTDecompressionSessionInvalidate(session)
             decompressionSession = nil
@@ -2066,6 +2108,98 @@ final class StreamReceiver: ObservableObject {
         if shouldConfirmWithHaptic { displayModeConfirmationGeneration &+= 1 }
     }
 
+    /// Requests an Extend display shape change without predicting its
+    /// outcome — same request/confirm contract as `requestDisplayMode`. A
+    /// no-op against a Mac below `extendShapeWireVersion`, while
+    /// disconnected, or with a request already outstanding.
+    @MainActor
+    @discardableResult
+    func requestExtendShape(_ preference: ExtendDisplayShapePreference) -> Bool {
+        guard connected,
+              macProtocolVersion >= WireProtocol.extendShapeWireVersion,
+              extendShapeRequestState.request(preference) else { return false }
+        pendingExtendShape = extendShapeRequestState.pending
+        var dict = preference.wireFields
+        dict["type"] = WireMessage.extendShapeRequest
+        sendControl(dict)
+        let generation = extendShapeRequestState.pendingGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.displayModeRequestTimeout) { [weak self] in
+            self?.expirePendingExtendShape(generation: generation)
+        }
+        return true
+    }
+
+    @MainActor
+    private func expirePendingExtendShape(generation: Int) {
+        guard extendShapeRequestState.expirePending(generation: generation) else { return }
+        pendingExtendShape = nil
+        Log.info("extend shape request timed out — keeping \(extendShapeRequestState.confirmed?.shape.rawValue ?? "unknown")")
+    }
+
+    /// Deliberate session teardown: the Mac's active shape is no longer
+    /// known and any in-flight request dies with the session.
+    func resetExtendShapeState() {
+        DispatchQueue.main.async {
+            self.extendShapeRequestState.reset()
+            self.confirmedExtendShape = nil
+            self.pendingExtendShape = nil
+        }
+    }
+
+    @MainActor
+    private func applyConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
+        _ = extendShapeRequestState.confirm(preference)
+        confirmedExtendShape = extendShapeRequestState.confirmed
+        pendingExtendShape = extendShapeRequestState.pending
+    }
+
+    /// Requests a receiver-enforced max-FPS change without predicting its
+    /// outcome — same request/confirm contract as `requestExtendShape`. A
+    /// no-op against a Mac below `maxFPSWireVersion`, while disconnected, or
+    /// with a request already outstanding.
+    @MainActor
+    @discardableResult
+    func requestMaxFPS(_ preference: ReceiverMaxFPSPreference) -> Bool {
+        guard connected,
+              macProtocolVersion >= WireProtocol.maxFPSWireVersion,
+              maxFPSRequestState.request(preference) else { return false }
+        pendingMaxFPS = maxFPSRequestState.pending
+        var dict = preference.wireFields
+        dict["type"] = WireMessage.maxFPSRequest
+        sendControl(dict)
+        let generation = maxFPSRequestState.pendingGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.displayModeRequestTimeout) { [weak self] in
+            self?.expirePendingMaxFPS(generation: generation)
+        }
+        return true
+    }
+
+    @MainActor
+    private func expirePendingMaxFPS(generation: Int) {
+        guard maxFPSRequestState.expirePending(generation: generation) else { return }
+        pendingMaxFPS = nil
+        Log.info("max FPS request timed out — keeping \(maxFPSRequestState.confirmed.map(String.init(describing:)) ?? "unknown")")
+    }
+
+    /// Deliberate session teardown: the Mac's active max-FPS state is no
+    /// longer known and any in-flight request dies with the session.
+    func resetMaxFPSState() {
+        DispatchQueue.main.async {
+            self.maxFPSRequestState.reset()
+            self.confirmedMaxFPS = nil
+            self.pendingMaxFPS = nil
+            self.lastMaxFPSState = nil
+        }
+    }
+
+    @MainActor
+    private func applyConfirmedMaxFPS(_ update: MaxFPSStateUpdate) {
+        _ = maxFPSRequestState.confirm(update.preference)
+        confirmedMaxFPS = maxFPSRequestState.confirmed
+        pendingMaxFPS = maxFPSRequestState.pending
+        lastMaxFPSState = update
+    }
+
     /// A hardware key going down, for keys the Mac must hold (arrows,
     /// modified shortcuts). `modifiers` are named protocol modifiers, not
     /// raw UIKit flags.
@@ -2219,7 +2353,14 @@ final class StreamReceiver: ObservableObject {
             }
         }
         if formatDesc == nil, let sps, let pps {
-            displayLayer.flush()   // drop any frames from the previous format
+            // The SPS/PPS actually changed mid-stream (a real geometry/
+            // profile change — e.g. Extend shape or decode-ceiling
+            // reconfigure — not a pure FPS change, which never touches
+            // SPS/PPS). `flushAndRemoveImage()` retires the currently-
+            // displayed frame too, so a stale image decoded under the OLD
+            // format never stays on screen mapped into the NEW geometry
+            // while the fresh IDR is still in flight.
+            displayLayer.flushAndRemoveImage()
             buildFormatDescription(sps: sps, pps: pps)
         }
         guard !vclNALUs.isEmpty else { return }
@@ -3032,6 +3173,16 @@ final class StreamReceiver: ObservableObject {
                 if status == noErr, let formatDesc {
                     let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
                     Log.info("format description built: \(dims.width)x\(dims.height)")
+                    #if DEBUG
+                    // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
+                    // decode generation — re-arm the decoded-frame luma
+                    // probe (see `debugProbeDecodedLuma`) for it.
+                    debugDecodedFramesSinceFormatChange = 0
+                    if let session = debugProbeDecompressionSession {
+                        VTDecompressionSessionInvalidate(session)
+                        debugProbeDecompressionSession = nil
+                    }
+                    #endif
                     DispatchQueue.main.async {
                         self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
                     }
@@ -3089,6 +3240,10 @@ final class StreamReceiver: ObservableObject {
             sampleBufferOut: &sample)
 
         guard let sample else { return }
+
+        #if DEBUG
+        debugProbeDecodedLuma(sample)
+        #endif
 
         if loggedDisplayPath != (useMetalPath && onDecodedFrame != nil) {
             loggedDisplayPath = useMetalPath && onDecodedFrame != nil
@@ -3300,6 +3455,85 @@ final class StreamReceiver: ObservableObject {
             requestKeyframeIfNeeded()
         }
     }
+
+    #if DEBUG
+    /// BLACK-VIDEO forensics (iOS decoder stage): decodes the first few
+    /// frames of every format-description generation through an
+    /// independent, throwaway `VTDecompressionSession` — regardless of
+    /// `useMetalPath` — purely to answer "did the receiver's decoder
+    /// produce a real image from these NALUs, or black?", without touching
+    /// or duplicating the actual render path (`displayLayer.enqueue`
+    /// decodes internally and is unaffected by this probe running
+    /// alongside it).
+    private func debugProbeDecodedLuma(_ sample: CMSampleBuffer) {
+        guard debugDecodedFramesSinceFormatChange < 5, let formatDesc else { return }
+        debugDecodedFramesSinceFormatChange += 1
+        let frameNumber = debugDecodedFramesSinceFormatChange
+        if let session = debugProbeDecompressionSession,
+           !VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: formatDesc) {
+            VTDecompressionSessionInvalidate(session)
+            debugProbeDecompressionSession = nil
+        }
+        if debugProbeDecompressionSession == nil {
+            let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+            var session: VTDecompressionSession?
+            let status = VTDecompressionSessionCreate(
+                allocator: nil, formatDescription: formatDesc, decoderSpecification: nil,
+                imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
+                decompressionSessionOut: &session)
+            guard status == noErr, let session else {
+                Log.info("extendDebug: iOS decode probe session create failed status=\(status)")
+                return
+            }
+            debugProbeDecompressionSession = session
+        }
+        guard let session = debugProbeDecompressionSession else { return }
+        let status = VTDecompressionSessionDecodeFrame(
+            session, sampleBuffer: sample, flags: [], infoFlagsOut: nil
+        ) { status, _, imageBuffer, _, _ in
+            guard status == noErr, let imageBuffer else {
+                Log.info("extendDebug: iOS decode probe frame #\(frameNumber) failed status=\(status)")
+                return
+            }
+            let luma = Self.debugAverageLuma(imageBuffer)
+            Log.info("extendDebug: iOS decode probe frame #\(frameNumber) "
+                + "\(CVPixelBufferGetWidth(imageBuffer))x\(CVPixelBufferGetHeight(imageBuffer)) "
+                + "avgLuma=\(luma.map { String(format: "%.1f", $0) } ?? "n/a")")
+        }
+        if status != noErr {
+            Log.info("extendDebug: iOS decode probe submit failed frame #\(frameNumber) status=\(status)")
+        }
+    }
+
+    /// See `MacSender.debugAverageLuma` (identical purpose, independent
+    /// copy — the two live in different compilation targets). A cheap,
+    /// sparse-sampled average luma, never a full-frame scan.
+    private static func debugAverageLuma(_ pixelBuffer: CVPixelBuffer) -> Double? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        guard width > 0, height > 0 else { return nil }
+        let buf = base.assumingMemoryBound(to: UInt8.self)
+        let stepX = max(width / 32, 1), stepY = max(height / 32, 1)
+        var sum = 0.0
+        var count = 0
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                sum += Double(buf[y * stride + x])
+                count += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        guard count > 0 else { return nil }
+        return sum / Double(count)
+    }
+    #endif
 
     private var lastKeyframeRequest = Date.distantPast
     private func requestKeyframeIfNeeded() {
@@ -3571,6 +3805,13 @@ final class StreamReceiver: ObservableObject {
                 // were still current — a fresh mirrorDisplayState arrives on
                 // the next hello.
                 self.mirrorDisplayState = nil
+                // Same reasoning again: the Mac's active shape is only ever
+                // known from a live Mac; a fresh extendShapeState arrives on
+                // the next hello.
+                self.confirmedExtendShape = nil
+                // Same reasoning again: only ever known from a live Mac.
+                self.confirmedMaxFPS = nil
+                self.lastMaxFPSState = nil
             }
         }
         if !value {

@@ -180,11 +180,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// setting (the same one its own Settings picker writes) and the
     /// existing session-rebuild path that applies it. `nil` requests Auto.
     @MainActor var onMirrorDisplayRequest: ((String?) -> Void)?
+    /// Fires whenever this peer's Extend shape preference changes — from a
+    /// receiver's `extendShapeRequest` or from `requestExtendShape` (the
+    /// Mac's own per-device Settings control). Unlike Mirror/mode/streaming
+    /// profile, Extend shape is genuinely per-peer, so this instance applies
+    /// and persists it directly rather than bubbling up to
+    /// `SenderController`; the callback only lets the UI mirror the current
+    /// value onto `DeviceSession` for display.
+    @MainActor var onExtendShapeChanged: ((ExtendDisplayShapePreference) -> Void)?
+    @MainActor var onMaxFPSChanged: ((ReceiverMaxFPSPreference) -> Void)?
     /// Pinned TLS failures are terminal trust failures, never packet-loss retries.
     @MainActor var onTrustFailure: ((String) -> Void)?
 
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
+    /// Gates actual encode admission to the authoritative effective FPS —
+    /// `minimumFrameInterval`/`ExpectedFrameRate` alone are requests/hints,
+    /// not proof VideoToolbox receives no more than that rate (see
+    /// `FrameRateLimiter`). Reconfigured from `setupEncoder`, the one choke
+    /// point every FPS change already goes through. Mutated only from
+    /// `queue` (both `setupEncoder` and the capture callback run there), so
+    /// this needs no lock of its own.
+    private var frameRateLimiter = FrameRateLimiter(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
     private var connection: NWConnection?
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
@@ -203,13 +220,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let streamingProfile: StreamingProfile
     private let customFPS: Int?
     /// Capability-aware effective encode/capture FPS for this session right
-    /// now (`StreamingFPSPolicy`). Recomputed on demand from `lastHello?.maxFPS`
-    /// — the receiver capability is authoritative and can only ever be known
+    /// now (`StreamingFPSPolicy`), at a given final encode size. Recomputed
+    /// on demand from `lastHello?.maxFPS` and `receiverMaxFPSPreference` —
+    /// the receiver capability is authoritative and can only ever be known
     /// once hello has arrived, which every capture-start call site already
-    /// waits for (see `start()`'s `waitForHello()`).
-    private var currentEffectiveFPS: Int {
-        StreamingFPSPolicy.effectiveFPS(profile: streamingProfile, requestedFPS: customFPS,
-                                        receiverMaxFPS: lastHello?.maxFPS)
+    /// waits for (see `start()`'s `waitForHello()`). `width`/`height` MUST
+    /// be the actual final encode pixel dimensions (post `DecodeCeiling`),
+    /// never the desktop/virtual-display size — see `EncoderCapability`.
+    private func effectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
+        let encoderSafeFPS = EncoderCapability.codecSafeFPS(width: width, height: height)
+        return StreamingFPSPolicy.effectiveFPS(profile: streamingProfile, requestedFPS: customFPS,
+                                                receiverMaxFPS: lastHello?.maxFPS,
+                                                userMaxFPS: receiverMaxFPSPreference.userCeilingFPS,
+                                                encoderSafeFPS: encoderSafeFPS)
     }
     /// The FPS actually applied to the live capture/encoder pipeline, latched
     /// at the last `startCapture`/`setupEncoder` call — for status/telemetry
@@ -266,6 +289,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsEncTotal = 0
     private var dropsNetTotal = 0
     private var needsKeyframe = true
+    #if DEBUG
+    // BLACK-VIDEO forensics (encoder stage) — guarded by `pipelineLock`
+    // like the other counters the VideoToolbox callback queue touches; see
+    // `encode`'s completion closure.
+    private var debugEncodeLogGeneration: UInt64?
+    private var debugEncodeLogCount = 0
+    #endif
     /// The persisted preference and the state actually applied to this peer
     /// differ until its hello proves support for protocol v9. Older peers are
     /// always kept video-on so they never get a frozen, unexplained surface.
@@ -496,12 +526,40 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Bumped on `queue` but read from the SCK sample queue and the VideoToolbox
     // callback queue, so it lives under `pipelineLock` like the other counters
     // those callbacks touch — read it via `captureGenerationNow`.
+    // Bounded encoder-failure safety net (PART 8): the theoretical
+    // `EncoderCapability` ceiling should prevent a size x fps combination
+    // the hardware can't sustain, but real hardware may still be stricter.
+    // If a freshly (re)started encoder generation produces ZERO successful
+    // frames within `encodeFailureStreakLimit` attempts, that is treated as
+    // proof of the same class of failure, not a transient glitch — recover
+    // once by dropping to the next lower supported FPS tier rather than
+    // leaving the receiver black forever. Guarded under `pipelineLock` like
+    // the other per-generation counters the encode callback touches;
+    // `encoderRecoveryDowngradedGeneration` ensures at most one downgrade
+    // per generation, so a persistently broken encoder degrades once and
+    // then surfaces as an ordinary capture-recovery/failed-session instead
+    // of bouncing between FPS levels forever.
+    private var encodeFailureStreakGeneration: UInt64?
+    private var encodeFailureStreakCount = 0
+    /// The most recent generation that produced at least one successful
+    /// frame — compared by value, never reset by a later failure, so a
+    /// generation that already proved itself can't be re-flagged as "never
+    /// succeeded" by subsequent occasional failures.
+    private var encodeLastSuccessGeneration: UInt64?
+    private var encoderRecoveryDowngradedGeneration: UInt64?
+    private let encodeFailureStreakLimit = 30
     private var captureGeneration: UInt64 = 0
     private var captureGenerationNow: UInt64 {
         pipelineLock.lock()
         defer { pipelineLock.unlock() }
         return captureGeneration
     }
+    #if DEBUG
+    // BLACK-VIDEO forensics (SCK stage) — `didOutputSampleBuffer`'s `queue`-
+    // confined per-generation frame counter; see its call site.
+    private var debugSCKFrameLogGeneration: UInt64?
+    private var debugSCKFrameLogCount = 0
+    #endif
 
     // Mirror display inventory (P1): a connected/external display appearing
     // or disappearing must refresh what a receiver's Manual picker can
@@ -583,11 +641,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// At most one timer is active; each new drop resets the 30ms deadline.
     private var dropReplayTimer: DispatchSourceTimer?
 
+    /// Extend virtual-display shape (PROTOCOL.md 6.7). Seeded from the Mac's
+    /// global default at construction; once a peer's own stored preference
+    /// (or a live `extendShapeRequest`) is known, it takes over for this
+    /// peer specifically — see `applyExtendShape`.
+    private var extendShapePreference: ExtendDisplayShapePreference
+    /// Receiver-enforced max-FPS preference (PART 2/3). Same seeding
+    /// convention as `extendShapePreference`: the Mac-wide/constructor
+    /// default until a peer's own stored preference (or a live
+    /// `maxFPSRequest`) is known, at which point it takes over for this
+    /// peer specifically — see `applyMaxFPS`.
+    private var receiverMaxFPSPreference: ReceiverMaxFPSPreference
+
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
          identityOffset: UInt32 = 0, awaitingWake: Bool = false,
          videoEnabled: Bool = true, mirrorDisplayUUID: String? = nil,
-         streamingProfile: StreamingProfile = .performance, customFPS: Int? = nil) {
+         streamingProfile: StreamingProfile = .performance, customFPS: Int? = nil,
+         extendShapePreference: ExtendDisplayShapePreference = .standard,
+         receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -599,6 +671,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.desiredVideoEnabled = videoEnabled
         self.streamingProfile = streamingProfile
         self.customFPS = customFPS
+        self.extendShapePreference = extendShapePreference
+        self.receiverMaxFPSPreference = receiverMaxFPSPreference
         super.init()
     }
 
@@ -636,6 +710,159 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func pushDisplayModeState() {
         queue.async { [weak self] in self?.sendDisplayModeState() }
+    }
+
+    /// PROTOCOL.md 6.7. Meaningful only in Extend, but harmless to send
+    /// regardless of mode (same pattern as `sendVideoState`/`sendAudioState`
+    /// — an old/mirror-mode receiver simply ignores it), so every
+    /// capture-start call site can send it unconditionally.
+    private func sendExtendShapeState() {
+        guard let info = lastHello,
+              info.protocolVersion >= WireProtocol.extendShapeWireVersion else { return }
+        var dict = extendShapePreference.wireFields
+        dict["type"] = WireMessage.extendShapeState
+        sendJSONObject(dict)
+    }
+
+    /// The Mac's own per-device Extend Display control (`ReceiverDeviceDetailView`)
+    /// drives this directly — the exact same authoritative path a receiver's
+    /// own `extendShapeRequest` takes, so both directions of PROTOCOL.md 6.7
+    /// stay one source of truth.
+    func requestExtendShape(_ preference: ExtendDisplayShapePreference) {
+        queue.async { [weak self] in
+            guard let self, let info = self.lastHello else { return }
+            self.applyExtendShape(preference, info: info)
+        }
+    }
+
+    /// Applies an Extend shape change (from either direction), persists it
+    /// per-peer, reports it back, and — while Extend is actually active —
+    /// safely reconfigures the virtual display through the same
+    /// generation-guarded `reconfigure` path a rotation already uses.
+    /// Called on `queue`.
+    private func applyExtendShape(_ preference: ExtendDisplayShapePreference, info: PhoneInfo) {
+        guard preference != extendShapePreference else {
+            sendExtendShapeState()
+            return
+        }
+        extendShapePreference = preference
+        if let peerID = info.id { ExtendDisplayShapeStore.save(preference, peerID: peerID) }
+        Task { @MainActor in self.onExtendShapeChanged?(preference) }
+        guard mode == .extend, virtualDisplay != nil else {
+            sendExtendShapeState()
+            return
+        }
+        Task {
+            await self.reconfigure(info)
+            self.queue.async { self.sendExtendShapeState() }
+        }
+    }
+
+    /// PART 4/9: unlike `sendExtendShapeState`, max-FPS state is meaningful
+    /// in both Mirror and Extend, so every hello/capture-start call site can
+    /// send it unconditionally — an old receiver simply ignores it.
+    /// `capturePixelsWide/High` being 0 (no capture has started yet) still
+    /// reports a real `encoderSafeFPS`/`effectiveFPS`/`availableTiers` off
+    /// the receiver's advertised capability alone, so a receiver sees a
+    /// sane picker before the first frame.
+    private func sendMaxFPSState() {
+        guard let info = lastHello,
+              info.protocolVersion >= WireProtocol.maxFPSWireVersion else { return }
+        let width = capturePixelsWide
+        let height = capturePixelsHigh
+        let encoderSafeFPS = (width > 0 && height > 0)
+            ? EncoderCapability.codecSafeFPS(width: width, height: height)
+            : (EncoderCapability.supportedFPSTiers.last ?? StreamingFPSPolicy.hardCapFPS)
+        let result = StreamingFPSPolicy.effectiveFPS(
+            profile: streamingProfile, requestedFPS: customFPS, receiverMaxFPS: info.maxFPS,
+            userMaxFPS: receiverMaxFPSPreference.userCeilingFPS, encoderSafeFPS: encoderSafeFPS)
+        let requestedFPS = StreamingFPSPolicy.profileRequestedFPS(profile: streamingProfile, requestedFPS: customFPS)
+        let availableTiers = StreamingFPSPolicy.availableUserCeilingTiers(
+            receiverMaxFPS: info.maxFPS, encoderSafeFPS: encoderSafeFPS)
+        var dict = MaxFPSStateUpdate(preference: receiverMaxFPSPreference, availableTiers: availableTiers,
+                                      encoderSafeFPS: encoderSafeFPS, requestedFPS: requestedFPS,
+                                      effectiveFPS: result.fps, reason: result.reason.rawValue).wireFields
+        dict["type"] = WireMessage.maxFPSState
+        sendJSONObject(dict)
+    }
+
+    /// The Mac's own per-device max-FPS control (`ReceiverDeviceDetailView`)
+    /// drives this directly — same authoritative path a receiver's own
+    /// `maxFPSRequest` takes, so both directions stay one source of truth.
+    func requestMaxFPS(_ preference: ReceiverMaxFPSPreference) {
+        queue.async { [weak self] in
+            guard let self, let info = self.lastHello else { return }
+            self.applyMaxFPS(preference, info: info)
+        }
+    }
+
+    /// Applies a max-FPS change (from either direction), persists it
+    /// per-peer, reports it back, and — while capture is actually live —
+    /// reconfigures the running pipeline in place rather than tearing
+    /// anything down (same pattern as `applyAudioEnabled`'s live
+    /// `stream.updateConfiguration`). Called on `queue`.
+    private func applyMaxFPS(_ preference: ReceiverMaxFPSPreference, info: PhoneInfo) {
+        guard preference != receiverMaxFPSPreference else {
+            sendMaxFPSState()
+            return
+        }
+        receiverMaxFPSPreference = preference
+        if let peerID = info.id { ReceiverMaxFPSStore.save(preference, peerID: peerID) }
+        Task { @MainActor in self.onMaxFPSChanged?(preference) }
+        applyEffectiveFPSChange()
+        sendMaxFPSState()
+    }
+
+    /// Re-derives the effective FPS for the live pipeline's current encode
+    /// size (a profile/user-ceiling/receiver-capability change, never a
+    /// resolution change — resolution changes already go through
+    /// `reconfigure`/`startCapture`) and applies it without a capture
+    /// restart: `SCStreamConfiguration.minimumFrameInterval` via
+    /// `updateConfiguration`, then a fresh `setupEncoder` at the new rate.
+    /// No-op while there is no live stream — the next `startCapture` picks
+    /// up the new preference on its own.
+    private func applyEffectiveFPSChange() {
+        guard let stream, capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
+        let fpsResult = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh)
+        guard fpsResult.fps != captureTargetFPS else { return }
+        logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
+        let config = SCStreamConfiguration()
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fpsResult.fps * 2))
+        Task {
+            do {
+                try await stream.updateConfiguration(config)
+            } catch {
+                Log.info("FPS reconfigure failed: \(error)")
+            }
+            self.queue.async {
+                guard self.stream === stream else { return }
+                self.captureTargetFPS = fpsResult.fps
+                if self.videoEnabled {
+                    do {
+                        try self.setupEncoder(width: self.capturePixelsWide, height: self.capturePixelsHigh,
+                                              fps: fpsResult.fps)
+                    } catch {
+                        Log.info("FPS-change encoder setup failed: \(error) — entering capture recovery")
+                        guard self.updateCaptureState({ $0.unexpectedStop() }) else { return }
+                        self.scheduleCaptureRecovery()
+                    }
+                }
+            }
+        }
+    }
+
+    /// PART 9 diagnostic line. DEBUG-only: this fires on every capture
+    /// (re)start, and the throttled encode-failure logs already cover the
+    /// production-worthy signal.
+    private func logEncodeCapability(width: Int, height: Int, result: StreamingFPSPolicy.Result) {
+        #if DEBUG
+        let requestedFPS = StreamingFPSPolicy.profileRequestedFPS(profile: streamingProfile, requestedFPS: customFPS)
+        Log.info("encodeCapability: size=\(width)x\(height) requestedFPS=\(requestedFPS) "
+            + "receiverMaxFPS=\(lastHello?.maxFPS.map(String.init) ?? "none") "
+            + "userMaxFPS=\(receiverMaxFPSPreference.userCeilingFPS.map(String.init) ?? "none") "
+            + "encoderSafeFPS=\(EncoderCapability.codecSafeFPS(width: width, height: height)) "
+            + "effectiveFPS=\(result.fps) reason=\(result.reason.rawValue)")
+        #endif
     }
 
     /// Called on the sender queue. `InputPolicy.allowsInput()` reads
@@ -931,14 +1158,40 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func setupExtend(_ info: PhoneInfo, sessionGeneration: UInt64? = nil) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
 
+        // Extend display shape (PROTOCOL.md 6.7): a peer's own remembered
+        // choice — set by an earlier `extendShapeRequest`, or by the Mac's
+        // own per-device Extend Display picker — wins over the Mac-wide
+        // default this instance was constructed with, so each physical
+        // device keeps its own shape.
+        if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
+            extendShapePreference = stored
+        }
+        Task { @MainActor in self.onExtendShapeChanged?(self.extendShapePreference) }
+        let physicalAspect = Double(info.pixelsWide) / Double(info.pixelsHigh)
+        let resolvedAspect = extendShapePreference.resolvedAspect(receiverPhysicalAspect: physicalAspect)
         // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
-        // = native pixels / 2 (rounded down to even for the encoder).
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
+        // = native pixels / 2 (rounded down to even for the encoder) when
+        // the shape matches the phone's own aspect; otherwise the shape's
+        // own ratio governs — see `ExtendDisplaySizing`.
+        let (pointsWide, pointsHigh) = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh, aspect: resolvedAspect)
+        #if DEBUG
+        Log.info("extendDebug: setupExtend shape=\(extendShapePreference.shape.rawValue) "
+            + "useFullDisplay=\(extendShapePreference.useFullDisplay) physicalAspect=\(physicalAspect) "
+            + "resolvedAspect=\(resolvedAspect) virtualDisplayPoints=\(pointsWide)x\(pointsHigh)")
+        #endif
         // Rough physical size so macOS picks a sane default UI scale.
-        let mm = info.pixelsWide >= info.pixelsHigh
+        let mm = pointsWide >= pointsHigh
             ? CGSize(width: 147, height: 68)
             : CGSize(width: 68, height: 147)
+        // Encoder-safe FPS (PART 1/7) depends on the actual encode pixel
+        // size, not the shape/points alone — compute it from the same
+        // `clampedCaptureSize` the capture start path below uses, so the
+        // virtual display's own refresh rate never claims a rate the
+        // encoder can't actually sustain at this size.
+        let (virtualDisplayCaptureW, virtualDisplayCaptureH) = clampedCaptureSize(
+            pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
+        let virtualDisplayFPS = effectiveFPS(width: virtualDisplayCaptureW, height: virtualDisplayCaptureH).fps
 
         // USB sessions can start before lockdown resolves the device name —
         // fall back to the kind from the hello rather than the generic label.
@@ -1004,7 +1257,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           sizeInMillimeters: mm,
                                           serialNum: serial &+ totalOffset,
                                           productID: 0x4F53 &+ totalOffset,
-                                          refreshRate: self.currentEffectiveFPS,
+                                          refreshRate: virtualDisplayFPS,
                                           restoreOrigin: restoreOrigin,
                                           onOriginChange: { origin, currentSize in
                                               DisplayArrangement.save(origin: origin, size: currentSize,
@@ -1053,19 +1306,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
-        var captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
-        var captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
-        // hello.maxEncodeWide/High (PROTOCOL.md 6.5): a big panel does not
-        // imply a big decoder. Cap the stream at the receiver's advertised
-        // decode ceiling — SCK scales the capture — while the desktop keeps
-        // its announced size.
-        if let maxW = info.maxEncodeWide, let maxH = info.maxEncodeHigh,
-           maxW > 0, maxH > 0, captureW > maxW || captureH > maxH {
-            let s = min(Double(maxW) / Double(captureW), Double(maxH) / Double(captureH))
-            captureW = (Int(Double(captureW) * s)) & ~1
-            captureH = (Int(Double(captureH) * s)) & ~1
-            Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling \(maxW)x\(maxH)")
-        }
+        let (captureW, captureH) = clampedCaptureSize(
+            pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
+        #if DEBUG
+        Log.info("extendDebug: selectedSCDisplay id=\(display.displayID) "
+            + "reportedSize=\(display.width)x\(display.height) "
+            + "encodeOutput=\(captureW)x\(captureH) captureGeneration=\(captureGenerationNow)")
+        #endif
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
                                sessionGeneration: sessionGeneration)
 
@@ -1099,7 +1346,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             encoder = nil
             needsKeyframe = true
             do {
-                if try await resizeExistingDisplay(for: target) {
+                var resized = false
+                do {
+                    resized = try await resizeExistingDisplay(for: target)
+                } catch {
+                    // The in-place resize path (mode-switch, or the SCK
+                    // re-enumeration that follows it) failed partway
+                    // through — e.g. the resized display never reappeared
+                    // in SCShareableContent in time. Letting this propagate
+                    // as a terminal failure left the session with `stream`
+                    // and `encoder` already torn down (see above) and
+                    // nothing to rebuild them: capture never restarts, so
+                    // the receiver goes black/frozen while the cursor (a
+                    // separate channel, unaffected) keeps moving. Treat it
+                    // exactly like "no reusable display" below and fall
+                    // back to a full rebuild instead.
+                    Log.info("resize path failed (\(error)) — falling back to a full rebuild")
+                }
+                if resized {
                     // The display identity survived, so WindowServer has no
                     // reason to migrate this device's windows to a sibling.
                 } else {
@@ -1129,11 +1393,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func resizeExistingDisplay(for info: PhoneInfo) async throws -> Bool {
         guard let vd = virtualDisplay else { return false }
 
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
+        if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
+            extendShapePreference = stored
+        }
+        let physicalAspect = Double(info.pixelsWide) / Double(info.pixelsHigh)
+        let resolvedAspect = extendShapePreference.resolvedAspect(receiverPhysicalAspect: physicalAspect)
+        let (pointsWide, pointsHigh) = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh, aspect: resolvedAspect)
         let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
         let size = CGSize(width: pointsWide, height: pointsHigh)
-        let targetFPS = currentEffectiveFPS
+        let (resizeCaptureW, resizeCaptureH) = clampedCaptureSize(
+            pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
+        let targetFPS = effectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
+        #if DEBUG
+        Log.info("extendDebug: resizeExistingDisplay id=\(vd.displayID) "
+            + "shape=\(extendShapePreference.shape.rawValue) resolvedAspect=\(resolvedAspect) "
+            + "targetPoints=\(pointsWide)x\(pointsHigh)")
+        #endif
         let didResize = await MainActor.run {
             vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
                       movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
@@ -1141,8 +1417,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard didResize else { return false }
 
         let display = try await findSCDisplay(id: vd.displayID, expectedSize: size)
-        let captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
-        let captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
+        let (captureW, captureH) = clampedCaptureSize(pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
+        #if DEBUG
+        Log.info("extendDebug: resizeExistingDisplay selectedSCDisplay id=\(display.displayID) "
+            + "reportedSize=\(display.width)x\(display.height) encodeOutput=\(captureW)x\(captureH)")
+        #endif
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
@@ -1154,6 +1433,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Task { @MainActor in TestPattern.show(on: id) }
         }
         return true
+    }
+
+    /// hello.maxEncodeWide/High (PROTOCOL.md 6.5): a big panel does not imply
+    /// a big decoder. Caps the stream at the receiver's advertised decode
+    /// ceiling — SCK scales the capture — while the desktop keeps its full
+    /// resolved size. Aspect-preserving, never upscales (a stream already
+    /// inside the ceiling passes through unchanged). Shared by every capture
+    /// (re)start path so the ceiling is never bypassed by taking the resize
+    /// fast-path instead of a full rebuild.
+    private func clampedCaptureSize(pointsWide: Int, pointsHigh: Int, info: PhoneInfo) -> (Int, Int) {
+        let nativeW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
+        let nativeH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
+        let (captureW, captureH) = DecodeCeiling.clamp(
+            width: nativeW, height: nativeH, maxWide: info.maxEncodeWide, maxHigh: info.maxEncodeHigh)
+        if captureW != nativeW || captureH != nativeH {
+            Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling "
+                + "\(info.maxEncodeWide ?? 0)x\(info.maxEncodeHigh ?? 0)")
+        }
+        return (captureW, captureH)
     }
 
     /// The virtual display takes a moment to show up in shareable content.
@@ -1218,21 +1516,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.sendAllowInputState()
                 self.sendVideoState()
                 self.sendAudioState()
+                self.sendExtendShapeState()
             }
             await status("Video off — controls remain connected")
             return
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        #if DEBUG
+        Log.info("extendDebug: startCapture mode=\(mode.rawValue) targetDisplay=\(display.displayID) "
+            + "SCDisplaySize=\(display.width)x\(display.height) requestedEncode=\(pixelsWide)x\(pixelsHigh) "
+            + "captureGeneration=\(captureGenerationNow)")
+        #endif
 
         // Capability-aware effective FPS (high-refresh milestone):
         // Efficiency/Performance/Custom clamped to the receiver's advertised
-        // max refresh rate and to the 120 FPS product ceiling. Mirror mode's
-        // physical source still governs how many *unique* frames actually
-        // exist — this only ever asks SCK for up to this rate, it never
-        // fabricates duplicates, so a 60Hz physical display streaming under
-        // Performance simply keeps delivering real frames at its own cadence.
-        let targetFPS = currentEffectiveFPS
+        // max refresh rate, an optional receiver-enforced ceiling, and the
+        // 120 FPS product ceiling — and now also to the encoder-safe ceiling
+        // for THESE final encode dimensions (PART 1/7), so a resolution that
+        // can't sustain the requested rate never reaches VideoToolbox at it.
+        // Mirror mode's physical source still governs how many *unique*
+        // frames actually exist — this only ever asks SCK for up to this
+        // rate, it never fabricates duplicates, so a 60Hz physical display
+        // streaming under Performance simply keeps delivering real frames at
+        // its own cadence.
+        let fpsResult = effectiveFPS(width: pixelsWide, height: pixelsHigh)
+        let targetFPS = fpsResult.fps
         captureTargetFPS = targetFPS
+        logEncodeCapability(width: pixelsWide, height: pixelsHigh, result: fpsResult)
 
         let config = SCStreamConfiguration()
         config.width = pixelsWide
@@ -1321,6 +1631,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendAllowInputState()
             self.sendVideoState()
             self.sendAudioState()
+            self.sendExtendShapeState()
         }
         guard authenticatedSession.isLive(generation: sessionGeneration) else {
             Log.info("sessionDebug: ignored stale capture status generation=\(sessionGeneration)")
@@ -1559,7 +1870,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // encoding on it directly instead of restarting capture (which
             // would find `stream != nil` and throw "already active").
             do {
-                captureTargetFPS = currentEffectiveFPS
+                captureTargetFPS = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh).fps
                 try setupEncoder(width: capturePixelsWide, height: capturePixelsHigh, fps: captureTargetFPS)
             } catch {
                 Log.info("video resume encoder setup failed: \(error) — entering capture recovery")
@@ -1584,10 +1895,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let display = try await findSCDisplay(
                     id: vd.displayID,
                     expectedSize: CGSize(width: vd.pointsWide, height: vd.pointsHigh))
-                let width = capturePixelsWide > 0
-                    ? capturePixelsWide : (Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1
-                let height = capturePixelsHigh > 0
-                    ? capturePixelsHigh : (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1
+                var width = capturePixelsWide
+                var height = capturePixelsHigh
+                if width <= 0 || height <= 0 {
+                    (width, height) = lastHello.map {
+                        clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
+                    } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
+                          (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+                }
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
         } catch is CancellationError {
@@ -1628,8 +1943,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 let size = CGSize(width: vd.pointsWide, height: vd.pointsHigh)
                 let display = try await findSCDisplay(id: vd.displayID, expectedSize: size)
-                let width = (Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1
-                let height = (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1
+                let (width, height) = lastHello.map {
+                    clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
+                } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
+                      (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
         } catch is CancellationError {
@@ -1878,6 +2195,59 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         scheduleCaptureRecovery()
     }
 
+    /// PART 8 recovery: called at most once per capture generation (guarded
+    /// by `encoderRecoveryDowngradedGeneration` at the call site) after
+    /// `encodeFailureStreakLimit` consecutive encode-output failures with
+    /// zero successful frames. Reconfigures the LIVE stream/encoder at the
+    /// next lower supported FPS tier — same in-place mechanism as
+    /// `applyEffectiveFPSChange` — rather than tearing down and rebuilding
+    /// the whole capture pipeline, so a genuinely-transient stall isn't
+    /// compounded by a full restart. Already at the lowest tier (1 FPS)
+    /// means the size itself is the problem, not the rate — falls through
+    /// to the ordinary capture-recovery/reconnect path instead of an
+    /// infinite downgrade loop.
+    private func recoverFromEncoderFailureStreak(generation: UInt64) {
+        guard generation == captureGenerationNow, let stream,
+              capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
+        let tiers = EncoderCapability.supportedFPSTiers
+        guard let currentIndex = tiers.firstIndex(where: { $0 >= captureTargetFPS }),
+              currentIndex > 0 else {
+            Log.info("encoder failure safety net: no successful frames after "
+                + "\(encodeFailureStreakLimit) attempts at \(capturePixelsWide)x\(capturePixelsHigh)"
+                + "@\(captureTargetFPS), already at the lowest FPS tier — entering capture recovery")
+            guard updateCaptureState({ $0.unexpectedStop() }) else { return }
+            scheduleCaptureRecovery()
+            return
+        }
+        let downgraded = tiers[currentIndex - 1]
+        Log.info("encoder failure safety net: no successful frames after \(encodeFailureStreakLimit) "
+            + "attempts at \(capturePixelsWide)x\(capturePixelsHigh)@\(captureTargetFPS) — "
+            + "recovering once at \(downgraded) FPS")
+        needsKeyframe = true
+        let config = SCStreamConfiguration()
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(downgraded * 2))
+        Task {
+            do {
+                try await stream.updateConfiguration(config)
+            } catch {
+                Log.info("failure-streak SCK reconfigure failed: \(error)")
+            }
+            self.queue.async {
+                guard self.stream === stream, generation == self.captureGenerationNow else { return }
+                self.captureTargetFPS = downgraded
+                do {
+                    try self.setupEncoder(width: self.capturePixelsWide, height: self.capturePixelsHigh,
+                                          fps: downgraded)
+                    self.sendMaxFPSState()
+                } catch {
+                    Log.info("encoder failure-streak recovery setup failed: \(error) — entering capture recovery")
+                    guard self.updateCaptureState({ $0.unexpectedStop() }) else { return }
+                    self.scheduleCaptureRecovery()
+                }
+            }
+        }
+    }
+
     /// Retry capture without rebuilding a healthy display. Extend recovery
     /// keeps its existing reattach-first path; Mirror recovery reattaches to
     /// the captured physical display and rebuilds capture alone on fallback.
@@ -2020,8 +2390,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                           userInfo: [NSLocalizedDescriptionKey: "virtual display is unavailable"])
         }
         let display = try await findSCDisplay(id: vd.displayID)
-        let captureW = (Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1
-        let captureH = (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1
+        let (captureW, captureH) = lastHello.map {
+            clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
+        } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
+              (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
     }
 
@@ -3255,6 +3627,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { await self.status("Connected") }
                 let previous = lastHello
                 lastHello = info
+                // Receiver-enforced max FPS (PART 3): load this peer's own
+                // stored preference the first time it's known, same
+                // convention as Extend shape — a live `maxFPSRequest` (or
+                // the Mac's own per-device picker) takes over from here.
+                if previous == nil, let peerID = info.id,
+                   let stored = ReceiverMaxFPSStore.load(peerID: peerID) {
+                    receiverMaxFPSPreference = stored
+                    Task { @MainActor in self.onMaxFPSChanged?(stored) }
+                }
                 // A fresh dial classifies before the hello names the device —
                 // now that it has, decide again (see the comment on the func).
                 if let conn = connection { refreshDirectLinkClassification(for: conn) }
@@ -3288,6 +3669,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendStreamingProfileState()
                 sendWakeInfo()
                 sendDisplayModeState()
+                sendMaxFPSState()
                 if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
                     sendMirrorDisplayState()
                 }
@@ -3476,6 +3858,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String
             Task { @MainActor in self.onMirrorDisplayRequest?(requestedUUID) }
+        case WireMessage.extendShapeRequest:
+            // Same construction as `mirrorDisplayRequest` above: only ever
+            // read off an already-authenticated `connection`.
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.extendShapeWireVersion,
+                  let preference = ExtendDisplayShapePreference(message: obj) else { return }
+            applyExtendShape(preference, info: info)
+        case WireMessage.maxFPSRequest:
+            // Same construction as `extendShapeRequest` above: only ever
+            // read off an already-authenticated `connection`.
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.maxFPSWireVersion,
+                  let preference = ReceiverMaxFPSPreference(message: obj) else { return }
+            applyMaxFPS(preference, info: info)
         case WireMessage.promoteInteractiveWake:
             // `handleControl` only ever runs on data read off `connection`,
             // which for wireless media is always the pinned-mutual-TLS
@@ -3657,6 +4053,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTCompressionSessionPrepareToEncodeFrames(encoder)
+        // Every path that sets a new encode rate goes through here (initial
+        // start, resize, live FPS change, encoder-failure recovery) — the
+        // single choke point to resync frame ADMISSION to match, so
+        // VideoToolbox never actually receives more than `fps` submissions/
+        // sec regardless of how fast ScreenCaptureKit delivers frames.
+        frameRateLimiter.reconfigure(fps: fps)
         Log.info("encoder ready: \(width)x\(height)@\(fps) H.264 \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
     }
 
@@ -3685,6 +4087,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastCaptureAt = Date()
             capFrames += 1
 
+            #if DEBUG
+            // BLACK-VIDEO forensics: answers "did ScreenCaptureKit itself
+            // hand us real desktop pixels, or an all-black frame?" for the
+            // first few frames of every capture generation (covers both
+            // Mirror and Extend — same callback — so the two can be
+            // compared directly from the log). Cheap: a sparse ~32x32 grid
+            // sample, not a full-frame scan, and capped at 5 frames/generation.
+            if debugSCKFrameLogGeneration != generation {
+                debugSCKFrameLogGeneration = generation
+                debugSCKFrameLogCount = 0
+            }
+            if debugSCKFrameLogCount < 5 {
+                debugSCKFrameLogCount += 1
+                let n = debugSCKFrameLogCount
+                let w = CVPixelBufferGetWidth(pixelBuffer)
+                let h = CVPixelBufferGetHeight(pixelBuffer)
+                let luma = Self.debugAverageLuma(pixelBuffer)
+                Log.info("extendDebug: SCK frame mode=\(mode.rawValue) gen=\(generation) #\(n) "
+                    + "\(w)x\(h) avgLuma=\(luma.map { String(format: "%.1f", $0) } ?? "n/a")")
+            }
+            #endif
+
             // No receiver, video off, or a pipeline stage is backed up: skip
             // this frame. Video off never tears down an audio-only stream
             // (see startCapture), so this guard — not stream teardown — is
@@ -3692,6 +4116,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard connectionReady, videoEnabled else { return }
             if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
             if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
+            // Actual encode ADMISSION gate (not just capture pacing/VT's own
+            // hint): SCK's capture headroom means frames can arrive up to
+            // ~2x the target rate, and neither `minimumFrameInterval` nor
+            // `kVTCompressionPropertyKey_ExpectedFrameRate` stops VideoToolbox
+            // from being handed more than the authoritative effective FPS —
+            // see `FrameRateLimiter`.
+            guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
 
             encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation)
 
@@ -3837,20 +4268,56 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     status,
                     at: ProcessInfo.processInfo.systemUptime
                 )
+                if self.encodeFailureStreakGeneration != generation {
+                    self.encodeFailureStreakGeneration = generation
+                    self.encodeFailureStreakCount = 0
+                }
+                self.encodeFailureStreakCount += 1
+                let shouldAttemptRecovery = self.encodeLastSuccessGeneration != generation
+                    && self.encodeFailureStreakCount >= self.encodeFailureStreakLimit
+                    && self.encoderRecoveryDowngradedGeneration != generation
+                if shouldAttemptRecovery { self.encoderRecoveryDowngradedGeneration = generation }
                 self.pipelineLock.unlock()
                 self.handleEncodeOutputFailureLogAction(logAction)
                 if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
                     self.wakeCaptureAwaitingEncodedFrameGeneration = nil
                     Log.info("wakeCapture: encoderRejectedFirstFrame error=\(status)")
                 }
+                if shouldAttemptRecovery {
+                    self.queue.async { self.recoverFromEncoderFailureStreak(generation: generation) }
+                }
                 return
             }
+            self.pipelineLock.lock()
+            self.encodeLastSuccessGeneration = generation
+            self.pipelineLock.unlock()
             guard generation == self.captureGenerationNow else { return }
             if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
                 self.wakeCaptureAwaitingEncodedFrameGeneration = nil
                 Log.info("wakeCapture: firstEncodedFrame")
                 Log.info("wakeCapture: ready")
             }
+            #if DEBUG
+            // BLACK-VIDEO forensics (encoder stage): proves VideoToolbox is
+            // actually emitting non-trivial output — and whether it's the
+            // keyframe/parameter-set-bearing packet a dimension change
+            // needs — for the first few encoded frames of every generation.
+            self.pipelineLock.lock()
+            if self.debugEncodeLogGeneration != generation {
+                self.debugEncodeLogGeneration = generation
+                self.debugEncodeLogCount = 0
+            }
+            let shouldLogEncode = self.debugEncodeLogCount < 5
+            if shouldLogEncode { self.debugEncodeLogCount += 1 }
+            let encodeLogNumber = self.debugEncodeLogCount
+            self.pipelineLock.unlock()
+            if shouldLogEncode {
+                let dims = CMSampleBufferGetFormatDescription(buffer).map { CMVideoFormatDescriptionGetDimensions($0) }
+                Log.info("extendDebug: encoder output gen=\(generation) #\(encodeLogNumber) "
+                    + "dims=\(dims.map { "\($0.width)x\($0.height)" } ?? "?") "
+                    + "bytes=\(CMSampleBufferGetTotalSampleSize(buffer)) keyframe=\(self.isKeyframe(buffer))")
+            }
+            #endif
             if let data = self.annexB(from: buffer) {
                 let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
                 var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
@@ -3954,6 +4421,65 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     // MARK: - H.264 -> Annex B
+
+    #if DEBUG
+    /// BLACK-VIDEO forensics: a cheap, sparse-sampled average luma over a
+    /// pixel buffer — never a full-frame scan — to answer "is this frame
+    /// actually black?" without the cost/privacy weight of dumping frame
+    /// data. Handles the two formats this pipeline ever produces (420v
+    /// biplanar, the encoder's native input, and BGRA behind the `-pixfmt`
+    /// debug switch); returns `nil` for anything else rather than guessing.
+    static func debugAverageLuma(_ pixelBuffer: CVPixelBuffer) -> Double? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        var sum = 0.0
+        var count = 0
+        switch format {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+            guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            guard width > 0, height > 0 else { return nil }
+            let buf = base.assumingMemoryBound(to: UInt8.self)
+            let stepX = max(width / 32, 1), stepY = max(height / 32, 1)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < width {
+                    sum += Double(buf[y * stride + x])
+                    count += 1
+                    x += stepX
+                }
+                y += stepY
+            }
+        case kCVPixelFormatType_32BGRA:
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+            let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            guard width > 0, height > 0 else { return nil }
+            let buf = base.assumingMemoryBound(to: UInt8.self)
+            let stepX = max(width / 32, 1), stepY = max(height / 32, 1)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < width {
+                    let o = y * stride + x * 4
+                    sum += 0.114 * Double(buf[o]) + 0.587 * Double(buf[o + 1]) + 0.299 * Double(buf[o + 2])
+                    count += 1
+                    x += stepX
+                }
+                y += stepY
+            }
+        default:
+            return nil
+        }
+        guard count > 0 else { return nil }
+        return sum / Double(count)
+    }
+    #endif
 
     private func annexB(from sample: CMSampleBuffer) -> Data? {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }

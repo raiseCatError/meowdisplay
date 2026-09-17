@@ -36,6 +36,11 @@ struct ReceiverDeviceDetailView: View {
                 }
             }
 
+            if let session {
+                extendShapeSection(session)
+                maxFPSSection(session)
+            }
+
             if let session, session.receiverPreferencesReported {
                 receiverControlsSection(session)
                 if session.receiverPinchTarget == "app" || session.receiverRotateTarget == "app" {
@@ -78,6 +83,111 @@ struct ReceiverDeviceDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(name)
+    }
+
+    /// This device's own Extend shape (PROTOCOL.md 6.7) — Mac-authoritative,
+    /// unlike the receiver-reported sections below: `session.sender` is the
+    /// live source of truth and this control writes straight through it via
+    /// `requestExtendShape`, the same path a receiver's own
+    /// `extendShapeRequest` takes.
+    @ViewBuilder
+    private func extendShapeSection(_ session: DeviceSession) -> some View {
+        Section {
+            Picker("Extend Display", selection: Binding(
+                get: { session.extendShapePreference.shape },
+                set: { shape in
+                    var preference = session.extendShapePreference
+                    preference.shape = shape
+                    session.sender.requestExtendShape(preference)
+                })) {
+                ForEach(ExtendDisplayShape.allCases) { shape in
+                    Text(shape.title).tag(shape)
+                }
+            }
+            if session.extendShapePreference.shape == .automatic {
+                Toggle("Use Full Display", isOn: Binding(
+                    get: { session.extendShapePreference.useFullDisplay },
+                    set: { value in
+                        var preference = session.extendShapePreference
+                        preference.useFullDisplay = value
+                        session.sender.requestExtendShape(preference)
+                    }))
+            }
+        } header: {
+            Text("Extend Shape")
+        } footer: {
+            Text("Only affects this device. Takes effect immediately while Extend is active.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// This device's own receiver-enforced max-FPS preference (PART 2/3/4) —
+    /// same Mac-authoritative, `session.sender`-backed pattern as
+    /// `extendShapeSection` above, writing through `requestMaxFPS`. The
+    /// picker only ever offers tiers this device can currently actually
+    /// reach (PART 2): filtered by the receiver's own advertised refresh
+    /// rate AND the encoder-safe ceiling for the stream's current encode
+    /// size, computed locally via `EncoderCapability` — the Mac already
+    /// knows its own encode dimensions, no round trip needed.
+    @ViewBuilder
+    private func maxFPSSection(_ session: DeviceSession) -> some View {
+        let hasLiveSize = session.videoWidth > 0 && session.videoHeight > 0
+        let encoderSafeFPS = hasLiveSize
+            ? EncoderCapability.codecSafeFPS(width: session.videoWidth, height: session.videoHeight)
+            : EncoderCapability.supportedFPSTiers.last ?? StreamingFPSPolicy.hardCapFPS
+        let availableTiers = StreamingFPSPolicy.availableUserCeilingTiers(
+            receiverMaxFPS: session.receiverMaxFPS, encoderSafeFPS: encoderSafeFPS)
+        Section {
+            Toggle("Enforce Maximum FPS", isOn: Binding(
+                get: { session.maxFPSPreference.enabled },
+                set: { enabled in
+                    var preference = session.maxFPSPreference
+                    preference.enabled = enabled
+                    session.sender.requestMaxFPS(preference)
+                }))
+            if session.maxFPSPreference.enabled {
+                Picker("Maximum FPS", selection: Binding(
+                    get: { session.maxFPSPreference.maxFPS },
+                    set: { fps in
+                        var preference = session.maxFPSPreference
+                        preference.maxFPS = fps
+                        session.sender.requestMaxFPS(preference)
+                    })) {
+                    ForEach(availableTiers, id: \.self) { fps in
+                        Text("\(fps)").tag(fps)
+                    }
+                }
+            }
+        } header: {
+            Text("Maximum FPS")
+        } footer: {
+            if hasLiveSize {
+                Text(fpsLimitationText(width: session.videoWidth, height: session.videoHeight,
+                                       encoderSafeFPS: encoderSafeFPS))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Only affects this device. Unavailable values (above this device's own refresh rate, or above what the current display size can safely encode) are hidden.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// PART 5 exact user-facing text: derived from the CURRENT final encode
+    /// dimensions, never hardcoded from aspect ratio alone — a smaller 16:9
+    /// stream that genuinely supports 120 says so, and stays quiet unless
+    /// something is actually limiting it below what was requested.
+    private func fpsLimitationText(width: Int, height: Int, encoderSafeFPS: Int) -> String {
+        guard let profile = StreamingProfile(rawValue: UserDefaults.standard.string(forKey: "streamingProfile") ?? "") else {
+            return "Maximum for this display size: \(encoderSafeFPS) FPS."
+        }
+        let requested = StreamingFPSPolicy.profileRequestedFPS(profile: profile, requestedFPS: nil)
+        if encoderSafeFPS >= requested {
+            return "Maximum for this display size: \(encoderSafeFPS) FPS."
+        }
+        return "\(profile.label) requests \(requested) FPS. Limited to \(encoderSafeFPS) FPS at this display size."
     }
 
     @ViewBuilder

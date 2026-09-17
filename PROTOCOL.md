@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 12** &nbsp;|&nbsp; Status: **normative** for `pv <= 12`
+**Protocol version (`pv`): 15** &nbsp;|&nbsp; Status: **normative** for `pv <= 15`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -379,6 +379,9 @@ Coordinates use the conventions of section 7.
 | `videoRequest` | pv 9 | `enabled` (bool) | Request Mac video capture/encode/transmission on or off |
 | `nativeAppGesture` | pv 10 | `kind` (`magnify` or `rotate`), `phase` (`began`, `changed`, `ended`, or `cancelled`), `delta` (number) | Continuous foreground-app gesture lifecycle |
 | `audioRequest` | pv 12 | `enabled` (bool) | Request Mac system-audio capture on/off for this receiver |
+| `mirrorDisplayRequest` | pv 13 | `selectedUUID`? | Select Auto (absent/null) or a specific stable display UUID as the Mirror capture source |
+| `extendShapeRequest` | pv 14 | `shape`, `useFullDisplay` (bool) | Request an Extend virtual-display shape change (section 6.7) |
+| `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -601,6 +604,9 @@ section 4.
 | `allowInputState` | pv 8 | `allowed` (bool) | Mac-authoritative input gate state |
 | `videoState` | pv 9 | `enabled` (bool), `width`, `height` | Mac-authoritative video state and retained mapping geometry |
 | `audioState` | pv 12 | `enabled` (bool) | Mac-authoritative confirmed system-audio production state |
+| `mirrorDisplayState` | pv 13 | `selectedUUID`?, `displays` (array) | Mac-authoritative confirmed Mirror capture-source selection + display inventory |
+| `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool) | Mac-authoritative confirmed active Extend shape (section 6.7) |
+| `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -807,13 +813,25 @@ screen's actual maximum refresh rate (e.g. `UIScreen.maximumFramesPerSecond`
 on iOS) — never a guess, and never simply 120 because the device model
 *might* be ProMotion.
 
-The sender picks a per-session effective frame rate from its local
-Streaming Profile setting (Efficiency / Performance / Custom) and this
-field:
+The sender picks a per-session effective frame rate (`StreamingFPSPolicy.
+effectiveFPS`) from its local Streaming Profile setting (Efficiency /
+Performance / Custom), this field, an optional receiver-enforced ceiling
+(section 6.8), and the encoder-safe ceiling for the CURRENT final encode
+pixel dimensions (`EncoderCapability.codecSafeFPS` — section 6.5's decode
+ceiling changes what those dimensions are, so this is always computed
+after it):
 
 ```
-usableFPS = min(profile/customFPS, hello.maxFPS ?? 60, 120)
+usableFPS = min(profile/customFPS, hello.maxFPS ?? 60, userMaxFPS ?? 120,
+                encoderSafeFPS(encodeWidth, encodeHeight), 120)
 ```
+
+`encoderSafeFPS(...)` is an ARBITRARY positive integer (e.g. `118`, `106`),
+never quantized to a tier — the sender streams at the real computed value.
+Only the receiver-enforced ceiling's PICKER (section 6.8) is restricted to
+the fixed tier list `1/5/10/24/30/60/120`; an unenforced/automatic stream is
+never floored to the next lower tier just because that is what the picker
+would offer.
 
 * **Efficiency** requests at most 60.
 * **Performance** and **Custom "Auto"** request up to 120.
@@ -827,6 +845,89 @@ purely informational, like `maxEncodeWide`/`maxEncodeHigh`: it changes what
 rate the sender *requests* from its own capture/encode pipeline, never
 what the receiver promises to decode at (H.264 frames carry no inherent
 rate requirement — any cadence decodes).
+
+The encoder-safe ceiling exists because VideoToolbox's H.264 hardware
+encoder has a real macroblock-rate throughput limit that a big-enough
+`encodeWidth x encodeHeight x fps` product exceeds regardless of what
+level/profile is configured — observed as `VTCompressionSessionEncodeFrame`
+repeatedly emitting nil output instead of failing cleanly. The sender MUST
+compute this from the actual final encode pixel size (post section 6.5
+clamping), never from the desktop/virtual-display size or the aspect ratio
+alone, and MUST NOT shrink the Extend desktop/virtual-display size just to
+preserve a higher frame rate — it drops the rate instead.
+
+### 6.7 Extend display shape (`extendShapeRequest` / `extendShapeState`)
+
+Before `pv` 14, Extend's virtual display always inherited the receiver's own
+physical panel aspect verbatim (`hello.pixelsWide/High` halved per axis).
+`pv` 14 lets either end choose a Mac-like shape instead, with the Mac
+remaining the authority that actually builds the virtual display.
+
+Both messages carry the same two fields:
+
+* `shape` (string): one of `"automatic"`, `"16:10"`, `"16:9"`, `"3:2"`,
+  `"4:3"`, `"5:4"`, `"21:9"`, `"32:9"`, `"1:1"`. Senders MUST ignore a
+  request with an unrecognized `shape` rather than treat it as fatal.
+* `useFullDisplay` (bool): meaningful only when `shape` is `"automatic"`.
+  `true` resolves to the receiver's own physical panel aspect (the pre-`pv`-14
+  behavior); `false` (the default) resolves to a fixed 16:10. Ignored for
+  every explicit ratio.
+
+**`extendShapeRequest`** (receiver -> Mac) asks the Mac to change the active
+Extend shape. The Mac owns the transition exactly like
+`displayModeRequest`: a failed/ignored request produces no reply, and a
+change that succeeds is followed by a fresh `extendShapeState`, sent again
+on every subsequent successful capture start so the receiver never infers
+shape from stream dimensions. Receivers MUST NOT send this below `pv` 14.
+
+**`extendShapeState`** (Mac -> receiver) reports the Mac's actual active
+shape/Full-Display setting — after a Mac-originated change (e.g. its own
+Settings UI), after honoring a receiver request, and on every newly
+established session. A receiver MUST treat it as authoritative rather than
+assuming its own request was honored verbatim.
+
+Changing the resolved aspect changes the virtual display's **point**
+dimensions only; the encoded stream is still separately subject to the
+decode ceiling in section 6.5. Implementations SHOULD derive sensible pixel
+dimensions from the receiver's own panel size rather than exposing an
+arbitrary width x height editor — the official apps do not offer one.
+
+### 6.8 Receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`)
+
+`pv` 15 lets a receiver optionally enforce its OWN maximum frame rate,
+independent of (and always narrower than) the Streaming Profile ceiling
+in section 6.6 — e.g. capping an otherwise-120-capable session at 30 to
+save battery on one specific device, without touching the Mac-wide
+profile. This is a genuine capture/encode ceiling, not receiver-side
+frame dropping: the sender asks ScreenCaptureKit/VideoToolbox for at most
+this rate.
+
+**`maxFPSRequest`** (receiver -> Mac) asks the Mac to change this peer's
+enforcement. Fields: `enabled` (bool) and `maxFPS` (int, one of `1`, `5`,
+`10`, `24`, `30`, `60`, `120`). The Mac owns the transition exactly like
+`extendShapeRequest`: a failed/ignored request produces no reply, and a
+change that succeeds is followed by a fresh `maxFPSState`. Receivers MUST
+NOT send this below `pv` 15, and MUST NOT offer a value in their own picker
+above what the Mac's last `maxFPSState.availableTiers` reported reachable.
+
+**`maxFPSState`** (Mac -> receiver) reports the Mac's actual active
+enforcement (`enabled`, `maxFPS`) plus enough of its last `effectiveFPS`
+calculation for the receiver to render section 6.6's limitation text
+without re-deriving `EncoderCapability` itself (which needs the encode
+pixel dimensions a receiver never sees): `availableTiers` (the FPS values
+currently selectable, already filtered by `hello.maxFPS` and the current
+encoder-safe ceiling), `encoderSafeFPS`, `requestedFPS` (the profile's own
+unclamped request), `effectiveFPS`, and `reason` (one of `"requested"`,
+`"receiverCapability"`, `"encoderThroughput"`, `"userCeiling"` — which
+constraint actually won). Re-sent on every successful capture start (same
+pattern as `extendShapeState`), including a shape/resolution change, so a
+receiver's limitation text updates on its own.
+
+This preference is per-peer, stored keyed by the receiver's stable install
+id — never mixed with Extend shape or TrustStore/security state. A
+receiver below `pv` 15 gets no enforcement UI and no `maxFPSState`; the
+Mac still applies the encoder-safe ceiling from section 6.6 regardless, so
+an old receiver still gets a working (if unlabeled) stream.
 
 ## 7. Coordinate spaces and units
 
@@ -943,7 +1044,7 @@ Rules already stated elsewhere, gathered:
 Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 
 * `pv` is a single integer, bumped **only when the wire changes**, never
-  per release. Current: **12**.
+  per release. Current: **14**.
 * A peer that advertises no `pv` anywhere (TXT, `hello`, `welcome`) **is**
   protocol 1.
 * Each side declares the oldest peer it supports (`welcome.min` on the
@@ -974,6 +1075,8 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 10 | Continuous `nativeAppGesture` magnify/rotate lifecycle (advertised; not yet injectable — see Appendix B) |
 | 11 | Transcript-authenticated pairing and pinned mutual TLS 1.3 for LAN/AWDL media |
 | 12 | Mac system audio: typed `0x01` media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
+| 13 | Mac-authoritative Mirror capture-source selection: `mirrorDisplayRequest` / `mirrorDisplayState` |
+| 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
 
 ---
 
@@ -1063,3 +1166,6 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-14 | `pv` 7: receiver mode requests and Mac-authoritative Mirror/Extend state |
 | 2026-09-15 | `pv` 11: transcript-authenticated pairing and pinned mutual TLS 1.3 for LAN/AWDL |
 | 2026-09-16 | `pv` 12: Mac system audio — typed media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
+| 2026-09-17 | `pv` 13: Mac-authoritative Mirror capture-source selection (`mirrorDisplayRequest` / `mirrorDisplayState`) |
+| 2026-09-18 | `pv` 14: Mac-authoritative Extend display shape (`extendShapeRequest` / `extendShapeState`, section 6.7); additive `hello.maxEncodeWide`/`maxEncodeHigh` now advertised by the official iOS receiver |
+| 2026-09-18 | `pv` 15: encoder-safe FPS ceiling and receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`, section 6.8) |

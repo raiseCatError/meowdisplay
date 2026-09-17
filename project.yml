@@ -200,6 +200,11 @@ targets:
       - Shared/PairingPromptModel.swift
       - Shared/StreamingProfile.swift
       - Shared/CatMode.swift
+      - Shared/ExtendDisplayShape.swift
+      - Shared/DecodeCeiling.swift
+      - Shared/EncoderCapability.swift
+      - Shared/ReceiverMaxFPS.swift
+      - Shared/FrameRateLimiter.swift
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight

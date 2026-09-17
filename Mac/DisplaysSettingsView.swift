@@ -25,6 +25,27 @@ struct DisplaysSettingsView: View {
                 }
             }
 
+            Section {
+                Picker("Extend Display", selection: Binding(
+                    get: { controller.extendShapeDefault.shape },
+                    set: { controller.extendShapeDefault.shape = $0 })) {
+                    ForEach(ExtendDisplayShape.allCases) { shape in
+                        Text(shape.title).tag(shape)
+                    }
+                }
+                if controller.extendShapeDefault.shape == .automatic {
+                    Toggle("Use Full Display", isOn: Binding(
+                        get: { controller.extendShapeDefault.useFullDisplay },
+                        set: { controller.extendShapeDefault.useFullDisplay = $0 }))
+                }
+            } header: {
+                Text("Extend Shape")
+            } footer: {
+                Text("Applies to devices that haven't chosen their own shape yet. Each device remembers whatever shape it (or this Mac, in its own device settings) last selected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Output") {
                 LabeledContent("Display layout") {
                     Button("Arrange Displays…") {

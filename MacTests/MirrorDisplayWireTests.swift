@@ -10,10 +10,11 @@ import XCTest
 /// contract both sides actually share.
 final class MirrorDisplayWireTests: XCTestCase {
 
-    func testMirrorDisplayWireVersionIsTheCurrentProtocolVersion() {
-        // Mirror display selection is what bumped the wire this milestone —
-        // see AudioMediaFrameTests for the same canary at audio's milestone.
-        XCTAssertEqual(WireProtocol.mirrorDisplayWireVersion, WireProtocol.version)
+    func testMirrorDisplayWireVersionIsFixedAt13() {
+        // Mirror display selection bumped the wire to 13 at its own
+        // milestone — superseded as "the current version" by
+        // `extendShapeWireVersion` (14) at a later one; see
+        // ExtendDisplayShapeTests/ProtocolVersionTests for that canary now.
         XCTAssertEqual(WireProtocol.mirrorDisplayWireVersion, 13)
     }
 

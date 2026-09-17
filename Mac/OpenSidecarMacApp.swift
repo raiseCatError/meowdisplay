@@ -205,6 +205,20 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var receiverSnapRotation = true
     @Published var receiverAppGestureCommands = AppGestureCommands.defaults
     @Published var receiverAVSyncOffsetMs = 0
+    // This peer's live Extend shape (PROTOCOL.md 6.7). Unlike the
+    // receiver-reported fields above, MEOW's own `MacSender` is the
+    // authoritative store for this one — mirrored here via
+    // `onExtendShapeChanged` purely for `ReceiverDeviceDetailView` display.
+    @Published var extendShapePreference = ExtendDisplayShapePreference.standard
+    // This peer's live receiver-enforced max-FPS preference (PART 2/3/4) —
+    // same "MacSender is authoritative, mirrored here for display" pattern
+    // as `extendShapePreference`, via `onMaxFPSChanged`.
+    @Published var maxFPSPreference = ReceiverMaxFPSPreference.standard
+    // This peer's advertised HARDWARE max refresh rate (`hello.maxFPS`) —
+    // nil until the first hello reports it, exactly
+    // like `receiverPreferencesReported` distinguishes "unknown" from
+    // "reported and low". Used to filter the Maximum FPS picker.
+    @Published var receiverMaxFPS: Int?
     // Nil until the first hello with these fields arrives (protocol 6+) —
     // distinguishes "not yet reported" from "reported and off/default" so
     // device detail can show "No compatible device connected" honestly
@@ -344,6 +358,23 @@ final class SenderController: ObservableObject {
     // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
     // Automatic. Irrelevant to Extend, which always uses its own virtual
     // display.
+    // Default Extend shape for any peer with no per-peer stored preference of
+    // its own yet (see `ExtendDisplayShapeStore`). Not itself pushed to
+    // active sessions on change — that would make an already-customized
+    // peer's shape bleed from whichever device this Mac-wide default last
+    // changed for, which is exactly what per-peer persistence exists to
+    // avoid. New connections pick it up naturally.
+    @Published var extendShapeDefault = (UserDefaults.standard.dictionary(forKey: "extendShapeDefault")).flatMap {
+        (raw: [String: Any]) -> ExtendDisplayShapePreference? in
+        guard let rawShape = raw["shape"] as? String, let shape = ExtendDisplayShape(rawValue: rawShape) else { return nil }
+        return ExtendDisplayShapePreference(shape: shape, useFullDisplay: raw["useFullDisplay"] as? Bool ?? false)
+    } ?? .standard {
+        didSet {
+            UserDefaults.standard.set(["shape": extendShapeDefault.shape.rawValue,
+                                        "useFullDisplay": extendShapeDefault.useFullDisplay],
+                                       forKey: "extendShapeDefault")
+        }
+    }
     @Published var mirrorDisplayUUID = UserDefaults.standard.string(forKey: "mirrorDisplayUUID") {
         didSet {
             guard mirrorDisplayUUID != oldValue else { return }
@@ -380,7 +411,19 @@ final class SenderController: ObservableObject {
             sessions.forEach { $0.sender.pushDisplayModeState() }
             return
         }
-        mode = requested
+        // `DisplaysSettingsView`'s Mode picker is a segmented control, whose
+        // Binding(set:) AppKit invokes synchronously as part of SwiftUI's
+        // current view-update transaction — this function's caller there,
+        // not something under our control. Assigning `mode` in that same
+        // frame cascades through its own `didSet` (`restartAll()` — tears
+        // down and reconnects every session, `@Published`-mutating each one
+        // along the way) still nested inside that transaction, which is
+        // exactly "publishing changes from within view updates". Yielding
+        // to the next main-actor turn lets SwiftUI finish committing the
+        // picker's own update first; every other caller of `requestMode`
+        // (a receiver's `displayModeRequest`) already runs on its own async
+        // hop, so this adds at most one harmless extra turn there.
+        Task { @MainActor in self.mode = requested }
     }
 
     func requestVideoEnabled(_ enabled: Bool) {
@@ -1596,7 +1639,8 @@ final class SenderController: ObservableObject {
                                videoEnabled: videoEnabled,
                                mirrorDisplayUUID: mirrorDisplayUUID,
                                streamingProfile: streamingProfile,
-                               customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil)
+                               customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil,
+                               extendShapePreference: extendShapeDefault)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let intendedPeerID: String? = {
             if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
@@ -1660,6 +1704,12 @@ final class SenderController: ObservableObject {
             // when Mirror is active, so both surfaces stay one source of truth.
             self.mirrorDisplayUUID = requestedUUID
         }
+        sender.onExtendShapeChanged = { [weak session] preference in
+            session?.extendShapePreference = preference
+        }
+        sender.onMaxFPSChanged = { [weak session] preference in
+            session?.maxFPSPreference = preference
+        }
         sender.onHello = { [weak self, weak session] info in
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
@@ -1670,6 +1720,7 @@ final class SenderController: ObservableObject {
             session.applicationAuthenticated = true
             Log.info("deviceUI: activeSession added peerID=\(info.id ?? "unknown") route=\(session.route?.rawValue ?? "pending")")
             session.receiverProtocolVersion = info.protocolVersion
+            session.receiverMaxFPS = info.maxFPS
             if let value = info.trayEnabled { session.receiverTrayEnabled = value }
             if let value = info.keyboardButtonEnabled {
                 session.receiverKeyboardButtonEnabled = value
