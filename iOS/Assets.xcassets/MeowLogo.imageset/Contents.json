@@ -1,0 +1,6 @@
+{
+  "images" : [
+    { "idiom" : "universal", "filename" : "meowlogo.png" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}

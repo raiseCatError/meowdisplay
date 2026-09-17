@@ -504,7 +504,7 @@ struct IdleView: View {
         VStack(spacing: 28) {
             Spacer()
 
-            Image("AppLogo")
+            Image("MeowLogo")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 132)
