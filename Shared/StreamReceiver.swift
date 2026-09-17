@@ -43,9 +43,9 @@ struct PerfStats: Equatable {
     var transport = "—"          // USB, AWDL, or LAN from the live NWPath
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // UDP cursor datagrams missing or reordered (this window)
-    var macDrops = 0             // enc + net drops (legacy total)
-    var macEncDrops = 0          // Mac skipped capture: encoder busy
-    var macNetDrops = 0          // Mac skipped capture: TCP queue full
+    var macDrops = 0             // enc + net drops, this ~2s ping window
+    var macEncDrops = 0          // Mac skipped capture: encoder busy (this ~2s ping window)
+    var macNetDrops = 0          // Mac skipped capture: TCP queue full (this ~2s ping window)
     var macPending = 0           // Mac send queue depth right now
     var inputP50 = 0.0           // touch sent → CGEvent injected on the Mac, ms
     var inputP95 = 0.0
@@ -71,6 +71,10 @@ final class StreamReceiver: ObservableObject {
     @Published var fps = 0
     @Published private(set) var streamingProfile: StreamingProfile = .performance
     @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
+    /// Mac-authoritative Streaming Priority mirror. Default `.auto` matches
+    /// the Mac's own default so an old-peer/pre-hello receiver never assumes
+    /// a different bounded encode depth than the Mac is actually running.
+    @Published private(set) var streamingPriority: StreamingPriority = .auto
     @Published var connected = false
     @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @Published private(set) var displayState = DisplayState.running
@@ -1603,6 +1607,10 @@ final class StreamReceiver: ObservableObject {
             guard let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
             DispatchQueue.main.async { self.streamingProfile = profile }
+        case WireMessage.streamingPriorityState:
+            guard let raw = obj["priority"] as? String,
+                  let priority = StreamingPriority(rawValue: raw) else { return }
+            DispatchQueue.main.async { self.streamingPriority = priority }
         case WireMessage.maxFPSState:
             guard let update = MaxFPSStateUpdate(message: obj) else { return }
             DispatchQueue.main.async { self.applyConfirmedMaxFPS(update) }
@@ -1989,6 +1997,15 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": WireMessage.streamingProfileRequest,
                      "profile": profile.rawValue,
                      "customFrameRate": customFrameRate.rawValue])
+    }
+
+    /// Requests a Mac-side Streaming Priority change over the existing
+    /// authenticated control channel. The Mac remains authoritative and
+    /// reports the accepted priority back through `streamingPriorityState`.
+    func requestStreamingPriority(_ priority: StreamingPriority) {
+        guard connected else { return }
+        sendControl(["type": WireMessage.streamingPriorityRequest,
+                     "priority": priority.rawValue])
     }
 
     /// Turns Mac system audio on/off for this receiver. Persists the

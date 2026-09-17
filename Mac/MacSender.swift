@@ -152,6 +152,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
     @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection) -> Void)?
+    /// A receiver asked to change Streaming Priority. Handed to
+    /// `SenderController`, which owns the canonical `streamingPriority`
+    /// setting (same one its own Settings picker writes) and rebuilds the
+    /// session the same way a Streaming Profile change does.
+    @MainActor var onStreamingPriorityRequest: ((StreamingPriority) -> Void)?
     // Fired when the user stopped the capture from the system UI (menu-bar
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
@@ -219,6 +224,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // session (see SenderController.restartAll).
     private let streamingProfile: StreamingProfile
     private let customFPS: Int?
+    /// Streaming Priority (bounded encoder-pipelining depth, see
+    /// `StreamingPriorityPolicy`): like `streamingProfile`, applies per-
+    /// pipeline at construction — a change rebuilds the session (see
+    /// SenderController.restartAll).
+    private let streamingPriority: StreamingPriority
     /// Capability-aware effective encode/capture FPS for this session right
     /// now (`StreamingFPSPolicy`), at a given final encode size. Recomputed
     /// on demand from `lastHello?.maxFPS` and `receiverMaxFPSPreference` —
@@ -288,7 +298,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // gate one level up — `FrameRateLimiter` — which decides which SCK
     // samples are even eligible to reach here.
     private var pendingEncodes = 0
-    private let maxPendingEncodes = 2
+    // Streaming Priority (Auto/Prefer FPS/Prefer Latency) picks this bounded
+    // depth via `StreamingPriorityPolicy.maxPendingEncodes` — Auto keeps the
+    // 2-deep balance documented above; Prefer Latency tightens back to the
+    // pre-fix 1 (accepting the throughput ceiling this comment describes, in
+    // exchange for the smallest possible admission-to-callback latency);
+    // Prefer FPS opens one step further to 3. Still small, fixed, and always
+    // drop-not-queue once full — this is not the adaptive controller in #287.
+    private let maxPendingEncodes: Int
 
     // ── Outstanding send backpressure (maxPendingSends = 3) ──────────────────
     //
@@ -309,6 +326,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsNetThisWindow = 0
     private var dropsEncTotal = 0
     private var dropsNetTotal = 0
+    // HUD-only per-ping-interval counters (~2s, reset in `schedulePing`) —
+    // separate from `dropsEncThisWindow`/`dropsNetThisWindow` above, which
+    // are reset on the phone's own independent "stats" cadence for the
+    // PHONE-STATS debug log. The `enc↓`/`net↓` HUD metric (`PerfOverlay`)
+    // previously showed `dropsEncTotal`/`dropsNetTotal`, which only ever grow
+    // for the life of the session — misleading on a long-running stream. This
+    // makes the HUD counter answer "how many drops in roughly the last
+    // couple seconds", the same per-window shape `capFps` already uses.
+    private var dropsEncPingWindow = 0
+    private var dropsNetPingWindow = 0
     private var needsKeyframe = true
     #if DEBUG
     // Rolling ~1s sender-pipeline instrumentation (LAN FPS-collapse
@@ -694,7 +721,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          videoEnabled: Bool = true, mirrorDisplayUUID: String? = nil,
          streamingProfile: StreamingProfile = .performance, customFPS: Int? = nil,
          extendShapePreference: ExtendDisplayShapePreference = .standard,
-         receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard) {
+         receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard,
+         streamingPriority: StreamingPriority = .auto) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -708,6 +736,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.customFPS = customFPS
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
+        self.streamingPriority = streamingPriority
+        self.maxPendingEncodes = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
         super.init()
     }
 
@@ -3184,7 +3214,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 #else
                 let audioSuffix = ""
                 #endif
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(self.dropsEncTotal),\"netDrops\":\(self.dropsNetTotal),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
+                // `encDrops`/`netDrops` are this ~2s window's drops (reset
+                // right after being sent), matching the `capFps` shape above
+                // — the HUD's `enc↓`/`net↓` want "recent", not a lifetime
+                // total that only ever climbs. `drops` (the sum) stays the
+                // session-lifetime total for anything relying on that legacy
+                // meaning.
+                let encDropsWindow = self.dropsEncPingWindow
+                let netDropsWindow = self.dropsNetPingWindow
+                self.dropsEncPingWindow = 0
+                self.dropsNetPingWindow = 0
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(encDropsWindow),\"netDrops\":\(netDropsWindow),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
             }
             self.schedulePing()
         }
@@ -3702,6 +3742,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // phone dedupes by content.
                 sendWelcome()
                 sendStreamingProfileState()
+                sendStreamingPriorityState()
                 sendWakeInfo()
                 sendDisplayModeState()
                 sendMaxFPSState()
@@ -3885,6 +3926,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   let profile = StreamingProfile(rawValue: raw) else { return }
             let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
             Task { @MainActor in self.onStreamingProfileRequest?(profile, custom) }
+        case WireMessage.streamingPriorityRequest:
+            guard let info = lastHello,
+                  info.protocolVersion >= WireProtocol.streamingPriorityWireVersion,
+                  let raw = obj["priority"] as? String,
+                  let priority = StreamingPriority(rawValue: raw) else { return }
+            Task { @MainActor in self.onStreamingPriorityRequest?(priority) }
         case WireMessage.mirrorDisplayRequest:
             // Same construction as `promoteInteractiveWake` above: this only
             // ever runs on data read off an already pinned-TLS/loopback
@@ -4284,9 +4331,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "pending_encode":
             dropsEncThisWindow += 1
             dropsEncTotal += 1
+            dropsEncPingWindow += 1
         case "pending_sends":
             dropsNetThisWindow += 1
             dropsNetTotal += 1
+            dropsNetPingWindow += 1
         default:
             break
         }
@@ -4619,6 +4668,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func sendStreamingProfileState() {
         sendJSONFrame("{\"type\":\"\(WireMessage.streamingProfileState)\",\"profile\":\"\(streamingProfile.rawValue)\"}")
+    }
+
+    private func sendStreamingPriorityState() {
+        sendJSONFrame("{\"type\":\"\(WireMessage.streamingPriorityState)\",\"priority\":\"\(streamingPriority.rawValue)\"}")
     }
 
     /// Best-effort LAN wake hint (Remote Wake-on-LAN foundation): this Mac's

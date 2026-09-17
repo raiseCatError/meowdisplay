@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 15
+    static let version = 16
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -99,6 +99,16 @@ enum WireProtocol {
     /// exactly the same fallback shape as `extendShapeWireVersion`.
     static let maxFPSWireVersion = 15
 
+    /// Protocol version that introduced Mac-authoritative Streaming Priority:
+    /// `streamingPriorityState` (Mac -> receiver: confirmed Auto/Prefer FPS/
+    /// Prefer Latency selection) and `streamingPriorityRequest` (receiver ->
+    /// Mac: request a different priority). A receiver MUST NOT send
+    /// `streamingPriorityRequest`, and MUST NOT expect
+    /// `streamingPriorityState`, when the peer is below this version — the
+    /// Mac keeps using its own stored/default priority regardless, exactly
+    /// the same fallback shape as `maxFPSWireVersion`.
+    static let streamingPriorityWireVersion = 16
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -170,6 +180,14 @@ enum WireMessage {
     // `extendShapeState`) so the receiver never infers it from stream
     // dimensions alone.
     static let maxFPSState = "maxFPSState"
+    // receiver -> Mac: request a Streaming Priority change (`priority`) —
+    // see `StreamingPriority`. Only ever honored over the existing
+    // authenticated session — see `streamingPriorityWireVersion`.
+    static let streamingPriorityRequest = "streamingPriorityRequest"
+    // Mac -> receiver: confirmed active Streaming Priority. Re-sent on every
+    // hello (same pattern as `streamingProfileState`) so the receiver never
+    // infers it from stream behavior alone.
+    static let streamingPriorityState = "streamingPriorityState"
 }
 
 enum WireCrypto {

@@ -354,6 +354,13 @@ final class SenderController: ObservableObject {
     @Published var customFrameRate = CustomFrameRateSelection(rawValue: UserDefaults.standard.string(forKey: "customFrameRate") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(customFrameRate.rawValue, forKey: "customFrameRate") }
     }
+    // Streaming Priority: bounded encoder-pipelining depth (Auto/Prefer FPS/
+    // Prefer Latency — see StreamingPriorityPolicy). Default Auto so an
+    // existing user with no stored value keeps today's balanced 2-deep
+    // pipeline exactly as before this feature existed.
+    @Published var streamingPriority = StreamingPriority(rawValue: UserDefaults.standard.string(forKey: "streamingPriority") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(streamingPriority.rawValue, forKey: "streamingPriority") }
+    }
     // Mirror-mode's explicit display choice: a stable UUID (never a raw
     // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
     // Automatic. Irrelevant to Extend, which always uses its own virtual
@@ -1640,7 +1647,8 @@ final class SenderController: ObservableObject {
                                mirrorDisplayUUID: mirrorDisplayUUID,
                                streamingProfile: streamingProfile,
                                customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil,
-                               extendShapePreference: extendShapeDefault)
+                               extendShapePreference: extendShapeDefault,
+                               streamingPriority: streamingPriority)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let intendedPeerID: String? = {
             if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
@@ -1695,6 +1703,11 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.streamingProfile = profile
             self.customFrameRate = custom
+            self.restartAll()
+        }
+        sender.onStreamingPriorityRequest = { [weak self, weak session] priority in
+            guard let self, let session, self.owns(session) else { return }
+            self.streamingPriority = priority
             self.restartAll()
         }
         sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in

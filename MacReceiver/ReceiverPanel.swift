@@ -90,6 +90,17 @@ private struct ReceiverStatusSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+            let priorityBinding = Binding<StreamingPriority>(
+                get: { receiver.streamingPriority },
+                set: { receiver.requestStreamingPriority($0) })
+            Picker("Streaming Priority", selection: priorityBinding) {
+                ForEach(StreamingPriority.allCases) { priority in
+                    Text(priority.label).tag(priority)
+                }
+            }
+            Text(receiver.streamingPriority.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
             Text("Automatically reconnect to paired devices after connection interruptions. This Mac keeps listening for a connection either way.")
                 .font(.caption)

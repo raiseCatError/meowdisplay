@@ -117,8 +117,11 @@ final class ReceiverMaxFPSTests: XCTestCase {
 
     // MARK: - Older-peer wire-version compatibility
 
-    func testMaxFPSWireVersionIsTheCurrentProtocolVersion() {
-        XCTAssertEqual(WireProtocol.maxFPSWireVersion, WireProtocol.version)
+    func testMaxFPSWireVersionDoesNotExceedTheCurrentProtocolVersion() {
+        // No longer the newest feature (superseded by
+        // `streamingPriorityWireVersion` — see StreamingPriorityTests), but
+        // it must never claim a version this build doesn't actually speak.
+        XCTAssertLessThanOrEqual(WireProtocol.maxFPSWireVersion, WireProtocol.version)
     }
 
     // MARK: - maxFPSState wire round trip (PART 4/5/9)

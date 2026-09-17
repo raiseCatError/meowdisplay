@@ -1469,6 +1469,17 @@ struct SettingsView: View {
                     }
                 }
             }
+            let priorityBinding = Binding<StreamingPriority>(
+                get: { receiver.streamingPriority },
+                set: { receiver.requestStreamingPriority($0) })
+            Picker("Streaming Priority", selection: priorityBinding) {
+                ForEach(StreamingPriority.allCases) { priority in
+                    Text(priority.label).tag(priority)
+                }
+            }
+            Text(receiver.streamingPriority.explanation)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 

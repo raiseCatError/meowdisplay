@@ -28,6 +28,17 @@ struct StreamingSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Streaming Priority", selection: $controller.streamingPriority) {
+                        ForEach(StreamingPriority.allCases) { p in
+                            Text(p.label).tag(p)
+                        }
+                    }
+                    .onChange(of: controller.streamingPriority) { controller.restartAll() }
+                    Text(controller.streamingPriority.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if controller.streamingProfile == .custom {
                     VStack(alignment: .leading, spacing: 4) {
                         Picker("Frame Rate", selection: $controller.customFrameRate) {
