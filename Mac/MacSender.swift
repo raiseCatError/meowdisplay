@@ -75,6 +75,11 @@ struct PhoneInfo: Decodable {
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's decode ceiling in pixels (PROTOCOL.md
     let maxEncodeHigh: Int?  //  6.5): cap the stream, keep the desktop size
+    // Receiver's real maximum display refresh rate in Hz (high-refresh
+    // milestone): the screen's actual capability, not a request. Absent on
+    // any receiver that predates this field — StreamingFPSPolicy treats nil
+    // as `defaultReceiverMaxFPS` (60), never as "unlimited".
+    let maxFPS: Int?
     let trayEnabled: Bool?   // receiver-local control UI state (protocol 6)
     let keyboardButtonEnabled: Bool?
     // Per-device receiver settings the connected receiver reports on every
@@ -124,7 +129,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // projection (Overview / Active Display / menu bar all read from the
     // one place this feeds — DeviceSession — rather than re-deriving it).
     @MainActor var onMediaState: ((_ videoActive: Bool, _ audioActive: Bool,
-                                   _ width: Int, _ height: Int) -> Void)?
+                                   _ width: Int, _ height: Int, _ fps: Int) -> Void)?
     @MainActor var onCaptureLifecycleChanged: ((CaptureLifecyclePhase) -> Void)?
     // Fired when a previously connected device stays gone past the grace
     // period — the controller ends the session (capture, virtual display,
@@ -189,6 +194,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let endpointName: String
     private var mode: CaptureMode
     private let quality: StreamQuality
+    // Streaming Profile (high-refresh milestone): Efficiency/Performance/
+    // Custom, plus Custom's manual FPS pick (nil = Auto). Like `quality`,
+    // these apply per-pipeline at construction — a change rebuilds the
+    // session (see SenderController.restartAll).
+    private let streamingProfile: StreamingProfile
+    private let customFPS: Int?
+    /// Capability-aware effective encode/capture FPS for this session right
+    /// now (`StreamingFPSPolicy`). Recomputed on demand from `lastHello?.maxFPS`
+    /// — the receiver capability is authoritative and can only ever be known
+    /// once hello has arrived, which every capture-start call site already
+    /// waits for (see `start()`'s `waitForHello()`).
+    private var currentEffectiveFPS: Int {
+        StreamingFPSPolicy.effectiveFPS(profile: streamingProfile, requestedFPS: customFPS,
+                                        receiverMaxFPS: lastHello?.maxFPS)
+    }
+    /// The FPS actually applied to the live capture/encoder pipeline, latched
+    /// at the last `startCapture`/`setupEncoder` call — for status/telemetry
+    /// (`onMediaState`) so the UI reports what's really running, not a
+    /// recomputation that could have since drifted from a later hello.
+    private var captureTargetFPS = StreamingFPSPolicy.defaultReceiverMaxFPS
     // The user's persisted Mirror-mode display choice (a stable UUID, never
     // a raw CGDirectDisplayID — see MirrorDisplaySelection.swift). Resolved
     // against the live display list at capture start; unresolvable or nil
@@ -561,7 +586,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
          identityOffset: UInt32 = 0, awaitingWake: Bool = false,
-         videoEnabled: Bool = true, mirrorDisplayUUID: String? = nil) {
+         videoEnabled: Bool = true, mirrorDisplayUUID: String? = nil,
+         streamingProfile: StreamingProfile = .performance, customFPS: Int? = nil) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -571,6 +597,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.baseIdentityOffset = identityOffset
         self.awaitingWake = awaitingWake
         self.desiredVideoEnabled = videoEnabled
+        self.streamingProfile = streamingProfile
+        self.customFPS = customFPS
         super.init()
     }
 
@@ -978,6 +1006,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           sizeInMillimeters: mm,
                                           serialNum: serial &+ totalOffset,
                                           productID: 0x4F53 &+ totalOffset,
+                                          refreshRate: self.currentEffectiveFPS,
                                           restoreOrigin: restoreOrigin,
                                           onOriginChange: { origin, currentSize in
                                               DisplayArrangement.save(origin: origin, size: currentSize,
@@ -1106,8 +1135,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let pointsHigh = (info.pixelsHigh / 2) & ~1
         let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
         let size = CGSize(width: pointsWide, height: pointsHigh)
+        let targetFPS = currentEffectiveFPS
         let didResize = await MainActor.run {
-            vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh,
+            vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
                       movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
         }
         guard didResize else { return false }
@@ -1196,13 +1226,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
+        // Capability-aware effective FPS (high-refresh milestone):
+        // Efficiency/Performance/Custom clamped to the receiver's advertised
+        // max refresh rate and to the 120 FPS product ceiling. Mirror mode's
+        // physical source still governs how many *unique* frames actually
+        // exist — this only ever asks SCK for up to this rate, it never
+        // fabricates duplicates, so a 60Hz physical display streaming under
+        // Performance simply keeps delivering real frames at its own cadence.
+        let targetFPS = currentEffectiveFPS
+        captureTargetFPS = targetFPS
+
         let config = SCStreamConfiguration()
         config.width = pixelsWide
         config.height = pixelsHigh
-        // Ask for 120 even though the virtual display is 60Hz: requesting
-        // exactly 1/60 makes SCK's rate limiter skip frames that arrive a
-        // hair early (beat frequency) — measured ~51fps instead of 60.
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+        // Ask for double the target even though the source may run slower:
+        // requesting exactly 1/fps makes SCK's rate limiter skip frames that
+        // arrive a hair early (beat frequency) — measured ~51fps instead of
+        // 60 at parity. Same headroom, generalized to the target rate.
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(targetFPS * 2))
         // 420v matches the encoder's native input — skips a BGRA→YUV conversion
         // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
         config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
@@ -1231,7 +1272,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let encoder { VTCompressionSessionInvalidate(encoder) }
         encoder = nil
         if videoEnabled {
-            try setupEncoder(width: pixelsWide, height: pixelsHigh)
+            try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
         }
         await audioCaptureEncoder.reset()
         beginAudioGeneration()
@@ -1524,7 +1565,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // encoding on it directly instead of restarting capture (which
             // would find `stream != nil` and throw "already active").
             do {
-                try setupEncoder(width: capturePixelsWide, height: capturePixelsHigh)
+                captureTargetFPS = currentEffectiveFPS
+                try setupEncoder(width: capturePixelsWide, height: capturePixelsHigh, fps: captureTargetFPS)
             } catch {
                 Log.info("video resume encoder setup failed: \(error) — entering capture recovery")
                 guard updateCaptureState({ $0.unexpectedStop() }) else { return }
@@ -3545,7 +3587,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         )
     }
 
-    private func setupEncoder(width: Int, height: Int) throws {
+    private func setupEncoder(width: Int, height: Int, fps: Int) throws {
         // Low-latency rate control: the hardware encoder emits every frame
         // immediately instead of pipelining. (`-lowlatency NO` for A/B.)
         let lowLatency = UserDefaults.standard.object(forKey: "lowlatency") == nil
@@ -3588,10 +3630,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: quality.bitrate as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTCompressionSessionPrepareToEncodeFrames(encoder)
-        Log.info("encoder ready: \(width)x\(height) H.264 \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        Log.info("encoder ready: \(width)x\(height)@\(fps) H.264 \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
     }
 
     // MARK: - Capture callback
@@ -4114,9 +4156,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let audioActive = self.audioEnabled
                 let width = self.capturePixelsWide
                 let height = self.capturePixelsHigh
+                let fps = self.captureTargetFPS
                 Task { @MainActor in
                     self.onStats?(frames, mbps)
-                    self.onMediaState?(videoActive, audioActive, width, height)
+                    self.onMediaState?(videoActive, audioActive, width, height, fps)
                 }
             }
         })

@@ -1258,9 +1258,13 @@ final class ReceiverModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     init() {
+        // maximumFramesPerSecond reports this specific screen's real
+        // hardware ceiling (60 on a standard panel, up to 120 on ProMotion)
+        // — never assume every iPhone is 120Hz (high-refresh milestone).
         receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                   deviceKind: deviceKind,
-                                  fallbackServiceName: UIDevice.current.name)
+                                  fallbackServiceName: UIDevice.current.name,
+                                  maxFPS: UIScreen.main.maximumFramesPerSecond)
         #if DEBUG
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         #endif

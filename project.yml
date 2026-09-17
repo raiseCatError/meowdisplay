@@ -197,6 +197,7 @@ targets:
       - Shared/ControlTrayGeometry.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
+      - Shared/StreamingProfile.swift
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight

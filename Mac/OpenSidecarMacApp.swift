@@ -212,6 +212,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var audioActive = false
     @Published var videoWidth = 0
     @Published var videoHeight = 0
+    @Published var videoFPS = 0
 
     var statusWithRoute: String {
         route.map { "\(status) · \($0.rawValue)" } ?? status
@@ -312,6 +313,19 @@ final class SenderController: ObservableObject {
     }
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
+    }
+    // Streaming Profile (high-refresh milestone). Default Performance: the
+    // pre-milestone behavior already requested 120 from SCK and encoded at
+    // an unconditional 60fps — Performance (capped by receiver capability)
+    // is the closer match for every existing install than Efficiency would
+    // be, and it's what most users installing this update want anyway.
+    @Published var streamingProfile = StreamingProfile(rawValue: UserDefaults.standard.string(forKey: "streamingProfile") ?? "") ?? .performance {
+        didSet { UserDefaults.standard.set(streamingProfile.rawValue, forKey: "streamingProfile") }
+    }
+    // Custom profile's manual frame-rate pick. Irrelevant outside `.custom`,
+    // same as `mirrorDisplayUUID` is irrelevant outside `.mirror`.
+    @Published var customFrameRate = CustomFrameRateSelection(rawValue: UserDefaults.standard.string(forKey: "customFrameRate") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(customFrameRate.rawValue, forKey: "customFrameRate") }
     }
     // Mirror-mode's explicit display choice: a stable UUID (never a raw
     // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
@@ -1358,7 +1372,9 @@ final class SenderController: ObservableObject {
                                identityOffset: identityOffset(for: id),
                                awaitingWake: awaitingWake,
                                videoEnabled: videoEnabled,
-                               mirrorDisplayUUID: mirrorDisplayUUID)
+                               mirrorDisplayUUID: mirrorDisplayUUID,
+                               streamingProfile: streamingProfile,
+                               customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let session = DeviceSession(id: id, logicalID: logicalID, attempt: attempt,
                                     target: target, name: name, sender: sender)
@@ -1483,12 +1499,13 @@ final class SenderController: ObservableObject {
             session?.framesSent = frames
             session?.mbps = mbps
         }
-        sender.onMediaState = { [weak session] videoActive, audioActive, width, height in
+        sender.onMediaState = { [weak session] videoActive, audioActive, width, height, fps in
             guard let session else { return }
             session.videoActive = videoActive
             session.audioActive = audioActive
             session.videoWidth = width
             session.videoHeight = height
+            session.videoFPS = fps
         }
         sender.onDisconnected = { [weak self, weak session] in
             // MacSender already exhausted its in-place reconnect grace. End
@@ -1721,6 +1738,7 @@ final class SenderController: ObservableObject {
         let allowInput: Bool
         let videoWidth: Int
         let videoHeight: Int
+        let videoFPS: Int
         let bitrateBps: Int
         // The two existing capture-lifecycle signals a session already
         // tracks (see `DeviceSession.capturePhase`/`.failed`), carried
@@ -1743,6 +1761,7 @@ final class SenderController: ObservableObject {
                                    mode: mode, videoActive: session.videoActive,
                                    audioActive: session.audioActive, allowInput: allowInput,
                                    videoWidth: session.videoWidth, videoHeight: session.videoHeight,
+                                   videoFPS: session.videoFPS,
                                    bitrateBps: quality.bitrate, capturePhase: session.capturePhase,
                                    failed: session.failed)
             }

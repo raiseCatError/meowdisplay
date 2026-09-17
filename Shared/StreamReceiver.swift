@@ -520,6 +520,11 @@ final class StreamReceiver: ObservableObject {
     // nothing about. nil = advertise nothing (sender streams full size).
     private let maxEncodeWide: Int?
     private let maxEncodeHigh: Int?
+    // This receiver's real maximum display refresh rate in Hz (high-refresh
+    // milestone), e.g. 60 or 120 on ProMotion — injected at init from the
+    // platform's actual screen capability, never assumed. nil = don't
+    // advertise (sender falls back to `StreamingFPSPolicy.defaultReceiverMaxFPS`).
+    private let maxFPS: Int?
     /// What to advertise when the user-set service name is empty.
     private let fallbackServiceName: String
 
@@ -634,12 +639,13 @@ final class StreamReceiver: ObservableObject {
 
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
-         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil) {
+         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil) {
         self.displayLayer = displayLayer
         self.deviceKind = deviceKind
         self.fallbackServiceName = fallbackServiceName
         self.maxEncodeWide = maxEncodeWide
         self.maxEncodeHigh = maxEncodeHigh
+        self.maxFPS = maxFPS
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
@@ -1683,6 +1689,11 @@ final class StreamReceiver: ObservableObject {
             hello["maxEncodeWide"] = maxEncodeWide
             hello["maxEncodeHigh"] = maxEncodeHigh
         }
+        // Additive: this receiver's real maximum display refresh rate
+        // (high-refresh milestone) — the Mac clamps every Streaming Profile
+        // to it (`StreamingFPSPolicy`), same "don't advertise capability we
+        // don't actually have" contract as maxEncodeWide/High above.
+        if let maxFPS { hello["maxFPS"] = maxFPS }
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
