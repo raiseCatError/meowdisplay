@@ -363,13 +363,13 @@ struct ReceiverScreen: View {
             controlStore.onInputResetRequested = {
                 model.receiver.sendCancelActiveInput()
             }
-            // The connected Mac is authoritative for Allow Input (a
-            // security-relevant, Mac-owned gate) — its confirmed state
+            // The connected Mac is authoritative for input consent (a
+            // security-relevant, Mac-owned decision) — its confirmed state
             // always wins over whatever this receiver had stored, so there
             // is exactly one source of truth once connected. See
-            // `ReceiverControlStore.applyAllowInput`.
-            model.receiver.onAllowInputStateChange = { allowed in
-                controlStore.applyAllowInput(allowed)
+            // `ReceiverControlStore.applySessionInputState`.
+            model.receiver.onAllowInputStateChange = { state in
+                controlStore.applySessionInputState(state)
             }
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: controlStore.preferences.trayEnabled,
@@ -1047,12 +1047,23 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("Allow Input", isOn: Binding(
-                        get: { controlStore.preferences.allowInput },
-                        set: { value in
-                            controlStore.update { $0.allowInput = value }
-                            receiver.requestAllowInput(value)
-                        }))
+                    // Never optimistic: this only ever reflects the Mac's
+                    // last CONFIRMED decision (`ReceiverControlStore.
+                    // sessionInputState`) — tapping Request Control does not
+                    // flip this label until the Mac actually replies.
+                    LabeledContent("Control", value: controlStore.sessionInputState.receiverDisplayText)
+                    switch controlStore.sessionInputState {
+                    case .off, .notAllowed:
+                        Button("Request Control") { receiver.requestAllowInput(true) }
+                    case .requesting:
+                        EmptyView()
+                    case .allowed:
+                        Button("Turn Off", role: .destructive) { receiver.requestAllowInput(false) }
+                    case .requestsDisabled:
+                        Text("This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Picker("Input Mode", selection: preferenceBinding(\.inputMode)) {
                         ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
                     }

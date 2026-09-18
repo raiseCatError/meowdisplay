@@ -172,11 +172,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver requests are handed to SenderController, which owns the
     /// existing authoritative session-rebuild mode-switch path.
     @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
-    /// A receiver asked to change Allow Input. Handed to `AppController`,
-    /// which owns the single, global `allowInput` toggle (see its `didSet`
-    /// — Mac remains authoritative and broadcasts the result to every
-    /// connected receiver, this one included).
+    /// A receiver requested (`true`) or released (`false`) control of THIS
+    /// session. Handed to `SenderController.handleInputControlRequested`,
+    /// which owns the per-peer policy lookup, the Mac owner prompt, and the
+    /// session-grant decision — this instance never grants itself. `false`
+    /// (release) is applied immediately, with no callback needed, by
+    /// `denySessionInput` at the call site in `handleControl` — this
+    /// closure only ever fires for `true` (a request that needs a policy
+    /// decision).
     @MainActor var onAllowInputRequest: ((Bool) -> Void)?
+    /// Fires whenever this session's own ephemeral input grant changes —
+    /// purely so `DeviceSession` can mirror it for display
+    /// (`ReceiverDeviceDetailView`'s "Current session" row). The
+    /// authoritative bit lives in `sessionInputGrant`, not here.
+    @MainActor var onSessionInputGrantChanged: ((Bool) -> Void)?
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
@@ -497,6 +506,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
     private var inputInjector: InputInjector?
+    // This logical session's ephemeral input grant (per-device/per-session
+    // consent milestone). Lives here — not on `DeviceSession` — because
+    // every input-gate choke point already runs on `queue`/under
+    // `InputInjector`'s own lock, never on the main actor; `DeviceSession`
+    // only ever mirrors this for display via `onSessionInputGrantChanged`.
+    // Never persisted: this instance is recreated for every fresh logical
+    // session (see `SenderController.startSession`), so a brand-new session
+    // always starts at `false`, and transport migration (`switchTransport`)
+    // never replaces this `MacSender` instance, so the grant survives it for
+    // free.
+    private let sessionInputGrant = SessionInputGrantBox()
     private var nativeAppGestureState = NativeAppGestureSessionState()
     private var loggedNativeGestureLimitation = false
 
@@ -971,11 +991,58 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Called on the sender queue. `InputPolicy.allowsInput()` reads
     /// straight from UserDefaults (the same static check every input-
-    /// injection call site already gates on), so this always reports the
-    /// Mac's real, current gate — never a stale cached copy.
-    private func sendAllowInputState() {
+    /// injection call site already gates on) and `sessionInputGrant` is this
+    /// session's own live grant, so this always reports the exact
+    /// `receiverInputIsAllowed()` result — never a stale cached copy, and
+    /// never another session's state. `state` is additive (pv 18+, see
+    /// `WireProtocol.sessionScopedInputConsentWireVersion`); `allowed`
+    /// alone remains a correct summary for every older peer.
+    private func sendAllowInputState(state: SessionInputWireState? = nil) {
+        let allowed = EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                            sessionGranted: sessionInputGrant.get())
+        let resolvedState = state ?? (allowed ? .allowed : .off)
         sendJSONObject(["type": WireMessage.allowInputState,
-                        "allowed": InputPolicy.allowsInput()])
+                        "allowed": allowed,
+                        "state": resolvedState.rawValue])
+    }
+
+    /// A control-request prompt is now up on the Mac for this session — lets
+    /// a pv 18+ receiver show "Requesting…" instead of a silent wait.
+    func notifyInputRequestPending() {
+        queue.async { [weak self] in self?.sendAllowInputState(state: .requesting) }
+    }
+
+    /// A Mac-owner (or auto-policy) decision granted this session control.
+    /// Only ever called from the main-actor consent flow
+    /// (`SenderController.handleInputControlRequested`/
+    /// `resolveInputControlRequest`), never directly from a wire handler.
+    func grantSessionInput() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.sessionInputGrant.set(true)
+            self.sendAllowInputState(state: .allowed)
+            Task { @MainActor in self.onSessionInputGrantChanged?(true) }
+        }
+    }
+
+    /// A request was denied (Not Now / timeout / Never-Allow policy / Mac
+    /// master off) or this session's own grant was released/revoked. Always
+    /// safe to call even if the grant was already off — narrowing input is
+    /// never blocked, unlike granting it.
+    func denySessionInput(state: SessionInputWireState) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let wasGranted = self.sessionInputGrant.get()
+            self.sessionInputGrant.set(false)
+            if wasGranted {
+                // Held-input cleanup: an ON -> OFF transition must never
+                // leave a stuck key/button/touch behind.
+                self.inputInjector?.cancelActiveInput()
+                self.sendJSONObject(["type": WireMessage.inputReset])
+            }
+            self.sendAllowInputState(state: state)
+            if wasGranted { Task { @MainActor in self.onSessionInputGrantChanged?(false) } }
+        }
     }
 
     private func sendVideoState() {
@@ -1109,6 +1176,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// broadcast the Mac's new state to this receiver.
     func pushAllowInputState() {
         queue.async { [weak self] in self?.sendAllowInputState() }
+    }
+
+    /// Thread-safe read of this session's own live grant — used by
+    /// `SenderController.anySessionHasEffectiveInput` and UI display. Safe
+    /// to call from the main actor: `SessionInputGrantBox` is lock-guarded.
+    var hasSessionInputGrant: Bool { sessionInputGrant.get() }
+
+    /// Mac owner manually revoked this session's control from Settings/
+    /// device detail. Same held-input cleanup and wire notification as any
+    /// other ON -> OFF transition.
+    func revokeSessionInput() {
+        denySessionInput(state: .off)
     }
 
     func setVideoEnabled(_ enabled: Bool) {
@@ -1602,7 +1681,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-            inputInjector = InputInjector(displayID: targetID)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
@@ -1756,7 +1835,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
             if let targetID = InputTargetResolver.displayID(
                 mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-                inputInjector = InputInjector(displayID: targetID)
+                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
             }
             if UserDefaults.standard.bool(forKey: "testPattern") {
                 let id = vd.displayID
@@ -2138,8 +2217,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// The one authoritative control-message-level gate: effectiveInput =
+    /// Mac master ON AND this logical session's own grant ON (see
+    /// `EffectiveInputAuthorization`) — never the master alone. A receiver
+    /// that never requested/was never granted control stays gated out here
+    /// even while the Mac master is fully on.
     private func receiverInputIsAllowed() -> Bool {
-        guard InputPolicy.allowsInput(),
+        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                   sessionGranted: sessionInputGrant.get()),
               captureStateSnapshot().allowsInput else {
             inputInjector?.cancelActiveInput()
             return false
@@ -2153,7 +2238,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// lifecycle to be fully `.running` (see `CaptureLifecycleState.
     /// allowsKeyboardInput`), without touching that shared policy.
     private func receiverKeyboardInputIsAllowed() -> Bool {
-        guard InputPolicy.allowsInput(),
+        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                   sessionGranted: sessionInputGrant.get()),
               captureStateSnapshot().allowsKeyboardInput else {
             inputInjector?.cancelActiveInput()
             return false
@@ -2757,7 +2843,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             mirrorDisplayID: display.displayID,
             virtualDisplayID: nil
         ) {
-            inputInjector = InputInjector(displayID: targetID)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
@@ -4369,13 +4455,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.allowInputWireVersion,
                   let requested = obj["allowed"] as? Bool else { return }
-            if requested == InputPolicy.allowsInput() {
-                // Already in the requested state — just re-confirm it,
-                // covering a receiver that missed an earlier push (e.g. it
-                // connected mid-flight).
-                sendAllowInputState()
+            if requested {
+                if sessionInputGrant.get() {
+                    // Already granted — just re-confirm, covering a
+                    // receiver that missed an earlier push (e.g. it
+                    // connected mid-flight).
+                    sendAllowInputState()
+                } else {
+                    // NEVER auto-grants here: only `SenderController.
+                    // handleInputControlRequested` decides (policy lookup +
+                    // Mac prompt), keeping the Mac authoritative and this
+                    // session's grant independent of every other session's.
+                    Task { @MainActor in self.onAllowInputRequest?(true) }
+                }
             } else {
-                Task { @MainActor in self.onAllowInputRequest?(requested) }
+                // Releasing this session's own grant is always safe/
+                // immediate — narrowing never needs a decision.
+                denySessionInput(state: .off)
             }
         case WireMessage.videoRequest:
             guard let info = lastHello,
@@ -4472,16 +4568,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "gesture":
             guard let name = obj["name"] as? String,
-                  let gesture = ReceiverGesture(rawValue: name) else { return }
-            let inputAllowed = InputPolicy.allowsInput()
-            guard ReceiverGesture.shouldRoute(name: name, inputAllowed: inputAllowed),
-                  receiverInputIsAllowed() else { return }
+                  let gesture = ReceiverGesture(rawValue: name),
+                  receiverInputIsAllowed(),
+                  ReceiverGesture.shouldRoute(name: name, inputAllowed: true) else { return }
             // The receiver normally sent a touch cancellation immediately
             // before this semantic message. Release again here as a safeguard
             // against an in-flight or missing cancellation.
             inputInjector?.cancelActiveInput()
             Task { @MainActor in
-                guard InputPolicy.allowsInput() else { return }
+                guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                           sessionGranted: self.sessionInputGrant.get()) else { return }
                 SystemGestureInvoker.invoke(gesture)
             }
         case "kf":

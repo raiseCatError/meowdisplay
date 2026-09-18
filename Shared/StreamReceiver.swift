@@ -207,11 +207,12 @@ final class StreamReceiver: ObservableObject {
     private var announcedSnapRotation = true
     private var announcedAppGestureCommands = AppGestureCommands.defaults
 
-    /// The connected Mac's confirmed Allow Input state — pushed on connect
-    /// and whenever it changes on the Mac (its own toggle, or an honored
-    /// request from any receiver). The Mac remains the single authority;
-    /// see `requestAllowInput`.
-    var onAllowInputStateChange: ((Bool) -> Void)?
+    /// This session's confirmed input-consent state — pushed on connect and
+    /// whenever it changes on the Mac (master toggle, a Mac-owner prompt
+    /// decision, an auto-policy grant/denial, or a manual revoke). The Mac
+    /// remains the single authority and never optimistically predicted; see
+    /// `requestAllowInput`.
+    var onAllowInputStateChange: ((SessionInputWireState) -> Void)?
 
     /// True when the connected Mac understands pencil/proximity wire messages.
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
@@ -1757,7 +1758,12 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { self.inputResetGeneration &+= 1 }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
-            DispatchQueue.main.async { self.onAllowInputStateChange?(allowed) }
+            // `state` is additive (pv 18+) — an older Mac never sends it, so
+            // fall back to the coarse allowed/off split every peer already
+            // understands. See `SessionInputWireState`.
+            let state = (obj["state"] as? String).flatMap(SessionInputWireState.init(rawValue:))
+                ?? (allowed ? .allowed : .off)
+            DispatchQueue.main.async { self.onAllowInputStateChange?(state) }
         case WireMessage.videoState:
             guard let update = VideoStateUpdate(message: obj) else { return }
             let changed = update.enabled != receivedVideoEnabled
@@ -2075,12 +2081,14 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": "keyboard", "action": "cancel"])
     }
 
-    /// Asks the connected Mac to change its Allow Input gate. The Mac
-    /// remains authoritative: this is a request, not an assignment — the
-    /// confirmed state always arrives back via `onAllowInputStateChange`,
-    /// whether or not it matches what was requested. A no-op against an
-    /// older Mac (or while disconnected) — the local, receiver-only
-    /// preference this drives from the UI side stays in effect either way.
+    /// `true`: requests control of THIS session — never an assignment, the
+    /// Mac may show its owner a prompt, auto-grant, or auto-deny per that
+    /// peer's policy, and the confirmed result always arrives back via
+    /// `onAllowInputStateChange`, whether or not it matches what was
+    /// requested. `false`: releases this session's own grant, always
+    /// honored immediately with no Mac decision needed (narrowing is always
+    /// safe). A no-op against an older Mac (pre `allowInputWireVersion`) or
+    /// while disconnected.
     func requestAllowInput(_ allowed: Bool) {
         guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
         sendControl(["type": WireMessage.allowInputRequest, "allowed": allowed])

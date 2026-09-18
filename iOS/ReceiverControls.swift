@@ -4,6 +4,14 @@ import UIKit
 @MainActor
 final class ReceiverControlStore: ObservableObject {
     @Published private(set) var preferences: ReceiverControlPreferences
+    // Live, per-session input-consent state (per-device/per-session
+    // milestone) — deliberately NOT part of `ReceiverControlPreferences`,
+    // which persists to disk: this must never survive a relaunch or a new
+    // connection as anything but `.off`, since the Mac defines a brand-new
+    // logical session as starting with no grant. Mirrors `preferences.
+    // allowInput` (kept for every existing call site that already gates
+    // input generation on that bool) purely for richer receiver UI text.
+    @Published private(set) var sessionInputState: SessionInputWireState = .off
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
 
@@ -65,12 +73,14 @@ final class ReceiverControlStore: ObservableObject {
         update { preferenceUpdate.apply(to: &$0) }
     }
 
-    /// The connected Mac is authoritative for Allow Input (a security-
-    /// relevant, Mac-owned gate — see `StreamReceiver.onAllowInputStateChange`)
-    /// so its confirmed state always overwrites the local preference rather
-    /// than merging with it — exactly one source of truth once connected.
-    func applyAllowInput(_ allowed: Bool) {
-        update { $0.allowInput = allowed }
+    /// The connected Mac is authoritative for input consent (a security-
+    /// relevant, Mac-owned decision — see `StreamReceiver.
+    /// onAllowInputStateChange`) so its confirmed state always overwrites
+    /// local state rather than merging with it — exactly one source of
+    /// truth once connected, and NEVER set optimistically ahead of this.
+    func applySessionInputState(_ state: SessionInputWireState) {
+        sessionInputState = state
+        update { $0.allowInput = (state == .allowed) }
     }
 }
 

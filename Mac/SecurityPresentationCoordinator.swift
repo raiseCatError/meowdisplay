@@ -63,6 +63,52 @@ enum SecurityPresentationCoordinator {
         Log.info("uiDebug: pairing panel orderedFront visible=\(panel.isVisible) keyWindow=\(panel.isKeyWindow)")
     }
 
+    // MARK: - Input control request ("<Device Name> wants to control this Mac")
+
+    private static var inputControlPanel: NSPanel?
+    private static var inputControlPanelDelegate: InputControlPanelWindowDelegate?
+
+    static func presentInputControlRequest(prompt: InputControlRequestPromptModel) {
+        guard prompt.pending != nil else { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let panel: NSPanel
+        if let existing = inputControlPanel {
+            panel = existing
+        } else {
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
+                styleMask: [.titled, .closable, .nonactivatingPanel],
+                backing: .buffered, defer: false)
+            panel.title = "Control Request"
+            panel.isFloatingPanel = true
+            panel.level = .modalPanel
+            // Same rationale as the pairing panel: a security decision must
+            // stay visible until explicit action or timeout, never dismiss
+            // itself on a focus change.
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            inputControlPanel = panel
+        }
+        let delegate = InputControlPanelWindowDelegate(prompt: prompt)
+        inputControlPanelDelegate = delegate
+        panel.delegate = delegate
+        let hostingController = NSHostingController(rootView: InputControlRequestPanelView(prompt: prompt, onResolved: {
+            panel.orderOut(nil)
+        }))
+        // A hardcoded `contentRect` clipped the real explanatory copy (see
+        // milestone bugfix). `.preferredContentSize` instead sizes the
+        // panel to the SwiftUI content's actual ideal size — computed from
+        // the view's own fixed wrap width below — and re-sizes it again on
+        // every future call (a fresh `NSHostingController` each time a new
+        // request is presented), so a longer/shorter device name never
+        // truncates or leaves the panel oddly oversized.
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Forget Device
 
     // Guards against a double-presentation if requestForget is somehow
@@ -159,6 +205,86 @@ private struct PairingPanelView: View {
             }
         }
         .frame(minWidth: 360)
+        .onChange(of: prompt.pending) { _, newValue in
+            if newValue == nil { onResolved() }
+        }
+    }
+}
+
+/// Treats the user closing the input-control-request panel via its window
+/// controls as an explicit "Not Now" (spec: "Dismissal of the prompt ==
+/// Not Now") — mirrors `PairingPanelWindowDelegate` exactly.
+@MainActor
+private final class InputControlPanelWindowDelegate: NSObject, NSWindowDelegate {
+    private weak var prompt: InputControlRequestPromptModel?
+
+    init(prompt: InputControlRequestPromptModel) {
+        self.prompt = prompt
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prompt?.windowClosedByUser()
+    }
+}
+
+/// "<Device Name> wants to control this Mac" — Not Now / Allow for This
+/// Session / Never Allow Requests are equal-weight choices; "Always Allow
+/// This Device" is deliberately set apart (extra spacing + a distinct
+/// tinted style) so it reads as a separate, higher-impact decision rather
+/// than a fourth equivalent button — see the milestone spec's requirement
+/// that it never be the easy/default click.
+private struct InputControlRequestPanelView: View {
+    @ObservedObject var prompt: InputControlRequestPromptModel
+    let onResolved: () -> Void
+
+    var body: some View {
+        Group {
+            if let pending = prompt.pending {
+                VStack(spacing: 20) {
+                    VStack(spacing: 6) {
+                        Text("\(pending.name) wants to control this Mac")
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                        Text("It can move the pointer, type, and use touch/scroll input until you turn this off.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                    }
+                    VStack(spacing: 8) {
+                        Button("Allow for This Session") { prompt.decide(.allowSession) }
+                            .keyboardShortcut(.defaultAction)
+                        HStack(spacing: 8) {
+                            Button("Not Now") { prompt.decide(.notNow) }
+                                .keyboardShortcut(.cancelAction)
+                            Button("Never Allow Requests") { prompt.decide(.neverAllowRequests) }
+                        }
+                    }
+                    Divider()
+                    VStack(spacing: 4) {
+                        Button("Always Allow This Device") { prompt.decide(.alwaysAllowDevice) }
+                            .foregroundStyle(.orange)
+                        Text("Skips this prompt for future requests from this device. Change anytime in Settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(24)
+                // A fixed wrap width, not `.frame(minWidth:)`: without an
+                // explicit width, SwiftUI reports each `Text`'s ideal
+                // (unwrapped, single-line) size to the hosting panel below,
+                // which then clipped the real explanatory copy to a
+                // narrower fixed `contentRect` instead of wrapping it. This
+                // width is also what `NSHostingController.sizingOptions`
+                // reads back to size the panel's actual window.
+                .frame(width: 340)
+            } else {
+                Color.clear.frame(width: 1, height: 1)
+            }
+        }
         .onChange(of: prompt.pending) { _, newValue in
             if newValue == nil { onResolved() }
         }

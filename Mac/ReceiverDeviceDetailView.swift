@@ -57,19 +57,32 @@ struct ReceiverDeviceDetailView: View {
             }
 
             Section {
-                Toggle("Allow this device to enable input from the receiver", isOn: Binding(
-                    get: { controller.isInputAuthorized(peerID: peerID) },
-                    set: { controller.setInputAuthorized($0, peerID: peerID) }))
-                    .disabled(!controller.isPermanentInputAuthorizationEditable)
+                if let session, session.sessionInputGranted {
+                    LabeledContent("Current Session", value: "Control allowed")
+                    Button("Revoke Control", role: .destructive) {
+                        controller.revokeSessionInput(peerID: peerID)
+                    }
+                } else {
+                    LabeledContent("Current Session", value: "Off")
+                }
+                Picker("Input Requests", selection: Binding(
+                    get: { controller.inputPolicy(peerID: peerID) },
+                    set: { controller.setInputPolicy($0, peerID: peerID) })) {
+                    Text("Ask").tag(PeerInputRequestPolicy.ask)
+                    Text("Always Allow Requests").tag(PeerInputRequestPolicy.alwaysAllow)
+                    Text("Never Allow Requests").tag(PeerInputRequestPolicy.neverAllow)
+                }
+                .disabled(!controller.canSetInputPolicy(.alwaysAllow, peerID: peerID)
+                    && controller.inputPolicy(peerID: peerID) != .alwaysAllow)
             } header: {
                 Text("Input Authorization")
             } footer: {
-                if controller.isPermanentInputAuthorizationEditable {
-                    Text("Never bypasses this Mac's Allow Input master switch on the Input page.")
+                if controller.anySessionHasEffectiveInput {
+                    Text("Can't promote to Always Allow Requests while a device currently controls this Mac. Never bypasses the Allow Input master switch on the Input page.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Disable Allow Input to change permanent device permissions.")
+                    Text("This is a request policy, not a live toggle: even Always Allow Requests still requires the device to explicitly ask each session, and never bypasses the Allow Input master switch on the Input page.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

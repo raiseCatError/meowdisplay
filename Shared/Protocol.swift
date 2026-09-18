@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 17
+    static let version = 18
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -120,6 +120,23 @@ enum WireProtocol {
     /// pre-existing clean, immediate Mirror failure instead of waiting on a
     /// prompt an older receiver cannot show.
     static let mirrorUnavailableWireVersion = 17
+
+    /// Protocol version that introduced per-DEVICE-SESSION input consent:
+    /// `allowInputState` gained an additive `state` field (`off`/
+    /// `requesting`/`allowed`/`notAllowed`/`requestsDisabled` — see
+    /// `SessionInputWireState`) alongside its pre-existing `allowed` bool,
+    /// which keeps meaning exactly the same thing (effective input on/off)
+    /// for every peer regardless of version. `allowInputRequest` itself is
+    /// unchanged on the wire (`{type, allowed: Bool}`); only the MAC's
+    /// behavior on receiving `allowed: true` changed, from an immediate
+    /// Mac-wide grant to a per-session request that may show an owner
+    /// prompt — this is strictly a NARROWING of what a request achieves, so
+    /// it is safe to apply to every peer unconditionally, not gated on this
+    /// version at all. A pre-18 receiver simply sees `allowInputState.
+    /// allowed` flip to true later (once/if granted) instead of instantly,
+    /// exactly like a slow reply; a pv 18+ receiver can additionally render
+    /// "Requesting…"/"Not allowed"/"Requests disabled by Mac" from `state`.
+    static let sessionScopedInputConsentWireVersion = 18
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
@@ -283,6 +300,35 @@ struct NativeAppGestureSessionState: Equatable {
     }
 
     mutating func cancelAll() { active.removeAll() }
+}
+
+/// Wire values for `allowInputState`'s additive `state` field (pv 18+) — see
+/// `WireProtocol.sessionScopedInputConsentWireVersion`. A pre-18 receiver
+/// never reads this field and only ever sees the unchanged `allowed` bool,
+/// which stays a correct summary of every one of these: only `.allowed` is
+/// ever sent with `allowed: true`, every other case sends `allowed: false`.
+enum SessionInputWireState: String, Equatable {
+    /// No session grant, no pending request.
+    case off
+    /// A control-request prompt is up on the Mac, awaiting the owner.
+    case requesting
+    /// This session currently has effective input.
+    case allowed
+    /// The Mac owner said Not Now, or the prompt timed out.
+    case notAllowed
+    /// This peer's persisted policy is Never Allow Requests — the receiver
+    /// should stop offering to retry immediately.
+    case requestsDisabled
+
+    var receiverDisplayText: String {
+        switch self {
+        case .off: return "Off"
+        case .requesting: return "Requesting…"
+        case .allowed: return "Allowed for this session"
+        case .notAllowed: return "Not allowed"
+        case .requestsDisabled: return "Requests disabled by Mac"
+        }
+    }
 }
 
 enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {

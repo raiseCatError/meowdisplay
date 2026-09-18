@@ -25,6 +25,12 @@ private enum SystemClickMetrics {
 final class InputInjector {
 
     private let displayID: CGDirectDisplayID
+    // This session's ephemeral input grant (per-device-session milestone) —
+    // shared with the owning `MacSender`'s own control-message-level gate so
+    // both read the exact same bit under the same lock. See
+    // `SessionInputGrantBox`'s doc comment for why a plain shared `Bool`
+    // isn't safe here.
+    private let sessionInputGrant: SessionInputGrantBox
     // Preference changes arrive on the main actor; receiver messages arrive on
     // Network's callback queue. Serialize them so cancellation cannot race a
     // new synthetic down event.
@@ -74,8 +80,9 @@ final class InputInjector {
     private var heldKeys = HeldKeyTracker()
     private var heldModifiers = HeldModifierTracker()
 
-    init(displayID: CGDirectDisplayID) {
+    init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox) {
         self.displayID = displayID
+        self.sessionInputGrant = sessionInputGrant
     }
 
     /// Release every synthetic contact when capture is paused, torn down,
@@ -434,7 +441,8 @@ final class InputInjector {
     /// The control-message gate is duplicated here under the input lock so an
     /// OFF transition cannot race an event that already passed its outer gate.
     private func inputIsAllowed() -> Bool {
-        guard InputPolicy.allowsInput() else {
+        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                   sessionGranted: sessionInputGrant.get()) else {
             cancelActiveInputLocked()
             return false
         }

@@ -69,20 +69,20 @@ final class ForgetDeviceCleanupTests: XCTestCase {
                         "a permanent input authorization must never survive Forget")
     }
 
-    func testForgettingOnePeerRevokesOnlyItsOwnInputAuthorization() {
+    func testForgettingOnePeerRevokesOnlyItsOwnInputPolicy() {
         let forgotten = peerID()
         let kept = peerID()
 
-        ReceiverInputAuthorizationStore.setAuthorized(true, peerID: forgotten)
-        ReceiverInputAuthorizationStore.setAuthorized(true, peerID: kept)
+        ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: forgotten, anySessionHasEffectiveInput: false)
+        ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: kept, anySessionHasEffectiveInput: false)
         defer {
-            ReceiverInputAuthorizationStore.removeAuthorization(peerID: forgotten)
-            ReceiverInputAuthorizationStore.removeAuthorization(peerID: kept)
+            ReceiverInputAuthorizationStore.removePolicy(peerID: forgotten)
+            ReceiverInputAuthorizationStore.removePolicy(peerID: kept)
         }
 
-        ReceiverInputAuthorizationStore.removeAuthorization(peerID: forgotten)
+        ReceiverInputAuthorizationStore.removePolicy(peerID: forgotten)
 
-        XCTAssertFalse(ReceiverInputAuthorizationStore.isAuthorized(peerID: forgotten))
-        XCTAssertTrue(ReceiverInputAuthorizationStore.isAuthorized(peerID: kept))
+        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: forgotten), .ask)
+        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: kept), .alwaysAllow)
     }
 }

@@ -1,13 +1,14 @@
 import SwiftUI
 
-/// Normal interaction/security controls. Two deliberately separate gates
-/// live here (see the milestone's SETTINGS / ALLOW INPUT INVARIANTS):
-/// `Allow Input` is the Mac-wide master switch — while OFF, no receiver may
-/// control the Mac, full stop. "Devices allowed to enable input" is a much
-/// narrower, per-device SECURITY authorization: it only lets an already-
-/// trusted device ask to turn the master switch on without a fresh Mac
-/// confirmation every time — it can never itself bypass the master switch,
-/// and un-authorizing a device never touches the master switch either.
+/// Normal interaction/security controls. Two deliberately separate layers
+/// live here (see the per-device/per-session input consent milestone):
+/// `Allow Input` is the Mac-wide master switch/kill-switch — while OFF, no
+/// receiver may control the Mac, full stop, regardless of any session grant
+/// or per-device policy. "Input Requests" per device is a permanent POLICY,
+/// never a live grant: `Always Allow Requests` only means a future control
+/// request from that device skips the Mac prompt — every new connection
+/// still starts that session's own input OFF, and the receiver must still
+/// explicitly ask.
 struct InputSettingsView: View {
     @ObservedObject var controller: SenderController
     @ObservedObject var permissions: PermissionMonitor
@@ -17,7 +18,7 @@ struct InputSettingsView: View {
             Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Allow Input", isOn: $controller.allowInput)
-                    Text("Allow touch, scrolling, and pointer input from the connected device.")
+                    Text("Master switch for remote control. While off, no connected device can control this Mac, no matter what it was previously granted.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -25,34 +26,37 @@ struct InputSettingsView: View {
 
             if !controller.activeDisplayEntries.isEmpty {
                 Section("Current Session") {
-                    LabeledContent("Touch/Input", value: controller.allowInput ? "Active" : "Disabled")
-                    LabeledContent("Keyboard", value: "Available")
                     LabeledContent("Accessibility", value: permissions.accessibility ? "Granted" : "Not Granted")
                 }
             }
 
             Section {
                 if controller.knownDeviceEntries.isEmpty {
-                    Text("No devices are currently allowed to enable input remotely.")
+                    Text("No paired devices yet.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(controller.knownDeviceEntries) { entry in
-                        Toggle(entry.name, isOn: Binding(
-                            get: { entry.inputAuthorized },
-                            set: { controller.setInputAuthorized($0, peerID: entry.id) }))
-                            .disabled(!controller.isPermanentInputAuthorizationEditable)
+                        Picker(entry.name, selection: Binding(
+                            get: { entry.inputPolicy },
+                            set: { controller.setInputPolicy($0, peerID: entry.id) })) {
+                            Text("Ask").tag(PeerInputRequestPolicy.ask)
+                            Text("Always Allow Requests").tag(PeerInputRequestPolicy.alwaysAllow)
+                            Text("Never Allow Requests").tag(PeerInputRequestPolicy.neverAllow)
+                        }
+                        .disabled(!controller.canSetInputPolicy(.alwaysAllow, peerID: entry.id)
+                            && entry.inputPolicy != .alwaysAllow)
                     }
                 }
             } header: {
-                Text("Devices allowed to enable input")
+                Text("Input Requests")
             } footer: {
-                if controller.isPermanentInputAuthorizationEditable {
-                    Text("A permanently allowed device can turn Allow Input on from its own screen without asking here every time. It can never do this while Allow Input is off for a reason other than that device's own request, and it never bypasses this Mac's Allow Input master switch above.")
+                if controller.anySessionHasEffectiveInput {
+                    Text("A device currently controlling this Mac can't be promoted to Always Allow Requests right now — this prevents a connected device from granting itself permanent access.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Disable Allow Input to change permanent device permissions.")
+                    Text("Ask shows a prompt on this Mac for every new request. Always Allow Requests skips the prompt but still requires the device to explicitly ask each session — connecting alone never turns input on.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

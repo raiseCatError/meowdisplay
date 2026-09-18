@@ -171,6 +171,7 @@ targets:
       - Mac/SettingsCategory.swift
       - Mac/ForgetDeviceAction.swift
       - Mac/ReceiverInputAuthorizationStore.swift
+      - Mac/InputControlConsent.swift
       - Mac/RouteOverrides.swift
       - Mac/WakeInspector.swift
       - Mac/AppPresentation.swift

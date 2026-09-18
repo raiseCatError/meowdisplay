@@ -14,8 +14,11 @@ final class MirrorUnavailableOfferPolicyTests: XCTestCase {
 
     // See StreamingPriorityTests' matching comment — that canary now points
     // here.
-    func testMirrorUnavailableWireVersionIsTheCurrentProtocolVersion() {
-        XCTAssertEqual(WireProtocol.mirrorUnavailableWireVersion, WireProtocol.version)
+    /// Pinned to the version `mirrorUnavailable` actually introduced — not
+    /// `WireProtocol.version`, which has since moved on with later features
+    /// (e.g. `sessionScopedInputConsentWireVersion` at 18).
+    func testMirrorUnavailableWireVersionIsSeventeen() {
+        XCTAssertEqual(WireProtocol.mirrorUnavailableWireVersion, 17)
     }
 
     // MARK: - shouldOffer (headless Mirror -> one offer; old receiver -> clean failure)

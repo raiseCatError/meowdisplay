@@ -236,6 +236,15 @@ final class DeviceSession: ObservableObject, Identifiable {
     // resolution, rather than each re-deriving it independently.
     @Published var videoActive = false
     @Published var audioActive = false
+    // Mirrors `MacSender.sessionInputGrant` for display only — the
+    // authoritative bit lives on `sender`, updated via `onSessionInputGrantChanged`.
+    // Never itself grants anything; see `SenderController.
+    // handleInputControlRequested` for the only path that actually grants.
+    @Published var sessionInputGranted = false
+    // This session's control-request dedup/cooldown/timeout — MainActor-
+    // confined (unlike the grant bit) since it's only ever touched from
+    // `SenderController`'s consent-flow methods, all MainActor.
+    var inputControlRequest = InputControlRequestLifecycle()
     @Published var videoWidth = 0
     @Published var videoHeight = 0
     @Published var videoFPS = 0
@@ -318,6 +327,11 @@ final class SenderController: ObservableObject {
     let pairingPrompt = PairingPromptModel()
     @Published var pairingMessage: String?
     @Published private(set) var pendingForget: ForgetConfirmation?
+    /// Per-device/per-session input consent milestone: the single shared
+    /// native-prompt surface for "<Device Name> wants to control this
+    /// Mac" — see `InputControlRequestPromptModel`'s doc comment for why
+    /// only one prompt is ever live at a time.
+    let inputControlPrompt = InputControlRequestPromptModel()
     private var pairingObservation: AnyCancellable?
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
     // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
@@ -424,10 +438,17 @@ final class SenderController: ObservableObject {
             guard allowInput != oldValue else { return }
             UserDefaults.standard.set(allowInput, forKey: InputPolicy.defaultsKey)
             sessions.forEach { session in
+                // The master is a global kill switch: turning it off must
+                // cancel every session's held input immediately, regardless
+                // of that session's own grant (which is left untouched —
+                // see the milestone's MAC MASTER INPUT SWITCH section:
+                // turning the master back on during the same session may
+                // resume a previously granted session with no fresh
+                // request).
                 if !allowInput { session.sender.resetReceiverInputState() }
-                // Every connected receiver gets the new state, not just
-                // whichever one may have requested it — Allow Input is one
-                // global Mac-wide gate, never per-receiver.
+                // Each session computes its OWN effective state from its
+                // own grant — this is no longer one broadcast value shared
+                // by every receiver.
                 session.sender.pushAllowInputState()
             }
         }
@@ -642,6 +663,11 @@ final class SenderController: ObservableObject {
             // closed) — it must be seen and stay visible regardless.
             SecurityPresentationCoordinator.presentPairing(prompt: self.pairingPrompt)
             Log.info("pairDebug: pairingPanelPresented")
+        }
+        inputControlPrompt.onPending = { [weak self] pending in
+            guard let self else { return }
+            Log.info("inputConsentDebug: onPending peerID=\(pending.peerID)")
+            SecurityPresentationCoordinator.presentInputControlRequest(prompt: self.inputControlPrompt)
         }
         persistKnownIdentifiers()
         startBrowsing()
@@ -1136,7 +1162,7 @@ final class SenderController: ObservableObject {
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
             removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
-            removeInputAuthorization: { ReceiverInputAuthorizationStore.removeAuthorization(peerID: $0) })
+            removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) })
         // Forget must take effect immediately for a still-open listener
         // socket, not just for the next connection this process happens to
         // build fresh TLS options for — see `scheduleRemoteConnectRequestListenerRefresh`.
@@ -1151,7 +1177,7 @@ final class SenderController: ObservableObject {
         }
         for session in matchingSessions {
             autoConnectPolicy.suppress(identifiers(for: session))
-            end(session)
+            end(session)   // also dismisses any pending input-control prompt — see `end`'s doc comment
         }
         Log.info("trustDebug: sessionsTerminated=\(matchingSessions.count)")
         let trustAfter = TrustStore.shared.hasPin(peerID: peerID)
@@ -1823,24 +1849,15 @@ final class SenderController: ObservableObject {
             self.requestMode(CaptureMode(requestedMode))
         }
         sender.onAllowInputRequest = { [weak self, weak session] requested in
-            guard let self, let session, self.owns(session) else { return }
-            // SECURITY: a receiver may only ENABLE input this way if the
-            // Mac user has permanently authorized that specific peer (see
-            // `ReceiverInputAuthorizationStore` / the Input settings
-            // page's "Devices allowed to enable input" list) — this is the
-            // per-device authorization the global Allow Input toggle alone
-            // used to let ANY connected receiver flip unconditionally.
-            // Relinquishing (`requested == false`) is always honored: that
-            // never grants capability, only gives it up.
-            if requested {
-                guard let peerID = session.deviceID,
-                      ReceiverInputAuthorizationStore.isAuthorized(peerID: peerID) else {
-                    Log.info("inputAuth: denied allowInputRequest(true) from unauthorized peerID=\(session.deviceID ?? "unknown")")
-                    session.sender.pushAllowInputState()
-                    return
-                }
-            }
-            self.allowInput = requested
+            // Only ever fires for `requested == true` — see the closure's
+            // doc comment on `MacSender.onAllowInputRequest`; a release
+            // (`false`) is applied immediately by `MacSender` itself and
+            // never reaches here.
+            guard requested, let self, let session, self.owns(session) else { return }
+            self.handleInputControlRequested(session: session)
+        }
+        sender.onSessionInputGrantChanged = { [weak session] granted in
+            session?.sessionInputGranted = granted
         }
         sender.onVideoEnabledRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }
@@ -2071,6 +2088,16 @@ final class SenderController: ObservableObject {
 
     private func end(_ session: DeviceSession) {
         autoConnectPolicy.finish(session.attempt)
+        // Input-consent milestone: a true session end (this is the single
+        // choke point every teardown path — disconnect, sleeping's
+        // replacement session, Forget, restartAll — already goes through)
+        // must never leave a stale prompt or request lifecycle behind for a
+        // session that no longer exists. The session's own ephemeral input
+        // grant needs no explicit clearing here: it lives in `MacSender.
+        // sessionInputGrant`, which is deallocated with this `MacSender`
+        // instance — a brand-new logical session always gets a fresh one.
+        inputControlPrompt.cancelForEndedSession(id: session.id)
+        session.inputControlRequest.reset()
         session.sender.stop()
         if session.applicationAuthenticated {
             Log.info("deviceUI: activeSession removed peerID=\(session.deviceID ?? "unknown") sessionID=\(session.id)")
@@ -2218,7 +2245,9 @@ final class SenderController: ObservableObject {
                 ActiveDisplayEntry(id: session.id, peerID: session.deviceID, name: session.name,
                                    statusText: session.statusWithRoute, route: session.route,
                                    mode: mode, videoActive: session.videoActive,
-                                   audioActive: session.audioActive, allowInput: allowInput,
+                                   audioActive: session.audioActive,
+                                   allowInput: EffectiveInputAuthorization.allowed(
+                                       masterEnabled: allowInput, sessionGranted: session.sender.hasSessionInputGrant),
                                    videoWidth: session.videoWidth, videoHeight: session.videoHeight,
                                    videoFPS: session.videoFPS,
                                    bitrateBps: quality.bitrate, capturePhase: session.capturePhase,
@@ -2250,7 +2279,7 @@ final class SenderController: ObservableObject {
         let name: String
         let activeSessionID: String?
         let resolvedTarget: ConnectionTarget?
-        let inputAuthorized: Bool
+        let inputPolicy: PeerInputRequestPolicy
     }
 
     var knownDeviceEntries: [KnownDeviceEntry] {
@@ -2259,33 +2288,127 @@ final class SenderController: ObservableObject {
             return KnownDeviceEntry(
                 id: peer.peerID, name: peer.displayName, activeSessionID: active?.id,
                 resolvedTarget: active == nil ? resolvedTarget(forPeerID: peer.peerID) : nil,
-                inputAuthorized: ReceiverInputAuthorizationStore.isAuthorized(peerID: peer.peerID))
+                inputPolicy: ReceiverInputAuthorizationStore.policy(peerID: peer.peerID))
         }
     }
 
-    /// Whether `peerID` may enable Mac input from its own UI without a
-    /// fresh Mac confirmation each time — see the security invariant in
-    /// `onAllowInputRequest`'s wiring. Always Mac-user-granted, never
-    /// auto-granted by connecting or pairing.
-    func isInputAuthorized(peerID: String) -> Bool {
-        ReceiverInputAuthorizationStore.isAuthorized(peerID: peerID)
+    /// `peerID`'s persisted policy for how the Mac responds to a future
+    /// control request — never a live grant (see `PeerInputRequestPolicy`).
+    func inputPolicy(peerID: String) -> PeerInputRequestPolicy {
+        ReceiverInputAuthorizationStore.policy(peerID: peerID)
     }
 
-    /// Whether permanent per-device input authorization can be changed right
-    /// now. False whenever Allow Input is on: at that point a remote peer
-    /// already controls the Mac's screen, so any "Always Allow" control
-    /// stops being a real security boundary unless it's also locked below
-    /// the UI layer (`ReceiverInputAuthorizationStore.setAuthorized`).
-    var isPermanentInputAuthorizationEditable: Bool { !allowInput }
+    /// True while ANY connected session currently has effective input — the
+    /// self-authorization guard's condition (see `ReceiverInputAuthorizationStore`'s
+    /// doc comment): a remote peer with live screen control could otherwise
+    /// click any device's row in Settings to widen its own or another
+    /// peer's permanent policy.
+    var anySessionHasEffectiveInput: Bool {
+        sessions.contains { EffectiveInputAuthorization.allowed(masterEnabled: allowInput, sessionGranted: $0.sender.hasSessionInputGrant) }
+    }
 
-    /// Returns whether the change actually took effect. Fails while Allow
-    /// Input is on — see `isPermanentInputAuthorizationEditable`.
+    /// Whether `policy` can be set for `peerID` right now. Narrowing
+    /// (`.ask`/`.neverAllow`) is always editable; widening to `.alwaysAllow`
+    /// is not while `anySessionHasEffectiveInput` — see
+    /// `ReceiverInputAuthorizationStore.setPolicy`'s enforcement, which this
+    /// mirrors for the UI's `.disabled` state.
+    func canSetInputPolicy(_ policy: PeerInputRequestPolicy, peerID: String) -> Bool {
+        policy != .alwaysAllow || !anySessionHasEffectiveInput
+    }
+
+    /// Returns whether the change actually took effect — see
+    /// `ReceiverInputAuthorizationStore.setPolicy`.
     @discardableResult
-    func setInputAuthorized(_ authorized: Bool, peerID: String) -> Bool {
-        let applied = ReceiverInputAuthorizationStore.setAuthorized(authorized, peerID: peerID)
+    func setInputPolicy(_ policy: PeerInputRequestPolicy, peerID: String) -> Bool {
+        let applied = ReceiverInputAuthorizationStore.setPolicy(
+            policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
         if applied { objectWillChange.send() }
         return applied
     }
+
+    /// Mac owner manually revokes an active session's control grant from
+    /// Settings/device detail. Immediate: no confirmation, since narrowing
+    /// is always safe.
+    func revokeSessionInput(peerID: String) {
+        guard let session = sessions.first(where: { $0.deviceID == peerID && $0.applicationAuthenticated }) else { return }
+        session.sender.revokeSessionInput()
+    }
+
+    // MARK: - Input control-request consent flow
+
+    /// A receiver requested control of `session`. Every new logical session
+    /// starts input OFF regardless of trust/pairing (the milestone's core
+    /// invariant) — this is the ONLY path that can turn it on, and it never
+    /// widens anything beyond `session` itself.
+    func handleInputControlRequested(session: DeviceSession) {
+        guard let peerID = session.deviceID else { return }
+        guard allowInput else {
+            // Mac-wide master is off — the owner already said no globally;
+            // never surface a prompt for a request that can't succeed.
+            session.sender.denySessionInput(state: .notAllowed)
+            return
+        }
+        switch ReceiverInputAuthorizationStore.policy(peerID: peerID) {
+        case .neverAllow:
+            session.sender.denySessionInput(state: .requestsDisabled)
+        case .alwaysAllow:
+            session.sender.grantSessionInput()
+        case .ask:
+            presentInputControlPrompt(session: session, peerID: peerID)
+        }
+    }
+
+    private func presentInputControlPrompt(session: DeviceSession, peerID: String) {
+        guard let generation = session.inputControlRequest.beginRequest() else {
+            // Duplicate while pending (coalesced into the existing prompt)
+            // or within the post-decision cooldown — no new prompt, no
+            // reply needed: the receiver is already showing "Requesting…"
+            // for the pending one, or should be in its own local cooldown.
+            return
+        }
+        session.sender.notifyInputRequestPending()
+        let request = PendingInputControlRequest(id: session.id, peerID: peerID, name: session.name, generation: generation)
+        Task { [weak self, weak session] in
+            let decision = await self?.inputControlPrompt.request(request) ?? .notNow
+            guard let self, let session else { return }
+            self.resolveInputControlRequest(session: session, peerID: peerID, generation: generation, decision: decision)
+        }
+    }
+
+    private func resolveInputControlRequest(session: DeviceSession, peerID: String, generation: Int,
+                                             decision: InputControlRequestDecision) {
+        guard session.inputControlRequest.resolve(generation: generation, decision: decision) else {
+            // Stale: this generation was already superseded (session ended
+            // and a replacement began, or a duplicate resolution raced in).
+            return
+        }
+        // `InputControlRequestPlan` fixes a real ordering bug: persisting
+        // BEFORE granting means `.alwaysAllowDevice`'s widening is judged
+        // by whatever OTHER sessions currently have effective input, never
+        // by the grant this very decision is about to create — see the
+        // plan type's doc comment. Applying `grantSession`/`denyState`
+        // before computing the plan (or before persisting) would silently
+        // reintroduce that bug.
+        let plan = InputControlRequestPlan.plan(for: decision)
+        if let policy = plan.persistPolicy {
+            let persisted = setInputPolicy(policy, peerID: peerID)
+            if policy == .alwaysAllow, !persisted {
+                // SECURITY CRITICAL: refused because some OTHER session
+                // currently has effective input — never silently pretend
+                // this succeeded. Fails closed to the existing `.ask`
+                // policy; the session grant below still proceeds, since
+                // that reflects the owner's explicit local decision at the
+                // Mac just now, not anything the remote peer did.
+                Log.info("inputConsent: refused to persist Always Allow for peer \(peerID) — another session already has effective input")
+            }
+        }
+        if plan.grantSession {
+            session.sender.grantSessionInput()
+        } else if let denyState = plan.denyState {
+            session.sender.denySessionInput(state: denyState)
+        }
+    }
+
 
     /// A currently reachable (but not yet connected) target for a known
     /// peer, so its row can offer Connect without waiting for it to also

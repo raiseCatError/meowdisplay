@@ -508,11 +508,15 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var preferredLandscapeSide = LandscapeTraySide.trailing
     var activeControlProfile = ControlProfileSlot.default
     var trayCollapsed = false
-    /// Master remote-input gate, receiver-local and (once connected to a
-    /// Mac speaking `allowInputWireVersion`) kept in sync with the Mac's own
-    /// Allow Input toggle — see `StreamReceiver.requestAllowInput` /
-    /// `onAllowInputStateChange`. Settings/the gear are never gated by this;
-    /// only remote touch/pointer/keyboard/gesture output is.
+    /// Whether THIS session currently has effective input, mirrored from the
+    /// Mac's per-session consent decision once connected (see
+    /// `ReceiverControlStore.sessionInputState`/`applySessionInputState`,
+    /// `StreamReceiver.requestAllowInput`/`onAllowInputStateChange`).
+    /// Defaults true only so a brand-new install with no connection yet
+    /// never shows a manufactured "denied" state; the Mac's own hello
+    /// reply always overwrites it before any input could actually be sent.
+    /// Settings/the gear are never gated by this; only remote touch/
+    /// pointer/keyboard/gesture output is.
     var allowInput = true
     /// The primary one-finger pointer model — see `PointerInputMode`.
     /// Editable regardless of `allowInput`: choosing a mode never itself
