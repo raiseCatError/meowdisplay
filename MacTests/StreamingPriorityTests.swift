@@ -45,8 +45,11 @@ final class StreamingPriorityTests: XCTestCase {
 
     // MARK: - Wire-version currency
 
-    func testStreamingPriorityWireVersionIsTheCurrentProtocolVersion() {
-        XCTAssertEqual(WireProtocol.streamingPriorityWireVersion, WireProtocol.version)
+    // Superseded as "the current version" by mirrorUnavailableWireVersion
+    // (17) at a later milestone — see MirrorUnavailableOfferPolicyTests for
+    // that canary now.
+    func testStreamingPriorityWireVersionIsFixedAt16() {
+        XCTAssertEqual(WireProtocol.streamingPriorityWireVersion, 16)
     }
 
     // MARK: - Persistence survives reload

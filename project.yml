@@ -177,18 +177,21 @@ targets:
       - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
       - Mac/DisplayHealth.swift
+      - Mac/RouteArbitration.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
       - Shared/RemoteEndpointStore.swift
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift
-      - Shared/RemoteStabilizationPolicy.swift
+      - Shared/SessionStabilizationPolicy.swift
       - Shared/WakeOnLAN.swift
       - Shared/StreamListenerRestartState.swift
       - Shared/ReceiverSessionState.swift
       - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
+      - Shared/MirrorUnavailableOfferPolicy.swift
+      - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/PCMPlaybackEngine.swift
       - Shared/RemoteViewport.swift

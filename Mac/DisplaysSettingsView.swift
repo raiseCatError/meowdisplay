@@ -8,15 +8,28 @@ struct DisplaysSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Display Mode") {
+            Section {
                 Picker("Mode", selection: Binding(
                     get: { controller.mode },
                     set: { controller.requestMode($0) })) {
                     Text("Extend").tag(CaptureMode.extend)
                         .disabled(!controller.videoEnabled)
                     Text("Mirror").tag(CaptureMode.mirror)
+                        .disabled(!controller.hasUsablePhysicalDisplay)
                 }
                 .pickerStyle(.segmented)
+            } header: {
+                Text("Display Mode")
+            } footer: {
+                // Disabling the segment alone still lets a stale keyboard/
+                // accessibility selection reach it — `requestMode` is the
+                // actual authority and rejects Mirror regardless; this is
+                // just telling the user why.
+                if !controller.hasUsablePhysicalDisplay {
+                    Text("Mirror requires an active physical display.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if controller.mode == .mirror {

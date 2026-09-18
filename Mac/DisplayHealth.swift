@@ -71,4 +71,26 @@ enum DisplayHealth {
     static func isUsable(_ id: CGDirectDisplayID) -> Bool {
         DisplayUsability.evaluate(reading(for: id)) == .usable
     }
+
+    /// True when at least one CoreGraphics-active display other than
+    /// `excluded` is currently usable — the general "is there a genuinely
+    /// usable PHYSICAL display right now" check. Callers exclude every
+    /// MEOW-owned virtual display ID they know about (a healthy VD reads as
+    /// "usable" through this same API, so it must be excluded explicitly to
+    /// answer the physical-display question rather than "any display").
+    /// Shared by `MacSender` (excluding its own VD) and `SenderController`
+    /// (excluding every session's VD, when deciding whether Mirror may be
+    /// selected at all).
+    static func hasUsablePhysicalDisplay(excludingAny excluded: Set<CGDirectDisplayID> = []) -> Bool {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        guard count > 0 else { return false }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        return ids.contains { id in !excluded.contains(id) && isUsable(id) }
+    }
+
+    static func hasUsablePhysicalDisplay(excluding id: CGDirectDisplayID?) -> Bool {
+        hasUsablePhysicalDisplay(excludingAny: id.map { [$0] } ?? [])
+    }
 }

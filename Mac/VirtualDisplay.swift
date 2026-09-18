@@ -198,6 +198,20 @@ final class VirtualDisplay {
     /// swaps the serial, transport switches change it) — the caller's
     /// device-keyed record must win. Afterwards, origin changes are the user
     /// rearranging: report them so the caller can persist the new spot.
+    /// Re-arms the restore-window mechanism to move this display to
+    /// `origin` (CoreGraphics defines "main display" as whichever display
+    /// sits at (0,0)) without persisting it as a user-driven placement —
+    /// used when going headless mid-session forces this display to become
+    /// the system's main display so macOS's login/lock UI has somewhere to
+    /// render. `manageOrigin()`'s existing enforcement tick drives the
+    /// actual move on its next pass; the per-device saved arrangement in
+    /// `DisplayArrangement` is left untouched, exactly like the initial
+    /// creation-time restore window.
+    func repositionForHeadlessMain(to origin: CGPoint = .zero) {
+        restoreTarget = origin
+        restoreUntil = Date().addingTimeInterval(6)
+    }
+
     private func manageOrigin() {
         let id = display.displayID
         let origin = CGDisplayBounds(id).origin

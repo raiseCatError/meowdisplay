@@ -209,6 +209,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var frameRateLimiter = FrameRateLimiter(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
     private var connection: NWConnection?
     private var virtualDisplay: VirtualDisplay?
+    /// The MEOW virtual display's CoreGraphics ID, if Extend currently has
+    /// one — exposed only so `SenderController` can exclude it when
+    /// deciding whether a genuinely usable PHYSICAL display exists
+    /// (Mirror's authoritative availability gate in `requestMode`).
+    var virtualDisplayID: CGDirectDisplayID? { virtualDisplay?.displayID }
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
 
@@ -562,6 +567,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // the session decides to redial (scheduleReconnect/switchTransport):
     // dial-phase failures take the grace/refusal rules, never this exit.
     private var currentPathDirectLink = false
+    // Last route `reportRoute` classified — logging context only (which
+    // route a stabilization arm/log line applies to); never gates trust.
+    private var currentRoute: ConnectionRoute?
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
     private var lastCursorPNGHash = 0
     // Cursor side channel (UDP, WiFi only): positions queue behind video
@@ -638,14 +646,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `pipelineLock`.
     private var wakeCaptureObserver: NSObjectProtocol?
     // Not itself part of the wake-capture-recovery machinery above — this is
-    // the fixed 60s post-Promote display-sleep stabilization hold (see
-    // WakeStabilizationAssertion).
+    // the fixed 60s post-authentication display/system-sleep stabilization
+    // hold (see WakeStabilizationAssertion), armed for every route.
     private var wakeStabilizationAssertion: WakeStabilizationAssertion?
     // The connection generation `wakeStabilizationAssertion` was last armed
-    // for via `reportRoute` (see `RemoteStabilizationPolicy`) — distinct from
-    // the explicit `promoteInteractiveWake` wire handler, which still begins
-    // the same assertion on its own. `queue`-confined, like `reportRoute`.
-    private var remoteStabilizationArmedGeneration: UInt64?
+    // for (see `SessionStabilizationPolicy`) — distinct from the explicit
+    // `promoteInteractiveWake` wire handler, which still begins the same
+    // assertion on its own. `queue`-confined, like `reportRoute`.
+    private var sessionStabilizationArmedGeneration: UInt64?
+    // Set only while `offerExtendOrFailMirror` is actively waiting on a
+    // headless-Mirror "Use Extend?" offer, scoped to the connection
+    // generation it was sent for — exactly one pending offer per
+    // generation. Cleared on timeout, on `stop()`, or found stale (a
+    // different generation) by the poll itself.
+    private var mirrorUnavailableOfferGeneration: UInt64?
     private var wakeCaptureRecoveryScheduled = false
     private var wakeCaptureRecoveryRunning = false
     // Display-topology generation (distinct from `captureGeneration`/session
@@ -786,6 +800,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func pushDisplayModeState() {
         queue.async { [weak self] in self?.sendDisplayModeState() }
+    }
+
+    /// Broadcasts `mirrorUnavailable` outside the headless-Mirror-STARTUP
+    /// offer flow (`offerExtendOrFailMirror`) — used when an already-
+    /// connected receiver requests Mirror via `displayModeRequest` while
+    /// this Mac has no usable physical display (see
+    /// `SenderController.requestMode`'s authoritative rejection). Reuses
+    /// the exact same wire message; the receiver tells the two contexts
+    /// apart by its own already-confirmed mode (see
+    /// `StreamReceiver`'s handling) — no new field, no new message type.
+    func pushMirrorUnavailable() {
+        queue.async { [weak self] in
+            self?.sendJSONObject(["type": WireMessage.mirrorUnavailable, "reason": "noUsablePhysicalDisplay"])
+        }
     }
 
     /// PROTOCOL.md 6.7. Meaningful only in Extend, but harmless to send
@@ -1132,6 +1160,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Headless counterpart to `transitionToMirrorAndDisableVideo`: this Mac
+    /// has no usable physical display, so becoming Mirror to reclaim the
+    /// virtual display's resources is exactly as impossible as requesting
+    /// Mirror directly (see `SenderController.requestMode`'s guard).
+    /// Stays in Extend and stops capture the same way `applyVideoEnabled(false)`
+    /// already does for the "stream survives for audio" case — the virtual
+    /// display and its identity are left alone, so re-enabling video later
+    /// (`restartVideoCapture`'s `.extend` branch) resumes Extend on the
+    /// SAME display normally, headless or not.
+    func disableVideoKeepingExtend(completion: @escaping @MainActor () -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.desiredVideoEnabled = false
+            self.applyVideoEnabled(false)
+            Task { @MainActor in completion() }
+        }
+    }
+
     func start() async throws {
         stopped = false
         queue.async { self.connect() }   // dial state lives on `queue`
@@ -1164,7 +1210,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         switch mode {
         case .mirror:
-            try await startMirrorCaptureUsingPreference(sessionGeneration: ready.generation)
+            if DisplayHealth.hasUsablePhysicalDisplay(excluding: nil) {
+                try await startMirrorCaptureUsingPreference(sessionGeneration: ready.generation)
+            } else {
+                try await offerExtendOrFailMirror(info: ready.info, sessionGeneration: ready.generation)
+            }
 
         case .extend:
             // awaitingWake is queue-confined — read it there before surfacing.
@@ -1230,6 +1280,96 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
     }
 
+    /// Mirror has no usable physical source (headless): instead of failing
+    /// immediately, give the receiver a bounded chance to switch to Extend
+    /// over the EXISTING `displayModeRequest` path — never a parallel
+    /// mode-switch mechanism, and the Mac's `mode` remains the sole
+    /// authoritative source of truth throughout (see
+    /// `SenderController.requestMode`). Only offered when the receiver's
+    /// protocol version advertises understanding it; an older receiver gets
+    /// today's clean, immediate Mirror failure instead of sitting on a
+    /// prompt it cannot show. `sessionGeneration` scopes the offer to
+    /// exactly this authenticated connection — a route migration,
+    /// Disconnect, Forget, or a newer session all invalidate
+    /// `authenticatedSession`'s generation, which this function's own poll
+    /// notices and aborts on, so a stale offer can never resurface or force
+    /// anything. If a physical display returns while this is waiting, that
+    /// alone changes nothing here — the receiver's own "Use Extend" tap (if
+    /// it still arrives) remains a perfectly valid request regardless of
+    /// what the physical topology looks like by then.
+    private func offerExtendOrFailMirror(info: PhoneInfo, sessionGeneration: UInt64) async throws {
+        guard MirrorUnavailableOfferPolicy.shouldOffer(
+            hasUsablePhysicalDisplay: false, receiverProtocolVersion: info.protocolVersion
+        ) else {
+            throw NSError(domain: "MacSender", code: 1, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "No display available to mirror — connect a display, or use Extend instead."])
+        }
+        guard authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+        mirrorUnavailableOfferGeneration = sessionGeneration
+        Log.info("displayDebug: mirrorUnavailable offered generation=\(sessionGeneration)")
+        sendJSONObject(["type": WireMessage.mirrorUnavailable, "reason": "noUsablePhysicalDisplay"])
+        let deadline = Date().addingTimeInterval(Self.mirrorUnavailableOfferTimeout)
+        // Wake/lid/topology churn can report a display usable for a single
+        // transient sample before it actually settles — require it stably
+        // usable (consecutive samples covering ~1s) before ever cancelling
+        // the offer and resuming Mirror. This is scoped to exactly this
+        // wait; ordinary Mirror startup with a display already present
+        // never goes through this function at all, so no delay is added there.
+        var stability = DisplayStabilityTracker()
+        while Date() < deadline {
+            try await Task.sleep(for: .milliseconds(500))
+            guard MirrorUnavailableOfferPolicy.isOfferStillPending(
+                offerGeneration: mirrorUnavailableOfferGeneration, sessionGeneration: sessionGeneration,
+                sessionIsLive: authenticatedSession.isLive(generation: sessionGeneration)
+            ) else {
+                // Superseded already — an Extend request won (handled
+                // entirely by the existing `onDisplayModeRequest` ->
+                // `requestMode` -> mode-restart path), or the session ended/
+                // migrated/was superseded. Nothing left for this attempt to do.
+                throw CancellationError()
+            }
+            guard !stability.recordSample(usable: DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)) else {
+                // Mirror became STABLY viable again while the offer was
+                // pending — the MAC decides this, never a stale "Use
+                // Extend" tap that might still be in flight: dismiss the
+                // offer and go straight back to Mirror. `startCapture`'s
+                // existing unconditional post-success `sendDisplayModeState()`
+                // is what tells the receiver to dismiss the now-moot alert
+                // (see `applyConfirmedDisplayMode`) — no new wire message.
+                mirrorUnavailableOfferGeneration = nil
+                Log.info("displayDebug: mirrorUnavailable offer cleared generation=\(sessionGeneration) "
+                    + "— a physical display returned and stayed stable, resuming Mirror")
+                try await startMirrorCaptureUsingPreference(sessionGeneration: sessionGeneration)
+                return
+            }
+        }
+        mirrorUnavailableOfferGeneration = nil
+        Log.info("displayDebug: mirrorUnavailable offer timed out generation=\(sessionGeneration)")
+        // Distinct error code (vs. the plain "no display" throw above) so
+        // `SenderController`'s start-failure handler can tell "the receiver
+        // never answered" apart from "declined immediately" and suppress
+        // auto-connect for this peer accordingly — see
+        // `mirrorUnavailableTimeoutErrorCode`.
+        throw NSError(domain: "MacSender", code: Self.mirrorUnavailableTimeoutErrorCode, userInfo: [
+            NSLocalizedDescriptionKey:
+                "No display available to mirror — connect a display, or use Extend instead."])
+    }
+
+    /// `NSError.code` used only for the `offerExtendOrFailMirror` timeout
+    /// throw — lets `SenderController` distinguish "the receiver never
+    /// responded to the headless-Mirror offer" from every other Mirror
+    /// failure, so ONLY that specific case suppresses auto-connect for this
+    /// peer (see `SenderController`'s `sender.start()` catch block). Not
+    /// `private` because that controller check needs it.
+    static let mirrorUnavailableTimeoutErrorCode = 13
+
+    /// How long the Mac waits for the receiver to answer a headless-Mirror
+    /// "Use Extend?" offer before failing Mirror cleanly — bounded so a
+    /// silent/unresponsive receiver can never hold the Mac's stabilization
+    /// assertions (or the session) open indefinitely.
+    private static let mirrorUnavailableOfferTimeout: TimeInterval = 30
+
     /// Whether an in-flight `setupExtend` probe/attempt should abort rather
     /// than create, adopt, or keep waiting on a virtual display: `stopped`,
     /// or the authenticated session this setup belongs to is no longer the
@@ -1240,6 +1380,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func isExtendSetupStale(ownerGeneration: UInt64?) -> Bool {
         guard !stopped, let ownerGeneration else { return true }
         return !authenticatedSession.isLive(generation: ownerGeneration)
+    }
+
+    /// Bounded topology diagnostics — called only at headless creation/
+    /// recovery boundaries, never per-frame. Answers, from real hardware
+    /// logs alone, which displays exist, which is CoreGraphics' main
+    /// display, whether MEOW's own virtual display is main, and what a
+    /// FRESH ScreenCaptureKit enumeration currently sees — so a "shows only
+    /// wallpaper" hardware report can be diagnosed without attaching a
+    /// debugger to the sender.
+    private func logDisplayTopologyDiagnostics(reason: String, vdID: CGDirectDisplayID?) async {
+        let mainID = CGMainDisplayID()
+        Log.info("displayDebug: topologyDiag reason=\(reason) mainDisplayID=\(mainID) "
+            + "vdID=\(vdID.map(String.init) ?? "none") vdIsMain=\(vdID == mainID)")
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        if count > 0 { CGGetActiveDisplayList(count, &ids, &count) }
+        for id in ids {
+            let reading = DisplayHealth.reading(for: id)
+            let bounds = CGDisplayBounds(id)
+            let builtin = CGDisplayIsBuiltin(id) != 0
+            Log.info("displayDebug: topologyDiag display id=\(id) builtin=\(builtin) "
+                + "online=\(reading.isOnline) active=\(reading.isActive) "
+                + "bounds=(\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height))) "
+                + "mirror=\(reading.mirrorState) isMain=\(id == mainID)")
+        }
+        if let content = try? await SCShareableContent.current {
+            Log.info("displayDebug: topologyDiag scShareableDisplayIDs=\(content.displays.map(\.displayID))")
+        }
     }
 
     /// Build (or rebuild) the virtual display + capture for the announced
@@ -1348,7 +1517,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     guard !self.isExtendSetupStale(ownerGeneration: ownerGeneration) else {
                         throw CancellationError()
                     }
-                    let restoreOrigin = DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
+                    // Headless (no usable physical display exists): place the
+                    // VD at (0,0) — CoreGraphics defines "main display" as
+                    // whichever display sits at that origin — instead of the
+                    // per-device saved arrangement, so the login/lock UI has
+                    // an actual main display to render onto. This never
+                    // touches the saved arrangement itself (no `save` call
+                    // fires unless something later actually moves it), so a
+                    // physical display returning still restores normally.
+                    let restoreOrigin: CGPoint? = DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)
+                        ? DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
+                        : CGPoint.zero
                     // The productID moves with the serial: field data in #206
                     // suggests some macOS versions key the hostile state on
                     // the product, not the serial — bumping both escapes
@@ -1436,6 +1615,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         #endif
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
                                sessionGeneration: sessionGeneration)
+        await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vd.displayID)
 
         // Debug aid (`defaults write com.peetzweg.opensidecar.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
@@ -1853,6 +2033,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         stopped = true
         authenticatedSession.invalidate()
+        mirrorUnavailableOfferGeneration = nil
         wakeStabilizationAssertion?.release()
         inputInjector?.cancelActiveInput()
         _ = updateCaptureState { state in
@@ -2275,31 +2456,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
             + " route=\(route.rawValue) direct=\(currentPathDirectLink)")
+        currentRoute = route
         Task { @MainActor in self.onTransportPath?(route) }
-        armRemoteStabilizationIfNeeded(route: route)
     }
 
-    /// Gives an authenticated Remote-route session the same bounded 60s
-    /// post-wake stabilization LAN/USB sessions already get via the explicit
-    /// `promoteInteractiveWake` wire message (see `WakeStabilizationAssertion`)
-    /// — some Remote peers connect without ever sending that message, and the
-    /// graphical/video pipeline still needs the same runway to come alive.
-    /// Reuses the identical assertion object/`begin()`/`release()` lifecycle;
-    /// only ever reached once `reportRoute` has already gated on
-    /// `connectionReady` (past pinned mutual-TLS verification), so this can
-    /// only arm after the expected peer is cryptographically authenticated —
-    /// never from route/hostname/IP alone, and never from unauthenticated
-    /// traffic.
-    private func armRemoteStabilizationIfNeeded(route: ConnectionRoute) {
-        guard RemoteStabilizationPolicy.shouldArm(
-            route: route,
-            previouslyArmedGeneration: remoteStabilizationArmedGeneration,
-            currentGeneration: activeConnectionGeneration
+    /// Arms/extends the bounded 60s post-wake stabilization for ANY
+    /// authenticated route (USB/LAN/AWDL/Remote alike) — called once the
+    /// MEOW application handshake completes (`markApplicationReady`), which
+    /// already implies pinned mutual-TLS (checked earlier in the same hello
+    /// path). Every route's graphical/video pipeline needs the same runway
+    /// to come alive, not just Remote's dark-wake gap. A same-peer transport
+    /// migration (`switchTransport`) redials and reaches this again with a
+    /// new generation — `SessionStabilizationPolicy`/`WakeStabilizationAssertion.begin()`
+    /// both treat that as "extend," not "release+reopen a gap," since
+    /// `invalidateApplicationSession` deliberately does not release the
+    /// assertion for a `"transportSwitch"` reason.
+    private func armSessionStabilizationIfNeeded(generation: UInt64) {
+        guard SessionStabilizationPolicy.shouldArm(
+            previouslyArmedGeneration: sessionStabilizationArmedGeneration,
+            currentGeneration: generation
         ) else { return }
-        remoteStabilizationArmedGeneration = activeConnectionGeneration
-        Log.info("wakeDebug: remoteStabilizationArmed generation=\(activeConnectionGeneration)")
+        sessionStabilizationArmedGeneration = generation
         if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
-        wakeStabilizationAssertion?.begin()
+        wakeStabilizationAssertion?.begin(generation: generation, route: currentRoute?.rawValue)
     }
 
     /// True when the far end of a connection is a link-local address
@@ -2757,6 +2936,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, !self.stopped, self.mode == .extend,
                   !GenerationGate.isStale(capturedAt: generation, current: self.topologyGenerationNow),
                   self.virtualDisplay?.displayID == displayID else { return }
+            // Going headless mid-session: the VD is still healthy, but if
+            // it isn't already the main display (origin (0,0)) macOS's
+            // login/lock UI has no usable main display to render onto — a
+            // separate concern from the "went stale, rebuild" check below,
+            // which only fires for an actually-unhealthy display.
+            if !DisplayHealth.hasUsablePhysicalDisplay(excluding: displayID),
+               CGDisplayBounds(displayID).origin != .zero {
+                Log.info("displayDebug: no usable physical display — repositioning VD "
+                    + "\(displayID) to become main (origin 0,0)")
+                Task { @MainActor in vd.repositionForHeadlessMain() }
+                Task { await self.logDisplayTopologyDiagnostics(reason: reason, vdID: displayID) }
+            }
             let usability = DisplayUsability.evaluate(DisplayHealth.reading(for: displayID))
             guard usability != .usable else { return }
             guard self.captureStateSnapshot().phase == .running else { return }
@@ -3338,7 +3529,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = activeConnectionGeneration
         authenticatedSession.invalidate(generation: generation == 0 ? nil : generation)
         connectionReady = false
-        wakeStabilizationAssertion?.release()
+        // A same-peer transport migration is not a session end — the
+        // stabilization window must survive the redial/re-handshake gap,
+        // not release-then-reopen a window during exactly the moment it
+        // exists to cover (the new connection's `markApplicationReady`
+        // re-arms/extends it once the migration completes). Every other
+        // reason here is a genuine failure/disconnect and must still
+        // release it.
+        if reason != "transportSwitch" {
+            wakeStabilizationAssertion?.release()
+        }
         Log.info("sessionDebug: invalidated reason=\(reason) generation=\(generation)")
     }
 
@@ -3956,6 +4156,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 awaitingWake = false
                 disconnectedSince = nil
                 Log.info("sessionDebug: applicationReady generation=\(generation)")
+                // Pinned mutual-TLS (checked above) + this application
+                // handshake together are exactly "the expected paired peer
+                // is authenticated" for every route — arm the same bounded
+                // stabilization window Remote previously got alone.
+                armSessionStabilizationIfNeeded(generation: generation)
                 Task { await self.status("Connected") }
                 let previous = lastHello
                 lastHello = info
@@ -4119,6 +4324,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             case "press":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                    #if DEBUG
+                    if usage == .deleteOrBackspace {
+                        Log.info("keyboardDebug: specialPress received usage=42")
+                    }
+                    #endif
                     inputInjector?.handleKeyboardPress(
                         usage, modifiers: obj["modifiers"] as? [String] ?? [])
                 }
@@ -4230,7 +4440,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // WakeStabilizationAssertion's doc comment for why this is a
                 // separate, longer hold from the one-shot declaration above.
                 if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
-                wakeStabilizationAssertion?.begin()
+                wakeStabilizationAssertion?.begin(generation: activeConnectionGeneration, route: currentRoute?.rawValue)
             } else {
                 result["success"] = false
                 result["code"] = Int(attempt.result)

@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 16
+    static let version = 17
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -109,6 +109,18 @@ enum WireProtocol {
     /// the same fallback shape as `maxFPSWireVersion`.
     static let streamingPriorityWireVersion = 16
 
+    /// Protocol version that introduced `mirrorUnavailable` (Mac ->
+    /// receiver): sent when Mirror has no usable physical display (a
+    /// headless/clamshell Mac) instead of failing the session immediately —
+    /// the receiver may offer to switch to Extend via the EXISTING
+    /// `displayModeRequest` message; there is no separate "accepted" reply,
+    /// the confirmed mode still arrives back the normal way via
+    /// `displayModeState`. A receiver MUST NOT expect `mirrorUnavailable`
+    /// when the peer is below this version — the Mac falls back to its
+    /// pre-existing clean, immediate Mirror failure instead of waiting on a
+    /// prompt an older receiver cannot show.
+    static let mirrorUnavailableWireVersion = 17
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -188,6 +200,12 @@ enum WireMessage {
     // hello (same pattern as `streamingProfileState`) so the receiver never
     // infers it from stream behavior alone.
     static let streamingPriorityState = "streamingPriorityState"
+    // Mac -> receiver: Mirror has no usable physical display (headless) —
+    // offer the receiver a chance to switch to Extend via the EXISTING
+    // `displayModeRequest` message rather than failing the session
+    // immediately. `reason` is diagnostic only (currently always
+    // "noUsablePhysicalDisplay"). See `mirrorUnavailableWireVersion`.
+    static let mirrorUnavailable = "mirrorUnavailable"
 }
 
 enum WireCrypto {

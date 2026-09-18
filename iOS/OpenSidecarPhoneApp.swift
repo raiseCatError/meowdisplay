@@ -259,6 +259,33 @@ struct ReceiverScreen: View {
         } message: {
             if let update = recommendedUpdate { Text(update.message) }
         }
+        // Presentable before video ever starts — a headless Mac has no
+        // physical display for the receiver to fall back on, so this is
+        // the only place the choice can be made. "Use Extend" sends the
+        // EXISTING `displayModeRequest`; the Mac remains authoritative for
+        // the actual mode change.
+        .alert("Mirror isn’t available",
+               isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
+            Button("Cancel", role: .cancel) {
+                model.receiver.declineMirrorUnavailableOffer()
+            }
+            Button("Use Extend") {
+                model.receiver.acceptMirrorUnavailableOffer()
+            }
+        } message: {
+            Text("This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?")
+        }
+        // Distinct from the offer above: this fires when Mirror was
+        // requested while ALREADY confirmed extending — the user is
+        // already using Extend, so there is nothing to offer, only to
+        // explain. Purely informational (one dismiss button, no wire
+        // reply) — the Mac already stayed on Extend on its own.
+        .alert("Mirror isn’t available",
+               isPresented: Binding(get: { model.receiver.mirrorRejectedWhileExtending }, set: { _ in })) {
+            Button("OK") { model.receiver.dismissMirrorRejection() }
+        } message: {
+            Text("Mirror requires an active physical display.")
+        }
         .task { await versionGate.check() }
         // Merge the connected Mac's compatibility signal into the same gate.
         .onReceive(model.receiver.$peerSignal) { versionGate.applyPeer($0) }
@@ -880,6 +907,11 @@ struct SettingsView: View {
                     if receiver.videoSize != .zero {
                         LabeledContent("Stream",
                                        value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
+                    }
+                    if receiver.connected {
+                        Button("Disconnect", role: .destructive) {
+                            receiver.disconnect()
+                        }
                     }
                 }
 

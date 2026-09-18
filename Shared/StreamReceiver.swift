@@ -94,6 +94,19 @@ final class StreamReceiver: ObservableObject {
     @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
     @Published private(set) var displayModeConfirmationGeneration = 0
     private var displayModeRequestState = DisplayModeRequestState()
+    /// Set when the Mac reports Mirror has no usable physical display (a
+    /// headless/clamshell Mac) — see `WireMessage.mirrorUnavailable`. The UI
+    /// offers switching to Extend via `acceptMirrorUnavailableOffer()`,
+    /// which sends the EXISTING `displayModeRequest` — never a parallel
+    /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
+    /// the user acts on it.
+    @Published private(set) var mirrorUnavailable = false
+    /// Set when the Mac authoritatively rejects a Mirror request made
+    /// WHILE already confirmed extending (see `SenderController.requestMode`)
+    /// — a simple informational state, never the "Use Extend?" offer, since
+    /// the user is already using Extend. Dismissed with `dismissMirrorRejection()`,
+    /// on any disconnect, or once any mode confirmation resolves it.
+    @Published private(set) var mirrorRejectedWhileExtending = false
     /// The connected Mac's canonical Mirror capture-source report — see
     /// `MirrorDisplayStateUpdate`. `nil` until a Mac speaking
     /// `mirrorDisplayWireVersion` has actually reported one (distinct from
@@ -609,7 +622,7 @@ final class StreamReceiver: ObservableObject {
     private var advertisedService: NWListener.Service {
         var txt = NWTXTRecord()
         txt["id"] = Self.installID
-        txt["pv"] = String(WireProtocol.version)   // issue #132
+        txt["pv"] = String(advertisedProtocolVersion)   // issue #132
         if let connectRequestToken { txt["cr"] = connectRequestToken }
         return NWListener.Service(name: serviceName, type: "_opensidecar._tcp",
                                   domain: nil, txtRecord: txt)
@@ -618,7 +631,7 @@ final class StreamReceiver: ObservableObject {
     private var advertisedPairingService: NWListener.Service {
         var txt = NWTXTRecord()
         txt["id"] = Self.installID
-        txt["pv"] = String(WireProtocol.version)
+        txt["pv"] = String(advertisedProtocolVersion)
         return NWListener.Service(name: serviceName, type: "_opendisplay-pair._tcp",
                                   domain: nil, txtRecord: txt)
     }
@@ -915,6 +928,58 @@ final class StreamReceiver: ObservableObject {
     func shutDown(completion: (() -> Void)? = nil) {
         closeSession(announcing: WireMessage.closing,
                      status: "Closed", completion: completion)
+    }
+
+    /// The user explicitly ended THIS session from the live receiver UI —
+    /// unlike `shutDown()`/`stop()` (leaving receiver mode entirely), this
+    /// does not touch the listener, TLS listener, or pairing browser:
+    /// pairing/trust, the Remote endpoint, and Wake metadata all remain, and
+    /// this device stays reachable for a future manual Connect. Reuses the
+    /// exact same authenticated "closing" wire message `shutDown()` sends
+    /// (PROTOCOL.md 6.1) — the Mac already treats a received `closing` as a
+    /// deliberate goodbye and suppresses its own auto-reconnect for this
+    /// peer (`onPeerClosed` -> `autoConnectPolicy.suppress` in
+    /// OpenSidecarMacApp.swift), so no protocol or Mac-side change was
+    /// needed for that half of the contract.
+    func disconnect(completion: (() -> Void)? = nil) {
+        queue.async {
+            var finished = false
+            let finish = { [weak self] in
+                guard let self, !finished else { return }
+                finished = true
+                self.connection?.cancel()
+                self.connection = nil
+                // Deliberate teardown by this device: no automatic recovery,
+                // and any retry already scheduled is invalidated so it
+                // cannot resurrect the session afterwards. A subsequent
+                // manual Connect (`requestConnect()`) clears this the same
+                // way it already clears a Mac-initiated disconnect.
+                self.cancelReconnect()
+                self.setConnected(false, reason: .explicitDisconnect)
+                self.resetDisplayModeState()
+                self.resetExtendShapeState()
+                self.resetMaxFPSState()
+                self.resetAudioPlayback()
+                self.setStatus("Disconnected")
+                DispatchQueue.main.async {
+                    self.displayState = .running
+                    self.onDisplayStateChange?(.running)
+                }
+                completion?()
+            }
+            guard let conn = self.connection, conn.state == .ready else {
+                Log.info("disconnecting — no live connection")
+                finish()
+                return
+            }
+            Log.info("disconnecting — announcing closing to the Mac")
+            self.sendControl(["type": WireMessage.closing], on: conn) {
+                self.queue.async { finish() }
+            }
+            // The send completion may never fire on a dying link — don't
+            // let that keep this session looking connected after going dark.
+            self.queue.asyncAfter(deadline: .now() + 1) { finish() }
+        }
     }
 
     private func closeSession(announcing type: String, status: String,
@@ -1597,6 +1662,21 @@ final class StreamReceiver: ObservableObject {
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
             DispatchQueue.main.async { self.applyConfirmedDisplayMode(mode) }
+        case WireMessage.mirrorUnavailable:
+            DispatchQueue.main.async {
+                if self.confirmedDisplayMode == .extend {
+                    // Already extending — the user doesn't need the "Use
+                    // Extend?" offer (they're already using Extend); this
+                    // is a receiver-originated Mirror request the Mac
+                    // authoritatively rejected (see
+                    // `SenderController.requestMode`). Just explain why.
+                    self.mirrorRejectedWhileExtending = true
+                } else {
+                    // Fresh Mirror session startup, headless — the normal
+                    // pv17 "Use Extend?" offer.
+                    self.mirrorUnavailable = true
+                }
+            }
         case WireMessage.mirrorDisplayState:
             guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
             DispatchQueue.main.async { self.mirrorDisplayState = update }
@@ -1755,6 +1835,21 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Control messages (phone -> Mac)
 
+    /// `WireProtocol.version`, except capped for a receiver platform that
+    /// doesn't yet implement everything the latest `pv` promises — a
+    /// receiver advertising support for a feature MUST actually handle it.
+    /// MacReceiver has no display-mode UI at all (Mirror/Extend selection
+    /// is an iOS-only concept today), so it cannot present the
+    /// `mirrorUnavailable` headless-Mirror offer (pv 17) — capping keeps the
+    /// Mac sender falling back to its pre-pv17 immediate Mirror failure for
+    /// this receiver instead of it silently sitting on an offer it can
+    /// never answer. Raise this the moment MacReceiver gets that UI; pv 17
+    /// introduces nothing else today, so this has no other effect.
+    private var advertisedProtocolVersion: Int {
+        MirrorUnavailableOfferPolicy.advertisedProtocolVersion(
+            deviceKind: deviceKind, latestVersion: WireProtocol.version)
+    }
+
     private func sendHello(on conn: NWConnection) {
         var hello: [String: Any] = [
             "type": "hello",
@@ -1763,7 +1858,7 @@ final class StreamReceiver: ObservableObject {
             "scale": deviceScale,
             "device": deviceKind,
             "id": Self.installID,
-            "pv": WireProtocol.version,   // issue #132 — absent on old receivers
+            "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
         ]
         if deviceKind != "Mac" {
             hello["trayEnabled"] = announcedTrayEnabled
@@ -1956,6 +2051,14 @@ final class StreamReceiver: ObservableObject {
     /// keyboard-page usage number.
     func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
+        #if DEBUG
+        // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
+        // value) — this file also compiles into the macOS receiver, which
+        // has no UIKit, so the literal is used instead of that enum.
+        if usage == 42 {
+            Log.info("keyboardDebug: specialPress sent usage=\(usage)")
+        }
+        #endif
         sendControl(["type": "keyboard", "action": "press", "usage": usage,
                      "modifiers": modifiers])
     }
@@ -2104,6 +2207,33 @@ final class StreamReceiver: ObservableObject {
         Log.info("display mode request timed out — keeping \(displayModeRequestState.confirmedMode?.rawValue ?? "unknown")")
     }
 
+    /// "Use Extend" from the Mirror-unavailable offer: sends the EXISTING
+    /// authoritative `displayModeRequest` (`requestDisplayMode`) — never a
+    /// parallel mode-switch mechanism. Clearing the offer first means a fast
+    /// double-tap cannot present the alert a second time; `requestDisplayMode`
+    /// itself already guards against a second in-flight request regardless.
+    @MainActor
+    func acceptMirrorUnavailableOffer() {
+        mirrorUnavailable = false
+        requestDisplayMode(.extend)
+    }
+
+    /// "Cancel" from the Mirror-unavailable offer: deliberately end this
+    /// attempted session — identical semantics to the live Disconnect
+    /// action (`disconnect()`). Trust, pairing, the Remote endpoint, and
+    /// Wake metadata all remain; only this attempt ends.
+    func declineMirrorUnavailableOffer() {
+        DispatchQueue.main.async { self.mirrorUnavailable = false }
+        disconnect()
+    }
+
+    /// Dismisses the simple informational "Mirror requires an active
+    /// physical display" state — no wire message, purely local UI state
+    /// (unlike the offer, there is nothing to accept/decline here).
+    func dismissMirrorRejection() {
+        DispatchQueue.main.async { self.mirrorRejectedWhileExtending = false }
+    }
+
     /// Asks the connected Mac to change its Mirror capture source. The Mac
     /// remains the single canonical owner (`SenderController.mirrorDisplayUUID`,
     /// the same setting its own Settings picker writes) — this only requests;
@@ -2127,6 +2257,7 @@ final class StreamReceiver: ObservableObject {
             self.displayModeRequestState.reset()
             self.confirmedDisplayMode = nil
             self.pendingDisplayMode = nil
+            self.mirrorRejectedWhileExtending = false
         }
     }
 
@@ -2136,6 +2267,14 @@ final class StreamReceiver: ObservableObject {
         confirmedDisplayMode = displayModeRequestState.confirmedMode
         pendingDisplayMode = displayModeRequestState.pendingMode
         if shouldConfirmWithHaptic { displayModeConfirmationGeneration &+= 1 }
+        // Any authoritative mode confirmation — Mirror resuming on its own
+        // because a physical display returned, or Extend actually starting
+        // — means a still-showing Mirror-unavailable offer is moot. This is
+        // what makes the offer disappear from the screen if the Mac already
+        // resolved it before the user answered, so a stale tap can no
+        // longer reach a "Use Extend" button that isn't there anymore.
+        mirrorUnavailable = false
+        mirrorRejectedWhileExtending = false
     }
 
     /// Requests an Extend display shape change without predicting its
@@ -3876,6 +4015,11 @@ final class StreamReceiver: ObservableObject {
                 // Same reasoning again: only ever known from a live Mac.
                 self.confirmedMaxFPS = nil
                 self.lastMaxFPSState = nil
+                // The offer belonged to a specific attempt on a specific
+                // connection — any disconnect (deliberate or not) ends it;
+                // a fresh one arrives on the Mac's own next attempt, if any.
+                self.mirrorUnavailable = false
+                self.mirrorRejectedWhileExtending = false
             }
         }
         if !value {

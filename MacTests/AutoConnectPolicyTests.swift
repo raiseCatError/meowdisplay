@@ -56,6 +56,28 @@ final class AutoConnectPolicyTests: XCTestCase {
             logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
     }
 
+    /// Reused by `SenderController`'s headless-Mirror-offer-timeout handling
+    /// (`MacSender.mirrorUnavailableTimeoutErrorCode`): once a "Use Extend?"
+    /// offer times out with no answer, the Mac suppresses that peer exactly
+    /// like a receiver-initiated `closing` goodbye — otherwise the very next
+    /// automatic auto-connect scan would see no session owner for this peer
+    /// (the failed attempt already ended) and immediately redial it into
+    /// another doomed offer/timeout cycle. A future explicit Connect must
+    /// still work.
+    func testMirrorOfferTimeoutSuppressionBlocksImmediateAutoRetry() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        // The failed attempt already finished; there is no session owner by
+        // the time the next automatic scan runs.
+        policy.suppress([receiver, wifi])
+
+        XCTAssertNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false),
+            "auto-connect must not immediately re-offer the same peer after a Mirror-offer timeout")
+
+        XCTAssertNotNil(policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, wifi]),
+            "an explicit Connect must still be allowed after the timeout suppression")
+    }
+
     func testExplicitConnectClearsSuppression() {
         var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
         policy.suppress([receiver, wifi])

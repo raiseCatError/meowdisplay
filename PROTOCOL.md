@@ -607,6 +607,7 @@ section 4.
 | `mirrorDisplayState` | pv 13 | `selectedUUID`?, `displays` (array) | Mac-authoritative confirmed Mirror capture-source selection + display inventory |
 | `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool) | Mac-authoritative confirmed active Extend shape (section 6.7) |
 | `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
+| `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -652,6 +653,20 @@ mode it did not enter. A mode switch normally rebuilds the sender's session,
 so the confirming `displayModeState` legitimately arrives on the *next*
 connection; receivers SHOULD therefore keep a request outstanding across that
 reconnect, and SHOULD retire it on a local deadline rather than wait forever.
+
+**`mirrorUnavailable`** (Mac → receiver, pv 17): sent instead of immediately
+failing the session when `mode` is `mirror` and the Mac has no usable
+physical display (e.g. lid closed, no external monitor). This is purely
+additive UX around a known limitation — it does not add a new mode-switch
+mechanism. A receiver that understands it MAY present an offer to switch to
+Extend; accepting sends the EXISTING `displayModeRequest` (`mode: extend`)
+described above, which the Mac handles exactly like any other mode request.
+The Mac holds the authenticated connection open for a bounded window
+(currently 30s) waiting for that request before failing Mirror with its
+normal error; a receiver that declines, disconnects, or simply never
+responds gets the exact same outcome a receiver that never saw the offer at
+all would. Receivers below pv 17 are never sent this message and see
+today's immediate Mirror failure.
 
 **`videoRequest` / `videoState`** (pv 9) control video production without
 changing the logical session. When disabled, the sender stops capture,
@@ -1077,6 +1092,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 12 | Mac system audio: typed `0x01` media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
 | 13 | Mac-authoritative Mirror capture-source selection: `mirrorDisplayRequest` / `mirrorDisplayState` |
 | 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
+| 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
 
 ---
 

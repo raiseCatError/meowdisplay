@@ -27,48 +27,68 @@ enum InteractiveWakePromotion {
     }
 }
 
-/// A fixed, bounded `PreventUserIdleDisplaySleep` assertion held only after
-/// a successful `InteractiveWakePromotion.promote()` — a separate, longer-
-/// lived hold from that one-shot user-activity declaration, meant to keep
-/// the just-promoted display from immediately re-sleeping while the
-/// receiver's connection/video pipeline (Promote → screensDidWake → fresh
-/// SCK recovery) actually gets going. Always exactly 60 seconds from the
-/// most recent successful Promote — `begin()` reschedules rather than
-/// stacking a second assertion if one is already held. Owned by
-/// `MacSender`, which is responsible for calling `release()` on session
-/// invalidation/teardown so this can never outlive the session it started
-/// with (see `invalidateApplicationSession`/`stop()`).
+/// A fixed, bounded hold on two PUBLIC IOKit power assertions — held
+/// together after either a successful `InteractiveWakePromotion.promote()`
+/// (the dark/network-wake path) or, since the headless hardening pass, any
+/// authenticated MEOW session becoming application-ready on ANY route (see
+/// `SessionStabilizationPolicy` and `MacSender.armSessionStabilizationIfNeeded`)
+/// — meant to keep the Mac from re-sleeping while the receiver's
+/// connection/video pipeline actually gets going. Real hardware showed
+/// `PreventUserIdleDisplaySleep` alone is not enough: the Mac can still
+/// `screensDidSleep`/suspend well before the 60s window elapses, so this
+/// also holds `PreventSystemSleep` for the identical bounded window — never
+/// indefinitely, and never via pmset/NVRAM/a privileged helper.
+/// Always exactly 60 seconds from the most recent arm — `begin()`
+/// reschedules rather than stacking a second pair of assertions if one is
+/// already held, which is exactly how a same-peer route migration extends
+/// (rather than re-opens a gap in) the window. Owned by `MacSender`, which
+/// is responsible for calling `release()` on session invalidation/teardown
+/// so this can never outlive the session it started with (see
+/// `invalidateApplicationSession`/`stop()`) — except a same-peer transport
+/// migration, which deliberately does NOT release it (see `switchTransport`).
 final class WakeStabilizationAssertion {
     static let duration: TimeInterval = 60
-    static let reason = "MEOW Remote Wake Stabilization"
+    static let reason = "MEOW Session Stabilization"
 
-    private var assertionID: IOPMAssertionID?
+    private var displaySleepAssertionID: IOPMAssertionID?
+    private var systemSleepAssertionID: IOPMAssertionID?
     private var releaseWorkItem: DispatchWorkItem?
 
-    func begin() {
+    /// `generation`/`route` are logging context only (which session/route
+    /// triggered this arm) — they never gate whether the assertions are held.
+    func begin(generation: UInt64? = nil, route: String? = nil) {
         releaseWorkItem?.cancel()
-        if assertionID == nil {
-            var id: IOPMAssertionID = 0
-            let result = IOPMAssertionCreateWithName(
-                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                Self.reason as CFString, &id)
-            guard result == kIOReturnSuccess else {
-                Log.info("wakeDebug: wakeStabilizationAssertionFailed result=\(result)")
-                releaseWorkItem = nil
-                return
-            }
-            assertionID = id
-            Log.info("wakeDebug: wakeStabilizationAssertionStarted id=\(id)")
-        } else {
-            Log.info("wakeDebug: wakeStabilizationAssertionExtended id=\(assertionID!)")
-        }
+        let context = [generation.map { "generation=\($0)" }, route.map { "route=\($0)" }]
+            .compactMap { $0 }.joined(separator: " ")
+        Log.info("wakeDebug: sessionStabilizationArmed \(context)")
+        beginOne(&displaySleepAssertionID,
+                type: kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                name: "displaySleepAssertion")
+        beginOne(&systemSleepAssertionID,
+                type: kIOPMAssertionTypePreventSystemSleep as CFString,
+                name: "systemSleepAssertion")
         let work = DispatchWorkItem { [weak self] in
-            Log.info("wakeDebug: wakeStabilizationAssertionExpired")
+            Log.info("wakeDebug: sessionStabilizationExpired")
             self?.release()
         }
         releaseWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration, execute: work)
+    }
+
+    private func beginOne(_ id: inout IOPMAssertionID?, type: CFString, name: String) {
+        guard id == nil else {
+            Log.info("wakeDebug: \(name)Extended id=\(id!)")
+            return
+        }
+        var newID: IOPMAssertionID = 0
+        let result = IOPMAssertionCreateWithName(
+            type, IOPMAssertionLevel(kIOPMAssertionLevelOn), Self.reason as CFString, &newID)
+        guard result == kIOReturnSuccess else {
+            Log.info("wakeDebug: \(name)Failed result=\(result)")
+            return
+        }
+        id = newID
+        Log.info("wakeDebug: \(name)Started id=\(newID)")
     }
 
     /// Idempotent: safe to call from every teardown path regardless of
@@ -76,9 +96,15 @@ final class WakeStabilizationAssertion {
     func release() {
         releaseWorkItem?.cancel()
         releaseWorkItem = nil
-        guard let assertionID else { return }
-        IOPMAssertionRelease(assertionID)
-        self.assertionID = nil
-        Log.info("wakeDebug: wakeStabilizationAssertionReleased")
+        if let id = displaySleepAssertionID {
+            IOPMAssertionRelease(id)
+            displaySleepAssertionID = nil
+            Log.info("wakeDebug: displaySleepAssertionReleased")
+        }
+        if let id = systemSleepAssertionID {
+            IOPMAssertionRelease(id)
+            systemSleepAssertionID = nil
+            Log.info("wakeDebug: systemSleepAssertionReleased")
+        }
     }
 }

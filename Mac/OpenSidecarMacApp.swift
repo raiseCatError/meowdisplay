@@ -338,6 +338,36 @@ final class SenderController: ObservableObject {
             if !suppressModeRestart { restartAll() }
         }
     }
+    // Mirror's authoritative availability signal — Extend has no such
+    // requirement. UI-facing only (`DisplaysSettingsView` disables the
+    // Mirror option and explains why); `requestMode` never trusts this
+    // cached value, it always re-checks live. Refreshed on every
+    // `didChangeScreenParametersNotification` (the same topology-change
+    // notification `MacSender`'s own headless detection already uses) —
+    // see `startObservingPhysicalDisplayAvailability`.
+    @Published private(set) var hasUsablePhysicalDisplay = true
+    private var displayTopologyObserver: NSObjectProtocol?
+
+    private func startObservingPhysicalDisplayAvailability() {
+        refreshPhysicalDisplayAvailability()
+        displayTopologyObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.refreshPhysicalDisplayAvailability() }
+    }
+
+    private func refreshPhysicalDisplayAvailability() {
+        hasUsablePhysicalDisplay = hasUsablePhysicalDisplayNow()
+    }
+
+    /// Live (never cached) check for whether a genuinely usable PHYSICAL
+    /// display exists right now — excludes every current session's own
+    /// MEOW virtual display, since a healthy VD otherwise reads as
+    /// "usable" through the same CoreGraphics checks.
+    private func hasUsablePhysicalDisplayNow() -> Bool {
+        let virtualDisplayIDs = Set(sessions.compactMap { $0.sender.virtualDisplayID })
+        return DisplayHealth.hasUsablePhysicalDisplay(excludingAny: virtualDisplayIDs)
+    }
+
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
     }
@@ -418,6 +448,24 @@ final class SenderController: ObservableObject {
             sessions.forEach { $0.sender.pushDisplayModeState() }
             return
         }
+        // Mirror requires a genuinely usable PHYSICAL display; Extend does
+        // not. Re-checked LIVE here — never from the cached `@Published`
+        // UI signal below — so a stale/racing request (the Mac-local
+        // picker, or a receiver's `displayModeRequest` arriving just as the
+        // Mac goes headless) can never push this Mac into an impossible
+        // Mirror state. Reject and push the still-current mode back rather
+        // than ever calling `restartAll()`/tearing down a working Extend
+        // session for a mode this Mac cannot actually enter.
+        guard requested != .mirror
+            || MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow())
+        else {
+            Log.info("routeDebug: rejected Mirror request — no usable physical display")
+            sessions.forEach {
+                $0.sender.pushDisplayModeState()
+                $0.sender.pushMirrorUnavailable()
+            }
+            return
+        }
         // `DisplaysSettingsView`'s Mode picker is a segmented control, whose
         // Binding(set:) AppKit invokes synchronously as part of SwiftUI's
         // current view-update transaction — this function's caller there,
@@ -435,6 +483,35 @@ final class SenderController: ObservableObject {
 
     func requestVideoEnabled(_ enabled: Bool) {
         guard enabled != videoEnabled else { return }
+        // Mirror is established through the existing authoritative mode
+        // transition before capture is stopped — this reclaims the virtual
+        // display's system resources by handing input/capture off to a
+        // physical display. Headless has nowhere for that hand-off to go:
+        // becoming Mirror here would be exactly as impossible as if the
+        // user had requested it directly (see `requestMode`'s guard), so
+        // this stays in Extend and only stops capture — the VD survives to
+        // resume into, exactly like the existing "stream survives for
+        // audio" case inside `applyVideoEnabled` already does. Turning
+        // video back on never restores Extend implicitly (that comment
+        // still applies to the Mirror path below); staying in Extend here
+        // means there is nothing to "restore" — it never left.
+        if !enabled, mode == .extend,
+           !MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow()) {
+            let transitioning = sessions
+            guard !transitioning.isEmpty else {
+                videoEnabled = false
+                return
+            }
+            var remaining = transitioning.count
+            for session in transitioning {
+                session.sender.disableVideoKeepingExtend { [weak self] in
+                    guard let self else { return }
+                    remaining -= 1
+                    if remaining == 0 { self.videoEnabled = false }
+                }
+            }
+            return
+        }
         // Mirror is established through the existing authoritative mode
         // transition before capture is stopped. Turning video back on never
         // restores Extend implicitly.
@@ -546,6 +623,7 @@ final class SenderController: ObservableObject {
     init() {
         _ = TrustStore.shared.ownIdentity()
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
+        startObservingPhysicalDisplayAvailability()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1258,11 +1336,12 @@ final class SenderController: ObservableObject {
         }
     }
 
-    #if DEBUG
     /// Best-effort route classification *before* a connection exists, using
-    /// only what discovery already told us (Bonjour interfaces) — used
-    /// solely to label a route for the DEBUG override gate. The real route
-    /// a live session reports (`DeviceSession.route`) still comes from
+    /// only what discovery already told us (Bonjour interfaces) — used both
+    /// for the DEBUG override gate's label and, unconditionally, as the
+    /// route-tier fallback in `startSession`'s peer-ownership/migration
+    /// check before a live path exists. The real route a live session
+    /// reports (`DeviceSession.route`) still comes from
     /// `NWConnection.currentPath` and is unaffected by this.
     private func preConnectRoute(for target: ConnectionTarget) -> ConnectionRoute {
         switch target {
@@ -1275,6 +1354,7 @@ final class SenderController: ObservableObject {
         }
     }
 
+    #if DEBUG
     /// The single authoritative admission check every dial site must pass
     /// through immediately before starting a connection. Never cache this
     /// result — re-check right at the dial, since a candidate may have been
@@ -1559,6 +1639,69 @@ final class SenderController: ObservableObject {
                      userInitiated: userInitiated, awaitingWake: awaitingWake)
     }
 
+    /// The live session (any route) that already owns this logical peer, if
+    /// any — the single central peer-ownership check. A failed session owns
+    /// nothing, matching `activeSession(coveringUSB/WiFi:)`'s prior behavior.
+    private func owningSession(for target: ConnectionTarget) -> DeviceSession? {
+        let targetIdentifiers = identifiers(for: target)
+        return sessions.first { !$0.failed && !identifiers(for: $0).isDisjoint(with: targetIdentifiers) }
+    }
+
+    private func routeTier(for target: ConnectionTarget) -> Int {
+        RoutePriority.tier(preConnectRoute(for: target))
+    }
+
+    /// Prefers the route Network.framework actually reported
+    /// (`DeviceSession.route`) over the pre-connection guess — accurate for
+    /// LAN vs AWDL, which `preConnectRoute` cannot always distinguish before
+    /// a path exists.
+    private func routeTier(for session: DeviceSession) -> Int {
+        RoutePriority.tier(session.route ?? preConnectRoute(for: session.target))
+    }
+
+    /// Builds the transport for a connection target — shared by fresh
+    /// session creation and in-place route migration so both build it
+    /// identically. `nil` means the target isn't dialable right now (e.g. no
+    /// pin yet); callers treat that as attempt failure.
+    private func buildTransport(for target: ConnectionTarget) -> SenderTransport? {
+        switch target {
+        case .usb(let udid):
+            guard let portNum = UInt16(port) else { return nil }
+            if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
+                // Manual override: dial a plain TCP endpoint instead of usbmuxd.
+                return .tcp(.hostPort(host: NWEndpoint.Host(host),
+                                      port: NWEndpoint.Port(rawValue: portNum)!), tls: nil)
+            }
+            return .usb(udid: udid, port: portNum)
+        case .wifi(let result):
+            return secureWiFiTransport(for: result)
+        case .remote(let peerID):
+            return secureRemoteTransport(forPeerID: peerID)
+        case .remoteCallback(let peerID, let host, let port):
+            return secureRemoteTransport(forPeerID: peerID, hostOverride: host, portOverride: port)
+        }
+    }
+
+    /// Migrates a live session to a better route for the same peer without
+    /// tearing down capture — the same mechanism `upgradeToUSB`/`failover`
+    /// already use for their specific directions, generalized here to also
+    /// cover LAN/AWDL <-> Remote.
+    private func migrateSession(_ session: DeviceSession, to target: ConnectionTarget,
+                                transport: SenderTransport) {
+        switch target {
+        case .usb(let udid):
+            session.onUSB = true
+            session.usbUDID = udid
+            if let id = session.deviceID, let udid { installIDByUDID[udid] = id }
+        case .wifi(let result):
+            session.onUSB = false
+            session.wifiServiceName = serviceName(of: result)
+        case .remote, .remoteCallback:
+            session.onUSB = false
+        }
+        session.sender.switchTransport(to: transport)
+    }
+
     private func startSession(to target: ConnectionTarget, logicalID: String,
                               attempt: AutoConnectPolicy.Attempt,
                               userInitiated: Bool = false,
@@ -1589,53 +1732,57 @@ final class SenderController: ObservableObject {
             end(existing)
         }
 
-        // Never create a second session for the same physical device — the
-        // receiver holds one connection, so a twin would steal it. But an
-        // explicit user click overrides: e.g. right after unplugging the
-        // cable, the dying USB session sits in its 10s reconnect grace and
-        // would otherwise swallow the tap on the WiFi row.
-        let covering: DeviceSession?
-        switch target {
-        case .usb(let udid?):
-            covering = usbDevices.first(where: { $0.udid == udid })
-                .flatMap { activeSession(coveringUSB: $0) }
-        case .wifi(let result):
-            covering = activeSession(coveringWiFi: result)
-        default:
-            covering = nil
-        }
-        if let covering {
-            guard userInitiated else {
+        // One logical peer = one live session, on ANY route (USB/WiFi/Remote
+        // alike) — the receiver holds one connection, so a twin would steal
+        // it. `owningSession` is the single central check every entry point
+        // (explicit Connect, receiver Connect-request, remote knock,
+        // auto-connect) funnels through here, replacing the old USB/WiFi-only
+        // `covering` check that let a Remote target slip past unchecked and
+        // spin up a second sender for a peer already live on LAN/AWDL.
+        if let owner = owningSession(for: target) {
+            // `userInitiated` deliberately never factors into this decision:
+            // a single Connect/Wake & Connect action fans out into BOTH a
+            // local Bonjour connect request and a Remote connect request
+            // when Remote is configured, so both arrive here as
+            // user-initiated attempts for the same peer — letting either one
+            // "replace" an equal/worse-route owner re-creates the exact
+            // thrash this check exists to prevent (see
+            // `RouteArbitrationDecision`'s doc comment).
+            let decision = RouteArbitration.decide(
+                ownerTier: routeTier(for: owner), targetTier: routeTier(for: target))
+            switch decision {
+            case .proceed:
+                break   // unreachable when `owner` is non-nil, kept exhaustive
+            case .migrate:
+                // A genuinely better route appeared (Remote -> LAN/AWDL,
+                // LAN/AWDL -> USB) — migrate the existing sender through
+                // `switchTransport` instead of creating a second one.
+                guard let transport = buildTransport(for: target) else {
+                    autoConnectPolicy.finish(attempt)
+                    return
+                }
+                Log.info("routeDebug: better route available for \(owner.logicalID) — "
+                    + "migrating \(owner.id) to \(id)")
+                migrateSession(owner, to: target, transport: transport)
+                autoConnectPolicy.finish(attempt)
+                return
+            case .ignore:
+                // Same-or-worse route than the current owner (including
+                // LAN<->AWDL, which are the same tier, and a second
+                // user-initiated request for a different route arriving
+                // after migration already happened): never steal, and never
+                // bounce. Also covers a stale/retired route's own redial
+                // callback firing after another route already won.
+                Log.info("routeDebug: connect attempt to \(id) ignored — "
+                    + "\(owner.id) already owns \(owner.logicalID) at an equal/better route")
                 autoConnectPolicy.finish(attempt)
                 return
             }
-            Log.info("user chose \(id) — taking over from \(covering.id)")
-            end(covering)
         }
 
-        let transport: SenderTransport
-        switch target {
-        case .usb(let udid):
-            guard let portNum = UInt16(port) else {
-                autoConnectPolicy.finish(attempt)
-                return
-            }
-            if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
-                // Manual override: dial a plain TCP endpoint instead of usbmuxd.
-                transport = .tcp(.hostPort(host: NWEndpoint.Host(host),
-                                           port: NWEndpoint.Port(rawValue: portNum)!), tls: nil)
-            } else {
-                transport = .usb(udid: udid, port: portNum)
-            }
-        case .wifi(let result):
-            guard let secure = secureWiFiTransport(for: result) else { return }
-            transport = secure
-        case .remote(let peerID):
-            guard let secure = secureRemoteTransport(forPeerID: peerID) else { return }
-            transport = secure
-        case .remoteCallback(let peerID, let host, let port):
-            guard let secure = secureRemoteTransport(forPeerID: peerID, hostOverride: host, portOverride: port) else { return }
-            transport = secure
+        guard let transport = buildTransport(for: target) else {
+            autoConnectPolicy.finish(attempt)
+            return
         }
 
         let name = label(for: target)
@@ -1878,6 +2025,20 @@ final class SenderController: ObservableObject {
                 guard self.owns(session) else { return }
                 Log.info("sender failed to start: \(error)")
                 session.status = "Failed: \(error.localizedDescription)"
+                let nsError = error as NSError
+                if nsError.domain == "MacSender",
+                   nsError.code == MacSender.mirrorUnavailableTimeoutErrorCode {
+                    // The receiver never answered the headless-Mirror "Use
+                    // Extend?" offer within its bounded window. Without this,
+                    // the very next auto-connect scan would see no owning
+                    // session for this peer and immediately dial it again —
+                    // offer, timeout, retry, forever. Reuses the exact same
+                    // suppression `onPeerClosed` already applies for a
+                    // deliberate receiver-side goodbye; an explicit Connect
+                    // still clears it (`allowExplicitConnection`), same as
+                    // any other suppression.
+                    self.autoConnectPolicy.suppress(self.identifiers(for: session))
+                }
                 // Free the half-built pipeline: a leaked virtual display
                 // would keep holding this device's serial, and a parked
                 // live-looking session would swallow every future connect.

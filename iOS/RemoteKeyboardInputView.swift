@@ -144,6 +144,9 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         for action in KeyboardEditPlanner.plan(rangeLength: deleteCount, replacementText: text) {
             switch action {
             case .backspace:
+                #if DEBUG
+                Log.info("keyboardDebug: softwareBackspace generated")
+                #endif
                 onSpecialPress?(Int(UIKeyboardHIDUsage.keyboardDeleteOrBackspace.rawValue))
             case .returnKey:
                 onSpecialPress?(Int(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue))

@@ -344,7 +344,17 @@ final class InputInjector {
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
         let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        #if DEBUG
+        if usage == .deleteOrBackspace {
+            Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) down")
+        }
+        #endif
         postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+        #if DEBUG
+        if usage == .deleteOrBackspace {
+            Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) up")
+        }
+        #endif
         postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: flags)
     }
 
