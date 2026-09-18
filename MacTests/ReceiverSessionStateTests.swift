@@ -350,6 +350,16 @@ final class ReceiverSessionStateTests: XCTestCase {
         XCTAssertTrue(failed.interruption!.offersManualReconnect)
     }
 
+    // A stuck reconnectFailed/unrecoverable session must never trap the user
+    // on the receiver surface with nothing tappable — the iOS "Back to Home"
+    // escape hatch (ReceiverInterruptionOverlay) is gated on this.
+    func testOnlyGaveUpStatesOfferBackToHome() {
+        XCTAssertFalse(ReceiverSessionInterruption.paused.offersBackToHome)
+        XCTAssertFalse(ReceiverSessionInterruption.reconnecting.offersBackToHome)
+        XCTAssertTrue(ReceiverSessionInterruption.reconnectFailed.offersBackToHome)
+        XCTAssertTrue(ReceiverSessionInterruption.unrecoverable.offersBackToHome)
+    }
+
     // MARK: - Background / foreground
 
     func testBackgroundingParksRecoveryWithoutBurningItsBudget() {

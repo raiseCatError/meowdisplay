@@ -163,6 +163,8 @@ struct ReceiverScreen: View {
                     if let interruption = model.receiver.session.interruption {
                         ReceiverInterruptionOverlay(interruption: interruption) {
                             model.receiver.reconnectNow()
+                        } onBackToHome: {
+                            model.receiver.disconnect()
                         }
                     }
                     if showAnalytics {
@@ -467,6 +469,7 @@ private struct ReceiverSafeAreaProbe: UIViewRepresentable {
 struct ReceiverInterruptionOverlay: View {
     let interruption: ReceiverSessionInterruption
     let onReconnect: () -> Void
+    let onBackToHome: () -> Void
 
     var body: some View {
         VStack(spacing: 8) {
@@ -486,14 +489,25 @@ struct ReceiverInterruptionOverlay: View {
                     .buttonStyle(.borderedProminent)
                     .padding(.top, 6)
             }
+            // A stuck/failed/incompatible peer must not trap the user on
+            // this screen forever — this cancels recovery for the current
+            // target and returns to device selection without touching
+            // pairing/trust (StreamReceiver.disconnect() below).
+            if interruption.offersBackToHome {
+                Button(interruption == .unrecoverable ? "Choose Another Mac" : "Back to Home", action: onBackToHome)
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                    .padding(.top, interruption.offersManualReconnect ? 0 : 6)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .foregroundStyle(.white)
-        // Only the failed state has anything to tap; the others must not
-        // swallow touches the receiver surface below might still want.
-        .allowsHitTesting(interruption.offersManualReconnect)
+        // Failed/incompatible states now have something to tap too; only
+        // pause and active reconnection must not swallow touches the
+        // receiver surface below might still want.
+        .allowsHitTesting(interruption.offersManualReconnect || interruption.offersBackToHome)
         .animation(.snappy(duration: 0.2), value: interruption)
     }
 }

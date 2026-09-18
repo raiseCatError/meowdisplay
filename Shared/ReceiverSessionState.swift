@@ -80,6 +80,12 @@ enum ReceiverSessionInterruption: Equatable {
     /// Only a failed recovery offers a manual retry. Pause is the Mac's call,
     /// and an incompatible peer will never become compatible by retrying.
     var offersManualReconnect: Bool { self == .reconnectFailed }
+
+    /// Both "gave up" states can otherwise trap the user on the receiver
+    /// surface indefinitely — `unrecoverable` doesn't even offer a retry.
+    /// Pause and active reconnection are still going somewhere, so neither
+    /// offers this.
+    var offersBackToHome: Bool { self == .reconnectFailed || self == .unrecoverable }
 }
 
 struct ReceiverSessionState: Equatable {
