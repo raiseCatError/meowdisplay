@@ -110,41 +110,16 @@ final class MirrorUnavailableOfferPolicyTests: XCTestCase {
             "the original offer generation must not still be considered pending once cleared")
     }
 
-    // MARK: - advertisedProtocolVersion (MacReceiver capability compatibility)
+    // MARK: - Current-version receivers (MacReceiver no longer caps its pv)
 
-    /// A receiver advertising support for a `pv` MUST actually be able to
-    /// handle everything that version implies. MacReceiver has no
-    /// display-mode UI at all, so it cannot present the "Use Extend?"
-    /// offer — it must cap itself below `mirrorUnavailableWireVersion`
-    /// rather than silently receive an offer it can never answer.
-    func testMacReceiverCapsBelowMirrorUnavailableVersion() {
-        XCTAssertEqual(
-            MirrorUnavailableOfferPolicy.advertisedProtocolVersion(
-                deviceKind: "Mac", latestVersion: WireProtocol.version),
-            WireProtocol.mirrorUnavailableWireVersion - 1)
-    }
-
-    /// iOS/iPadOS implement the offer UI — they advertise the full current
-    /// version, unaffected by the MacReceiver cap.
-    func testIOSReceiverAdvertisesTheFullCurrentVersion() {
-        for kind in ["iPhone", "iPad"] {
-            XCTAssertEqual(
-                MirrorUnavailableOfferPolicy.advertisedProtocolVersion(
-                    deviceKind: kind, latestVersion: WireProtocol.version),
-                WireProtocol.version)
-        }
-    }
-
-    /// The cap must never accidentally ADVERTISE a higher version than the
-    /// build actually speaks (e.g. if a future refactor lowers
-    /// `WireProtocol.version` below the mirrorUnavailable threshold for some
-    /// other reason) — `min` keeps this defensively correct either way.
-    func testAdvertisedVersionNeverExceedsTheBuildsOwnVersion() {
-        let hypotheticalOlderBuildVersion = WireProtocol.mirrorUnavailableWireVersion - 5
-        XCTAssertEqual(
-            MirrorUnavailableOfferPolicy.advertisedProtocolVersion(
-                deviceKind: "Mac", latestVersion: hypotheticalOlderBuildVersion),
-            hypotheticalOlderBuildVersion)
+    /// MacReceiver now presents the "Use Extend?" offer, so it advertises the
+    /// full `WireProtocol.version` (the same value in hello and both Bonjour
+    /// TXT records). A receiver at that version must be offered Extend when
+    /// the sender is headless.
+    func testCurrentVersionReceiverIsOfferedExtendWhenHeadless() {
+        XCTAssertGreaterThanOrEqual(WireProtocol.version, WireProtocol.mirrorUnavailableWireVersion)
+        XCTAssertTrue(MirrorUnavailableOfferPolicy.shouldOffer(
+            hasUsablePhysicalDisplay: false, receiverProtocolVersion: WireProtocol.version))
     }
 
     // MARK: - canEnterMirror (Mirror requires a physical display; Extend does not)

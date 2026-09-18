@@ -88,12 +88,8 @@ enum CodecCapabilityProbe {
     /// Whether a receiver's advertised `hello.codecs` (`PhoneInfo.codecs`)
     /// includes HEVC. Deliberately takes ONLY the codec list — never the
     /// receiver's overall protocol version — because codec capability and
-    /// overall `pv` are independent axes: a receiver can cap its advertised
-    /// `pv` below the wire's latest for reasons that have nothing to do with
-    /// codec support (see `MirrorUnavailableOfferPolicy.
-    /// advertisedProtocolVersion` — MacReceiver caps `pv` below
-    /// `mirrorUnavailableWireVersion` purely because it lacks unrelated
-    /// display-mode UI, while its build fully implements codec negotiation).
+    /// overall `pv` are independent axes: a peer may advertise a lower `pv`
+    /// without that saying anything about codec support.
     /// `nil` (the field never sent) or a list without `"hevc"` both mean
     /// H.264-only — absence is never treated as "unknown means everything".
     static func receiverSupportsHEVC(codecs: [String]?) -> Bool {

@@ -288,29 +288,21 @@ final class CodecCapabilityTests: XCTestCase {
 
     // MARK: - Codec capability is decoupled from overall protocol version
     //
-    // MacReceiver caps its ADVERTISED `hello.pv` below
-    // `WireProtocol.mirrorUnavailableWireVersion` (currently 16, i.e. one
-    // below pv 17) purely because it has no display-mode UI — a reason
-    // entirely unrelated to codec support (see
-    // `MirrorUnavailableOfferPolicy.advertisedProtocolVersion`). The same
-    // MacReceiver build fully implements HEVC decode and the
-    // `streamCodecState` message. `CodecCapabilityProbe.receiverSupportsHEVC`
-    // and `MacSender.sendStreamCodecState`'s gate must therefore key off
-    // `codecs`' presence/content alone, never off `pv` — these tests pin
-    // that contract at the pure-policy layer (the `pv` value below is
-    // deliberately never passed to the function under test at all, which is
-    // the point: the decision has no `pv` parameter to be wrong about).
+    // Codec capability is the explicit `hello.codecs` field, never the
+    // overall `pv`: a peer may advertise a lower `pv` than the latest for
+    // reasons unrelated to codecs, and a pv 16 peer that advertises HEVC can
+    // still use it. `CodecCapabilityProbe.receiverSupportsHEVC` and
+    // `MacSender.sendStreamCodecState`'s gate therefore key off `codecs`
+    // alone — the function under test deliberately has no `pv` parameter.
 
     func testReceiverSupportsHEVCWhenCodecsAdvertiseItRegardlessOfCappedProtocolVersion() {
-        // MacReceiver-style peer: advertised pv = 16 (capped below
-        // mirrorUnavailableWireVersion for the unrelated Mirror-unavailable
-        // UI gap), but `hello.codecs` explicitly includes "hevc" because its
-        // hardware decoder actually supports it.
+        // A peer of any `pv` (including a pre-17 one) whose `hello.codecs`
+        // explicitly includes "hevc" because its hardware decoder supports it.
         XCTAssertTrue(CodecCapabilityProbe.receiverSupportsHEVC(codecs: ["h264", "hevc"]))
 
         // Feeding that into the Auto policy alongside a sender that also
         // supports HEVC and a request H.264 cannot satisfy must still reach
-        // HEVC — a capped `pv` must never suppress an otherwise-eligible
+        // HEVC — a lower `pv` must never suppress an otherwise-eligible
         // HEVC selection.
         let result = CodecSelectionPolicy.select(.init(
             preference: .auto, senderSupportsHEVC: true,
@@ -320,7 +312,7 @@ final class CodecCapabilityTests: XCTestCase {
     }
 
     func testReceiverWithoutCodecsFieldIsH264OnlyRegardlessOfProtocolVersion() {
-        // Same capped-pv MacReceiver-style peer, but this build predates
+        // A peer whose build predates
         // codec advertisement entirely (no `codecs` field at all) — must be
         // H.264-only, not "unknown means everything".
         XCTAssertFalse(CodecCapabilityProbe.receiverSupportsHEVC(codecs: nil))

@@ -5,8 +5,7 @@ import Foundation
 /// networking/async-wait glue (`offerExtendOrFailMirror`) and from
 /// `StreamReceiver`'s hello/advertisement code so the actual decisions are
 /// testable without ScreenCaptureKit/AVFoundation. Lives in `Shared/`
-/// (not `Mac/`) because both the sender's offer decision and the
-/// receiver's advertised-capability decision use it. See PROTOCOL.md's
+/// (not `Mac/`) alongside the receiver code that answers the offer. See PROTOCOL.md's
 /// `mirrorUnavailable` section for the wire contract.
 enum MirrorUnavailableOfferPolicy {
     /// Whether the Mac should offer Extend instead of failing Mirror
@@ -31,21 +30,6 @@ enum MirrorUnavailableOfferPolicy {
         offerGeneration: UInt64?, sessionGeneration: UInt64, sessionIsLive: Bool
     ) -> Bool {
         sessionIsLive && offerGeneration == sessionGeneration
-    }
-
-    /// Which protocol version a receiver should actually advertise in
-    /// `hello`/its Bonjour TXT records: capped just below
-    /// `mirrorUnavailableWireVersion` for a platform that cannot present
-    /// the offer at all — a receiver advertising a `pv` MUST actually be
-    /// able to handle everything that version implies. MacReceiver (the
-    /// macOS "use a spare Mac as a display" app) has no display-mode UI
-    /// whatsoever, so it cannot show the "Use Extend?" prompt; iOS/iPadOS
-    /// can and do. `deviceKind` is the same `"hello.device"` discriminator
-    /// (`"Mac"` vs. `"iPhone"`/`"iPad"`) already used elsewhere. Raise this
-    /// the moment MacReceiver gets that UI — pv 17 introduces nothing else
-    /// today, so this has no other effect in the meantime.
-    static func advertisedProtocolVersion(deviceKind: String, latestVersion: Int) -> Int {
-        deviceKind == "Mac" ? min(latestVersion, WireProtocol.mirrorUnavailableWireVersion - 1) : latestVersion
     }
 
     /// Whether the Mac may enter Mirror mode at all right now — the single

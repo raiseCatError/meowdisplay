@@ -4896,10 +4896,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `sendMaxFPSState` — an old receiver simply ignores it and correctly
     /// assumes H.264, the only codec it can ever be sent. Gated on `codecs`
     /// having been sent at all (the capability signal — see `PhoneInfo.
-    /// codecs`' doc comment), NOT on overall `pv`: a receiver whose `pv` is
-    /// capped below `hevcCodecWireVersion` for an unrelated reason (e.g.
-    /// MacReceiver, capped for `mirrorUnavailableWireVersion`) still fully
-    /// implements this message when it sends `codecs` at all.
+    /// codecs`' doc comment), NOT on overall `pv`: a receiver that
+    /// advertises a `pv` below `hevcCodecWireVersion` still fully implements
+    /// this message when it sends `codecs` at all.
     private func sendStreamCodecState() {
         guard let info = lastHello, CodecCapabilityProbe.shouldConfirmCodecOnHello(codecs: info.codecs) else { return }
         sendJSONObject(StreamCodecStateUpdate(codec: activeCodec, reason: activeCodecReason).wireFields)

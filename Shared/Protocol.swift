@@ -147,14 +147,10 @@ enum WireProtocol {
     /// peer's `hello.codecs` field, if present at all, IS the capability
     /// signal (understands codec negotiation and `streamCodecState`);
     /// absence of the field means H.264-only, regardless of `pv`. This
-    /// matters because a receiver can advertise a LOWER overall `pv` than
-    /// its build's latest for reasons unrelated to codec support (see
-    /// `MirrorUnavailableOfferPolicy.advertisedProtocolVersion` — MacReceiver
-    /// caps its advertised `pv` below `mirrorUnavailableWireVersion` because
-    /// it lacks unrelated display-mode UI, even though the very same build
-    /// fully implements codec negotiation). Gating HEVC on overall `pv`
-    /// would have made HEVC permanently unreachable for such a receiver for
-    /// a reason that has nothing to do with codecs. `minPeer` stays at `1`
+    /// matters because a peer can advertise a LOWER overall `pv` than its
+    /// build's latest for reasons unrelated to codec support; gating HEVC on
+    /// overall `pv` would make it unreachable for such a peer.
+    /// `minPeer` stays at `1`
     /// on both sides; a peer that never sends `hello.codecs` keeps receiving
     /// H.264 exactly as before this feature existed.
     static let hevcCodecWireVersion = 19

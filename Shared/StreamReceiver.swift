@@ -1923,20 +1923,11 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Control messages (phone -> Mac)
 
-    /// `WireProtocol.version`, except capped for a receiver platform that
-    /// doesn't yet implement everything the latest `pv` promises — a
-    /// receiver advertising support for a feature MUST actually handle it.
-    /// MacReceiver has no display-mode UI at all (Mirror/Extend selection
-    /// is an iOS-only concept today), so it cannot present the
-    /// `mirrorUnavailable` headless-Mirror offer (pv 17) — capping keeps the
-    /// Mac sender falling back to its pre-pv17 immediate Mirror failure for
-    /// this receiver instead of it silently sitting on an offer it can
-    /// never answer. Raise this the moment MacReceiver gets that UI; pv 17
-    /// introduces nothing else today, so this has no other effect.
-    private var advertisedProtocolVersion: Int {
-        MirrorUnavailableOfferPolicy.advertisedProtocolVersion(
-            deviceKind: deviceKind, latestVersion: WireProtocol.version)
-    }
+    /// Every receiver platform advertises the build's full `WireProtocol.version`:
+    /// iOS and MacReceiver both present the pv 17 `mirrorUnavailable` offer,
+    /// MacReceiver sends no input (pv 18 state is additive), and codecs are
+    /// negotiated from `hello.codecs`, never from `pv` (pv 19).
+    private var advertisedProtocolVersion: Int { WireProtocol.version }
 
     private func sendHello(on conn: NWConnection) {
         var hello: [String: Any] = [
