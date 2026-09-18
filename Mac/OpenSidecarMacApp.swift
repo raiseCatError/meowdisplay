@@ -366,7 +366,13 @@ final class SenderController: ObservableObject {
         refreshPhysicalDisplayAvailability()
         displayTopologyObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.refreshPhysicalDisplayAvailability() }
+        ) { [weak self] _ in
+            // `queue: .main` already guarantees this runs on the main thread;
+            // the explicit hop is only to give the Swift 6 checker something
+            // it can verify statically (it can't infer isolation from the
+            // OperationQueue argument alone).
+            Task { @MainActor in self?.refreshPhysicalDisplayAvailability() }
+        }
     }
 
     private func refreshPhysicalDisplayAvailability() {
