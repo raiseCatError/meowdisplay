@@ -192,6 +192,7 @@ targets:
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
+      - Shared/ReceiverPanelPresentation.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/PCMPlaybackEngine.swift

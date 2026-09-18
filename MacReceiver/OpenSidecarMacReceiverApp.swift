@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
+        ReceiverController.shared.onNeedsAttention = { [weak self] in
+            self?.showPanel()
+            NSApp.activate(ignoringOtherApps: true)
+        }
         ReceiverController.shared.start()
         showPanel()
         NSApp.activate(ignoringOtherApps: true)
@@ -134,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ReceiverContentView: View {
     /// Fixed panel size; the window is built to it and is not resizable.
-    static let size = CGSize(width: 440, height: 520)
+    static let size = CGSize(width: 440, height: 640)
 
     @ObservedObject var controller: ReceiverController
     let updater: SPUStandardUpdaterController?
@@ -186,6 +190,15 @@ struct ReceiverContentView: View {
             .padding(.vertical, 10)
         }
         .frame(width: Self.size.width, height: Self.size.height)
+        // The sender is headless, so Mirror has nothing to capture. "Use
+        // Extend" sends the existing displayModeRequest; the sender decides.
+        .alert("Mirror isn’t available",
+               isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
+            Button("Cancel", role: .cancel) { controller.declineMirrorUnavailableOffer() }
+            Button("Use Extend") { controller.acceptMirrorUnavailableOffer() }
+        } message: {
+            Text("The other Mac has no active physical display, for example its lid is closed. Use Extend to create a virtual display instead?")
+        }
     }
 }
 

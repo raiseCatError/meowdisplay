@@ -35,6 +35,13 @@ final class ReceiverController: ObservableObject {
     // "Waiting for a Mac…" from `connected`, which could otherwise drift.
     @Published private(set) var statusTitle = "Waiting for a Mac…"
     @Published private(set) var statusColor: Color = .secondary
+    // The sender has no usable physical display for Mirror (pv 17). Mirrors
+    // `receiver.mirrorUnavailable` so the panel can present the Cancel /
+    // Use Extend alert; the sender stays authoritative for the actual mode.
+    @Published private(set) var mirrorUnavailableOffer = false
+    /// Fired when something needs the user's answer while the panel may be
+    /// closed (the headless-Mirror offer) — the app delegate brings it up.
+    var onNeedsAttention: (() -> Void)?
 
     var active: Bool { receiver != nil }
 
@@ -61,6 +68,9 @@ final class ReceiverController: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)
+        // Audio stays a per-receiver opt-in; the shared receiver resends it on
+        // every welcome, so reconnects and migrations restore it.
+        receiver.primeAudioPreference(UserDefaults.standard.bool(forKey: Self.audioPreferredKey))
         self.receiver = receiver
         receiver.start(port: 9000)
 
@@ -77,6 +87,14 @@ final class ReceiverController: ObservableObject {
             .sink { [weak self] session in
                 self?.statusTitle = receiver.canonicalPhaseTitle
                 self?.statusColor = Self.statusColor(for: session.phase)
+            }
+            .store(in: &cancellables)
+        receiver.$mirrorUnavailable
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] offered in
+                self?.mirrorUnavailableOffer = offered
+                if offered { self?.onNeedsAttention?() }
             }
             .store(in: &cancellables)
         // Streaming = connected and the video format is known — that's when
@@ -142,10 +160,25 @@ final class ReceiverController: ObservableObject {
         streaming = false
         statusTitle = "Waiting for a Mac…"
         statusColor = .secondary
+        mirrorUnavailableOffer = false
         closeWindow()
         updateSleepAssertion(false)
         Log.info("receiver mode stopped")
     }
+
+    static let audioPreferredKey = "audioPreferred"
+
+    func setAudioPreferred(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.audioPreferredKey)
+        receiver?.requestAudioEnabled(enabled)
+    }
+
+    /// "Use Extend" on the Mirror-unavailable alert — the shared receiver
+    /// sends the existing `displayModeRequest`; nothing is faked locally.
+    func acceptMirrorUnavailableOffer() { receiver?.acceptMirrorUnavailableOffer() }
+
+    /// "Cancel" — ends this attempt exactly like Disconnect (trust stays).
+    func declineMirrorUnavailableOffer() { receiver?.declineMirrorUnavailableOffer() }
 
     /// Re-published name from the panel's text field. Empty falls back to the
     /// computer name (mirrors the iOS Settings behavior).

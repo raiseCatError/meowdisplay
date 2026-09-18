@@ -90,21 +90,32 @@ private struct ReceiverStatusSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            let priorityBinding = Binding<StreamingPriority>(
-                get: { receiver.streamingPriority },
-                set: { receiver.requestStreamingPriority($0) })
-            Picker("Streaming Priority", selection: priorityBinding) {
-                ForEach(StreamingPriority.allCases) { priority in
-                    Text(priority.label).tag(priority)
-                }
+            let controls = ReceiverConnectionControls(session: receiver.session,
+                                                      connected: receiver.connected)
+            if controls.canReconnect {
+                Button("Reconnect") { receiver.reconnectNow() }
+                    .help("Re-arm this Mac's listener and wait for the other Mac to reconnect.")
             }
-            Text(receiver.streamingPriority.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if controls.canDisconnect {
+                Button("Disconnect") { receiver.disconnect() }
+                    .help("End this session. Pairing is kept — connect again from the other Mac.")
+            }
             Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
             Text("Automatically reconnect to paired devices after connection interruptions. This Mac keeps listening for a connection either way.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+
+        ReceiverDisplaySection(receiver: receiver)
+        ReceiverStreamingSection(receiver: receiver)
+        ReceiverAudioSection(receiver: receiver, controller: controller)
+
+        Section {
+            Text("This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Input")
         }
     }
 
@@ -115,6 +126,181 @@ private struct ReceiverStatusSection: View {
         case let .updateReceiver(message, _): return message
         case let .updateMac(message): return message
         case nil: return nil
+        }
+    }
+}
+
+/// Video on/off and Mirror/Extend. Every value shown is the sender's
+/// confirmed state; a request only shows as "Switching…" until it answers.
+private struct ReceiverDisplaySection: View {
+    @ObservedObject var receiver: StreamReceiver
+
+    var body: some View {
+        Section("Display") {
+            Toggle("Video", isOn: Binding(
+                get: { receiver.videoEnabled },
+                set: { receiver.requestVideoEnabled($0) }))
+                .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
+            if let state = DisplayModePickerState(
+                confirmed: receiver.confirmedDisplayMode, pending: receiver.pendingDisplayMode,
+                connected: receiver.connected, macProtocolVersion: receiver.macProtocolVersion,
+                videoEnabled: receiver.videoEnabled) {
+                Picker("Display Mode", selection: Binding(
+                    get: { state.selection },
+                    set: { receiver.requestDisplayMode($0) })) {
+                    ForEach(ReceiverDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                            .disabled(state.extendDisabled && mode == .extend)
+                    }
+                }
+                .disabled(!state.isEnabled)
+                if state.isSwitching {
+                    Text("Switching to \(state.selection.title)…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if receiver.mirrorRejectedWhileExtending {
+                    HStack {
+                        Label("Mirror needs an active physical display on the other Mac. It stays on Extend.",
+                              systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Dismiss") { receiver.dismissMirrorRejection() }
+                            .controlSize(.small)
+                    }
+                }
+            } else {
+                HStack {
+                    Text("Display Mode")
+                    Spacer()
+                    Text(receiver.connected ? "Waiting for Mac" : "Unavailable")
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+}
+
+/// The controls the sender lets a receiver request, plus what it actually
+/// runs. The high-level Automatic/Custom switch and the codec preference are
+/// sender-owned settings with no receiver request on the wire, so the codec
+/// is shown read-only here.
+private struct ReceiverStreamingSection: View {
+    @ObservedObject var receiver: StreamReceiver
+
+    var body: some View {
+        Section {
+            Picker("Streaming Profile", selection: Binding(
+                get: { receiver.streamingProfile },
+                set: { receiver.requestStreamingProfile($0, customFrameRate: receiver.customFrameRate) })) {
+                ForEach(StreamingProfile.allCases) { profile in
+                    Text(profile.label).tag(profile)
+                }
+            }
+            Text(receiver.streamingProfile.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if receiver.streamingProfile == .custom {
+                Picker("Frame Rate", selection: Binding(
+                    get: { receiver.customFrameRate },
+                    set: { receiver.requestStreamingProfile(.custom, customFrameRate: $0) })) {
+                    ForEach(CustomFrameRateSelection.allCases) { frameRate in
+                        Text(frameRate.label).tag(frameRate)
+                    }
+                }
+            }
+            Picker("Streaming Priority", selection: Binding(
+                get: { receiver.streamingPriority },
+                set: { receiver.requestStreamingPriority($0) })) {
+                ForEach(StreamingPriority.allCases) { priority in
+                    Text(priority.label).tag(priority)
+                }
+            }
+            Text(receiver.streamingPriority.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            maxFPSControls
+            HStack {
+                Text("Codec")
+                Spacer()
+                Text(receiver.connected
+                     ? ReceiverStreamingPresentation.codecLabel(receiver.activeStreamCodec)
+                     : "—")
+                    .foregroundColor(.secondary)
+            }
+        } header: {
+            Text("Streaming")
+        } footer: {
+            Text("The other Mac decides what is actually applied and reports it back. Automatic/Custom mode and the codec choice (Auto, H.264, HEVC) are set in MeowDisplay on that Mac.")
+        }
+    }
+
+    @ViewBuilder
+    private var maxFPSControls: some View {
+        if receiver.macProtocolVersion >= WireProtocol.maxFPSWireVersion {
+            if let confirmed = receiver.confirmedMaxFPS {
+                let current = receiver.pendingMaxFPS ?? confirmed
+                let locked = !receiver.connected || receiver.pendingMaxFPS != nil
+                Toggle("Enforce Maximum FPS", isOn: Binding(
+                    get: { current.enabled },
+                    set: { enabled in
+                        var preference = current
+                        preference.enabled = enabled
+                        receiver.requestMaxFPS(preference)
+                    }))
+                    .disabled(locked)
+                if current.enabled {
+                    let tiers = receiver.lastMaxFPSState?.availableTiers ?? EncoderCapability.supportedFPSTiers
+                    Picker("Maximum FPS", selection: Binding(
+                        get: { current.maxFPS },
+                        set: { fps in
+                            var preference = current
+                            preference.maxFPS = fps
+                            receiver.requestMaxFPS(preference)
+                        })) {
+                        ForEach(tiers, id: \.self) { fps in Text("\(fps)").tag(fps) }
+                    }
+                    .disabled(locked)
+                }
+                if receiver.pendingMaxFPS != nil {
+                    Text("Updating Maximum FPS…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let text = ReceiverStreamingPresentation.fpsLimitation(
+                    state: receiver.lastMaxFPSState, profileLabel: receiver.streamingProfile.label) {
+                    Text(text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack {
+                    Text("Maximum FPS")
+                    Spacer()
+                    Text(receiver.connected ? "Waiting for Mac" : "Unavailable")
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+}
+
+private struct ReceiverAudioSection: View {
+    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var controller: ReceiverController
+    @AppStorage(ReceiverController.audioPreferredKey) private var audioPreferred = false
+
+    var body: some View {
+        Section {
+            Toggle("Audio", isOn: Binding(
+                get: { audioPreferred },
+                set: { audioPreferred = $0; controller.setAudioPreferred($0) }))
+                .disabled(!receiver.connected || !receiver.macSupportsAudio)
+        } header: {
+            Text("Audio")
+        } footer: {
+            Text("Plays a copy of what the other Mac is playing. It keeps playing there too.")
         }
     }
 }
