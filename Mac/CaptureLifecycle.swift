@@ -137,6 +137,16 @@ struct CaptureRecoveryBudget {
     }
 }
 
+/// Generation-scoping gate shared by any async recovery/health check that
+/// must not act after a newer topology/session event has superseded it —
+/// e.g. an Extend virtual-display health check started by one lid-close
+/// event finishing after a later topology change already invalidated it.
+enum GenerationGate {
+    static func isStale(capturedAt: UInt64, current: UInt64) -> Bool {
+        capturedAt != current
+    }
+}
+
 enum CaptureRecoveryPath: Equatable {
     case reattachMirrorCapture
     case rebuildMirrorPipeline

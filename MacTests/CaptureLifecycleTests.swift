@@ -58,6 +58,17 @@ final class CaptureLifecycleTests: XCTestCase {
                        .rebuildExtendPipeline)
     }
 
+    func testGenerationGateAcceptsMatchingGeneration() {
+        XCTAssertFalse(GenerationGate.isStale(capturedAt: 4, current: 4))
+    }
+
+    func testGenerationGateRejectsSupersededGeneration() {
+        // A topology health check captured generation 4 but a newer topology
+        // event bumped the counter to 5 before the check completed — it must
+        // recognize itself as stale rather than acting on outdated readings.
+        XCTAssertTrue(GenerationGate.isStale(capturedAt: 4, current: 5))
+    }
+
     func testSuccessfulModeReplacementSynchronizesStalePausedReceiverToRunning() {
         var oldSession = CaptureLifecycleState()
         XCTAssertTrue(oldSession.captureStarted())

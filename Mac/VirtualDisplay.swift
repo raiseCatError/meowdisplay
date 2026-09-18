@@ -19,6 +19,10 @@ final class VirtualDisplay {
     private let onOriginChange: ((CGPoint, CGSize) -> Void)?
 
     var displayID: CGDirectDisplayID { display.displayID }
+    /// Exposed only so a caller can remember mode A's rate before attempting
+    /// a resize to mode B, to roll back exactly if B never becomes usable
+    /// (see `MacSender.resizeExistingDisplay`'s transactional resize).
+    var currentRefreshRate: Int { refreshRate }
 
     /// Must be called on the main thread. `serialNum` must be unique per
     /// concurrent display AND stable per device — macOS keys saved display

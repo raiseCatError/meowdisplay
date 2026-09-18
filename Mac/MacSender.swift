@@ -641,8 +641,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // the fixed 60s post-Promote display-sleep stabilization hold (see
     // WakeStabilizationAssertion).
     private var wakeStabilizationAssertion: WakeStabilizationAssertion?
+    // The connection generation `wakeStabilizationAssertion` was last armed
+    // for via `reportRoute` (see `RemoteStabilizationPolicy`) — distinct from
+    // the explicit `promoteInteractiveWake` wire handler, which still begins
+    // the same assertion on its own. `queue`-confined, like `reportRoute`.
+    private var remoteStabilizationArmedGeneration: UInt64?
     private var wakeCaptureRecoveryScheduled = false
     private var wakeCaptureRecoveryRunning = false
+    // Display-topology generation (distinct from `captureGeneration`/session
+    // generation): bumped on every topology-changing notification so an
+    // async post-event health re-check that finishes after a NEWER topology
+    // event started can recognize itself as stale and no-op instead of
+    // acting on outdated readings. `queue`-confined.
+    private var topologyGenerationNow: UInt64 = 0
     private var wakeCaptureAwaitingFirstFrameGenerationStorage: UInt64?
     private var wakeCaptureAwaitingFirstFrameGeneration: UInt64? {
         get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return wakeCaptureAwaitingFirstFrameGenerationStorage }
@@ -1190,7 +1201,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } ?? content.displays.first
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "no displays found"])
+                          userInfo: [NSLocalizedDescriptionKey:
+                              "No display available to mirror — connect a display, or use Extend instead."])
         }
         try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
     }
@@ -1212,9 +1224,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "no displays found"])
+                          userInfo: [NSLocalizedDescriptionKey:
+                              "No display available to mirror — connect a display, or use Extend instead."])
         }
         try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
+    }
+
+    /// Whether an in-flight `setupExtend` probe/attempt should abort rather
+    /// than create, adopt, or keep waiting on a virtual display: `stopped`,
+    /// or the authenticated session this setup belongs to is no longer the
+    /// live one (disconnect, reconnect, or a newer session mid-setup).
+    /// Reuses `AuthenticatedSessionState` — the existing session-generation
+    /// gate every other stale-callback check in this file already relies on
+    /// — rather than a new generation counter.
+    private func isExtendSetupStale(ownerGeneration: UInt64?) -> Bool {
+        guard !stopped, let ownerGeneration else { return true }
+        return !authenticatedSession.isLive(generation: ownerGeneration)
     }
 
     /// Build (or rebuild) the virtual display + capture for the announced
@@ -1292,6 +1317,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var display: SCDisplay?
         var identityError = NSError(domain: "MacSender", code: 2,
                                     userInfo: [NSLocalizedDescriptionKey: "CGVirtualDisplay creation failed"])
+        // Every checkpoint below re-validates against this SAME captured
+        // generation (see `isExtendSetupStale`) — a disconnect or a newer
+        // authenticated session mid-probe must abort the whole setup rather
+        // than resurrect a display for a session that no longer exists.
+        let ownerGeneration = sessionGeneration ?? authenticatedSession.liveGeneration
         // Only a created-but-never-surfaced display proves the identity is
         // poisoned. Creation refusing outright usually means a twin still
         // holds the serial (just-quit instance, parallel debug build) —
@@ -1305,13 +1335,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             var created: VirtualDisplay?
             for attempt in 0..<(probe == 0 ? 8 : 3) {
                 if attempt > 0 { try await Task.sleep(for: .seconds(2)) }
-                // A Disconnect during the retry window tore the session down. Bail
-                // before creating/assigning the display: the serial the old display
-                // held is likely free now, so a late attempt would *succeed* and
-                // resurrect the very zombie this retry exists to avoid. (Mirrors the
-                // `if stopped` checks in the permission-poll loops above.)
-                if stopped { return }
-                created = await MainActor.run {
+                // A Disconnect (or a newer session) during the retry window
+                // tore this setup down. Bail before creating/assigning the
+                // display: the serial the old display held is likely free
+                // now, so a late attempt would *succeed* and resurrect the
+                // very zombie this retry exists to avoid. Checked again
+                // INSIDE the MainActor hop below — the race can land during
+                // the hop itself, not just before it — and once more right
+                // after, before this candidate is ever assigned.
+                guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
+                created = try await MainActor.run { () -> VirtualDisplay? in
+                    guard !self.isExtendSetupStale(ownerGeneration: ownerGeneration) else {
+                        throw CancellationError()
+                    }
                     let restoreOrigin = DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
                     // The productID moves with the serial: field data in #206
                     // suggests some macOS versions key the hostile state on
@@ -1334,9 +1370,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 await status("Preparing virtual display…")
             }
             guard let candidate = created else { continue }
+            // The MainActor hop above may have taken a while — re-check once
+            // more before this candidate is ever adopted as the live display.
+            guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
             virtualDisplay = candidate
             do {
-                display = try await findSCDisplay(id: candidate.displayID)
+                display = try await findSCDisplay(id: candidate.displayID, isCancelled: { [weak self] in
+                    self?.isExtendSetupStale(ownerGeneration: ownerGeneration) ?? true
+                })
+                // Transactional creation (#288's lesson: a successful
+                // CGVirtualDisplay apply does not mean WindowServer/SCK
+                // actually expose it) — `findSCDisplay` proves SCK sees it;
+                // this also proves CoreGraphics agrees it's actually usable.
+                guard DisplayUsability.evaluate(DisplayHealth.reading(for: candidate.displayID)) == .usable else {
+                    throw NSError(domain: "MacSender", code: 12, userInfo: [
+                        NSLocalizedDescriptionKey: "virtual display appeared but is not usable"])
+                }
+                guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
                 vd = candidate
                 if probe > 0, sawPoisonedIdentity {
                     Log.info("display identity +\(totalOffset) came online — the previous one is "
@@ -1345,6 +1395,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     Task { @MainActor in self.onDisplayIdentityBumped?(totalOffset) }
                 }
                 break identities
+            } catch is CancellationError {
+                // Stale, not a display failure — no fallback identity was
+                // burned proving anything, so this must surface as
+                // cancellation, not a misleading "display failed".
+                virtualDisplay = nil
+                throw CancellationError()
             } catch {
                 virtualDisplay = nil   // release the dead display and its serial
                 // No shareable displays at all is a permission-side failure —
@@ -1352,7 +1408,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if (error as NSError).domain == "MacSender", (error as NSError).code == 4 { throw error }
                 identityError = error as NSError
                 sawPoisonedIdentity = true
-                if stopped { return }
+                guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
                 Log.info("virtual display (identity +\(totalOffset)) never came online — trying a fresh identity")
                 await status("Display blocked by saved macOS state — trying a fresh identity…")
             }
@@ -1414,6 +1470,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 var resized = false
                 do {
                     resized = try await resizeExistingDisplay(for: target)
+                } catch is CancellationError {
+                    // Stale (stop()/new session/a newer VD replaced this one
+                    // mid-resize) — propagate as cancellation, never as
+                    // "resize failed, fall back to a full rebuild": building
+                    // a fresh VD for a session/identity that no longer owns
+                    // this reconfigure would resurrect exactly the kind of
+                    // stale-async work #288 flagged.
+                    throw CancellationError()
                 } catch {
                     // The in-place resize path (mode-switch, or the SCK
                     // re-enumeration that follows it) failed partway
@@ -1437,6 +1501,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     virtualDisplay = nil
                     try await setupExtend(target)
                 }
+            } catch is CancellationError {
+                return
             } catch {
                 Log.info("reconfigure failed: \(error)")
                 await status("Rotation failed: \(error.localizedDescription)")
@@ -1455,8 +1521,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// only the capture/encoder pieces that depend on pixel dimensions.
     /// Returns false when there is no reusable display or macOS rejected the
     /// mode switch, letting the caller use the legacy rebuild fallback.
+    ///
+    /// Transactional (#288's lesson: `vd.resize` returning true never
+    /// guarantees WindowServer/SCK actually expose the new mode): if the new
+    /// mode never becomes shareable/healthy, this rolls the SAME identity
+    /// back to the last known-good mode rather than letting the caller fall
+    /// straight to a full rebuild that would destroy an otherwise-working
+    /// display. A successful rollback still returns `true` — the receiver
+    /// keeps streaming at the old size rather than going black, and the next
+    /// genuine topology/rotation event gets a fresh attempt at the new one.
     private func resizeExistingDisplay(for info: PhoneInfo) async throws -> Bool {
         guard let vd = virtualDisplay else { return false }
+        // Scoped to THIS VirtualDisplay instance — if stop() or a fresh
+        // setupExtend() replaces `virtualDisplay` while this function is
+        // suspended, nothing below may resize/reattach/start capture again
+        // on the old identity.
+        func isStale() -> Bool { stopped || virtualDisplay !== vd }
+        guard !isStale() else { throw CancellationError() }
 
         if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
             extendShapePreference = stored
@@ -1475,29 +1556,83 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             + "shape=\(extendShapePreference.shape.rawValue) resolvedAspect=\(resolvedAspect) "
             + "targetPoints=\(pointsWide)x\(pointsHigh)")
         #endif
-        let didResize = await MainActor.run {
-            vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
-                      movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
+
+        // Brings the CURRENT vd mode online end-to-end: fresh SCK match +
+        // DisplayHealth (does WindowServer/SCK actually agree it's usable,
+        // not just "the apply call returned true") + capture start. Shared
+        // by the initial resize attempt and the same-identity rollback below.
+        func attachCurrentMode(pointsWide: Int, pointsHigh: Int, size: CGSize) async throws {
+            let display = try await findSCDisplay(id: vd.displayID, expectedSize: size, isCancelled: isStale)
+            guard !isStale() else { throw CancellationError() }
+            guard DisplayUsability.evaluate(DisplayHealth.reading(for: vd.displayID)) == .usable else {
+                throw NSError(domain: "MacSender", code: 11, userInfo: [
+                    NSLocalizedDescriptionKey: "resized virtual display did not become usable"])
+            }
+            let (captureW, captureH) = clampedCaptureSize(pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
+            #if DEBUG
+            Log.info("extendDebug: resizeExistingDisplay selectedSCDisplay id=\(display.displayID) "
+                + "reportedSize=\(display.width)x\(display.height) encodeOutput=\(captureW)x\(captureH)")
+            #endif
+            try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+            if let targetID = InputTargetResolver.displayID(
+                mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
+                inputInjector = InputInjector(displayID: targetID)
+            }
+            if UserDefaults.standard.bool(forKey: "testPattern") {
+                let id = vd.displayID
+                Task { @MainActor in TestPattern.show(on: id) }
+            }
+        }
+
+        // Remember mode A before attempting B, so a B that never becomes
+        // shareable can be reverted on the same identity.
+        let previousPointsWide = vd.pointsWide
+        let previousPointsHigh = vd.pointsHigh
+        let previousRefreshRate = vd.currentRefreshRate
+        let previousSize = CGSize(width: previousPointsWide, height: previousPointsHigh)
+
+        let didResize = try await MainActor.run { () -> Bool in
+            guard !isStale() else { throw CancellationError() }
+            return vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
+                              movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
         }
         guard didResize else { return false }
+        guard !isStale() else { throw CancellationError() }
 
-        let display = try await findSCDisplay(id: vd.displayID, expectedSize: size)
-        let (captureW, captureH) = clampedCaptureSize(pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
-        #if DEBUG
-        Log.info("extendDebug: resizeExistingDisplay selectedSCDisplay id=\(display.displayID) "
-            + "reportedSize=\(display.width)x\(display.height) encodeOutput=\(captureW)x\(captureH)")
-        #endif
-        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
-        if let targetID = InputTargetResolver.displayID(
-            mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-            inputInjector = InputInjector(displayID: targetID)
+        do {
+            try await attachCurrentMode(pointsWide: pointsWide, pointsHigh: pointsHigh, size: size)
+            return true
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            Log.info("resize to \(pointsWide)x\(pointsHigh) did not become shareable (\(error)) — "
+                + "rolling back \(vd.displayID) to \(previousPointsWide)x\(previousPointsHigh)")
+            guard !isStale() else { throw CancellationError() }
+            let rolledBack = try await MainActor.run { () -> Bool in
+                guard !isStale() else { throw CancellationError() }
+                return vd.resize(pointsWide: previousPointsWide, pointsHigh: previousPointsHigh,
+                                  refreshRate: previousRefreshRate,
+                                  movingTo: DisplayArrangement.origin(for: previousSize, device: arrangementKey))
+            }
+            guard rolledBack else {
+                Log.info("rollback mode-apply on \(vd.displayID) itself failed — falling back to a full rebuild")
+                return false
+            }
+            guard !isStale() else { throw CancellationError() }
+            do {
+                try await attachCurrentMode(pointsWide: previousPointsWide, pointsHigh: previousPointsHigh,
+                                            size: previousSize)
+                Log.info("rollback to \(previousPointsWide)x\(previousPointsHigh) succeeded — "
+                    + "identity \(vd.displayID) preserved")
+                return true
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                Log.info("rollback to \(previousPointsWide)x\(previousPointsHigh) also failed (\(error)) — "
+                    + "falling back to a full rebuild")
+                return false
+            }
         }
-
-        if UserDefaults.standard.bool(forKey: "testPattern") {
-            let id = vd.displayID
-            Task { @MainActor in TestPattern.show(on: id) }
-        }
-        return true
     }
 
     /// hello.maxEncodeWide/High (PROTOCOL.md 6.5): a big panel does not imply
@@ -1520,9 +1655,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// The virtual display takes a moment to show up in shareable content.
-    private func findSCDisplay(id: CGDirectDisplayID, expectedSize: CGSize? = nil) async throws -> SCDisplay {
+    /// `isCancelled` lets a caller supersede this poll with its own
+    /// ownership/generation check (a specific VD identity, an authenticated
+    /// session generation, …) — without one, only `stopped` bounds it, which
+    /// on its own already stops the ~5s poll from outliving a plain
+    /// disconnect (#288: a stale operation should not keep polling for dead
+    /// work).
+    private func findSCDisplay(id: CGDirectDisplayID, expectedSize: CGSize? = nil,
+                               isCancelled: () -> Bool = { false }) async throws -> SCDisplay {
         var lastDisplayCount = 0
         for _ in 0..<20 {
+            guard !stopped, !isCancelled() else { throw CancellationError() }
             let content = try await SCShareableContent.current
             lastDisplayCount = content.displays.count
             if let display = content.displays.first(where: {
@@ -2133,6 +2276,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
             + " route=\(route.rawValue) direct=\(currentPathDirectLink)")
         Task { @MainActor in self.onTransportPath?(route) }
+        armRemoteStabilizationIfNeeded(route: route)
+    }
+
+    /// Gives an authenticated Remote-route session the same bounded 60s
+    /// post-wake stabilization LAN/USB sessions already get via the explicit
+    /// `promoteInteractiveWake` wire message (see `WakeStabilizationAssertion`)
+    /// — some Remote peers connect without ever sending that message, and the
+    /// graphical/video pipeline still needs the same runway to come alive.
+    /// Reuses the identical assertion object/`begin()`/`release()` lifecycle;
+    /// only ever reached once `reportRoute` has already gated on
+    /// `connectionReady` (past pinned mutual-TLS verification), so this can
+    /// only arm after the expected peer is cryptographically authenticated —
+    /// never from route/hostname/IP alone, and never from unauthenticated
+    /// traffic.
+    private func armRemoteStabilizationIfNeeded(route: ConnectionRoute) {
+        guard RemoteStabilizationPolicy.shouldArm(
+            route: route,
+            previouslyArmedGeneration: remoteStabilizationArmedGeneration,
+            currentGeneration: activeConnectionGeneration
+        ) else { return }
+        remoteStabilizationArmedGeneration = activeConnectionGeneration
+        Log.info("wakeDebug: remoteStabilizationArmed generation=\(activeConnectionGeneration)")
+        if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
+        wakeStabilizationAssertion?.begin()
     }
 
     /// True when the far end of a connection is a link-local address
@@ -2340,10 +2507,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let targetAvailable: Bool
         switch mode {
         case .mirror:
-            targetAvailable = captureDisplayID != 0 && !CGDisplayBounds(captureDisplayID).isEmpty
+            targetAvailable = captureDisplayID != 0 && DisplayHealth.isUsable(captureDisplayID)
         case .extend:
             if let virtualDisplay {
-                targetAvailable = !CGDisplayBounds(virtualDisplay.displayID).isEmpty
+                targetAvailable = DisplayHealth.isUsable(virtualDisplay.displayID)
             } else {
                 targetAvailable = false
             }
@@ -2454,7 +2621,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw NSError(domain: "MacSender", code: 9,
                           userInfo: [NSLocalizedDescriptionKey: "virtual display is unavailable"])
         }
-        let display = try await findSCDisplay(id: vd.displayID)
+        // Scoped to THIS identity — if stop() or a fresh setupExtend()
+        // replaces `virtualDisplay` while this function is suspended (e.g.
+        // during the findSCDisplay poll below), nothing here may reattach or
+        // start capture against the old one.
+        func isStale() -> Bool { stopped || virtualDisplay !== vd }
+        // Cheap CoreGraphics-only check before paying `findSCDisplay`'s SCK
+        // poll: a torn-down/offline identity (upstream #219 — non-empty
+        // bounds but CGDisplayIsOnline/IsActive false) never appears in
+        // shareable content, so failing fast here skips straight to the
+        // caller's rebuild fallback instead of waiting out the ~5s poll.
+        let usability = DisplayUsability.evaluate(DisplayHealth.reading(for: vd.displayID))
+        guard usability == .usable else {
+            Log.info("displayDebug: virtual display \(vd.displayID) stale (\(usability)) — rebuilding")
+            throw NSError(domain: "MacSender", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "virtual display is stale/offline"])
+        }
+        let display = try await findSCDisplay(id: vd.displayID, isCancelled: isStale)
+        guard !isStale() else { throw CancellationError() }
         let (captureW, captureH) = lastHello.map {
             clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
         } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
@@ -2520,7 +2704,80 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         wakeCaptureObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.queue.async { self?.scheduleWakeCaptureRecovery(reason: "screensDidWake") }
+            self?.queue.async { self?.topologyChanged(reason: "screensDidWake") }
+        }
+    }
+
+    /// Called on `queue` for every topology-changing notification, for both
+    /// modes. Bumps `topologyGenerationNow` first so any in-flight async
+    /// health check started by an earlier event can recognize itself as
+    /// stale, then routes to the mode-appropriate recovery: Mirror keeps its
+    /// existing full SCK reconstruction; Extend gets a lighter health-check
+    /// pass (see `scheduleExtendTopologyHealthCheck`) since its capture
+    /// pipeline normally survives a topology change untouched and only needs
+    /// forcing back to life when the virtual display actually went stale.
+    private func topologyChanged(reason: String) {
+        guard !stopped else { return }
+        topologyGenerationNow &+= 1
+        Log.info("displayDebug: topologyChanged reason=\(reason) generation=\(topologyGenerationNow)")
+        switch mode {
+        case .mirror:
+            // Unchanged from before this milestone: only `screensDidWake`
+            // triggers Mirror's full SCK reconstruction.
+            // `didChangeScreenParameters` still only refreshes the picker
+            // list (via `sendMirrorDisplayState`, called at the notification
+            // site) — a real detach of the mirrored display already surfaces
+            // as an SCStream error through `handleCaptureStopped`, so forcing
+            // a rebuild here too would churn Mirror on unrelated topology
+            // changes (e.g. a second, uninvolved display attaching).
+            guard reason == "screensDidWake" else { return }
+            scheduleWakeCaptureRecovery(reason: reason)
+        case .extend:
+            scheduleExtendTopologyHealthCheck(reason: reason)
+        }
+    }
+
+    /// Extend's analogue of `runWakeCaptureRecovery`: a lid-close/open or
+    /// external-display attach/detach cycle can leave the SCStream itself
+    /// alive but the virtual display no longer capturable (WindowServer
+    /// transiently drops it from the topology without erroring the stream) —
+    /// the exact "silent black screen" gap Mirror doesn't have because it
+    /// always rebuilds from scratch on `screensDidWake`. This only forces
+    /// recovery when the display is actually unhealthy; a healthy display
+    /// mid-transition is left alone.
+    private func scheduleExtendTopologyHealthCheck(reason: String) {
+        guard mode == .extend, !stopped, let vd = virtualDisplay else { return }
+        let generation = topologyGenerationNow
+        let displayID = vd.displayID
+        // Give WindowServer/SCK the same settle window `findSCDisplay` polls
+        // at (250ms) before judging the display — an immediate read during
+        // the transition itself would false-positive on a display that is
+        // about to be fine.
+        queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, !self.stopped, self.mode == .extend,
+                  !GenerationGate.isStale(capturedAt: generation, current: self.topologyGenerationNow),
+                  self.virtualDisplay?.displayID == displayID else { return }
+            let usability = DisplayUsability.evaluate(DisplayHealth.reading(for: displayID))
+            guard usability != .usable else { return }
+            guard self.captureStateSnapshot().phase == .running else { return }
+            Log.info("displayDebug: extend virtual display \(displayID) went stale after "
+                + "\(reason) (\(usability)) with no SCK error — forcing capture recovery")
+            guard self.updateCaptureState({ $0.unexpectedStop() }) else { return }
+            self.inputInjector?.cancelActiveInput()
+            self.invalidateCapturePipeline()
+            // Unlike `handleCaptureStopped`, SCK itself has not reported this
+            // stream dead — it must be stopped explicitly rather than just
+            // dropped, or the doomed SCStream instance keeps running in the
+            // background.
+            let staleStream = self.stream
+            self.stream = nil
+            if let staleStream {
+                Task {
+                    do { try await staleStream.stopCapture() }
+                    catch { Log.info("displayDebug: stale extend stream stop failed: \(error)") }
+                }
+            }
+            self.scheduleCaptureRecovery()
         }
     }
 
@@ -4740,6 +4997,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.sendMirrorDisplayState()
+            self?.queue.async { self?.topologyChanged(reason: "didChangeScreenParameters") }
         }
     }
 
