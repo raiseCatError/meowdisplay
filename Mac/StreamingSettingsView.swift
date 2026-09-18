@@ -18,64 +18,84 @@ struct StreamingSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("Streaming Profile", selection: $controller.streamingProfile) {
-                        ForEach(StreamingProfile.allCases) { p in
-                            Text(p.label).tag(p)
+                    Picker("Streaming Mode", selection: $controller.streamingMode) {
+                        ForEach(StreamingMode.allCases) { m in
+                            Text(m.label).tag(m)
                         }
                     }
-                    .onChange(of: controller.streamingProfile) { controller.restartAll() }
-                    Text(controller.streamingProfile.explanation)
+                    // No .onChange(of:) here, unlike the other pickers below:
+                    // `streamingMode`'s own didSet (OpenSidecarMacApp.swift)
+                    // already calls restartAll() exactly once. Adding one
+                    // here too used to fire restartAll() twice per switch —
+                    // tearing every session down, rebuilding it, and tearing
+                    // that rebuild down again — which caused the mode-switch
+                    // hardware regressions (stuck "Reconnecting", transient
+                    // duplicate device rows, codec desync).
+                    Text(controller.streamingMode.explanation)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Streaming Priority", selection: $controller.streamingPriority) {
-                        ForEach(StreamingPriority.allCases) { p in
-                            Text(p.label).tag(p)
-                        }
-                    }
-                    .onChange(of: controller.streamingPriority) { controller.restartAll() }
-                    Text(controller.streamingPriority.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Codec", selection: $controller.codecPreference) {
-                        ForEach(CodecPreference.allCases) { c in
-                            Text(c.label).tag(c)
-                        }
-                    }
-                    .onChange(of: controller.codecPreference) { controller.restartAll() }
-                    Text(controller.codecPreference.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if controller.streamingProfile == .custom {
+                if controller.streamingMode == .custom {
                     VStack(alignment: .leading, spacing: 4) {
-                        Picker("Frame Rate", selection: $controller.customFrameRate) {
-                            ForEach(CustomFrameRateSelection.allCases) { r in
-                                Text(r.label).tag(r)
+                        Picker("Streaming Profile", selection: $controller.streamingProfile) {
+                            ForEach(StreamingProfile.allCases) { p in
+                                Text(p.label).tag(p)
                             }
                         }
-                        .onChange(of: controller.customFrameRate) { controller.restartAll() }
-                        Text("Clamped to the connected device's actual maximum refresh rate. "
-                            + "Auto uses the same ceiling as Performance.")
+                        .onChange(of: controller.streamingProfile) { controller.restartAll() }
+                        Text(controller.streamingProfile.explanation)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Quality", selection: $controller.quality) {
-                        ForEach(StreamQuality.allCases, id: \.self) { q in
-                            Text(q.label).tag(q)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Streaming Priority", selection: $controller.streamingPriority) {
+                            ForEach(StreamingPriority.allCases) { p in
+                                Text(p.label).tag(p)
+                            }
+                        }
+                        .onChange(of: controller.streamingPriority) { controller.restartAll() }
+                        Text(controller.streamingPriority.explanation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Codec", selection: $controller.codecPreference) {
+                            ForEach(CodecPreference.allCases) { c in
+                                Text(c.label).tag(c)
+                            }
+                        }
+                        .onChange(of: controller.codecPreference) { controller.restartAll() }
+                        Text(controller.codecPreference.explanation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if controller.streamingProfile == .custom {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Picker("Frame Rate", selection: $controller.customFrameRate) {
+                                ForEach(CustomFrameRateSelection.allCases) { r in
+                                    Text(r.label).tag(r)
+                                }
+                            }
+                            .onChange(of: controller.customFrameRate) { controller.restartAll() }
+                            Text("Clamped to the connected device's actual maximum refresh rate. "
+                                + "Auto uses the same ceiling as Performance.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .onChange(of: controller.quality) { controller.restartAll() }
-                    Text(controller.quality.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Quality", selection: $controller.quality) {
+                            ForEach(StreamQuality.allCases, id: \.self) { q in
+                                Text(q.label).tag(q)
+                            }
+                        }
+                        .onChange(of: controller.quality) { controller.restartAll() }
+                        Text(controller.quality.explanation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Video Bitrate", value: "\(controller.quality.bitrate / 1_000_000) Mbps")
                 }
-                LabeledContent("Video Bitrate", value: "\(controller.quality.bitrate / 1_000_000) Mbps")
             }
 
             Section("Audio") {

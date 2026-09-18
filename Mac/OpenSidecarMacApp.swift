@@ -413,6 +413,39 @@ final class SenderController: ObservableObject {
     @Published var codecPreference = CodecPreference(rawValue: UserDefaults.standard.string(forKey: "codecPreference") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(codecPreference.rawValue, forKey: "codecPreference") }
     }
+    // Automatic/Custom streaming settings milestone. Default Automatic —
+    // normal users get MEOW's existing default policy with no knobs shown;
+    // `streamingProfile`/`streamingPriority`/`codecPreference`/`quality`/
+    // `customFrameRate` above are left untouched by mode switches (see the
+    // `effective*` properties below), so a user's prior Custom values are
+    // still there, unmodified, the moment they switch back to Custom.
+    @Published var streamingMode = StreamingMode(rawValue: UserDefaults.standard.string(forKey: "streamingMode") ?? "") ?? .automatic {
+        didSet {
+            guard streamingMode != oldValue else { return }
+            UserDefaults.standard.set(streamingMode.rawValue, forKey: "streamingMode")
+            restartAll()
+        }
+    }
+    // What a session actually gets built with — `StreamingModePolicy`/
+    // `StreamQuality.effective` fold in Automatic's fixed default policy;
+    // only these (never the raw stored properties above) may reach
+    // `MacSender.init`.
+    var effectiveStreamingProfile: StreamingProfile {
+        StreamingModePolicy.effectiveProfile(mode: streamingMode, stored: streamingProfile)
+    }
+    var effectiveCustomFPS: Int? {
+        StreamingModePolicy.effectiveCustomFPS(mode: streamingMode, storedProfile: streamingProfile,
+                                                storedCustomFPS: customFrameRate.requestedFPS)
+    }
+    var effectiveStreamingPriority: StreamingPriority {
+        StreamingModePolicy.effectivePriority(mode: streamingMode, stored: streamingPriority)
+    }
+    var effectiveCodecPreference: CodecPreference {
+        StreamingModePolicy.effectiveCodec(mode: streamingMode, stored: codecPreference)
+    }
+    var effectiveQuality: StreamQuality {
+        StreamQuality.effective(mode: streamingMode, stored: quality)
+    }
     // Mirror-mode's explicit display choice: a stable UUID (never a raw
     // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
     // Automatic. Irrelevant to Extend, which always uses its own virtual
@@ -1821,16 +1854,16 @@ final class SenderController: ObservableObject {
 
         let name = label(for: target)
         let sender = MacSender(transport: transport, name: name, mode: mode,
-                               quality: quality, displaySerial: Self.displaySerial(for: id),
+                               quality: effectiveQuality, displaySerial: Self.displaySerial(for: id),
                                identityOffset: identityOffset(for: id),
                                awaitingWake: awaitingWake,
                                videoEnabled: videoEnabled,
                                mirrorDisplayUUID: mirrorDisplayUUID,
-                               streamingProfile: streamingProfile,
-                               customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil,
+                               streamingProfile: effectiveStreamingProfile,
+                               customFPS: effectiveCustomFPS,
                                extendShapePreference: extendShapeDefault,
-                               streamingPriority: streamingPriority,
-                               codecPreference: codecPreference)
+                               streamingPriority: effectiveStreamingPriority,
+                               codecPreference: effectiveCodecPreference)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let intendedPeerID: String? = {
             if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }

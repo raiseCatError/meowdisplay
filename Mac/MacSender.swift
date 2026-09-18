@@ -58,6 +58,17 @@ enum StreamQuality: String, CaseIterable {
         case .fast: return "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi."
         }
     }
+
+    /// Automatic/Custom streaming settings milestone: `StreamQuality` is
+    /// Mac-app-only (see `StreamingModePolicy`'s doc comment for why its
+    /// Shared siblings' equivalent lives there instead), so its own
+    /// Automatic default — matching today's pre-milestone default — lives
+    /// here rather than in `StreamingModePolicy`.
+    static let automatic = StreamQuality.best
+
+    static func effective(mode: StreamingMode, stored: StreamQuality) -> StreamQuality {
+        mode == .custom ? stored : automatic
+    }
 }
 
 struct PhoneInfo: Decodable {

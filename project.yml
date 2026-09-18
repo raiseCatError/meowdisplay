@@ -206,6 +206,7 @@ targets:
       - Shared/PairingPromptModel.swift
       - Shared/StreamingProfile.swift
       - Shared/StreamingPriority.swift
+      - Shared/StreamingMode.swift
       - Shared/CatMode.swift
       - Shared/ExtendDisplayShape.swift
       - Shared/DecodeCeiling.swift
