@@ -119,6 +119,15 @@ enum StreamingFPSPolicy {
         }
     }
 
+    /// Pre-HEVC-milestone single-call form: folds a codec's throughput
+    /// ceiling into the same `min()` as the common (non-codec-specific)
+    /// limits. Kept, and still exhaustively covered by
+    /// `StreamingProfileTests`, as a self-contained reference for that
+    /// combination math — but no longer how `MacSender` computes a live
+    /// session's FPS: doing so pre-clamps `encoderSafeFPS` in BEFORE a codec
+    /// is chosen, which is exactly the bug `commonTargetFPS` +
+    /// `codecEffectiveFPS` exist to avoid (see their doc comments). New
+    /// production call sites should use that pair instead.
     static func effectiveFPS(profile: StreamingProfile, requestedFPS: Int?, receiverMaxFPS: Int?,
                               userMaxFPS: Int?, encoderSafeFPS: Int) -> Result {
         let receiverCap = min(max(receiverMaxFPS ?? defaultReceiverMaxFPS, 1), hardCapFPS)
@@ -141,6 +150,56 @@ enum StreamingFPSPolicy {
             ?? candidates.first { $0.value == fps }?.reason
             ?? .requested
         return Result(fps: fps, reason: reason)
+    }
+
+    /// The COMMON (non-codec-specific) FPS target — profile/custom request,
+    /// receiver display capability, user ceiling, the hard product cap — and
+    /// deliberately NEVER `encoderSafeFPS` (HEVC milestone; see
+    /// `codecEffectiveFPS`). This is what `CodecSelectionPolicy.Input.
+    /// requestedFPS` MUST be built from: feeding the OLD `effectiveFPS`
+    /// (which already folds in H.264's `encoderSafeFPS`) into Auto would
+    /// silently pre-clamp the request to H.264's own throughput ceiling
+    /// before Auto ever asked "would H.264 need to reduce this?" — making
+    /// that question always answer "no" and HEVC's entire
+    /// throughput-rescue path unreachable. Same three of the four
+    /// `effectiveFPS` candidates, `encoderThroughput` excluded.
+    static func commonTargetFPS(profile: StreamingProfile, requestedFPS: Int?,
+                                 receiverMaxFPS: Int?, userMaxFPS: Int?) -> Result {
+        let receiverCap = min(max(receiverMaxFPS ?? defaultReceiverMaxFPS, 1), hardCapFPS)
+        let profileRequested = profileRequestedFPS(profile: profile, requestedFPS: requestedFPS)
+
+        var candidates: [(value: Int, reason: LimitReason)] = [
+            (profileRequested, .requested),
+            (receiverCap, .receiverCapability),
+        ]
+        if let userMaxFPS { candidates.append((max(userMaxFPS, 1), .userCeiling)) }
+
+        let fps = candidates.map(\.value).min() ?? profileRequested
+        let reason = candidates.first { $0.value == fps && $0.reason != .requested }?.reason
+            ?? candidates.first { $0.value == fps }?.reason
+            ?? .requested
+        return Result(fps: fps, reason: reason)
+    }
+
+    /// Applies a CHOSEN codec's own throughput ceiling (if any) on top of the
+    /// common target (HEVC milestone). H.264 has a real, measured one
+    /// (`EncoderCapability.codecSafeFPS`) and is clamped exactly like the old
+    /// unconditional `effectiveFPS` did. HEVC has no established throughput
+    /// ceiling anywhere in this codebase — inventing one would be the "fake
+    /// universal HEVC ceiling" the milestone forbids — so it passes the
+    /// common target through completely unclamped; its only ceilings are the
+    /// ones already folded into `commonTarget` (receiver/user/profile),
+    /// which apply to every codec equally and are not this function's
+    /// concern.
+    static func codecEffectiveFPS(commonTarget: Result, codec: StreamCodec, encoderSafeFPS: Int) -> Result {
+        switch codec {
+        case .h264:
+            let safeEncoderFPS = max(encoderSafeFPS, 1)
+            guard safeEncoderFPS < commonTarget.fps else { return commonTarget }
+            return Result(fps: safeEncoderFPS, reason: .encoderThroughput)
+        case .hevc:
+            return commonTarget
+        }
     }
 
     /// Tiers a receiver may pick as its enforced maximum (PART 2): filtered

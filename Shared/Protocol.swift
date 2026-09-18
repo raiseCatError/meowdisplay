@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 18
+    static let version = 19
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
@@ -138,6 +138,27 @@ enum WireProtocol {
     /// "Requesting…"/"Not allowed"/"Requests disabled by Mac" from `state`.
     static let sessionScopedInputConsentWireVersion = 18
 
+    /// Protocol version this build shipped HEVC/H.265 (Main, 8-bit) in, as
+    /// an OPTIONAL second video codec alongside the universal H.264
+    /// baseline. Historical/documentation marker ONLY — unlike most of the
+    /// version constants above, codec capability is deliberately NOT gated
+    /// by comparing a peer's overall `pv` against this constant. It follows
+    /// the additive-FIELD pattern of `maxEncodeWide`/`maxFPS` instead: a
+    /// peer's `hello.codecs` field, if present at all, IS the capability
+    /// signal (understands codec negotiation and `streamCodecState`);
+    /// absence of the field means H.264-only, regardless of `pv`. This
+    /// matters because a receiver can advertise a LOWER overall `pv` than
+    /// its build's latest for reasons unrelated to codec support (see
+    /// `MirrorUnavailableOfferPolicy.advertisedProtocolVersion` — MacReceiver
+    /// caps its advertised `pv` below `mirrorUnavailableWireVersion` because
+    /// it lacks unrelated display-mode UI, even though the very same build
+    /// fully implements codec negotiation). Gating HEVC on overall `pv`
+    /// would have made HEVC permanently unreachable for such a receiver for
+    /// a reason that has nothing to do with codecs. `minPeer` stays at `1`
+    /// on both sides; a peer that never sends `hello.codecs` keeps receiving
+    /// H.264 exactly as before this feature existed.
+    static let hevcCodecWireVersion = 19
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -223,6 +244,17 @@ enum WireMessage {
     // immediately. `reason` is diagnostic only (currently always
     // "noUsablePhysicalDisplay"). See `mirrorUnavailableWireVersion`.
     static let mirrorUnavailable = "mirrorUnavailable"
+    // Mac -> receiver: the confirmed codec ("h264" or "hevc") the in-flight
+    // (or about-to-start) video stream actually uses — see
+    // `WireProtocol.hevcCodecWireVersion`. Re-sent on every successful
+    // capture start and on every codec change (same pattern as
+    // `extendShapeState`/`maxFPSState`) so a receiver never infers codec
+    // from stream bytes. Sent to any receiver whose `hello` included a
+    // `codecs` field at all (that field's presence, not overall `pv`, is
+    // the capability signal — see `hevcCodecWireVersion`'s doc comment); a
+    // receiver that never sent `codecs` never receives this and correctly
+    // assumes H.264, the only codec it can ever be sent.
+    static let streamCodecState = "streamCodecState"
 }
 
 enum WireCrypto {
@@ -533,5 +565,32 @@ struct MaxFPSStateUpdate: Equatable {
         fields["effectiveFPS"] = effectiveFPS
         fields["reason"] = reason
         return fields
+    }
+}
+
+/// Mac -> receiver `streamCodecState` (HEVC milestone): the confirmed codec
+/// of the in-flight/about-to-start video stream, plus a diagnostic `reason`
+/// (a `CodecSelectionPolicy.Reason.rawValue`) so a receiver's diagnostics can
+/// show WHY without re-deriving the policy itself. See
+/// `WireProtocol.hevcCodecWireVersion`.
+struct StreamCodecStateUpdate: Equatable {
+    let codec: StreamCodec
+    let reason: String
+
+    init(codec: StreamCodec, reason: String) {
+        self.codec = codec
+        self.reason = reason
+    }
+
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == WireMessage.streamCodecState,
+              let rawCodec = message["codec"] as? String,
+              let codec = StreamCodec(rawValue: rawCodec) else { return nil }
+        self.codec = codec
+        reason = message["reason"] as? String ?? ""
+    }
+
+    var wireFields: [String: Any] {
+        ["type": WireMessage.streamCodecState, "codec": codec.wireValue, "reason": reason]
     }
 }

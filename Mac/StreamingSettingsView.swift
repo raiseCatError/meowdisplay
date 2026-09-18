@@ -39,6 +39,17 @@ struct StreamingSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Codec", selection: $controller.codecPreference) {
+                        ForEach(CodecPreference.allCases) { c in
+                            Text(c.label).tag(c)
+                        }
+                    }
+                    .onChange(of: controller.codecPreference) { controller.restartAll() }
+                    Text(controller.codecPreference.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if controller.streamingProfile == .custom {
                     VStack(alignment: .leading, spacing: 4) {
                         Picker("Frame Rate", selection: $controller.customFrameRate) {

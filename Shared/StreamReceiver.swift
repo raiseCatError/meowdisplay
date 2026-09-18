@@ -75,6 +75,12 @@ final class StreamReceiver: ObservableObject {
     /// the Mac's own default so an old-peer/pre-hello receiver never assumes
     /// a different bounded encode depth than the Mac is actually running.
     @Published private(set) var streamingPriority: StreamingPriority = .auto
+    /// Mac-authoritative confirmed codec (HEVC milestone) — the receiver's
+    /// own diagnostics mirror of `streamCodecState`. Default `.h264`: the
+    /// only codec a pre-`hevcCodecWireVersion` Mac can ever send, and the
+    /// safe assumption until the first `streamCodecState` (or first video
+    /// frame) arrives.
+    @Published private(set) var activeStreamCodec: StreamCodec = .h264
     @Published var connected = false
     @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @Published private(set) var displayState = DisplayState.running
@@ -82,6 +88,10 @@ final class StreamReceiver: ObservableObject {
     /// Queue-confined copy used to distinguish an idempotent state push from
     /// an actual off/on transition that must retire decoder state.
     private var receivedVideoEnabled = true
+    /// Queue-confined copy of `activeStreamCodec`, same convention as
+    /// `receivedVideoEnabled` — this is compared/written on the control-
+    /// message queue, never the main-thread `@Published` mirror.
+    private var receivedStreamCodec: StreamCodec = .h264
     @Published var perf = PerfStats()
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
@@ -464,6 +474,11 @@ final class StreamReceiver: ObservableObject {
     private var formatDesc: CMVideoFormatDescription?
     private var sps: Data?
     private var pps: Data?
+    /// HEVC-only parameter set; nil whenever the active codec is H.264.
+    /// Kept separate from `sps`/`pps` rather than reusing them under a new
+    /// meaning — the two codecs' parameter sets are never mixed into one
+    /// format description (see `resetDecoderForCodecChange`).
+    private var vps: Data?
 
     // Liveness: the Mac streams video and pings every 2s; if nothing arrives
     // for 5s the connection is half-open (Mac killed, tunnel died) — drop it
@@ -603,6 +618,12 @@ final class StreamReceiver: ObservableObject {
     // platform's actual screen capability, never assumed. nil = don't
     // advertise (sender falls back to `StreamingFPSPolicy.defaultReceiverMaxFPS`).
     private let maxFPS: Int?
+    /// HEVC milestone: real, hardware-decode-capable codec list, computed
+    /// once per process from `VTIsHardwareDecodeSupported` — never an OS-
+    /// version guess. H.264 is unconditional (matches today's behavior);
+    /// `.hevc` only when the platform actually proves a hardware decoder.
+    static let supportedCodecs: [StreamCodec] = CodecCapabilityProbe.supportedCodecs(
+        hevcHardwareDecodeSupported: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC))
     /// What to advertise when the user-set service name is empty.
     private let fallbackServiceName: String
 
@@ -1781,6 +1802,14 @@ final class StreamReceiver: ObservableObject {
             guard let update = AudioStateUpdate(message: obj) else { return }
             if !update.enabled { resetAudioPlayback() }
             DispatchQueue.main.async { self.audioEnabled = update.enabled }
+        case WireMessage.streamCodecState:
+            guard let update = StreamCodecStateUpdate(message: obj) else { return }
+            if update.codec != receivedStreamCodec {
+                receivedStreamCodec = update.codec
+                resetDecoderForCodecChange()
+            }
+            Log.info("effective codec: \(update.codec.wireValue) reason: \(update.reason)")
+            DispatchQueue.main.async { self.activeStreamCodec = update.codec }
         default:
             break
         }
@@ -1815,6 +1844,15 @@ final class StreamReceiver: ObservableObject {
         formatDesc = nil
         sps = nil
         pps = nil
+        // HEVC milestone: cleared alongside `sps`/`pps` for the same reason
+        // — a new session (different sender, or the same one after a full
+        // reconnect) must never let a stale VPS from the OLD session mix
+        // with fresh SPS/PPS from a NEW one while `formatDesc == nil` gates
+        // the rebuild at line ~2583. In practice the `formatDesc == nil`
+        // gate there already requires a fresh SPS/PPS (cleared here) before
+        // it rebuilds anything, so a stale `vps` was never actually usable
+        // — this closes the gap for hygiene/consistency, not a live bug.
+        vps = nil
         lastFrameAt = nil
         frameIntervals.removeAll()
         decodeFlushes = 0
@@ -1907,6 +1945,13 @@ final class StreamReceiver: ObservableObject {
         // to it (`StreamingFPSPolicy`), same "don't advertise capability we
         // don't actually have" contract as maxEncodeWide/High above.
         if let maxFPS { hello["maxFPS"] = maxFPS }
+        // Additive: hardware-decode-capable codec list (HEVC milestone,
+        // PROTOCOL.md 6.9 / `WireProtocol.hevcCodecWireVersion`) — H.264 is
+        // always included (advertised as today, unconditionally); `"hevc"`
+        // is added only when `Self.supportsHardwareHEVCDecode` actually
+        // proved a real hardware decoder exists, never guessed from OS
+        // version.
+        hello["codecs"] = Self.supportedCodecs.map(\.wireValue)
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
@@ -2172,11 +2217,22 @@ final class StreamReceiver: ObservableObject {
         formatDesc = nil
         sps = nil
         pps = nil
+        vps = nil
         displayLayer.flushAndRemoveImage()
         if let session = decompressionSession {
             VTDecompressionSessionInvalidate(session)
             decompressionSession = nil
         }
+    }
+
+    /// HEVC milestone: a codec change (Auto re-deciding, an explicit
+    /// preference flip, or a runtime HEVC->H.264 fallback on the Mac) needs
+    /// the exact same clean boundary a video-state change gets — no mixed-
+    /// codec decode state, ever. Requests a fresh keyframe so the next
+    /// frame carries the new codec's parameter sets.
+    private func resetDecoderForCodecChange() {
+        resetDecoderForVideoStateChange()
+        sendControl(["type": "kf"])
     }
 
     /// Requests a mode transition without predicting its outcome. The Mac
@@ -2512,33 +2568,60 @@ final class StreamReceiver: ObservableObject {
         }
 
         var vclNALUs: [Data] = []
-        for nalu in nalus {
-            guard let first = nalu.first else { continue }
-            switch first & 0x1F {
-            case 7:                                  // SPS (stream may change
-                if sps != nalu {                     //  size on rotation)
-                    sps = nalu
-                    formatDesc = nil
+        // Codec-aware NAL classification — `receivedStreamCodec` is the
+        // AUTHORITATIVE source (set from `streamCodecState` before this
+        // codec's first frame arrives), never inferred from the NAL bytes
+        // themselves. HEVC's NAL type is a different bit layout AND a
+        // different type space than H.264's `& 0x1F`: type is bits 1-6 of
+        // the first byte (`(first >> 1) & 0x3F`), and 32/33/34 are
+        // VPS/SPS/PPS versus H.264's 7/8 for SPS/PPS.
+        if receivedStreamCodec == .hevc {
+            for nalu in nalus {
+                guard let first = nalu.first else { continue }
+                switch HEVCNALUnitType.classify(firstByte: first) {
+                case .vps:
+                    if vps != nalu { vps = nalu; formatDesc = nil }
+                case .sps:
+                    if sps != nalu { sps = nalu; formatDesc = nil }
+                case .pps:
+                    if pps != nalu { pps = nalu; formatDesc = nil }
+                case .seiPrefix, .seiSuffix: break     // skip
+                case .other: vclNALUs.append(nalu)     // slice data
                 }
-            case 8:                                  // PPS
-                if pps != nalu {
-                    pps = nalu
-                    formatDesc = nil
-                }
-            case 6: break                            // SEI — skip
-            default: vclNALUs.append(nalu)           // slice data
             }
-        }
-        if formatDesc == nil, let sps, let pps {
-            // The SPS/PPS actually changed mid-stream (a real geometry/
-            // profile change — e.g. Extend shape or decode-ceiling
-            // reconfigure — not a pure FPS change, which never touches
-            // SPS/PPS). `flushAndRemoveImage()` retires the currently-
-            // displayed frame too, so a stale image decoded under the OLD
-            // format never stays on screen mapped into the NEW geometry
-            // while the fresh IDR is still in flight.
-            displayLayer.flushAndRemoveImage()
-            buildFormatDescription(sps: sps, pps: pps)
+            if formatDesc == nil, let vps, let sps, let pps {
+                displayLayer.flushAndRemoveImage()
+                buildHEVCFormatDescription(vps: vps, sps: sps, pps: pps)
+            }
+        } else {
+            for nalu in nalus {
+                guard let first = nalu.first else { continue }
+                switch first & 0x1F {
+                case 7:                                  // SPS (stream may change
+                    if sps != nalu {                     //  size on rotation)
+                        sps = nalu
+                        formatDesc = nil
+                    }
+                case 8:                                  // PPS
+                    if pps != nalu {
+                        pps = nalu
+                        formatDesc = nil
+                    }
+                case 6: break                            // SEI — skip
+                default: vclNALUs.append(nalu)           // slice data
+                }
+            }
+            if formatDesc == nil, let sps, let pps {
+                // The SPS/PPS actually changed mid-stream (a real geometry/
+                // profile change — e.g. Extend shape or decode-ceiling
+                // reconfigure — not a pure FPS change, which never touches
+                // SPS/PPS). `flushAndRemoveImage()` retires the currently-
+                // displayed frame too, so a stale image decoded under the OLD
+                // format never stays on screen mapped into the NEW geometry
+                // while the fresh IDR is still in flight.
+                displayLayer.flushAndRemoveImage()
+                buildFormatDescription(sps: sps, pps: pps)
+            }
         }
         guard !vclNALUs.isEmpty else { return }
         #if DEBUG
@@ -3375,6 +3458,50 @@ final class StreamReceiver: ObservableObject {
                     setStatus("Receiving \(dims.width)×\(dims.height)")
                 } else {
                     Log.info("format description FAILED: \(status)")
+                }
+            }
+        }
+    }
+
+    /// HEVC counterpart of `buildFormatDescription` — same shape, three
+    /// parameter sets (VPS, SPS, PPS) via the HEVC-specific CoreMedia API
+    /// rather than reusing the H.264 one under a different parameter count.
+    private func buildHEVCFormatDescription(vps: Data, sps: Data, pps: Data) {
+        vps.withUnsafeBytes { vpsBuf in
+            sps.withUnsafeBytes { spsBuf in
+                pps.withUnsafeBytes { ppsBuf in
+                    let ptrs: [UnsafePointer<UInt8>] = [
+                        vpsBuf.bindMemory(to: UInt8.self).baseAddress!,
+                        spsBuf.bindMemory(to: UInt8.self).baseAddress!,
+                        ppsBuf.bindMemory(to: UInt8.self).baseAddress!
+                    ]
+                    let sizes = [vps.count, sps.count, pps.count]
+                    let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: 3,
+                        parameterSetPointers: ptrs,
+                        parameterSetSizes: sizes,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &formatDesc
+                    )
+                    if status == noErr, let formatDesc {
+                        let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
+                        Log.info("format description built (HEVC): \(dims.width)x\(dims.height)")
+                        #if DEBUG
+                        debugDecodedFramesSinceFormatChange = 0
+                        if let session = debugProbeDecompressionSession {
+                            VTDecompressionSessionInvalidate(session)
+                            debugProbeDecompressionSession = nil
+                        }
+                        #endif
+                        DispatchQueue.main.async {
+                            self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
+                        }
+                        setStatus("Receiving \(dims.width)×\(dims.height)")
+                    } else {
+                        Log.info("HEVC format description FAILED: \(status)")
+                    }
                 }
             }
         }

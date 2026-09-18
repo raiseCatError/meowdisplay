@@ -74,13 +74,31 @@ struct PhoneInfo: Decodable {
                           // 6.3); absent = cursor stays on TCP
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
-    let maxEncodeWide: Int?  // receiver's decode ceiling in pixels (PROTOCOL.md
-    let maxEncodeHigh: Int?  //  6.5): cap the stream, keep the desktop size
+    let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
+    let maxEncodeHigh: Int?  // (PROTOCOL.md 6.5): cap the stream, keep the
+                             // desktop size. Historically H.264-specific
+                             // (see `iOSDecodeCeiling`/`MacReceiver.start()`'s
+                             // doc comments) but applied today as a shared
+                             // conservative bound for whichever codec is
+                             // chosen — see `CodecDecodeCeiling`'s doc
+                             // comment for why this is deliberate, not a bug.
     // Receiver's real maximum display refresh rate in Hz (high-refresh
     // milestone): the screen's actual capability, not a request. Absent on
     // any receiver that predates this field — StreamingFPSPolicy treats nil
     // as `defaultReceiverMaxFPS` (60), never as "unlimited".
     let maxFPS: Int?
+    // Receiver's hardware-decode-capable codec list (HEVC milestone,
+    // PROTOCOL.md section 6.9): e.g. ["h264"] or ["h264","hevc"]. Absent on
+    // any receiver that predates codec advertisement entirely — always
+    // treated as H.264-only, never as "unknown means everything", exactly
+    // like `maxFPS` treats absence as the safe default rather than
+    // "unlimited". This field's presence (not the receiver's overall `pv`)
+    // is what gates codec negotiation — see `WireProtocol.
+    // hevcCodecWireVersion`'s doc comment for why: a receiver can cap its
+    // advertised `pv` below the wire's latest for reasons unrelated to
+    // codec support (MacReceiver does, for the unrelated Mirror-unavailable
+    // UI), while still fully implementing this milestone's codec messages.
+    let codecs: [String]?
     let trayEnabled: Bool?   // receiver-local control UI state (protocol 6)
     let keyboardButtonEnabled: Bool?
     // Per-device receiver settings the connected receiver reports on every
@@ -104,6 +122,18 @@ struct PhoneInfo: Decodable {
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
+    /// True only when the receiver explicitly listed `"hevc"` in `codecs`.
+    /// Deliberately NOT gated on `protocolVersion` — see `codecs`' and
+    /// `WireProtocol.hevcCodecWireVersion`'s doc comments: a receiver can
+    /// advertise a lower overall `pv` for reasons unrelated to codec
+    /// support (MacReceiver does), so overall `pv` is never a valid proxy
+    /// for "does this peer understand codec negotiation". A peer that omits
+    /// `codecs` entirely, or sends it without `"hevc"`, is always H.264-only.
+    /// Delegates to `CodecCapabilityProbe.receiverSupportsHEVC` (`Shared/`)
+    /// so this exact decision is directly unit-testable without `PhoneInfo`.
+    var receiverSupportsHEVC: Bool {
+        CodecCapabilityProbe.receiverSupportsHEVC(codecs: codecs)
+    }
 }
 
 /// How the sender reaches the receiver. Reconnects re-dial from scratch, so
@@ -243,6 +273,40 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// pipeline at construction — a change rebuilds the session (see
     /// SenderController.restartAll).
     private let streamingPriority: StreamingPriority
+    /// HEVC milestone: user codec preference (Auto/H.264/HEVC), like
+    /// `streamingProfile`/`streamingPriority` applies per-pipeline at
+    /// construction — a change rebuilds the session (see
+    /// `SenderController.restartAll`).
+    private let codecPreference: CodecPreference
+    /// The codec `setupEncoder` last actually configured the compression
+    /// session for — read by `annexB(from:)` to pick H.264 vs HEVC
+    /// parameter-set extraction (never re-derived from NAL bytes, per the
+    /// milestone's "no ambiguous heuristics" rule) and by
+    /// `sendStreamCodecState` to report the confirmed codec.
+    private var activeCodec: StreamCodec = .h264
+    private var activeCodecReason: String = CodecSelectionPolicy.Reason.explicitPreference.rawValue
+    /// Cached once per process: whether this Mac has a real, usable
+    /// hardware HEVC encoder (VideoToolbox's actual encoder list, never an
+    /// OS-version guess). `VTCopyVideoEncoderList` enumerates every
+    /// encoder VideoToolbox can create right now, so this reflects actual
+    /// hardware, not a static capability table.
+    private static let senderSupportsHEVC: Bool = {
+        var list: CFArray?
+        guard VTCopyVideoEncoderList(nil, &list) == noErr,
+              let encoders = list as? [[CFString: Any]] else { return false }
+        return encoders.contains { entry in
+            guard let codec = entry[kVTVideoEncoderList_CodecType] as? UInt32,
+                  codec == kCMVideoCodecType_HEVC else { return false }
+            // Not every entry carries the hardware-acceleration key on
+            // every macOS version; a missing key on an entry that DID
+            // enumerate as a real HEVC encoder is treated as capable
+            // rather than excluded, since VideoToolbox only lists
+            // encoders it can actually instantiate. When present, it must
+            // not be explicitly `false`.
+            let isHardware = entry[kVTVideoEncoderList_IsHardwareAccelerated] as? Bool
+            return isHardware != false
+        }
+    }()
     /// Capability-aware effective encode/capture FPS for this session right
     /// now (`StreamingFPSPolicy`), at a given final encode size. Recomputed
     /// on demand from `lastHello?.maxFPS` and `receiverMaxFPSPreference` —
@@ -251,12 +315,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// waits for (see `start()`'s `waitForHello()`). `width`/`height` MUST
     /// be the actual final encode pixel dimensions (post `DecodeCeiling`),
     /// never the desktop/virtual-display size — see `EncoderCapability`.
+    ///
+    /// HEVC milestone: this is now CODEC-AWARE, via `selectCodec` +
+    /// `StreamingFPSPolicy.codecEffectiveFPS`, rather than unconditionally
+    /// folding H.264's `encoderSafeFPS` into the result the way the old
+    /// single-call `StreamingFPSPolicy.effectiveFPS` did. That old shape
+    /// silently pre-clamped the FPS value every caller of THIS function
+    /// (capture-frame-interval configuration, `setupEncoder`'s own internal
+    /// `selectCodec` re-derivation) ever saw to H.264's throughput ceiling —
+    /// so by the time Auto's `CodecSelectionPolicy` ran, its `requestedFPS`
+    /// input was already H.264-safe by construction, and the entire
+    /// "HEVC rescues a throughput-constrained request" path could never
+    /// fire in the live pipeline, even though `CodecSelectionPolicyTests`
+    /// verified the pure policy function correctly in isolation (fed raw,
+    /// un-pre-clamped numbers directly). Computing the COMMON target first,
+    /// deciding the codec against IT, then applying only the CHOSEN codec's
+    /// own ceiling closes that gap.
     private func effectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
+        let commonTarget = StreamingFPSPolicy.commonTargetFPS(
+            profile: streamingProfile, requestedFPS: customFPS,
+            receiverMaxFPS: lastHello?.maxFPS, userMaxFPS: receiverMaxFPSPreference.userCeilingFPS)
+        let codec = selectCodec(width: width, height: height, fps: commonTarget.fps).codec
         let encoderSafeFPS = EncoderCapability.codecSafeFPS(width: width, height: height)
-        return StreamingFPSPolicy.effectiveFPS(profile: streamingProfile, requestedFPS: customFPS,
-                                                receiverMaxFPS: lastHello?.maxFPS,
-                                                userMaxFPS: receiverMaxFPSPreference.userCeilingFPS,
-                                                encoderSafeFPS: encoderSafeFPS)
+        return StreamingFPSPolicy.codecEffectiveFPS(commonTarget: commonTarget, codec: codec, encoderSafeFPS: encoderSafeFPS)
     }
     /// The FPS actually applied to the live capture/encoder pipeline, latched
     /// at the last `startCapture`/`setupEncoder` call — for status/telemetry
@@ -767,7 +848,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          streamingProfile: StreamingProfile = .performance, customFPS: Int? = nil,
          extendShapePreference: ExtendDisplayShapePreference = .standard,
          receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard,
-         streamingPriority: StreamingPriority = .auto) {
+         streamingPriority: StreamingPriority = .auto,
+         codecPreference: CodecPreference = .auto) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -783,6 +865,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
         self.maxPendingEncodes = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
+        self.codecPreference = codecPreference
         super.init()
     }
 
@@ -1901,14 +1984,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// inside the ceiling passes through unchanged). Shared by every capture
     /// (re)start path so the ceiling is never bypassed by taking the resize
     /// fast-path instead of a full rebuild.
+    ///
+    /// Capture is provisioned once, before a codec is chosen (`setupEncoder`
+    /// — and the codec decision inside it — runs strictly AFTER this), so
+    /// there is no live codec to consult yet. `.h264` is passed to
+    /// `CodecDecodeCeiling.applicable` explicitly rather than the clamp
+    /// silently reusing the legacy fields on its own: it documents that this
+    /// capture-time bound is (and, per that function's doc comment, for now
+    /// always resolves to) H.264's historically-measured ceiling, applied as
+    /// today's deliberate conservative choice for whichever codec
+    /// `setupEncoder` goes on to pick — never a larger, unverified HEVC
+    /// number invented ahead of hardware testing.
     private func clampedCaptureSize(pointsWide: Int, pointsHigh: Int, info: PhoneInfo) -> (Int, Int) {
         let nativeW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
         let nativeH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
+        let (maxWide, maxHigh) = CodecDecodeCeiling.applicable(
+            codec: .h264, legacyMaxEncodeWide: info.maxEncodeWide, legacyMaxEncodeHigh: info.maxEncodeHigh)
         let (captureW, captureH) = DecodeCeiling.clamp(
-            width: nativeW, height: nativeH, maxWide: info.maxEncodeWide, maxHigh: info.maxEncodeHigh)
+            width: nativeW, height: nativeH, maxWide: maxWide, maxHigh: maxHigh)
         if captureW != nativeW || captureH != nativeH {
             Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling "
-                + "\(info.maxEncodeWide ?? 0)x\(info.maxEncodeHigh ?? 0)")
+                + "\(maxWide ?? 0)x\(maxHigh ?? 0)")
         }
         return (captureW, captureH)
     }
@@ -4294,6 +4390,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendWakeInfo()
                 sendDisplayModeState()
                 sendMaxFPSState()
+                // Re-confirm whatever codec is ALREADY active (`activeCodec`,
+                // last set by `setupEncoder`) on every hello — same
+                // re-sent-on-every-hello pattern as the state messages
+                // above, and internally gated on `info.codecs != nil`
+                // exactly like `setupEncoder`'s own call. Deliberately NOT a
+                // fresh `selectCodec`/Auto recomputation: a reconnect or
+                // route migration (new TCP connection, no dimension/FPS
+                // change) never re-runs `setupEncoder`, so the encoder
+                // simply keeps running whatever codec it already had — but
+                // the RECEIVER's own `receivedStreamCodec` only lives in
+                // that StreamReceiver instance's memory, defaulting back to
+                // `.h264` if the receiver app/process restarted while the
+                // Mac's encoder stayed on HEVC. Without this resend, the
+                // receiver would misclassify the next HEVC keyframe's
+                // VPS/SPS/PPS using H.264's `&0x1F` NAL-type space.
+                sendStreamCodecState()
                 if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
                     sendMirrorDisplayState()
                 }
@@ -4634,15 +4746,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Encoder setup
 
     /// Create the compression session into `encoder`, optionally requiring an
-    /// encoder that supports low-latency rate control.
-    private func createCompressionSession(width: Int, height: Int, lowLatency: Bool) -> OSStatus {
+    /// encoder that supports low-latency rate control, for the given codec.
+    private func createCompressionSession(width: Int, height: Int, lowLatency: Bool, codec: StreamCodec) -> OSStatus {
         let spec: CFDictionary? = lowLatency
             ? [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary
             : nil
         return VTCompressionSessionCreate(
             allocator: nil,
             width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
             encoderSpecification: spec,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -4652,11 +4764,43 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         )
     }
 
+    /// Decides the codec for the NEXT `setupEncoder` call, per
+    /// `CodecSelectionPolicy` (AUTO POLICY in the HEVC milestone spec).
+    /// `EncoderCapability.codecSafeFPS` — H.264's macroblock-rate ceiling —
+    /// is what "would H.264 need to reduce the request" means here.
+    /// `fps` MUST be the COMMON, non-codec-specific target
+    /// (`StreamingFPSPolicy.commonTargetFPS` — decode-ceiling raster is
+    /// already applied via `width`/`height`, but NEVER H.264's own
+    /// throughput ceiling), never an already-H.264-clamped value: clamping
+    /// first and asking Auto second is exactly the bug this doc comment used
+    /// to describe as correct and isn't — see `effectiveFPS`'s doc comment.
+    /// `effectiveFPS` is the one caller-facing entry point that gets this
+    /// right; `setupEncoder`'s own internal call is safe only because every
+    /// external caller already routes `fps` through `effectiveFPS` first.
+    private func selectCodec(width: Int, height: Int, fps: Int) -> CodecSelectionPolicy.Result {
+        let receiverSupportsHEVC = lastHello?.receiverSupportsHEVC ?? false
+        let input = CodecSelectionPolicy.Input(
+            preference: codecPreference,
+            senderSupportsHEVC: Self.senderSupportsHEVC,
+            receiverSupportsHEVC: receiverSupportsHEVC,
+            requestedWidth: width, requestedHeight: height, requestedFPS: fps)
+        return CodecSelectionPolicy.select(input)
+    }
+
     private func setupEncoder(width: Int, height: Int, fps: Int) throws {
         // Low-latency rate control: the hardware encoder emits every frame
         // immediately instead of pipelining. (`-lowlatency NO` for A/B.)
         let lowLatency = UserDefaults.standard.object(forKey: "lowlatency") == nil
             || UserDefaults.standard.bool(forKey: "lowlatency")
+        // Mutable: the runtime-HEVC-failure fallback below reduces this to
+        // H.264's safe ceiling — `fps` may be an UNCLAMPED common target
+        // (HEVC has no throughput ceiling of its own), which would silently
+        // recreate the exact throughput failure `EncoderCapability` exists
+        // to prevent if reused as-is for the H.264 encoder it falls back to.
+        var fps = fps
+        let decision = selectCodec(width: width, height: height, fps: fps)
+        var codec = decision.codec
+        var reason = decision.reason
         // The spec filters which encoder VideoToolbox is allowed to pick, so an
         // unsupported key fails creation outright rather than being ignored the
         // way the properties below are: this key *requires* an encoder that
@@ -4668,12 +4812,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // prevents. Measured on Apple silicon at a paced 60fps: 5.3ms mean
         // submit→emit without the spec vs 6.1ms with it, 1 frame held either
         // way. (Overfeeding it at ~320fps does queue ~8 frames, hence the cap.)
-        var status = createCompressionSession(width: width, height: height, lowLatency: lowLatency)
+        var status = createCompressionSession(width: width, height: height, lowLatency: lowLatency, codec: codec)
         var usedFallback = false
         if encoder == nil, lowLatency {
             Log.info("VTCompressionSessionCreate failed with low-latency rate control (status \(status)) — retrying without an encoder specification")
-            status = createCompressionSession(width: width, height: height, lowLatency: false)
+            status = createCompressionSession(width: width, height: height, lowLatency: false, codec: codec)
             usedFallback = true
+        }
+        // Runtime HEVC failure despite advertised/probed capability: recover
+        // safely to H.264 rather than throwing and killing the session. This
+        // is the ONLY codec fallback that happens post-decision — every
+        // other case is decided up front by `CodecSelectionPolicy`.
+        if encoder == nil, codec == .hevc {
+            let safeFPS = EncoderCapability.codecSafeFPS(width: width, height: height)
+            Log.info("HEVC encoder creation failed at runtime (status \(status)) despite advertised capability — "
+                + "falling back to H.264" + (fps > safeFPS ? " at its safe FPS (\(fps) -> \(safeFPS))" : ""))
+            codec = .h264
+            reason = CodecSelectionPolicy.Reason.runtimeFallback.rawValue
+            usedFallback = false
+            // The failed HEVC attempt may have been targeting an FPS that
+            // was never clamped to H.264's throughput ceiling (HEVC has
+            // none) — reduce it now, or the H.264 encoder we're about to
+            // create inherits the same size*fps product that just failed
+            // for a different codec.
+            fps = min(fps, safeFPS)
+            status = createCompressionSession(width: width, height: height, lowLatency: lowLatency, codec: codec)
+            if encoder == nil, lowLatency {
+                status = createCompressionSession(width: width, height: height, lowLatency: false, codec: codec)
+                usedFallback = true
+            }
         }
         guard let encoder else {
             // Returning here used to leave the session "connected, all green"
@@ -4685,10 +4852,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     "This Mac's video encoder could not be started (VideoToolbox error \(status))"
             ])
         }
+        activeCodec = codec
+        activeCodecReason = reason
         // Low-latency settings: real-time, no B-frames, periodic keyframes.
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel,
+            value: codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
         // No periodic IDRs: each one is a bitrate spike → transmit-time hiccup.
         // TCP never loses data, and we force a keyframe on reconnect/drop.
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 3600 as CFNumber)
@@ -4704,7 +4874,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // VideoToolbox never actually receives more than `fps` submissions/
         // sec regardless of how fast ScreenCaptureKit delivers frames.
         frameRateLimiter.reconfigure(fps: fps)
-        Log.info("encoder ready: \(width)x\(height)@\(fps) H.264 \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        Log.info("receiver codecs: \(lastHello?.codecs?.joined(separator: ", ") ?? "h264") "
+            + "codec preference: \(codecPreference.rawValue) effective codec: \(codec.wireValue) reason: \(reason)")
+        Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        sendStreamCodecState()
+    }
+
+    /// PROTOCOL.md 6.9 / `WireProtocol.hevcCodecWireVersion`. Meaningful
+    /// regardless of mode, same pattern as `sendExtendShapeState`/
+    /// `sendMaxFPSState` — an old receiver simply ignores it and correctly
+    /// assumes H.264, the only codec it can ever be sent. Gated on `codecs`
+    /// having been sent at all (the capability signal — see `PhoneInfo.
+    /// codecs`' doc comment), NOT on overall `pv`: a receiver whose `pv` is
+    /// capped below `hevcCodecWireVersion` for an unrelated reason (e.g.
+    /// MacReceiver, capped for `mirrorUnavailableWireVersion`) still fully
+    /// implements this message when it sends `codecs` at all.
+    private func sendStreamCodecState() {
+        guard let info = lastHello, CodecCapabilityProbe.shouldConfirmCodecOnHello(codecs: info.codecs) else { return }
+        sendJSONObject(StreamCodecStateUpdate(codec: activeCodec, reason: activeCodecReason).wireFields)
     }
 
     // MARK: - Capture callback
@@ -5179,17 +5366,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 dataPointerOut: &ptr) == noErr, let ptr else { return nil }
 
         var out = Data(capacity: total + 128)
-        // On keyframes, prepend SPS/PPS (they live in the format description).
+        // On keyframes, prepend the codec's parameter sets (they live in the
+        // format description): SPS/PPS for H.264, VPS/SPS/PPS for HEVC.
+        // Deliberately codec-specific APIs, not shared logic — HEVC's
+        // parameter sets are a different count and a different NAL-type
+        // space (32/33/34) than H.264's (7/8), and `activeCodec` is the
+        // authoritative, non-heuristic source of which one this sample is.
         if isKeyframe(sample), let fmt = CMSampleBufferGetFormatDescription(sample) {
-            for i in 0..<2 {           // index 0 = SPS, 1 = PPS
+            // CoreMedia reports the ACTUAL parameter-set count on
+            // `parameterSetCountOut` from the very same call used to fetch
+            // each set — query it once at index 0 rather than hardcoding
+            // VPS+SPS+PPS=3 / SPS+PPS=2, which assumes VideoToolbox never
+            // produces more (or fewer) sets than the common case. Falls
+            // back to that historical assumption only if the probe itself
+            // fails to report a sane count (e.g. index 0 fetch fails),
+            // never silently drops below it.
+            var probePtr: UnsafePointer<UInt8>?
+            var probeLen = 0
+            var reportedCount = 0
+            let probeStatus: OSStatus = activeCodec == .hevc
+                ? CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    fmt, parameterSetIndex: 0, parameterSetPointerOut: &probePtr,
+                    parameterSetSizeOut: &probeLen, parameterSetCountOut: &reportedCount, nalUnitHeaderLengthOut: nil)
+                : CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    fmt, parameterSetIndex: 0, parameterSetPointerOut: &probePtr,
+                    parameterSetSizeOut: &probeLen, parameterSetCountOut: &reportedCount, nalUnitHeaderLengthOut: nil)
+            let parameterSetCount = (probeStatus == noErr && reportedCount > 0)
+                ? reportedCount : (activeCodec == .hevc ? 3 : 2)   // HEVC: VPS,SPS,PPS. H.264: SPS,PPS.
+            for i in 0..<parameterSetCount {
                 var psPtr: UnsafePointer<UInt8>?
                 var psLen = 0
-                if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                let status: OSStatus
+                if activeCodec == .hevc {
+                    status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
                         fmt, parameterSetIndex: i,
                         parameterSetPointerOut: &psPtr,
                         parameterSetSizeOut: &psLen,
-                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
-                   let psPtr {
+                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+                } else {
+                    status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fmt, parameterSetIndex: i,
+                        parameterSetPointerOut: &psPtr,
+                        parameterSetSizeOut: &psLen,
+                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+                }
+                if status == noErr, let psPtr {
                     out.append(contentsOf: startCode)
                     out.append(Data(bytes: psPtr, count: psLen))
                 }

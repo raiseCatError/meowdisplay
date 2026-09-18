@@ -210,6 +210,7 @@ targets:
       - Shared/ExtendDisplayShape.swift
       - Shared/DecodeCeiling.swift
       - Shared/EncoderCapability.swift
+      - Shared/CodecCapability.swift
       - Shared/ReceiverMaxFPS.swift
       - Shared/FrameRateLimiter.swift
     settings:

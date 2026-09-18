@@ -40,4 +40,7 @@ dist-ssr/
 docs/
 .mcp.json
 
+# Antigravity/Serena/RTK workspace metadata
+.agents/
+
 MacTests/CatModeTests.swift.plist

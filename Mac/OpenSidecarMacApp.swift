@@ -405,6 +405,14 @@ final class SenderController: ObservableObject {
     @Published var streamingPriority = StreamingPriority(rawValue: UserDefaults.standard.string(forKey: "streamingPriority") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(streamingPriority.rawValue, forKey: "streamingPriority") }
     }
+    // Codec preference (HEVC milestone): Auto/H.264/HEVC, same persistence
+    // shape as `streamingProfile`/`streamingPriority`. Default Auto so an
+    // existing user with no stored value gets today's H.264-only behavior
+    // unless Auto's own policy (`CodecSelectionPolicy`) decides HEVC is
+    // actually needed to satisfy the requested stream.
+    @Published var codecPreference = CodecPreference(rawValue: UserDefaults.standard.string(forKey: "codecPreference") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(codecPreference.rawValue, forKey: "codecPreference") }
+    }
     // Mirror-mode's explicit display choice: a stable UUID (never a raw
     // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
     // Automatic. Irrelevant to Extend, which always uses its own virtual
@@ -1821,7 +1829,8 @@ final class SenderController: ObservableObject {
                                streamingProfile: streamingProfile,
                                customFPS: streamingProfile == .custom ? customFrameRate.requestedFPS : nil,
                                extendShapePreference: extendShapeDefault,
-                               streamingPriority: streamingPriority)
+                               streamingPriority: streamingPriority,
+                               codecPreference: codecPreference)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let intendedPeerID: String? = {
             if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
