@@ -1320,8 +1320,52 @@ final class StreamReceiver: ObservableObject {
                     connection.cancel()
                     return
                 }
-                Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
-                self.adopt(connection)
+                // Same race the plaintext listener above already guards
+                // against (see its comment): the Mac's own restartAll()
+                // cancels the old connection and immediately dials a
+                // replacement, but `NWConnection.cancel()` doesn't retract a
+                // handshake already in this listener's accept queue — a
+                // straggler from the connection just cancelled can complete
+                // its TLS handshake moments after the real replacement is
+                // already live. Adopting every newcomer unconditionally let
+                // that straggler evict the healthy winner (`adopt()` cancels
+                // whatever `self.connection` currently is), producing an
+                // endless reconnect loop after every streaming-setting
+                // change. Park it and only adopt once it proves itself with
+                // real bytes; a straggler that closes/errors first is
+                // discarded and the live session stays put.
+                if let current = self.connection, current.state != .cancelled,
+                   !Self.isFailed(current.state) {
+                    Log.info("reconnectDebug: incomingReplacement peer via TLS listener — parked pending proof")
+                    self.pendingConnections.append(connection)
+                    connection.stateUpdateHandler = { [weak self] state in
+                        guard let self, case .ready = state else { return }
+                        self.sendHello(on: connection)
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) {
+                            [weak self] data, _, isComplete, error in
+                            guard let self else { return }
+                            // Only a still-tracked candidate may adopt — see
+                            // the identical guard on the plaintext listener.
+                            guard self.pendingConnections.contains(where: { $0 === connection }) else {
+                                connection.cancel()
+                                return
+                            }
+                            self.pendingConnections.removeAll { $0 === connection }
+                            if let data, !data.isEmpty {
+                                self.adopt(connection, greeted: true, initialData: data)
+                            } else {
+                                Log.info("ignored a stale TLS connection that closed at once"
+                                         + (error.map { " (\($0))" } ?? ""))
+                                connection.cancel()
+                            }
+                            _ = isComplete
+                        }
+                    }
+                    connection.start(queue: self.queue)
+                } else {
+                    Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
+                    self.adopt(connection)
+                }
             }
             listener.stateUpdateHandler = { [weak self, weak listener] state in
                 switch state {
