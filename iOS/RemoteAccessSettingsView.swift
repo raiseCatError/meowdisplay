@@ -12,6 +12,8 @@ import SwiftUI
 /// `WireCrypto.remoteRequestPort` rather than the media `tlsPort`.
 struct RemoteAccessSettingsView: View {
     @ObservedObject var receiver: StreamReceiver
+    /// Preselects a paired Mac in the editor (e.g. from a Home remote row's menu).
+    var initialPeerID: String?
 
     var body: some View {
         Form {
@@ -21,7 +23,7 @@ struct RemoteAccessSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Remote Access") {
-                RemoteEndpointEditorView(receiver: receiver)
+                RemoteEndpointEditorView(receiver: receiver, initialPeerID: initialPeerID)
             }
         }
         .navigationTitle("Remote Access")
@@ -30,6 +32,7 @@ struct RemoteAccessSettingsView: View {
 
 struct RemoteEndpointEditorView: View {
     @ObservedObject var receiver: StreamReceiver
+    var initialPeerID: String?
 
     @State private var peerID = ""
     @State private var host = ""
@@ -58,6 +61,12 @@ struct RemoteEndpointEditorView: View {
                 }
             }
             .onChange(of: peerID) { newValue in loadSavedEndpoint(for: newValue) }
+            .onAppear {
+                if peerID.isEmpty, let initialPeerID,
+                   pairedMacs.contains(where: { $0.peerID == initialPeerID }) {
+                    peerID = initialPeerID
+                }
+            }
 
             if !peerID.isEmpty {
                 TextField("Host (Tailscale IP or MagicDNS name)", text: $host)

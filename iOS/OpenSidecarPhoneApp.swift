@@ -512,6 +512,106 @@ struct ReceiverInterruptionOverlay: View {
     }
 }
 
+// MARK: - Overflow marquee
+
+/// One-line text that only animates when it doesn't fit: it clips, pauses,
+/// slowly scrolls to reveal the end, pauses, and scrolls back. Fitting text
+/// is static. With Reduce Motion, overflowing text is shrunk slightly and
+/// tail-truncated instead of animating. Non-interactive, so taps pass through
+/// to the enclosing Button.
+struct OverflowMarqueeText: View {
+    private struct WidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
+
+    let text: String
+    var font: Font = .subheadline.weight(.semibold)
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var textWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+
+    init(_ text: String) { self.text = text }
+
+    private static let fadeWidth: CGFloat = 12
+
+    /// Masks only the text (the button's own background is untouched). While
+    /// scrolling, each edge fades in proportion to how far the text has moved
+    /// off it, so the resting position stays fully opaque; otherwise the mask
+    /// is a plain clip.
+    @ViewBuilder
+    private var edgeFadeMask: some View {
+        if animates {
+            let fade = Self.fadeWidth
+            let left = Double(min(1, max(0, -offset / fade)))
+            let right = Double(min(1, max(0, (overflow + offset) / fade)))
+            HStack(spacing: 0) {
+                LinearGradient(colors: [.black.opacity(1 - left), .black],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: fade)
+                Rectangle()
+                LinearGradient(colors: [.black, .black.opacity(1 - right)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: fade)
+            }
+        } else {
+            Rectangle()
+        }
+    }
+
+    private var overflow: CGFloat { max(0, textWidth - containerWidth) }
+    private var animates: Bool { overflow > 1 && !reduceMotion }
+
+    var body: some View {
+        // Flexible base: takes the space offered, one line tall.
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .minimumScaleFactor(reduceMotion ? 0.75 : 1)
+            .opacity(reduceMotion ? 1 : 0)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: WidthKey.self, value: proxy.size.width)
+            }.hidden())
+            .onPreferenceChange(WidthKey.self) { containerWidth = $0 }
+            .overlay(alignment: .leading) {
+                if !reduceMotion {
+                    Text(text)
+                        .font(font)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .offset(x: offset)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: TextWidthKey.self, value: proxy.size.width)
+                        })
+                        .onPreferenceChange(TextWidthKey.self) { textWidth = $0 }
+                }
+            }
+            .mask { edgeFadeMask }
+            .accessibilityLabel(text)
+            .task(id: animates ? overflow : 0) {
+                offset = 0
+                guard animates else { return }
+                let duration = Double(overflow) / 24
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    guard !Task.isCancelled else { break }
+                    withAnimation(.linear(duration: duration)) { offset = -overflow }
+                    try? await Task.sleep(nanoseconds: UInt64((duration + 1.0) * 1_000_000_000))
+                    guard !Task.isCancelled else { break }
+                    withAnimation(.linear(duration: duration)) { offset = 0 }
+                    try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+                }
+            }
+    }
+
+    private struct TextWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
+}
+
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
 struct IdleView: View {
@@ -519,6 +619,11 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
     @State private var showRemoteAccessSetup = false
+    /// Persisted expand/collapse state of the Connection Instructions section.
+    @AppStorage("home.connectionInstructionsExpanded") private var instructionsExpanded = true
+    @State private var remoteEditPeerID: String?
+    /// Bumped when remote details change so the (non-observable) store is re-read.
+    @State private var remoteRefresh = 0
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
     // going through `CatMode.resolveEnabled` — this value is only ever
@@ -526,194 +631,363 @@ struct IdleView: View {
     // while locked.
     @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabled = false
 
-    /// The one paired Mac to drive the unified primary Connect action for.
-    /// Multiple paired Macs keep using the existing per-row "Nearby Macs"
-    /// list below (a global single-button action can't disambiguate which
-    /// Mac to reach when more than one is paired) — this only covers the
-    /// common single-Mac setup the whole unified-Connect feature targets.
-    private var singlePairedMacPeerID: String? {
-        let peers = TrustStore.shared.pinnedPeers()
-        guard peers.count == 1 else { return nil }
-        return peers[0].peerID
-    }
-
-    private func isLocallyVisible(_ peerID: String) -> Bool {
-        receiver.discoveredMacs.contains { receiver.pairingMacPeerID($0) == peerID }
-    }
-
     var body: some View {
-        VStack(spacing: 28) {
+        GeometryReader { proxy in
+            Group {
+                if proxy.size.width > proxy.size.height {
+                    landscapeLayout
+                } else {
+                    portraitLayout(minHeight: proxy.size.height)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Color(.systemBackground))
+        .sheet(isPresented: $showRemoteAccessSetup, onDismiss: { remoteRefresh += 1 }) {
+            NavigationStack {
+                RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
+            }
+        }
+    }
+
+    /// Scrolls only when the content is taller than the screen; when it fits,
+    /// `minHeight` keeps the Spacers distributing exactly as before.
+    private func portraitLayout(minHeight: CGFloat) -> some View {
+        ScrollView(showsIndicators: false) {
+            portraitContent
+                .frame(minHeight: minHeight)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private var portraitContent: some View {
+        VStack(spacing: 24) {
             Spacer()
+            logo(width: 132)
+            titleAndStatus
+            autoReconnectToggle
+            instructionsSection
+            deviceSections
+            Spacer()
+            settingsButton
+            tip.padding(.bottom, 8)
+        }
+        .padding()
+    }
 
-            Image("MeowLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 132)
-
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Text("MeowDisplay")
-                        .font(.largeTitle.bold())
-                    if catModeEnabled {
-                        Image(systemName: "pawprint.fill")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
+    /// Two fixed columns for landscape. Neither column scrolls as a whole;
+    /// only the device sections scroll if they outgrow the space.
+    private var landscapeLayout: some View {
+        HStack(alignment: .top, spacing: 24) {
+            // Left: brand + setup, vertically centered in the available height.
+            VStack(spacing: 12) {
+                Spacer(minLength: 0)
+                if instructionsExpanded {
+                    HStack(spacing: 14) {
+                        logo(width: 76)
+                        VStack(alignment: .leading, spacing: 4) {
+                            brandTitle(font: .title.bold())
+                            statusLine
+                        }
+                        Spacer(minLength: 0)
                     }
+                } else {
+                    // Freed space: larger, centered branding like portrait.
+                    VStack(spacing: 8) {
+                        logo(width: 104)
+                        titleAndStatus(font: .title.bold())
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(receiver.connected ? Color.green : Color.orange)
-                        .frame(width: 8, height: 8)
-                    Text(receiver.status)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                if let pairingStatus = receiver.pairingPrompt.status {
-                    Text(pairingStatus)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
+                autoReconnectToggle
+                instructionsSection
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
-                .toggleStyle(.switch)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .frame(maxWidth: 420)
-                .background(Color(.secondarySystemBackground),
-                            in: RoundedRectangle(cornerRadius: 12))
-
-            VStack(alignment: .leading, spacing: 14) {
-                Label("Plug in the USB cable and start the Mac app",
-                      systemImage: "cable.connector")
-                Label("Or choose this \(deviceKind) under WiFi in the Mac app",
-                      systemImage: "wifi")
-                Label("Keep this app open — streaming starts automatically",
-                      systemImage: "play.circle")
+            // Right: devices fill the top, Settings & tip sit at the bottom.
+            VStack(spacing: 12) {
+                ScrollView { deviceSections.padding(.top, 12) }
+                    .scrollBounceBehavior(.basedOnSize)
+                settingsButton
+                tip
             }
-            .font(.subheadline)
-            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 12)
+    }
+
+    private func logo(width: CGFloat) -> some View {
+        Image("MeowLogo")
+            .resizable()
+            .scaledToFit()
+            .frame(width: width, height: width)
+    }
+
+    private func brandTitle(font: Font) -> some View {
+        HStack(spacing: 6) {
+            Text("MeowDisplay").font(font)
+            if catModeEnabled {
+                Image(systemName: "pawprint.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private var statusLine: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(receiver.connected ? Color.green : Color.orange)
+                .frame(width: 8, height: 8)
+            Text(receiver.status)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var titleAndStatus: some View { titleAndStatus(font: .largeTitle.bold()) }
+
+    private func titleAndStatus(font: Font) -> some View {
+        VStack(spacing: 6) {
+            brandTitle(font: font)
+            statusLine
+            if let pairingStatus = receiver.pairingPrompt.status {
+                Text(pairingStatus)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var autoReconnectToggle: some View {
+        Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
+            .toggleStyle(.switch)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
             .frame(maxWidth: 420)
             .background(Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 16))
+                        in: RoundedRectangle(cornerRadius: 12))
+    }
 
-            // Unified primary Connect: only shown for the single-paired-Mac
-            // setup, and only when that Mac isn't already visible/handled by
-            // the "Nearby Macs" list below (P0/P4 — one primary action, no
-            // unnecessary Remote takeover of an available local route).
-            if !receiver.connected,
-               let peerID = singlePairedMacPeerID,
-               !isLocallyVisible(peerID) {
-                primaryConnectControl(peerID: peerID)
+    private var instructionsSection: some View {
+        VStack(spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) { instructionsExpanded.toggle() }
+            } label: {
+                HStack {
+                    Text("Connection Instructions")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Image(systemName: instructionsExpanded ? "chevron.up" : "chevron.down")
+                        .font(.footnote.weight(.semibold))
+                }
+                .foregroundStyle(instructionsExpanded ? HierarchicalShapeStyle.primary : .secondary)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 36)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityValue(instructionsExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint("Double-tap to \(instructionsExpanded ? "collapse" : "expand")")
 
-            if !receiver.discoveredMacs.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Nearby Macs").font(.headline)
-                    ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
-                        HStack {
-                            Text(receiver.pairingMacName(result))
-                            Spacer()
-                            if receiver.pairingMacIsPaired(result) {
-                                if receiver.connected {
-                                    Text("Connected").foregroundStyle(.secondary)
-                                } else {
-                                    // Trust and connectivity are different: a
-                                    // paired-but-not-currently-connected Mac
-                                    // that is visible right now must offer a
-                                    // way back in rather than a dead-end
-                                    // "Paired" label. A disconnected Mac is
-                                    // never dialing out on its own, so this
-                                    // can't just rearm our own listener
-                                    // (reconnectNow) — it asks the Mac,
-                                    // which is always the dialer, to
-                                    // actually start a session for us.
-                                    connectControl(for: result)
-                                }
+            if instructionsExpanded {
+                instructionsCard
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: 420)
+    }
+
+    private var instructionsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            instructionRow("cable.connector", "Plug in the USB cable and start the Mac app")
+            instructionRow("wifi", "Or choose this \(deviceKind) under WiFi in the Mac app")
+            instructionRow("play.circle", "Keep this app open — streaming starts automatically")
+        }
+        .font(.footnote)
+        .padding(20)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Fixed-width icon column so every row's text starts at the same x.
+    private func instructionRow(_ symbol: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: symbol)
+                .frame(width: 28, alignment: .center)
+                .accessibilityHidden(true)
+            Text(text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: Device sections (shared by portrait and landscape)
+
+    private var deviceSections: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            nearbyDevices
+            remoteAccess
+        }
+        .frame(maxWidth: 420)
+    }
+
+    private var nearbyDevices: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Nearby Devices").font(.headline)
+            if receiver.discoveredMacs.isEmpty {
+                Text("No devices nearby")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
+                    HStack {
+                        Text(receiver.pairingMacName(result)).lineLimit(1)
+                        Spacer()
+                        if receiver.pairingMacIsPaired(result) {
+                            if receiver.connected {
+                                Text("Connected").foregroundStyle(.secondary)
                             } else {
-                                Button("Pair") { receiver.pairWithMac(result) }
-                                    .buttonStyle(.borderedProminent)
+                                // Trust and connectivity are different: a
+                                // paired-but-not-currently-connected Mac
+                                // that is visible right now must offer a
+                                // way back in rather than a dead-end
+                                // "Paired" label. A disconnected Mac is
+                                // never dialing out on its own, so this
+                                // can't just rearm our own listener
+                                // (reconnectNow) — it asks the Mac,
+                                // which is always the dialer, to
+                                // actually start a session for us.
+                                connectControl(for: result)
                             }
+                        } else {
+                            Button("Pair") { receiver.pairWithMac(result) }
+                                .buttonStyle(.borderedProminent)
                         }
                     }
                 }
-                .padding(16).frame(maxWidth: 420)
             }
-
-            Spacer()
-
-            Button {
-                showSettings = true
-            } label: {
-                Label("Settings & Help", systemImage: "gearshape")
-            }
-            .buttonStyle(.bordered)
-
-            Text("Tip: shake the \(deviceKind) to open settings anytime")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
-                .padding(.bottom, 8)
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
-        .sheet(isPresented: $showRemoteAccessSetup) {
-            NavigationStack { RemoteAccessSettingsView(receiver: receiver) }
-        }
+        .padding(.horizontal, 16)
     }
 
-    /// One primary Connect action for the single-paired-Mac case (P0), plus
-    /// a small overflow menu (P7) instead of separate "Connect Locally" /
-    /// "Connect Remotely" buttons. Label follows P6: "Wake & Connect" only
+    /// Paired Macs that have a saved Remote endpoint, with display names.
+    private var remoteMacs: [(peerID: String, displayName: String)] {
+        _ = remoteRefresh
+        let configured = Set(RemoteEndpointStore.allPeerIDs())
+        return TrustStore.shared.pinnedPeers().filter { configured.contains($0.peerID) }
+    }
+
+    private var remoteAccess: some View {
+        let macs = remoteMacs
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Remote Access").font(.headline)
+                Spacer()
+                if !macs.isEmpty {
+                    // Section-level actions only; per-remote actions live on
+                    // each row's own menu.
+                    Menu {
+                        Button("Remote Access Settings…") { presentRemoteSettings(peerID: nil) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").font(.title3)
+                    }
+                    .accessibilityLabel("Remote Access options")
+                }
+            }
+            if macs.isEmpty {
+                Button {
+                    presentRemoteSettings(peerID: nil)
+                } label: {
+                    Label("Set Up Remote Access", systemImage: "network")
+                }
+                .buttonStyle(.bordered)
+            } else {
+                ForEach(macs, id: \.peerID) { mac in
+                    remoteRow(peerID: mac.peerID, name: mac.displayName)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func presentRemoteSettings(peerID: String?) {
+        remoteEditPeerID = peerID
+        showRemoteAccessSetup = true
+    }
+
+    /// One configured remote: name, its Wake & Connect action, and its own
+    /// menu, all on the same row. Label follows P6: "Wake & Connect" only
     /// when a local LAN wake hint exists (never claims remote WoL);
     /// otherwise plain "Connect", which — via `connectPrimary(peerID:)` —
-    /// rearms the local listener/Bonjour `cr` and, if Remote Access is
-    /// configured, knocks this one Mac only (never every paired Mac).
+    /// rearms the local listener/Bonjour `cr` and knocks this one Mac only.
     @ViewBuilder
-    private func primaryConnectControl(peerID: String) -> some View {
-        let remoteConfigured = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+    private func remoteRow(peerID: String, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 10) {
-            if wakeConnect.isRunning(forPeerID: peerID) {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(wakeConnect.statusLabel).font(.caption).foregroundStyle(.secondary)
-                    Button("Cancel") { wakeConnect.cancel() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                }
+            Text(name)
+                .lineLimit(1)
+                .layoutPriority(1)
+            Spacer(minLength: 8)
+            if receiver.connected {
+                Text("Connected").foregroundStyle(.secondary)
+            } else if wakeConnect.isRunning(forPeerID: peerID) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { wakeConnect.cancel() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
             } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
-                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect") {
+                Button {
                     wakeConnect.begin(peerID: peerID)
-                    if remoteConfigured { receiver.requestRemoteConnect(peerID: peerID) }
+                    receiver.requestRemoteConnect(peerID: peerID)
+                } label: {
+                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect")
+                        .frame(minWidth: 88)
                 }
                 .buttonStyle(.borderedProminent)
             } else {
                 Button("Connect") { receiver.connectPrimary(peerID: peerID) }
                     .buttonStyle(.borderedProminent)
             }
-
             Menu {
-                if remoteConfigured {
-                    Button("Remote Access…") { showRemoteAccessSetup = true }
-                    Button("Edit Remote Details…") { showRemoteAccessSetup = true }
-                    Button("Remove Remote Details", role: .destructive) {
-                        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
-                    }
-                } else {
-                    Button("Set Up Remote Access…") { showRemoteAccessSetup = true }
+                Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
+                Button("Remove Remote Details", role: .destructive) {
+                    RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+                    remoteRefresh += 1
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.title3)
+                Image(systemName: "ellipsis.circle").font(.title3)
             }
-            .buttonStyle(.bordered)
+            .accessibilityLabel("Options for \(name)")
         }
-        if remoteConfigured, !receiver.connected {
-            Text(remoteStatusText(peerID: peerID))
+        if !receiver.connected {
+            Text(wakeConnect.isRunning(forPeerID: peerID) ? wakeConnect.statusLabel : remoteStatusText(peerID: peerID))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        }
+    }
+
+    private var settingsButton: some View {
+        Button {
+            showSettings = true
+        } label: {
+            Label("Settings & Help", systemImage: "gearshape")
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private var tip: some View {
+        Text("Tip: shake the \(deviceKind) to open settings anytime")
+            .font(.footnote)
+            .foregroundStyle(.tertiary)
+            .multilineTextAlignment(.center)
     }
 
     private func remoteStatusText(peerID: String) -> String {
@@ -741,8 +1015,11 @@ struct IdleView: View {
                         .buttonStyle(.borderless)
                 }
             } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
-                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect") {
+                Button {
                     wakeConnect.begin(peerID: peerID)
+                } label: {
+                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect")
+                        .frame(minWidth: 88)
                 }
                 .buttonStyle(.borderedProminent)
             } else {
