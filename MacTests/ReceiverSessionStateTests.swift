@@ -254,7 +254,7 @@ final class ReceiverSessionStateTests: XCTestCase {
     func testADeliberatePeerCloseDoesNotEnterRecovery() {
         var state = connectedSession()
         XCTAssertTrue(state.connectionLost(reason: .peerClosed))
-        XCTAssertEqual(state.phase, .disconnected)
+        XCTAssertEqual(state.phase, .peerDisconnected)
         XCTAssertNil(state.beginReconnectAttempt())
     }
 
@@ -386,5 +386,114 @@ final class ReceiverSessionStateTests: XCTestCase {
         XCTAssertFalse(state.suspendRecoveryForBackground())
         XCTAssertNil(state.beginReconnectAttempt())
         XCTAssertEqual(state.phase, .reconnectFailed)
+    }
+
+    // MARK: - Explicit Disconnect / Reconnect
+
+    func testManualConnectImmediatelyStartsNewAttemptAfterExplicitDisconnect() {
+        var state = connectedSession()
+
+        // 1. connected -> explicit Disconnect
+        XCTAssertTrue(state.connectionLost(reason: .explicitDisconnect))
+        XCTAssertEqual(state.phase, .disconnected)
+        XCTAssertFalse(state.automaticReconnectEnabled)
+
+        // -> no automatic reconnect occurs
+        XCTAssertNil(state.beginReconnectAttempt())
+
+        // 2. explicit Connect -> new remote attempt starts immediately
+        XCTAssertTrue(state.requestManualReconnect())
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertTrue(state.automaticReconnectEnabled) // Suppression is cleared for the new intent
+
+        // -> new remote attempt starts immediately
+        XCTAssertEqual(state.beginReconnectAttempt(), 1)
+        XCTAssertTrue(state.reconnectAttemptInFlight)
+    }
+
+    func testExhaustedRecoveryManualConnectStartsFreshAttempt() {
+        var state = connectedSession()
+
+        // 1. peer-side/session loss -> automatic recovery
+        XCTAssertTrue(state.connectionLost(reason: .transportLost))
+        XCTAssertEqual(state.phase, .reconnecting)
+
+        // 2. automatic reconnect attempts exhaust
+        for i in 1...ReceiverSessionState.maximumReconnectAttempts {
+            XCTAssertEqual(state.beginReconnectAttempt(), i)
+            _ = state.endReconnectAttempt()
+        }
+        XCTAssertNil(state.beginReconnectAttempt())
+        state.exhaustRecovery()
+
+        // 3. terminal reconnect-failed state
+        XCTAssertEqual(state.phase, .reconnectFailed)
+        XCTAssertTrue(state.hasExhaustedReconnectAttempts)
+
+        // 4. Return to Home (disconnect)
+        XCTAssertTrue(state.connectionLost(reason: .explicitDisconnect))
+        XCTAssertEqual(state.phase, .disconnected)
+
+        // 5. explicit manual Connect
+        XCTAssertTrue(state.requestManualReconnect())
+
+        // 6. fresh attempt starts -> retry budget is reset
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertFalse(state.hasExhaustedReconnectAttempts)
+        XCTAssertEqual(state.reconnectAttempt, 0)
+        XCTAssertFalse(state.reconnectAttemptInFlight)
+
+        // 7. remote connect request is eligible/fired
+        XCTAssertEqual(state.beginReconnectAttempt(), 1)
+        XCTAssertTrue(state.reconnectAttemptInFlight)
+    }
+
+    func testExhaustedRecoveryManualReconnectStartsFreshAttempt() {
+        var state = connectedSession()
+
+        XCTAssertTrue(state.connectionLost(reason: .transportLost))
+        for _ in 1...ReceiverSessionState.maximumReconnectAttempts {
+            _ = state.beginReconnectAttempt()
+            _ = state.endReconnectAttempt()
+        }
+        state.exhaustRecovery()
+        XCTAssertEqual(state.phase, .reconnectFailed)
+
+        // User taps Reconnect from the Connection Lost overlay directly
+        XCTAssertTrue(state.requestManualReconnect())
+
+        // Same fresh-attempt semantics
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertFalse(state.hasExhaustedReconnectAttempts)
+        XCTAssertEqual(state.reconnectAttempt, 0)
+        XCTAssertFalse(state.reconnectAttemptInFlight)
+        XCTAssertEqual(state.beginReconnectAttempt(), 1)
+    }
+
+    func testPeerDisconnectedExplicitReconnectStartsFreshAttempt() {
+        var state = connectedSession()
+        XCTAssertTrue(state.connectionLost(reason: .peerClosed))
+        XCTAssertEqual(state.phase, .peerDisconnected)
+        XCTAssertFalse(state.automaticReconnectEnabled)
+        XCTAssertNil(state.beginReconnectAttempt())
+
+        XCTAssertTrue(state.requestManualReconnect())
+        XCTAssertEqual(state.phase, .reconnecting)
+        XCTAssertTrue(state.automaticReconnectEnabled)
+        XCTAssertEqual(state.beginReconnectAttempt(), 1)
+    }
+
+    func testStaleTransportLossAfterExplicitIntentIsIgnored() {
+        for reason in [ReceiverSessionLossReason.explicitDisconnect, .peerClosed] {
+            var state = connectedSession()
+            XCTAssertTrue(state.connectionLost(reason: reason))
+            let phase = state.phase
+            let generation = state.generation
+            XCTAssertFalse(state.connectionLost(reason: .transportLost))
+            XCTAssertEqual(state.phase, phase)
+            XCTAssertEqual(state.generation, generation)
+            XCTAssertFalse(state.automaticReconnectEnabled)
+            XCTAssertNil(state.beginReconnectAttempt())
+        }
     }
 }

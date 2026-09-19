@@ -48,6 +48,7 @@ enum ReceiverSessionPhase: String, Equatable {
     case reconnecting
     case reconnectFailed
     case unrecoverable
+    case peerDisconnected
 }
 
 /// What an interruption overlay should say. One presentation model for the
@@ -58,6 +59,7 @@ enum ReceiverSessionInterruption: Equatable {
     case reconnecting
     case reconnectFailed
     case unrecoverable
+    case peerDisconnected
 
     var title: String {
         switch self {
@@ -65,6 +67,7 @@ enum ReceiverSessionInterruption: Equatable {
         case .reconnecting: return "Reconnecting…"
         case .reconnectFailed: return "Connection Lost"
         case .unrecoverable: return "Can't Connect"
+        case .peerDisconnected: return "Mac Disconnected"
         }
     }
 
@@ -74,18 +77,19 @@ enum ReceiverSessionInterruption: Equatable {
         case .reconnecting: return "Trying to restore the connection to your Mac."
         case .reconnectFailed: return "We couldn't restore the connection."
         case .unrecoverable: return "This Mac and this device can't work together yet."
+        case .peerDisconnected: return "The Mac ended this session."
         }
     }
 
     /// Only a failed recovery offers a manual retry. Pause is the Mac's call,
     /// and an incompatible peer will never become compatible by retrying.
-    var offersManualReconnect: Bool { self == .reconnectFailed }
+    var offersManualReconnect: Bool { self == .reconnectFailed || self == .peerDisconnected }
 
     /// Both "gave up" states can otherwise trap the user on the receiver
     /// surface indefinitely — `unrecoverable` doesn't even offer a retry.
     /// Pause and active reconnection are still going somewhere, so neither
     /// offers this.
-    var offersBackToHome: Bool { self == .reconnectFailed || self == .unrecoverable }
+    var offersBackToHome: Bool { self == .reconnectFailed || self == .unrecoverable || self == .peerDisconnected }
 }
 
 struct ReceiverSessionState: Equatable {
@@ -119,7 +123,7 @@ struct ReceiverSessionState: Equatable {
     /// screen between retries.
     var retainsReceiverSurface: Bool {
         switch phase {
-        case .connected, .paused, .reconnecting, .reconnectFailed, .unrecoverable:
+        case .connected, .paused, .reconnecting, .reconnectFailed, .unrecoverable, .peerDisconnected:
             return true
         case .connecting:
             // A USB/AWDL/LAN migration replaces the connection underneath a
@@ -143,6 +147,7 @@ struct ReceiverSessionState: Equatable {
         case .reconnecting: return .reconnecting
         case .reconnectFailed: return .reconnectFailed
         case .unrecoverable: return .unrecoverable
+        case .peerDisconnected: return .peerDisconnected
         case .connected, .connecting, .disconnected: return nil
         }
     }
@@ -214,6 +219,14 @@ struct ReceiverSessionState: Equatable {
            phase == .reconnectFailed || phase == .unrecoverable || phase == .reconnecting {
             return false
         }
+        // Explicit intent dominates: a late EOF/error from the socket this
+        // side or the peer just deliberately closed is the same teardown,
+        // not a fresh transport loss.
+        if reason == .transportLost || reason == .listenerFailed,
+           phase == .disconnected || phase == .peerDisconnected,
+           lossReason == .explicitDisconnect || lossReason == .peerClosed {
+            return false
+        }
         let previous = phase
         generation &+= 1
         reconnectAttemptInFlight = false
@@ -227,7 +240,8 @@ struct ReceiverSessionState: Equatable {
             phase = .unrecoverable
         case .peerClosed:
             reconnectAttempt = 0
-            phase = .disconnected
+            automaticReconnectEnabled = false
+            phase = .peerDisconnected
         case .transportLost, .listenerFailed:
             if hasEverConnected, automaticReconnectEnabled, autoReconnectPreferenceEnabled {
                 reconnectAttempt = 0
@@ -270,7 +284,7 @@ struct ReceiverSessionState: Equatable {
     /// The user tapped Reconnect. One clean run: budget reset, automatic
     /// recovery re-armed, straight back into the reconnecting presentation.
     mutating func requestManualReconnect() -> Bool {
-        guard phase == .reconnectFailed || phase == .disconnected else { return false }
+        guard phase == .reconnectFailed || phase == .disconnected || phase == .peerDisconnected else { return false }
         phase = .reconnecting
         lossReason = .transportLost
         reconnectAttempt = 0

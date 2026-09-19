@@ -272,7 +272,7 @@ final class ReceiverController: ObservableObject {
         case .connected: return .green
         case .reconnectFailed, .unrecoverable: return .red
         case .connecting, .reconnecting, .paused: return .orange
-        case .disconnected: return .secondary
+        case .disconnected, .peerDisconnected: return .secondary
         }
     }
 

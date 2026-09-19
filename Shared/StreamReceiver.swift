@@ -156,6 +156,11 @@ final class StreamReceiver: ObservableObject {
     /// peerID, a hostname, or wake metadata are never sufficient on their
     /// own (see `resolveAuthenticatedPeerID`).
     @Published private(set) var authenticatedPeerID: String?
+
+    /// Stored when a connection is lost, so `armReconnect()` can knock the Mac
+    /// even if `authenticatedPeerID` has been cleared by the UI.
+    private var recoveryPeerID: String?
+
     /// Set by `forgetPeer(_:)` so `WakeConnectCoordinator` can end an attempt
     /// targeting a peer whose trust was just revoked instead of letting a
     /// late/stale authentication complete it (P13).
@@ -198,6 +203,7 @@ final class StreamReceiver: ObservableObject {
     /// live session is left alone; the flag only reclassifies the eventual
     /// loss so recovery never loops against a peer that cannot work with us.
     private var peerIsIncompatible = false
+    private var manualConnectPeerID: String?
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
@@ -418,6 +424,7 @@ final class StreamReceiver: ObservableObject {
     // connection still runs the full pinned-TLS + hello handshake.
     private var connectRequestToken: String?
     private var connectRequestClearWorkItem: DispatchWorkItem?
+    private var pendingDisconnectFinish: (() -> Void)?
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
     private var mediaSuppressedForPairing = false
@@ -969,6 +976,7 @@ final class StreamReceiver: ObservableObject {
             let finish = { [weak self] in
                 guard let self, !finished else { return }
                 finished = true
+                self.pendingDisconnectFinish = nil
                 self.connection?.cancel()
                 self.connection = nil
                 // Deliberate teardown by this device: no automatic recovery,
@@ -982,6 +990,8 @@ final class StreamReceiver: ObservableObject {
                 self.resetExtendShapeState()
                 self.resetMaxFPSState()
                 self.resetAudioPlayback()
+                self.manualConnectPeerID = nil
+                self.recoveryPeerID = nil
                 self.setStatus("Disconnected")
                 DispatchQueue.main.async {
                     self.displayState = .running
@@ -989,6 +999,7 @@ final class StreamReceiver: ObservableObject {
                 }
                 completion?()
             }
+            self.pendingDisconnectFinish = finish
             guard let conn = self.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
@@ -1031,6 +1042,7 @@ final class StreamReceiver: ObservableObject {
                 self.resetExtendShapeState()
                 self.resetMaxFPSState()
                 self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
+                self.manualConnectPeerID = nil
                 self.setStatus(status)
                 DispatchQueue.main.async {
                     self.displayState = .running
@@ -1529,6 +1541,7 @@ final class StreamReceiver: ObservableObject {
         }
         let onReady: () -> Void = { [weak self] in
             guard let self else { return }
+            self.manualConnectPeerID = nil
             self.lastDataReceived = Date()
             if let path = conn.currentPath {
                 self.updateTransport(for: conn, path: path)
@@ -1785,6 +1798,14 @@ final class StreamReceiver: ObservableObject {
                 sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferred])
             } else {
                 DispatchQueue.main.async { self.audioEnabled = false }
+            }
+        case WireMessage.closing:
+            // The Mac explicitly ended this session. Do not treat it as a transport failure.
+            Log.info("Mac explicitly closed the session")
+            queue.async {
+                self.connection?.cancel()
+                self.connection = nil
+                self.setConnected(false, reason: .peerClosed)
             }
         case WireMessage.wakeInfo:
             // The Mac self-labels this with its own install ID purely as a
@@ -3991,6 +4012,9 @@ final class StreamReceiver: ObservableObject {
         setStatus("Reconnecting…")
         ensureTLSListening()
         if !listenerHealthy { restartListener() }
+        if let peerID = manualConnectPeerID ?? authenticatedPeerID ?? recoveryPeerID {
+            requestRemoteConnect(peerID: peerID)
+        }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
@@ -4017,11 +4041,10 @@ final class StreamReceiver: ObservableObject {
     func requestConnect() {
         queue.async {
             Log.info("connectDebug: receiverConnectRequest peer=local")
+            self.pendingDisconnectFinish?()
             self.cancelReconnect()
             self.peerIsIncompatible = false
             self.mutateSession { $0.requestManualReconnect() }
-            self.ensureTLSListening()
-            self.restartListener()
             self.signalConnectRequest()
         }
     }
@@ -4069,9 +4092,8 @@ final class StreamReceiver: ObservableObject {
     /// already replaces any in-flight connection, so there is no risk of a
     /// duplicate session from racing routes.
     func connectPrimary(peerID: String) {
+        queue.async { self.manualConnectPeerID = peerID }
         requestConnect()
-        guard RemoteEndpointStore.endpoint(forPeerID: peerID) != nil else { return }
-        requestRemoteConnect(peerID: peerID)
     }
 
     /// Sends one authenticated "please connect" knock to a paired Mac's
@@ -4116,15 +4138,23 @@ final class StreamReceiver: ObservableObject {
 
     func reconnectNow() {
         queue.async {
+            self.pendingDisconnectFinish?()
+            if self.sessionState.phase == .peerDisconnected {
+                // Fresh explicit intent after the Mac ended the session:
+                // the same single path Home → Connect uses.
+                Log.info("connectDebug: peerDisconnected reconnect -> requestConnect")
+                self.requestConnect()
+                return
+            }
             guard self.sessionState.phase == .reconnectFailed
                     || self.sessionState.phase == .disconnected else { return }
             Log.info("manual reconnect requested")
             self.cancelReconnect()
             self.peerIsIncompatible = false
             self.mutateSession { $0.requestManualReconnect() }
-            // A manual retry always rebuilds the listening side, healthy or
-            // not: "I pressed the button and nothing visibly happened" is
-            // the failure mode worth spending one rebind on.
+            // If the listener is healthy, `armReconnect` (fired reactively)
+            // won't rebuild it. A manual retry is explicitly a user asking
+            // to un-stick a broken state, so force a rebind.
             self.restartListener()
         }
     }
@@ -4162,6 +4192,7 @@ final class StreamReceiver: ObservableObject {
     /// apart from a deliberate end — see `ReceiverSessionLossReason`.
     private func setConnected(_ value: Bool,
                               reason: ReceiverSessionLossReason = .transportLost) {
+        let peerID = authenticatedPeerID
         DispatchQueue.main.async {
             self.connected = value
             if !value {
@@ -4204,14 +4235,30 @@ final class StreamReceiver: ObservableObject {
             let wasConnected = sessionState.phase == .connected
                 || sessionState.phase == .paused
             Log.info("reconnectDebug: lost reason=\(classified.rawValue) oldGeneration=\(oldGeneration)")
+            let staleAfterIntent = classified == .transportLost
+                && (sessionState.lossReason == .explicitDisconnect || sessionState.lossReason == .peerClosed)
+                && (sessionState.phase == .disconnected || sessionState.phase == .peerDisconnected)
+            if staleAfterIntent {
+                Log.info("connectDebug: ignored stale transportLost after explicit disconnect generation=\(oldGeneration)")
+            } else if classified == .explicitDisconnect {
+                Log.info("connectDebug: localExplicitDisconnect generation=\(oldGeneration)")
+                self.recoveryPeerID = nil
+            } else {
+                self.recoveryPeerID = peerID
+            }
             mutateSession { $0.connectionLost(reason: classified,
                                               autoReconnectPreferenceEnabled: autoReconnectEnabled) }
             if sessionState.phase != .reconnecting {
-                setStatus(wasConnected && classified != .explicitDisconnect
-            ? "Connection lost" : "Waiting for Mac")
+                if classified == .peerClosed {
+                    setStatus("Mac Disconnected")
+                } else {
+                    setStatus(wasConnected && classified != .explicitDisconnect
+                        ? "Connection lost" : "Waiting for Mac")
+                }
             }
         }
         else {
+            self.recoveryPeerID = nil
             peerIsIncompatible = false
             mutateSession { $0.connectionEstablished() }
             Log.info("reconnectDebug: authenticated generation=\(sessionState.generation)")

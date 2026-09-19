@@ -65,6 +65,12 @@ final class WakeConnectCoordinator: ObservableObject {
         return false
     }
 
+    func failureReason(forPeerID peerID: String) -> String? {
+        guard activePeerID == peerID else { return nil }
+        if case .failed(let reason) = attempt.stage { return reason }
+        return nil
+    }
+
     var statusLabel: String {
         switch attempt.stage {
         case .idle, .failed: return ""
@@ -87,12 +93,12 @@ final class WakeConnectCoordinator: ObservableObject {
         let id = attempt.begin(peerID: peerID)
         Log.info("wakeConnect: begin peer=\(peerID) attempt=\(id)")
 
-        // Listener ready + connect-request published: `requestConnect()`
+        // Listener ready + connect-request published: `connectPrimary()`
         // does both (ensures the TLS listener is armed, rebinds the
         // plaintext listener, publishes the first one-shot token) and also
         // clears explicit-disconnect suppression — exactly what "IDLE AFTER
-        // EXPLICIT DISCONNECT" needs.
-        receiver.requestConnect()
+        // EXPLICIT DISCONNECT" needs. It also sends the first remote knock.
+        receiver.connectPrimary(peerID: peerID)
         Log.info("wakeConnect: listenerReady")
         if attempt.connectRequestPublished() {
             Log.info("wakeConnect: connectRequestPublished token=pending")
@@ -210,7 +216,7 @@ final class WakeConnectCoordinator: ObservableObject {
                     sendPromoteIfNeeded()
                 }
             }
-        case .reconnecting, .reconnectFailed, .disconnected:
+        case .reconnecting, .reconnectFailed, .disconnected, .peerDisconnected:
             if attempt.connectionLost() {
                 scheduleTokenRefresh()
             }

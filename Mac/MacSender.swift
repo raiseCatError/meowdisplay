@@ -2216,6 +2216,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
     }
 
+    func disconnect(completion: @escaping () -> Void) {
+        guard let connection, connectionReady else {
+            completion()
+            return
+        }
+        var completed = false
+        let finish = {
+            if completed { return }
+            completed = true
+            completion()
+        }
+        let json = "{\"type\":\"\(WireMessage.closing)\"}"
+        let payload = Data(json.utf8)
+        var header = UInt32(payload.count).bigEndian
+        var frame = Data(bytes: &header, count: 4)
+        frame.append(payload)
+        connection.send(content: frame, completion: .contentProcessed { _ in
+            DispatchQueue.main.async { finish() }
+        })
+        // The send completion may never fire on a dying link.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            finish()
+        }
+    }
+
     func stop() {
         stopped = true
         authenticatedSession.invalidate()

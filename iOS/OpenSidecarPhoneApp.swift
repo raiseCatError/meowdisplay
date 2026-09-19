@@ -942,18 +942,14 @@ struct IdleView: View {
                 Button("Cancel") { wakeConnect.cancel() }
                     .font(.caption)
                     .buttonStyle(.borderless)
-            } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
+            } else {
                 Button {
                     wakeConnect.begin(peerID: peerID)
-                    receiver.requestRemoteConnect(peerID: peerID)
                 } label: {
-                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect")
+                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Connect")
                         .frame(minWidth: 88)
                 }
                 .buttonStyle(.borderedProminent)
-            } else {
-                Button("Connect") { receiver.connectPrimary(peerID: peerID) }
-                    .buttonStyle(.borderedProminent)
             }
             Menu {
                 Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
@@ -991,9 +987,18 @@ struct IdleView: View {
     }
 
     private func remoteStatusText(peerID: String) -> String {
+        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
+            switch reason {
+            case "timedOut": return "Connection timed out"
+            case "cancelled": return "Cancelled"
+            case "protocolIncompatible": return "Mac requires app update"
+            case "peerForgotten": return "Mac pairing removed"
+            default: return "Connection failed"
+            }
+        }
         switch receiver.session.phase {
         case .connecting, .reconnecting: return "Connecting…"
-        case .reconnectFailed, .disconnected: return "Waiting for Mac…"
+        case .reconnectFailed, .disconnected: return "Remote Mac isn't reachable yet"
         default: return "Remote endpoint unavailable"
         }
     }

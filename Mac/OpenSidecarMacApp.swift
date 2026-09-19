@@ -970,28 +970,26 @@ final class SenderController: ObservableObject {
         }
         remoteConnectRequestAccepted[peerID] = now
 
-        func dial(_ target: ConnectionTarget, via routeDescription: String) {
+        func dial(_ target: ConnectionTarget, via routeDescription: String) -> Bool {
             if let existing = session(for: target.sessionID), !existing.failed {
                 Log.info("routeDebug: remote connect-request peer=\(peerID) already connecting/connected via \(routeDescription)")
-                return
+                return true
             }
             Log.info("routeDebug: remote connect-request peer=\(peerID) resolved via \(routeDescription)")
-            connect(to: target, userInitiated: true)
+            return connect(to: target, userInitiated: true)
         }
 
         if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
-            dial(.wifi(localResult), via: "local Bonjour")
-            return
+            if dial(.wifi(localResult), via: "local Bonjour") { return }
         }
         if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil {
-            dial(.remote(peerID: peerID), via: "persisted Remote hint")
-            return
+            if dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
         }
         guard let observedHost else {
             Log.info("routeDebug: remote connect-request peer=\(peerID) has no usable route")
             return
         }
-        dial(.remoteCallback(peerID: peerID, host: observedHost, port: WireCrypto.tlsPort),
+        _ = dial(.remoteCallback(peerID: peerID, host: observedHost, port: WireCrypto.tlsPort),
              via: "observed source \(observedHost)")
     }
 
@@ -1070,7 +1068,13 @@ final class SenderController: ObservableObject {
                 Log.info("connectDebug: senderStartRequested peer=\(peerID) alreadyConnecting=true")
                 continue
             }
-            connect(to: target, userInitiated: true)
+            let localStarted = connect(to: target, userInitiated: true)
+            if localStarted { continue }
+            // A present-but-blocked/unusable local record must not end
+            // route evaluation: fall through to a configured Remote hint.
+            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+            guard endpointFound else { continue }
+            connect(to: .remote(peerID: peerID), userInitiated: true)
         }
     }
 
@@ -1385,12 +1389,10 @@ final class SenderController: ObservableObject {
         // hint for, and only when no better local candidate for the same
         // logical device exists (the priority sort + de-dupe in autoConnect()
         // handles that).
-        let localLogicalIDs = Set(candidates.map(\.logicalID))
         candidates += RemoteEndpointStore.allPeerIDs().compactMap { peerID -> AutoConnectCandidate? in
             guard TrustStore.shared.hasPin(peerID: peerID) else { return nil }
             let target = ConnectionTarget.remote(peerID: peerID)
             let logicalID = logicalID(for: target)
-            guard !localLogicalIDs.contains(logicalID) else { return nil }
             return AutoConnectCandidate(target: target, logicalID: logicalID,
                                         identifiers: identifiers(for: target), priority: 2)
         }
@@ -1484,8 +1486,9 @@ final class SenderController: ObservableObject {
            session(for: "usb:first") == nil {
             connect(to: .usb(udid: nil))
         }
-        var consideredLogicalIDs = Set<String>()
-        for candidate in candidates where consideredLogicalIDs.insert(candidate.logicalID).inserted {
+        var successfullyStartedLogicalIDs = Set<String>()
+        for candidate in candidates {
+            if successfullyStartedLogicalIDs.contains(candidate.logicalID) { continue }
             let covering: DeviceSession?
             switch candidate.target {
             case .usb(let udid?):
@@ -1501,10 +1504,14 @@ final class SenderController: ObservableObject {
                 // Trust gates creating a session, not improving a session the
                 // user deliberately has running. The cable is better: take it.
                 upgradeToUSB(covering, device: device)
+                successfullyStartedLogicalIDs.insert(candidate.logicalID)
                 continue
             }
             let hasOwner = covering != nil || sessions.contains {
                 !$0.failed && !identifiers(for: $0).isDisjoint(with: candidate.identifiers)
+            }
+            if !autoConnectPolicy.suppressedIdentifiers.isDisjoint(with: candidate.identifiers) {
+                Log.info("connectDebug: autoConnect skipped suppressed peer=\(candidate.logicalID)")
             }
             guard let attempt = autoConnectPolicy.beginAutomaticAttempt(
                 logicalID: candidate.logicalID, identifiers: candidate.identifiers,
@@ -1514,10 +1521,15 @@ final class SenderController: ObservableObject {
                 } else if !autoConnectPolicy.autoReconnectEnabled {
                     Log.info("reconnectPolicy: automaticAttempt suppressed reason=disabled peer=\(candidate.logicalID)")
                 }
+                // Suppressed or already owned — skip all lower-priority
+                // candidates for this device too.
+                successfullyStartedLogicalIDs.insert(candidate.logicalID)
                 continue
             }
-            startSession(to: candidate.target, logicalID: candidate.logicalID,
-                         attempt: attempt)
+            if startSession(to: candidate.target, logicalID: candidate.logicalID,
+                         attempt: attempt) {
+                successfullyStartedLogicalIDs.insert(candidate.logicalID)
+            }
         }
     }
 
@@ -1692,9 +1704,10 @@ final class SenderController: ObservableObject {
         UInt32(clamping: UserDefaults.standard.integer(forKey: Self.identityOffsetKey(for: id)))
     }
 
+    @discardableResult
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
-                 awaitingWake: Bool = false) {
-        if let existing = session(for: target.sessionID), !existing.failed { return }
+                 awaitingWake: Bool = false) -> Bool {
+        if let existing = session(for: target.sessionID), !existing.failed { return true }
         let logicalID = logicalID(for: target)
         let targetIdentifiers = identifiers(for: target)
         let attempt: AutoConnectPolicy.Attempt
@@ -1708,8 +1721,8 @@ final class SenderController: ObservableObject {
         } else {
             attempt = autoConnectPolicy.beginContinuationAttempt(logicalID: logicalID)
         }
-        startSession(to: target, logicalID: logicalID, attempt: attempt,
-                     userInitiated: userInitiated, awaitingWake: awaitingWake)
+        return startSession(to: target, logicalID: logicalID, attempt: attempt,
+                            userInitiated: userInitiated, awaitingWake: awaitingWake)
     }
 
     /// The live session (any route) that already owns this logical peer, if
@@ -1778,12 +1791,12 @@ final class SenderController: ObservableObject {
     private func startSession(to target: ConnectionTarget, logicalID: String,
                               attempt: AutoConnectPolicy.Attempt,
                               userInitiated: Bool = false,
-                              awaitingWake: Bool = false) {
+                              awaitingWake: Bool = false) -> Bool {
         let targetIdentifiers = identifiers(for: target)
         guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
             Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
             autoConnectPolicy.finish(attempt)
-            return
+            return false
         }
         #if DEBUG
         // Central hard gate: every path that can start a session — auto-
@@ -1791,7 +1804,7 @@ final class SenderController: ObservableObject {
         // funnels through here, so this single check is authoritative.
         guard routeAdmission(for: target) else {
             autoConnectPolicy.finish(attempt)
-            return
+            return false
         }
         #endif
         let id = target.sessionID
@@ -1800,7 +1813,7 @@ final class SenderController: ObservableObject {
             // instead of letting it swallow the fresh attempt.
             guard existing.failed else {
                 autoConnectPolicy.finish(attempt)
-                return
+                return false
             }
             end(existing)
         }
@@ -1832,13 +1845,13 @@ final class SenderController: ObservableObject {
                 // `switchTransport` instead of creating a second one.
                 guard let transport = buildTransport(for: target) else {
                     autoConnectPolicy.finish(attempt)
-                    return
+                    return false
                 }
                 Log.info("routeDebug: better route available for \(owner.logicalID) — "
                     + "migrating \(owner.id) to \(id)")
                 migrateSession(owner, to: target, transport: transport)
                 autoConnectPolicy.finish(attempt)
-                return
+                return true
             case .ignore:
                 // Same-or-worse route than the current owner (including
                 // LAN<->AWDL, which are the same tier, and a second
@@ -1849,13 +1862,13 @@ final class SenderController: ObservableObject {
                 Log.info("routeDebug: connect attempt to \(id) ignored — "
                     + "\(owner.id) already owns \(owner.logicalID) at an equal/better route")
                 autoConnectPolicy.finish(attempt)
-                return
+                return false
             }
         }
 
         guard let transport = buildTransport(for: target) else {
             autoConnectPolicy.finish(attempt)
-            return
+            return false
         }
 
         let name = label(for: target)
@@ -2068,7 +2081,9 @@ final class SenderController: ObservableObject {
             // the normal discovery/auto-connect paths.
             guard let self, let session, self.owns(session) else { return }
             Log.info("session \(session.id) closed by the receiver — ending")
+            Log.info("connectDebug: peerExplicitDisconnect peer=\(session.logicalID)")
             self.autoConnectPolicy.suppress(self.identifiers(for: session))
+            Log.info("connectDebug: autoConnectSuppressed peer=\(session.logicalID)")
             self.end(session)
         }
         sender.onTrustFailure = { [weak self, weak session] message in
@@ -2111,6 +2126,7 @@ final class SenderController: ObservableObject {
                 sender.stop()
             }
         }
+        return true
     }
 
     /// User-initiated disconnect: also opt the device out of auto-connect.
@@ -2118,7 +2134,10 @@ final class SenderController: ObservableObject {
         Log.info("connectDebug: explicitDisconnect peer=\(session.logicalID)")
         autoConnectPolicy.suppress(identifiers(for: session))
         Log.info("connectDebug: reconnectSuppressed peer=\(session.logicalID)")
-        end(session)
+        session.sender.disconnect { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.end(session)
+        }
     }
 
     func disconnectAll() {
