@@ -1,20 +1,6 @@
 import Foundation
 import Network
 
-struct PairingEnvelope: Codable {
-    enum Kind: String, Codable { case hello, confirmation }
-    let kind: Kind
-    let hello: PairingHello?
-    let confirmation: PairingConfirmation?
-
-    static func hello(_ value: PairingHello) -> Self {
-        .init(kind: .hello, hello: value, confirmation: nil)
-    }
-    static func confirmation(_ value: PairingConfirmation) -> Self {
-        .init(kind: .confirmation, hello: nil, confirmation: value)
-    }
-}
-
 enum PairingFraming {
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let body = try JSONEncoder().encode(value)
@@ -64,10 +50,28 @@ enum PairingFraming {
     }
 }
 
+/// `PairingTransport` over the pairing `NWConnection`.
+final class NWPairingTransport: PairingTransport, @unchecked Sendable {
+    private let connection: NWConnection
+    init(_ connection: NWConnection) { self.connection = connection }
+    func send(_ envelope: PairingEnvelope) async throws { try await PairingFraming.send(envelope, on: connection) }
+    func receive() async throws -> PairingEnvelope { try await PairingFraming.receive(on: connection) }
+    func sendLastAndClose(_ envelope: PairingEnvelope?) {
+        let connection = connection
+        guard let envelope, let data = try? PairingFraming.encode(envelope) else { connection.cancel(); return }
+        connection.send(content: data, completion: .contentProcessed { _ in connection.cancel() })
+    }
+}
+
 enum PairingNetwork {
     static func runInitiator(connection: NWConnection, localID: String, localName: String,
                              prompt: PairingPromptModel, expectedPeerID: String? = nil,
-                             autoConfirm: Bool = false) async throws -> PendingPairing {
+                             allowIdentityChange: Bool = true,
+                             isCurrent: @escaping () -> Bool = { true },
+                             remoteHost: String? = nil, attemptToken: UUID = UUID(),
+                             onHandshakeReached: (@Sendable () -> Void)? = nil) async throws -> PendingPairing {
+        let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
+        defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
         let timeout = pairingTimeout(for: connection)
         defer { timeout.cancel() }
         try await waitUntilReady(connection)
@@ -80,27 +84,40 @@ enum PairingNetwork {
         guard response.kind == .hello, let peerHello = response.hello else { throw PairingError.malformedMessage }
         if let expectedPeerID, peerHello.deviceID != expectedPeerID { throw PairingError.identityChanged }
         let result = try handshake.result(peerHello: peerHello)
-        let pending = classify(result.pending)
-        logReady(pending)
-        let accepted: Bool
-        if autoConfirm { accepted = true }
-        else { accepted = await prompt.request(pending) }
-        Log.info("pairDebug: localConfirmation=\(accepted)")
-        try await PairingFraming.send(.confirmation(result.confirmation(accepted: accepted)), on: connection)
-        guard accepted else { throw PairingError.rejected }
-        let reply = try await PairingFraming.receive(on: connection)
-        guard reply.kind == .confirmation, let confirmation = reply.confirmation else {
-            throw PairingError.malformedMessage
+        var pending = classify(result.pending)
+        try PairingClassifier.check(pending, allowIdentityChange: allowIdentityChange)
+        if let remoteHost {
+            pending.changesRemoteEndpoint = RemoteHintChange.wouldChange(
+                existing: RemoteEndpointStore.endpoint(forPeerID: pending.peerID), newHost: remoteHost)
         }
-        try result.verify(confirmation)
-        Log.info("pairDebug: remoteConfirmation=\(confirmation.accepted)")
-        try persist(pending)
-        Log.info("pairDebug: trust persisted")
+        onHandshakeReached?()
+        // A cancelled/superseded attempt must never surface a SAS prompt.
+        guard isCurrent(), !gate.isCancelled else { throw PairingError.rejected }
+        logReady(pending)
+        try await PairingSessionCore.run(
+            role: .initiator, result: result, pending: pending, transport: transport,
+            gate: gate, abortSlot: slot,
+            decide: { pending in
+                let accepted = await prompt.request(pending, token: attemptToken)
+                // Owner-auth failure/cancel surfaces its own error, not "rejected".
+                if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
+                return accepted
+            },
+            onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
+            onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
+            store: TrustStore.shared, isCurrent: isCurrent, remoteHost: remoteHost,
+            hints: remoteHost == nil ? nil : RemoteEndpointStoreHints())
+        logFinalized(pending)
         return pending
     }
 
     static func runResponder(connection: NWConnection, localID: String, localName: String,
-                             prompt: PairingPromptModel, autoConfirm: Bool = false) async throws -> PendingPairing {
+                             prompt: PairingPromptModel,
+                             allowIdentityChange: Bool = true,
+                             isCurrent: @escaping () -> Bool = { true },
+                             attemptToken: UUID = UUID()) async throws -> PendingPairing {
+        let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
+        defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
         let timeout = pairingTimeout(for: connection)
         defer { timeout.cancel() }
         try await waitUntilReady(connection)
@@ -112,23 +129,45 @@ enum PairingNetwork {
                                          displayName: localName, identitySPKI: spki)
         let result = try handshake.result(peerHello: peerHello)
         let pending = classify(result.pending)
+        try PairingClassifier.check(pending, allowIdentityChange: allowIdentityChange)
+        guard isCurrent(), !gate.isCancelled else { throw PairingError.rejected }
         logReady(pending)
         try await PairingFraming.send(.hello(handshake.localHello), on: connection)
-        let accepted: Bool
-        if autoConfirm { accepted = true }
-        else { accepted = await prompt.request(pending) }
-        Log.info("pairDebug: localConfirmation=\(accepted)")
-        try await PairingFraming.send(.confirmation(result.confirmation(accepted: accepted)), on: connection)
-        guard accepted else { throw PairingError.rejected }
-        let reply = try await PairingFraming.receive(on: connection)
-        guard reply.kind == .confirmation, let confirmation = reply.confirmation else {
-            throw PairingError.malformedMessage
-        }
-        try result.verify(confirmation)
-        Log.info("pairDebug: remoteConfirmation=\(confirmation.accepted)")
-        try persist(pending)
-        Log.info("pairDebug: trust persisted")
+        try await PairingSessionCore.run(
+            role: .responder, result: result, pending: pending, transport: transport,
+            gate: gate, abortSlot: slot,
+            decide: { pending in
+                let accepted = await prompt.request(pending, token: attemptToken)
+                // Owner-auth failure/cancel surfaces its own error, not "rejected".
+                if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
+                return accepted
+            },
+            onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
+            onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
+            store: TrustStore.shared, isCurrent: isCurrent)
+        logFinalized(pending)
         return pending
+    }
+
+    /// Registers the prompt's Cancel path for this attempt: the same gate,
+    /// abort frame and connection the handshake itself uses.
+    private static func beginAttempt(connection: NWConnection, prompt: PairingPromptModel,
+                                    token: UUID) async
+        -> (NWPairingTransport, PairingCommitGate, PairingAbortSlot) {
+        let transport = NWPairingTransport(connection)
+        let gate = PairingCommitGate()
+        let slot = PairingAbortSlot()
+        await MainActor.run {
+            prompt.registerAttempt(token) {
+                PairingSessionCore.cancelAttempt(gate: gate, slot: slot, transport: transport)
+            }
+        }
+        return (transport, gate, slot)
+    }
+
+    private static func logFinalized(_ pending: PendingPairing) {
+        Log.info("pairDebug: trust persisted")
+        Log.info("deviceUI: knownPeer added peerID=\(pending.peerID)")
     }
 
     private static func logReady(_ pending: PendingPairing) {
@@ -153,26 +192,7 @@ enum PairingNetwork {
     /// existing pin for this peer ID is exactly the case the UI must call
     /// out (re-pair, or identity-changed), never silently skip.
     private static func classify(_ pending: PendingPairing) -> PendingPairing {
-        var pending = pending
-        switch TrustPinPolicy.decision(existing: TrustStore.shared.pin(peerID: pending.peerID),
-                                       presented: pending.peerSPKI) {
-        case .new: pending.classification = .newPeer
-        case .match: pending.classification = .rePairSameKey
-        case .identityChanged: pending.classification = .identityChanged
-        }
-        return pending
-    }
-
-    /// Runs only after both sides have confirmed the same fresh SAS — trust
-    /// is never mutated on the strength of a matching peer ID alone. An
-    /// identity change is persisted only because the user explicitly saw and
-    /// confirmed that specific warning through to a verified confirmation.
-    private static func persist(_ pending: PendingPairing) throws {
-        guard TrustStore.shared.setPin(peerID: pending.peerID, spki: pending.peerSPKI,
-                                       displayName: pending.peerName,
-                                       allowIdentityChange: pending.classification == .identityChanged)
-        else { throw PairingError.identityChanged }
-        Log.info("deviceUI: knownPeer added peerID=\(pending.peerID)")
+        PairingClassifier.classify(pending, existingPin: TrustStore.shared.pin(peerID: pending.peerID))
     }
 
     private static func waitUntilReady(_ connection: NWConnection) async throws {

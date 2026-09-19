@@ -42,6 +42,7 @@ struct ReceiverScreen: View {
     @StateObject private var versionGate = VersionGate()
     @StateObject private var controlStore = ReceiverControlStore()
     @State private var showSettings = false
+    @State private var showPairedToast = false
     @State private var showOnboarding = false
     @State private var nagDismissed = false
     @State private var keyboardVisibleRect: CGRect?
@@ -221,26 +222,29 @@ struct ReceiverScreen: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
         }
-        .sheet(item: Binding(get: { model.receiver.pairingPrompt.pending }, set: { _ in }),
-               onDismiss: { model.receiver.pairingPrompt.notePresentationDismissed() }) { pending in
-            VStack(spacing: 20) {
-                Text("Pair with \(pending.peerName)?").font(.title3.bold())
-                Text(pending.sas).font(.system(.largeTitle, design: .monospaced)).bold()
-                Text("Make sure this code matches the one on your Mac.")
-                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                HStack {
-                    Button("Cancel", role: .cancel) {
-                        model.receiver.pairingPrompt.decide(accept: false)
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Codes Match") {
-                        model.receiver.pairingPrompt.decide(accept: true)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
+        // One sheet for the whole secure pairing ceremony on every transport
+        // (LAN, USB, Remote): SAS → waiting for the other device. The Remote
+        // sheet owns the waiting presentation while its own attempt is running.
+        .sheet(isPresented: Binding(
+            get: {
+                let prompt = model.receiver.pairingPrompt
+                return prompt.pending != nil
+                    || (prompt.confirmedLocally != nil && model.receiver.remotePairingState != .connecting)
+            },
+            set: { _ in }),
+               onDismiss: { model.receiver.pairingPrompt.notePresentationDismissed() }) {
+            PairingConfirmationSheet(prompt: model.receiver.pairingPrompt)
+        }
+        .onChange(of: model.receiver.pairingSuccessCount) { _ in
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            withAnimation { showPairedToast = true }
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                withAnimation { showPairedToast = false }
             }
-            .padding(28).presentationDetents([.medium])
-            .interactiveDismissDisabled()
+        }
+        .overlay(alignment: .top) {
+            if showPairedToast { PairedToast().padding(.top, 12).transition(.move(edge: .top).combined(with: .opacity)) }
         }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
@@ -619,6 +623,7 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
     @State private var showRemoteAccessSetup = false
+    @State private var showRemotePairing = false
     /// Persisted expand/collapse state of the Connection Instructions section.
     @AppStorage("home.connectionInstructionsExpanded") private var instructionsExpanded = true
     @State private var remoteEditPeerID: String?
@@ -643,6 +648,29 @@ struct IdleView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(.systemBackground))
+        .sheet(isPresented: Binding(
+            get: { showRemotePairing && receiver.pairingPrompt.pending == nil },
+            set: { presented in
+                guard !presented else { return }
+                // Swipe-down while connecting cancels the real attempt. A sheet
+                // hidden only because the SAS sheet took over (pending != nil)
+                // must not cancel anything.
+                guard receiver.pairingPrompt.pending == nil else { return }
+                if receiver.remotePairingState == .connecting { receiver.cancelRemotePairing() }
+                else { receiver.acknowledgeRemotePairingResult() }
+                showRemotePairing = false
+            }), onDismiss: { remoteRefresh += 1 }) {
+            NavigationStack { RemotePairingView(receiver: receiver) }
+                .presentationDetents([.medium, .large])
+        }
+        .onChange(of: receiver.remotePairingState) { new in
+            // Success feedback is transport-independent (see the root view);
+            // this only closes the Remote sheet once pairing truly finished.
+            if new == .succeeded {
+                showRemotePairing = false
+                receiver.acknowledgeRemotePairingResult()
+            }
+        }
         .sheet(isPresented: $showRemoteAccessSetup, onDismiss: { remoteRefresh += 1 }) {
             NavigationStack {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
@@ -833,6 +861,13 @@ struct IdleView: View {
     private var deviceSections: some View {
         VStack(alignment: .leading, spacing: 16) {
             nearbyDevices
+            Button {
+                showRemotePairing = true
+            } label: {
+                Label("Pair over Remote", systemImage: "network")
+            }
+            .buttonStyle(.bordered)
+            .padding(.horizontal, 16)
             remoteAccess
         }
         .frame(maxWidth: 420)
@@ -1133,6 +1168,7 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var confirmingFunctionTrayReset = false
     @State private var trustRefresh = 0
+    @State private var forgetConfirmation = PeerForgetPrompt()
 
     // Cat Mode (hidden easter egg — nine taps on the About/version row
     // below). Local-only presentation state: never synced, never on the
@@ -1181,15 +1217,27 @@ struct SettingsView: View {
                                 Text(peer.displayName)
                                 Spacer()
                                 Button("Forget", role: .destructive) {
-                                    receiver.forgetPeer(peer.peerID)
-                                    receiver.pairingPrompt.cancel()
-                                    trustRefresh &+= 1
+                                    forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
                                 }
                             }
                         }
                     }
                 }
                 .id(trustRefresh)
+                .alert("Forget \u{201C}\(forgetConfirmation.candidate?.name ?? "This Mac")\u{201D}?",
+                       isPresented: Binding(get: { forgetConfirmation.isPresented },
+                                            set: { if !$0 { forgetConfirmation.cancel() } })) {
+                    Button("Forget", role: .destructive) {
+                        forgetConfirmation.confirm { peerID in
+                            receiver.forgetPeer(peerID)
+                            receiver.pairingPrompt.cancel()
+                            trustRefresh &+= 1
+                        }
+                    }
+                    Button("Cancel", role: .cancel) { forgetConfirmation.cancel() }
+                } message: {
+                    Text("You'll need to pair with this Mac again before connecting.")
+                }
                 Section {
                     NavigationLink("Remote Access") {
                         RemoteAccessSettingsView(receiver: receiver)

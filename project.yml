@@ -205,6 +205,8 @@ targets:
       - Shared/ControlTrayGeometry.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
+      - Shared/RemotePairing.swift
+      - Shared/PairingSession.swift
       - Shared/StreamingProfile.swift
       - Shared/StreamingPriority.swift
       - Shared/StreamingMode.swift
@@ -247,6 +249,7 @@ targets:
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
+        NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
         NSBonjourServices: ["_opensidecar._tcp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

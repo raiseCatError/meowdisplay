@@ -1,0 +1,476 @@
+import CryptoKit
+import XCTest
+
+/// In-memory pairing transport with TCP-like semantics: frames sent before a
+/// close are still delivered, sends to a closed peer silently "succeed", and
+/// inbound delivery can be held to force deterministic race orderings.
+private final class MemoryTransport: PairingTransport, @unchecked Sendable {
+    private enum Held { case frame(PairingEnvelope), eof }
+    private let lock = NSLock()
+    private weak var peer: MemoryTransport?
+    private var continuation: AsyncThrowingStream<PairingEnvelope, Error>.Continuation!
+    private var iterator: AsyncThrowingStream<PairingEnvelope, Error>.Iterator
+    private var paused = false
+    private var held: [Held] = []
+    private var closed = false
+
+    init() {
+        var c: AsyncThrowingStream<PairingEnvelope, Error>.Continuation!
+        let stream = AsyncThrowingStream<PairingEnvelope, Error> { c = $0 }
+        continuation = c
+        iterator = stream.makeAsyncIterator()
+    }
+
+    static func pair() -> (MemoryTransport, MemoryTransport) {
+        let a = MemoryTransport(), b = MemoryTransport()
+        a.peer = b; b.peer = a
+        return (a, b)
+    }
+
+    private func deliver(_ item: Held) {
+        lock.lock(); defer { lock.unlock() }
+        if paused { held.append(item); return }
+        push(item)
+    }
+
+    private func push(_ item: Held) {
+        switch item {
+        case .frame(let e): continuation.yield(e)
+        case .eof: continuation.finish()
+        }
+    }
+
+    func pauseInbound() { lock.lock(); paused = true; lock.unlock() }
+    func resumeInbound() {
+        lock.lock(); paused = false
+        let items = held; held = []
+        items.forEach(push)
+        lock.unlock()
+    }
+
+    func send(_ envelope: PairingEnvelope) async throws {
+        lock.lock(); let isClosed = closed; lock.unlock()
+        if isClosed { throw PairingError.malformedMessage }
+        peer?.deliver(.frame(envelope))
+    }
+
+    func receive() async throws -> PairingEnvelope {
+        guard let envelope = try await iterator.next() else { throw PairingError.malformedMessage }
+        return envelope
+    }
+
+    func sendLastAndClose(_ envelope: PairingEnvelope?) {
+        lock.lock(); closed = true; lock.unlock()
+        if let envelope { peer?.deliver(.frame(envelope)) }
+        peer?.deliver(.eof)
+        continuation.finish(throwing: PairingError.malformedMessage)
+    }
+}
+
+private final class Decider: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var early: Bool?
+    private(set) var asked = false
+    func decide() async -> Bool {
+        await withCheckedContinuation { c in
+            lock.lock(); asked = true
+            if let early { self.early = nil; lock.unlock(); c.resume(returning: early); return }
+            continuation = c; lock.unlock()
+        }
+    }
+    func resolve(_ value: Bool) {
+        lock.lock()
+        if let c = continuation { continuation = nil; lock.unlock(); c.resume(returning: value); return }
+        early = value; lock.unlock()
+    }
+}
+
+private final class Hints: RemoteEndpointHinting {
+    private(set) var saved: [String] = []
+    func setEndpoint(_ host: String, port: UInt16, forPeerID peerID: String) { saved.append(peerID) }
+}
+
+private final class Side {
+    let store = InMemoryPeerTrustStore()
+    let hints = Hints()
+    let decider = Decider()
+    let gate = PairingCommitGate()
+    let slot = PairingAbortSlot()
+    let role: PairingHandshake.Role
+    let result: PairingResult
+    let transport: MemoryTransport
+    private(set) var committing = false
+    var task: Task<Void, Error>?
+
+    init(role: PairingHandshake.Role, result: PairingResult, transport: MemoryTransport) {
+        self.role = role; self.result = result; self.transport = transport
+    }
+
+    func start(remoteHost: String? = nil) {
+        let decider = decider
+        task = Task { [self] in
+            try await PairingSessionCore.run(
+                role: role, result: result, pending: result.pending, transport: transport,
+                gate: gate, abortSlot: slot, decide: { _ in await decider.decide() },
+                onPeerAbort: { decider.resolve(false) }, onCommitting: { committing = true },
+                store: store, remoteHost: remoteHost, hints: remoteHost == nil ? nil : hints)
+        }
+    }
+
+    /// What the UI Cancel button does.
+    @discardableResult
+    func cancel() -> Bool {
+        let ok = PairingSessionCore.cancelAttempt(gate: gate, slot: slot, transport: transport)
+        if ok { decider.resolve(false) }
+        return ok
+    }
+
+    func outcome() async -> Result<Void, Error> { await task!.result }
+    var pinCount: Int { store.pins.count }
+}
+
+final class PairingSessionTests: XCTestCase {
+    private let initiatorID = "22222222-2222-2222-2222-222222222222"
+    private let responderID = "11111111-1111-1111-1111-111111111111"
+
+    private func makePair() throws -> (initiator: Side, responder: Side, iT: MemoryTransport, rT: MemoryTransport) {
+        let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Phone",
+                                     identitySPKI: Data("phone identity".utf8))
+        let mac = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Mac",
+                                   identitySPKI: Data("mac identity".utf8))
+        let (a, b) = MemoryTransport.pair()
+        let i = Side(role: .initiator, result: try phone.result(peerHello: mac.localHello), transport: a)
+        let r = Side(role: .responder, result: try mac.result(peerHello: phone.localHello), transport: b)
+        // Watchdog standing in for the real 65s network backstop.
+        for side in [i, r] {
+            Task { try? await Task.sleep(nanoseconds: 4_000_000_000); side.transport.sendLastAndClose(nil) }
+        }
+        return (i, r, a, b)
+    }
+
+    private func waitUntil(_ condition: @autoclosure () -> Bool) async {
+        for _ in 0..<2000 where !condition() { try? await Task.sleep(nanoseconds: 1_000_000) }
+    }
+
+    private func assertNoTrust(_ sides: Side..., file: StaticString = #filePath, line: UInt = #line) {
+        for side in sides {
+            XCTAssertEqual(side.pinCount, 0, file: file, line: line)
+            XCTAssertTrue(side.hints.saved.isEmpty, file: file, line: line)
+        }
+    }
+
+    // MARK: normal completion
+
+    func testBothConfirmBothFinalize() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(remoteHost: "100.64.0.7"); r.start()
+        i.decider.resolve(true); r.decider.resolve(true)
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertNoThrow(try io.get()); XCTAssertNoThrow(try ro.get())
+        XCTAssertNotNil(i.store.pin(peerID: responderID))
+        XCTAssertNotNil(r.store.pin(peerID: initiatorID))
+        XCTAssertEqual(i.hints.saved, [responderID])
+        XCTAssertFalse(i.cancel() && i.gate.isCommitted, "cancel is invalid after the commit point")
+    }
+
+    // MARK: the hardware bug — REPRO A / B
+
+    /// Initiator confirms, cancels while waiting, responder confirms afterwards.
+    func testInitiatorConfirmsCancelsThenResponderConfirms_NoTrust() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(remoteHost: "100.64.0.7"); r.start()
+        i.decider.resolve(true)
+        await waitUntil(r.decider.asked)
+        XCTAssertTrue(i.cancel())
+        r.decider.resolve(true)            // responder user taps Codes Match afterwards
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+        XCTAssertFalse(r.committing, "responder must never reach its commit point")
+    }
+
+    /// Responder confirms, cancels while waiting, initiator confirms afterwards.
+    func testResponderConfirmsCancelsThenInitiatorConfirms_NoTrust() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(remoteHost: "100.64.0.7"); r.start()
+        r.decider.resolve(true)
+        await waitUntil(i.decider.asked)
+        XCTAssertTrue(r.cancel())
+        i.decider.resolve(true)
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+    }
+
+    /// Same, but the abort frame is lost: a previously delivered acceptance
+    /// alone must still be insufficient.
+    func testDroppedAbortStillCannotComplete_InitiatorCancels() async throws {
+        let (i, r, iT, _) = try makePair()
+        i.start(); r.start()
+        i.decider.resolve(true)
+        await waitUntil(r.decider.asked)
+        XCTAssertTrue(i.gate.cancel())
+        iT.sendLastAndClose(nil)           // close only, no abort frame
+        r.decider.resolve(true)
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+    }
+
+    func testDroppedAbortStillCannotComplete_ResponderCancels() async throws {
+        let (i, r, _, rT) = try makePair()
+        i.start(); r.start()
+        r.decider.resolve(true)
+        await waitUntil(i.decider.asked)
+        XCTAssertTrue(r.gate.cancel())
+        rT.sendLastAndClose(nil)
+        i.decider.resolve(true)            // initiator even reaches its commit point
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+    }
+
+    // MARK: races
+
+    func testCancelBeforeAnyConfirmation() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(); r.start()
+        await waitUntil(i.decider.asked && r.decider.asked)
+        XCTAssertTrue(i.cancel())
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get())
+        XCTAssertThrowsError(try ro.get())
+        if case .failure(let e) = ro { XCTAssertEqual(e as? PairingError, .cancelledByPeer) }
+        assertNoTrust(i, r)
+    }
+
+    /// Commit is already in flight toward the responder when the responder
+    /// cancels: cancel wins (gate still open), commit is ignored, no trust.
+    func testCancelWinsRaceAgainstInFlightCommit() async throws {
+        let (i, r, _, rT) = try makePair()
+        i.start(); r.start()
+        r.decider.resolve(true)
+        await waitUntil(i.decider.asked)
+        rT.pauseInbound()                  // hold the initiator's frames at the responder
+        i.decider.resolve(true)            // initiator commits immediately
+        await waitUntil(i.committing)
+        XCTAssertTrue(r.cancel(), "responder has not received the commit yet: cancel is valid")
+        rT.resumeInbound()                 // stale commit arrives after local cancel
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+    }
+
+    /// Commit wins: responder persisted, so Cancel is refused and the UI must
+    /// move to success rather than offering Cancel.
+    func testCommitWinsThenCancelIsRefused() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(); r.start()
+        r.decider.resolve(true); i.decider.resolve(true)
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        XCTAssertNoThrow(try io.get()); XCTAssertNoThrow(try ro.get())
+        XCTAssertFalse(r.cancel())
+        XCTAssertFalse(i.cancel())
+        XCTAssertNotNil(r.store.pin(peerID: initiatorID))
+    }
+
+    func testPeerRejectionIsRejectedNotCancelled() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(); r.start()
+        r.decider.resolve(false); i.decider.resolve(true)
+        let (io, ro) = (await i.outcome(), await r.outcome())
+        if case .failure(let e) = io { XCTAssertEqual(e as? PairingError, .rejected) } else { XCTFail() }
+        XCTAssertThrowsError(try ro.get())
+        assertNoTrust(i, r)
+    }
+
+    // MARK: stale / new generation
+
+    func testNewAttemptAfterCancelledAttemptPairsNormally() async throws {
+        do {
+            let (i, r, _, _) = try makePair()
+            i.start(); r.start()
+            i.decider.resolve(true)
+            await waitUntil(r.decider.asked)
+            XCTAssertTrue(i.cancel())
+            _ = await (i.outcome(), r.outcome())
+            assertNoTrust(i, r)
+        }
+        let (i2, r2, _, _) = try makePair()   // fresh generation: new keys, transcript, transport
+        i2.start(remoteHost: "mac.tail1234.ts.net"); r2.start()
+        i2.decider.resolve(true); r2.decider.resolve(true)
+        let (io, ro) = (await i2.outcome(), await r2.outcome())
+        XCTAssertNoThrow(try io.get()); XCTAssertNoThrow(try ro.get())
+        XCTAssertEqual(i2.pinCount, 1); XCTAssertEqual(r2.pinCount, 1)
+    }
+
+    /// Frames from a previous attempt's transcript never authenticate here.
+    func testStaleCommitFromOtherAttemptIsRejected() async throws {
+        let old = try makePair()
+        let fresh = try makePair()
+        let staleCommit = PairingEnvelope.step(.commit, old.initiator.result.stepAuthenticator(.commit))
+        XCTAssertThrowsError(try fresh.responder.result.verifyStep(.commit, authenticator: staleCommit.authenticator!))
+    }
+
+    func testForgedAbortIsNotAnAuthenticatedCancel() throws {
+        let (_, r, _, _) = try makePair()
+        XCTAssertThrowsError(try r.result.verifyStep(.abort, authenticator: Data(repeating: 7, count: 32)))
+    }
+
+    func testCancelledAttemptNeverProducesSuccessFeedback() {
+        for error in [PairingError.cancelledByPeer, .rejected, .invalidConfirmation] {
+            XCTAssertEqual(PairingOutcomeFeedback.forCompletion(Result<Void, Error>.failure(error)), .none)
+        }
+    }
+
+    func testGateLinearization() {
+        let a = PairingCommitGate()
+        XCTAssertTrue(a.beginCommit()); XCTAssertFalse(a.cancel()); XCTAssertFalse(a.beginCommit())
+        let b = PairingCommitGate()
+        XCTAssertTrue(b.cancel()); XCTAssertFalse(b.beginCommit()); XCTAssertTrue(b.cancel())
+    }
+
+    // MARK: two concurrent attempts sharing one prompt (Mac LAN listener shape)
+
+    @MainActor
+    func testConcurrentAttemptBCannotAffectAttemptAOnSharedPrompt() async throws {
+        let prompt = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        let a = try makePair()    // legitimate attempt; responder side uses the prompt
+        let b = try makePair()    // unrelated attempt to the same listener
+        let (tokenA, tokenB) = (UUID(), UUID())
+        var aCancelled = 0
+        prompt.registerAttempt(tokenA) {
+            aCancelled += 1
+            return PairingSessionCore.cancelAttempt(gate: a.responder.gate, slot: a.responder.slot,
+                                                    transport: a.responder.transport)
+        }
+        prompt.registerAttempt(tokenB) {
+            PairingSessionCore.cancelAttempt(gate: b.responder.gate, slot: b.responder.slot,
+                                             transport: b.responder.transport)
+        }
+        func run(_ pair: (initiator: Side, responder: Side, iT: MemoryTransport, rT: MemoryTransport),
+                 token: UUID) {
+            pair.initiator.start()
+            pair.responder.task = Task { [pair] in
+                try await PairingSessionCore.run(
+                    role: .responder, result: pair.responder.result, pending: pair.responder.result.pending,
+                    transport: pair.responder.transport, gate: pair.responder.gate, abortSlot: pair.responder.slot,
+                    decide: { await prompt.request($0, token: token) },
+                    onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: token) } },
+                    onCommitting: { Task { @MainActor in prompt.markCommitting(token: token) } },
+                    store: pair.responder.store)
+            }
+        }
+        run(a, token: tokenA)
+        while prompt.pending == nil { await Task.yield() }
+        prompt.decide(accept: true)                       // A: local confirm → waiting
+        a.initiator.decider.resolve(false)                // (A's peer stays undecided/irrelevant)
+        run(b, token: tokenB)                             // B connects: duplicate, refused
+        _ = await b.responder.outcome()
+        b.initiator.cancel()                              // B's peer sends a valid abort for B
+        Task { @MainActor in prompt.attemptEnded(token: tokenB) }
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(prompt.owner, tokenA)
+        XCTAssertNotNil(prompt.confirmedLocally, "A's waiting state survived B")
+        prompt.cancelWaiting()                            // A's real Cancel
+        XCTAssertEqual(aCancelled, 1)
+        XCTAssertTrue(a.responder.gate.isCancelled, "A's own connection was the one cancelled")
+        XCTAssertFalse(b.responder.gate.isCommitted)
+        XCTAssertEqual(a.responder.pinCount, 0)
+    }
+
+    // MARK: Transport-independent ceremony (LAN / USB / Remote share this core)
+
+    /// No transport can confirm on the user's behalf: with nobody answering the
+    /// SAS, both sides ask and neither trusts (USB/loopback used to auto-confirm).
+    func testCeremonyRequiresExplicitSASOnBothSides() async throws {
+        let (i, r, _, _) = try makePair()
+        i.start(); r.start()
+        await waitUntil(i.decider.asked && r.decider.asked)
+        XCTAssertTrue(i.decider.asked && r.decider.asked)
+        XCTAssertEqual(i.pinCount, 0); XCTAssertEqual(r.pinCount, 0)
+        XCTAssertFalse(i.gate.isCommitted); XCTAssertFalse(r.gate.isCommitted)
+        _ = i.cancel()
+        _ = await (i.outcome(), r.outcome())
+    }
+
+    /// Local confirm → waiting → real cancel → late peer confirm: no trust.
+    /// (Runs through the shared prompt exactly like the LAN/USB responder path.)
+    @MainActor
+    func testWaitingCancelThenLatePeerConfirmCannotEstablishTrust() async throws {
+        let prompt = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        let pair = try makePair()
+        let token = UUID()
+        let side = pair.responder
+        prompt.registerAttempt(token) {
+            PairingSessionCore.cancelAttempt(gate: side.gate, slot: side.slot, transport: side.transport)
+        }
+        pair.initiator.start()
+        side.task = Task {
+            try await PairingSessionCore.run(
+                role: .responder, result: side.result, pending: side.result.pending,
+                transport: side.transport, gate: side.gate, abortSlot: side.slot,
+                decide: { await prompt.request($0, token: token) },
+                onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: token) } },
+                onCommitting: { Task { @MainActor in prompt.markCommitting(token: token) } },
+                store: side.store)
+        }
+        while prompt.pending == nil { await Task.yield() }
+        prompt.decide(accept: true)
+        while prompt.confirmedLocally == nil { await Task.yield() }   // owner auth resolves asynchronously
+        XCTAssertNotNil(prompt.confirmedLocally, "waiting state after local confirm")
+        prompt.cancelWaiting()
+        XCTAssertNil(prompt.confirmedLocally)
+        pair.initiator.decider.resolve(true)              // late peer confirm
+        let (io, ro) = (await pair.initiator.outcome(), await side.outcome())
+        XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
+        XCTAssertEqual(side.pinCount, 0); XCTAssertEqual(pair.initiator.pinCount, 0)
+    }
+
+    func testUSBPolicyPairsOnlyUnpinnedPeersAndNeverReplacesPins() {
+        XCTAssertTrue(USBPairingPolicy.shouldBeginPairing(hasPin: false, alreadyAttemptedThisSession: false))
+        XCTAssertFalse(USBPairingPolicy.shouldBeginPairing(hasPin: true, alreadyAttemptedThisSession: false),
+                       "already-trusted USB just connects")
+        XCTAssertFalse(USBPairingPolicy.shouldBeginPairing(hasPin: false, alreadyAttemptedThisSession: true))
+        XCTAssertFalse(USBPairingPolicy.allowIdentityChange)
+    }
+
+    func testChangedIdentityOverUSBIsAHardFailureAndKeepsThePin() throws {
+        let store = InMemoryPeerTrustStore()
+        store.setPin(peerID: responderID, spki: Data("original".utf8), displayName: "Phone")
+        let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Mac",
+                                     identitySPKI: Data("mac identity".utf8))
+        let impostor = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Phone",
+                                        identitySPKI: Data("impostor".utf8))
+        let pending = PairingClassifier.classify(try phone.result(peerHello: impostor.localHello).pending,
+                                                 existingPin: store.pin(peerID: responderID))
+        XCTAssertThrowsError(try PairingClassifier.check(pending, allowIdentityChange: USBPairingPolicy.allowIdentityChange))
+        XCTAssertEqual(store.pin(peerID: responderID), Data("original".utf8))
+    }
+
+    func testFinalizationOnlyFeedbackIsTransportIndependent() {
+        XCTAssertEqual(PairingOutcomeFeedback.forCompletion(Result<Void, Error>.success(())), .success)
+        XCTAssertEqual(PairingOutcomeFeedback.forCompletion(Result<Void, Error>.failure(PairingError.cancelledByPeer)), .none)
+    }
+
+    /// Loopback must never be treated as approval: the receiver and the
+    /// pairing network layer no longer contain any auto-confirm path.
+    func testNoAutoConfirmOrLoopbackApprovalRemains() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for path in ["Shared/StreamReceiver.swift", "Shared/PairingNetwork.swift", "Mac/OpenSidecarMacApp.swift"] {
+            let source = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+            XCTAssertFalse(source.contains("autoConfirm"), "\(path) must not auto-confirm pairing")
+            XCTAssertFalse(source.contains("isLoopback(connection"), "\(path) must not approve by loopback")
+        }
+    }
+
+    func testRemoteWordingDoesNotLeakIntoSharedCeremonyCopy() {
+        for text in [PairingCopy.sasTitle, PairingCopy.sasHelper, PairingCopy.waitingTitle,
+                     PairingCopy.waitingHelper(otherDevice: "your Mac")] {
+            XCTAssertFalse(text.contains("Pair Over Remote"))
+        }
+        XCTAssertTrue(PairingCopy.connectingHelper(target: .mac).contains("Pair Over Remote"),
+                      "Remote wording lives only in the Remote pre-SAS helper")
+    }
+}

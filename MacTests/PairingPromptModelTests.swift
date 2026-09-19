@@ -7,7 +7,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testPublishingAndPresentingDoesNotResolveConfirmation() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
         var presented = false
         model.onPending = { _ in presented = true }
         let task = Task { @MainActor in await model.request(self.pending()) }
@@ -24,7 +24,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testDuplicateRequestDoesNotReplaceOrRejectVisiblePrompt() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
         let first = pending("peer-a", sas: "111 111")
         let firstTask = Task { @MainActor in await model.request(first) }
         await Task.yield()
@@ -39,7 +39,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testTimeoutIsTheOnlyAutomaticResolution() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 1_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 1_000_000)
         let result = await model.request(pending())
 
         XCTAssertFalse(result)
@@ -47,7 +47,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testWindowClosedByUserResolvesAsRejectionAndAllowsAnImmediateNextRequest() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
         let firstTask = Task { @MainActor in await model.request(self.pending()) }
         await Task.yield()
 
@@ -70,7 +70,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testWindowClosedByUserAfterAlreadyResolvedDoesNotDoubleResolve() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
         let task = Task { @MainActor in await model.request(self.pending()) }
         await Task.yield()
 
@@ -86,7 +86,7 @@ final class PairingPromptModelTests: XCTestCase {
     }
 
     func testNetworkFinishCannotDismissAnActiveConfirmation() async {
-        let model = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
         let request = pending()
         let task = Task { @MainActor in await model.request(request) }
         await Task.yield()

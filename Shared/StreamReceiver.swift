@@ -430,6 +430,17 @@ final class StreamReceiver: ObservableObject {
     private var mediaSuppressedForPairing = false
     @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
     private var macPairingBrowser: NWBrowser?
+    /// Bumped only after a pairing (any transport) truly finalized: both
+    /// confirmations, commit exchange and the TrustStore pin. Drives the
+    /// success haptic/toast so it is transport-independent.
+    @Published private(set) var pairingSuccessCount = 0
+    @Published private(set) var remotePairingState: RemotePairingUIState = .idle
+    @MainActor private(set) var remotePairingRetry = RemotePairingRetryContext()
+    @MainActor private var remotePairingToken: UUID?
+    @MainActor private var remotePairingDeadline: Task<Void, Never>?
+    @MainActor private var remotePairingAttempt = PairingAttemptTracker()
+    @MainActor private var remotePairingConnection: NWConnection?
+    @MainActor private var remotePairingValidity: PairingAttemptValidity?
     private var listenerHealthy = false
     private var listenerRestartState = StreamListenerRestartState()
     private var connection: NWConnection?
@@ -754,6 +765,8 @@ final class StreamReceiver: ObservableObject {
         self.maxFPS = maxFPS
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
+            self.pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
             self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -807,6 +820,9 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    @MainActor
+    func notePairingSucceeded() { pairingSuccessCount += 1 }
+
     func pairWithMac(_ result: NWBrowser.Result) {
         let expectedPeerID: String? = if case .bonjour(let txt) = result.metadata {
             txt["id"]
@@ -823,6 +839,7 @@ final class StreamReceiver: ObservableObject {
                     localName: serviceName, prompt: pairingPrompt,
                     expectedPeerID: expectedPeerID)
                 await pairingPrompt.finish("Paired with \(paired.peerName)")
+                await notePairingSucceeded()
                 finishExplicitPairing(success: true)
             } catch {
                 await pairingPrompt.finish(error.localizedDescription)
@@ -834,6 +851,114 @@ final class StreamReceiver: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Pairs with a Mac at an explicit host (e.g. Tailscale IP / MagicDNS)
+    /// instead of a Bonjour result. The host is an untrusted routing hint: it
+    /// is saved as the peer's Remote endpoint only after the handshake
+    /// confirmed and pinned the peer, keyed by the confirmed peer ID. A changed
+    /// key for an existing peer is a hard failure.
+    @MainActor
+    func pairWithRemoteHost(_ endpoint: RemotePairingEndpoint) {
+        guard let generation = remotePairingAttempt.begin() else { return }
+        remotePairingRetry.remember(endpoint)
+        let token = UUID()
+        remotePairingToken = token
+        Log.info("remotePairing: attempt generation=\(generation) hostCategory=\(Self.hostCategory(endpoint.host))")
+        remotePairingState = .connecting
+        beginExplicitPairing(peerID: nil)
+        let validity = PairingAttemptValidity()
+        let deadlineFired = PairingFlag()
+        let handshakeReached = PairingFlag()
+        remotePairingValidity = validity
+        let connection = NWConnection(to: endpoint.nwEndpoint, using: .tcp)
+        remotePairingConnection = connection
+        remotePairingDeadline = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(RemotePairingWindow.attemptDeadline * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            deadlineFired.set()
+            validity.invalidate()
+            connection.cancel()
+            self?.pairingPrompt.cancel(ownedBy: token)
+        }
+        Task { @MainActor in
+            var outcome: RemotePairingUIState
+            do {
+                let paired = try await PairingNetwork.runInitiator(
+                    connection: connection, localID: Self.installID,
+                    localName: serviceName, prompt: pairingPrompt,
+                    allowIdentityChange: false, isCurrent: { validity.isValid },
+                    remoteHost: endpoint.host, attemptToken: token,
+                    onHandshakeReached: { handshakeReached.set() })
+                Log.info("remotePairing: attempt generation=\(generation) completed peer=\(paired.peerID)")
+                scheduleTLSListenerRefresh()
+                notePairingSucceeded()
+                outcome = .succeeded
+            } catch {
+                Log.info("remotePairing: attempt generation=\(generation) failed error=\(error)")
+                let kind = RemotePairingFailure.classify(
+                    error, cancelledByUser: !validity.isValid && !deadlineFired.isSet,
+                    deadlineFired: deadlineFired.isSet, handshakeReached: handshakeReached.isSet)
+                outcome = kind.map { .failed($0) } ?? .idle
+            }
+            connection.cancel()
+            // A cancelled/superseded attempt (generation no longer live)
+            // reports nothing and touches no state.
+            guard remotePairingAttempt.finish(generation) else { return }
+            remotePairingDeadline?.cancel(); remotePairingDeadline = nil
+            remotePairingConnection = nil
+            remotePairingValidity = nil
+            remotePairingToken = nil
+            pairingPrompt.cancel(ownedBy: token)
+            remotePairingState = outcome
+            finishExplicitPairing(success: outcome == .succeeded)
+        }
+    }
+
+    /// Cancels the real attempt: invalidates its generation and liveness flag,
+    /// tears down the connection and deadline, and closes any SAS prompt.
+    @MainActor
+    func cancelRemotePairing() {
+        // Goes through the attempt's commit gate: sends an authenticated abort
+        // and is refused if the attempt already reached its commit point.
+        if let token = remotePairingToken, !pairingPrompt.cancelAttempt(token: token) {
+            Log.info("remotePairing: cancel refused, attempt already committing")
+            return
+        }
+        remotePairingDeadline?.cancel(); remotePairingDeadline = nil
+        remotePairingValidity?.invalidate(); remotePairingValidity = nil
+        remotePairingConnection?.cancel(); remotePairingConnection = nil
+        if remotePairingAttempt.active != nil {
+            remotePairingAttempt.cancel()
+            if let token = remotePairingToken { pairingPrompt.cancel(ownedBy: token) }
+            remotePairingToken = nil
+            Log.info("remotePairing: attempt cancelled by user")
+            finishExplicitPairing(success: false)
+        }
+        remotePairingState = .idle
+    }
+
+    /// The Try Again action: a fresh attempt (new generation, connection and
+    /// deadline) to the last attempted host, only after a retryable failure.
+    @MainActor
+    @discardableResult
+    func retryRemotePairing() -> Bool {
+        guard let endpoint = remotePairingRetry.endpointForRetry(state: remotePairingState) else { return false }
+        pairWithRemoteHost(endpoint)
+        return remotePairingAttempt.active != nil
+    }
+
+    /// Dismisses a finished result (failure or success banner) back to idle.
+    @MainActor
+    func acknowledgeRemotePairingResult() {
+        guard remotePairingAttempt.active == nil else { return }
+        remotePairingState = .idle
+    }
+
+    private static func hostCategory(_ host: String) -> String {
+        if host.hasSuffix(".ts.net") { return "magicDNS" }
+        if host.hasPrefix("100.") { return "tailscaleIPv4" }
+        return host.contains(":") ? "ipv6" : (host.first?.isNumber == true ? "ipv4" : "hostname")
     }
 
     private func beginExplicitPairing(peerID: String?) {
@@ -1433,15 +1558,14 @@ final class StreamReceiver: ObservableObject {
                 guard let self, self.pairingListener === listener else { connection.cancel(); return }
                 let localName = self.serviceName
                 let prompt = self.pairingPrompt
-                let autoConfirm = Self.isLoopback(connection.endpoint)
                 Task { [weak self] in
                     defer { connection.cancel() }
                     do {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: Self.installID,
-                            localName: localName, prompt: prompt,
-                            autoConfirm: autoConfirm)
+                            localName: localName, prompt: prompt)
                         await prompt.finish("Paired with \(paired.peerName)")
+                        await self?.notePairingSucceeded()
                         self?.finishExplicitPairing(success: true)
                         self?.scheduleTLSListenerRefresh()
                     } catch {
@@ -1498,12 +1622,6 @@ final class StreamReceiver: ObservableObject {
         }
         browser.start(queue: queue)
         macPairingBrowser = browser
-    }
-
-    private static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
-        let peer = String(describing: endpoint).lowercased()
-        return peer.hasPrefix("127.") || peer.hasPrefix("::1")
-            || peer.hasPrefix("[::1]") || peer.hasPrefix("localhost")
     }
 
     /// Make `conn` the session: replace any existing connection and reset

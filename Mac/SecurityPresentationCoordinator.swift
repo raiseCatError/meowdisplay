@@ -189,14 +189,31 @@ private struct PairingPanelView: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Text(pending.sas).font(.system(.title, design: .monospaced)).bold()
-                    Text("Confirm only if this code matches on both devices.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(spacing: 2) {
+                        Text(PairingCopy.sasTitle).font(.subheadline.weight(.semibold))
+                        Text(PairingCopy.sasHelper).font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                     HStack {
                         Button("Cancel", role: .cancel) { prompt.decide(accept: false) }
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
                             prompt.decide(accept: true)
                         }
                         .keyboardShortcut(.defaultAction)
+                        .disabled(prompt.isAuthenticating)
+                    }
+                }
+                .padding(24)
+            } else if let confirmed = prompt.confirmedLocally {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text(PairingCopy.waitingTitle).font(.headline)
+                    Text(PairingCopy.waitingHelper(
+                        otherDevice: PairingCopy.otherDevice(localIsMac: true, peerName: confirmed.peerName)))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    if !prompt.isCommitting {
+                        Button("Cancel", role: .cancel) { prompt.cancelWaiting() }
                     }
                 }
                 .padding(24)
@@ -205,8 +222,10 @@ private struct PairingPanelView: View {
             }
         }
         .frame(minWidth: 360)
-        .onChange(of: prompt.pending) { _, newValue in
-            if newValue == nil { onResolved() }
+        // Stays open while waiting for the other device; closes only when the
+        // attempt has neither a pending SAS nor a local confirmation.
+        .onChange(of: prompt.pending == nil && prompt.confirmedLocally == nil) { _, ended in
+            if ended { onResolved() }
         }
     }
 }

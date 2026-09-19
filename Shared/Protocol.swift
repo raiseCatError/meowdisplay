@@ -15,7 +15,10 @@ enum WireProtocol {
 
     /// First version that requires pinned mutual TLS for LAN/AWDL media and
     /// supports the transcript-authenticated local pairing protocol.
-    static let securePairingWireVersion = 11
+    // 12: pairing adds the live commit/ack finalization phase and authenticated
+    // abort (a local accept is provisional until the commit exchange). Older
+    // pairing peers (11) are refused at the hello with "update required".
+    static let securePairingWireVersion = 12
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.
@@ -256,6 +259,10 @@ enum WireMessage {
 enum WireCrypto {
     static let tlsPort: UInt16 = 9001
     static let pairingPort: UInt16 = 9002
+    /// Mac-side pairing listener that exists only while the user has
+    /// explicitly opened "Pair over Remote" (see `RemotePairingWindow`).
+    /// Same pairing protocol as `pairingPort`; reachability only, never trust.
+    static let remotePairingPort: UInt16 = 9004
     /// Mac-side pinned-mutual-TLS listener a paired peer "knocks" on to
     /// request that the Mac dial it back — see `RemoteConnectRequestPolicy`
     /// and `SenderController.handleRemoteConnectRequest`. The knock itself

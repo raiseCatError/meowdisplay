@@ -8,6 +8,10 @@ enum PairingError: LocalizedError, Equatable {
     case invalidConfirmation
     case rejected
     case identityChanged
+    case cancelledByPeer
+    case cancelledLocally
+    case ownerAuthenticationFailed
+    case trustStateChanged
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +20,10 @@ enum PairingError: LocalizedError, Equatable {
         case .invalidKey, .invalidConfirmation: "Pairing could not be verified"
         case .rejected: "Pairing was cancelled"
         case .identityChanged: "Device identity changed"
+        case .cancelledByPeer: "Pairing was cancelled on the other device"
+        case .cancelledLocally: "Pairing was cancelled"
+        case .ownerAuthenticationFailed: "Device owner authentication failed"
+        case .trustStateChanged: "Trust changed during pairing. Try again"
         }
     }
 }
@@ -65,6 +73,9 @@ struct PendingPairing: Equatable, Identifiable {
     let peerSPKI: Data
     let sas: String
     var classification: PairingClassification = .newPeer
+    /// This ceremony would create or change the persisted Remote endpoint hint
+    /// for the peer (initiator over Remote). Decided before the user approves.
+    var changesRemoteEndpoint = false
     var id: String { peerID }
 }
 
@@ -167,6 +178,23 @@ struct PairingResult {
                                                                  using: localConfirmationKey)))
     }
 
+    /// Live finalization steps after both SAS confirmations. A confirmation
+    /// alone is provisional: trust is persisted only after the commit/ack
+    /// exchange (see `PairingNetwork`), and an authenticated abort ends it.
+    enum Step: UInt8 { case commit = 0x10, commitAck = 0x11, abort = 0x12 }
+
+    func stepAuthenticator(_ step: Step) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: transcriptHash + Data([step.rawValue]),
+                                             using: localConfirmationKey))
+    }
+
+    func verifyStep(_ step: Step, authenticator: Data) throws {
+        guard HMAC<SHA256>.isValidAuthenticationCode(authenticator,
+                                                     authenticating: transcriptHash + Data([step.rawValue]),
+                                                     using: peerConfirmationKey)
+        else { throw PairingError.invalidConfirmation }
+    }
+
     func verify(_ confirmation: PairingConfirmation) throws {
         let body = transcriptHash + Data([confirmation.accepted ? 1 : 0])
         guard HMAC<SHA256>.isValidAuthenticationCode(confirmation.authenticator,
@@ -234,5 +262,54 @@ enum PairingServiceAssociation {
                                    in records: [PairingServiceRecord<Endpoint>]) -> Endpoint? {
         guard let stableID, UUID(uuidString: stableID) != nil else { return nil }
         return records.first { $0.stableID == stableID }?.endpoint
+    }
+}
+
+/// Pure classification of a presented key against the existing pin.
+enum PairingClassifier {
+    static func classify(_ pending: PendingPairing, existingPin: Data?) -> PendingPairing {
+        var pending = pending
+        switch TrustPinPolicy.decision(existing: existingPin, presented: pending.peerSPKI) {
+        case .new: pending.classification = .newPeer
+        case .match: pending.classification = .rePairSameKey
+        case .identityChanged: pending.classification = .identityChanged
+        }
+        return pending
+    }
+
+    /// Remote pairing never replaces a pin: a changed key is a hard failure
+    /// resolved through the normal Forget / re-pair flow.
+    static func check(_ pending: PendingPairing, allowIdentityChange: Bool) throws {
+        if pending.classification == .identityChanged, !allowIdentityChange {
+            throw PairingError.identityChanged
+        }
+    }
+}
+
+/// The only place trust is written after a handshake. Runs strictly after the
+/// peer's authenticated confirmation verified (so both sides accepted the same
+/// SAS); a stale attempt never persists; the routing hint is saved only once
+/// the pin succeeded and is keyed by the confirmed peer ID.
+enum PairingFinalizer {
+    static func complete(result: PairingResult, pending: PendingPairing,
+                         peerConfirmation: PairingConfirmation, store: PeerTrustStoring,
+                         isCurrent: () -> Bool = { true },
+                         remoteHost: String? = nil, hints: RemoteEndpointHinting? = nil) throws {
+        try result.verify(peerConfirmation)
+        guard isCurrent() else { throw PairingError.rejected }
+        // A same-key re-pair skipped owner auth because the pin existed when the
+        // SAS was shown. If it vanished since, this would silently recreate
+        // trust from a stale classification: refuse instead.
+        if pending.classification == .rePairSameKey,
+           store.pin(peerID: pending.peerID) != pending.peerSPKI {
+            throw PairingError.trustStateChanged
+        }
+        guard store.setPin(peerID: pending.peerID, spki: pending.peerSPKI,
+                           displayName: pending.peerName,
+                           allowIdentityChange: pending.classification == .identityChanged)
+        else { throw PairingError.identityChanged }
+        if let remoteHost, let hints {
+            hints.setEndpoint(remoteHost, port: WireCrypto.remoteRequestPort, forPeerID: pending.peerID)
+        }
     }
 }

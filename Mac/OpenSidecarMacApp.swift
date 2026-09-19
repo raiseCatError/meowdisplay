@@ -613,6 +613,15 @@ final class SenderController: ObservableObject {
     private var receiverPairingBrowser: NWBrowser?
     private var receiverPairingResults: [NWBrowser.Result] = []
     private var pairingListener: NWListener?
+    /// "Pair over Remote": a fixed-port pairing listener that exists only
+    /// while the user has explicitly opened the window (`RemotePairingWindow`).
+    /// Reachability only; SAS confirmation and TrustStore pinning are unchanged.
+    @Published private(set) var remotePairingWindow = RemotePairingWindow()
+    private var remotePairingListener: NWListener?
+    private var remotePairingExpiryTask: Task<Void, Never>?
+    private var remotePairingConnection: NWConnection?
+    private var remotePairingValidity: PairingAttemptValidity?
+    private var remotePairingToken: UUID?
     /// Pinned-mutual-TLS listener a paired peer's authenticated remote
     /// connect-request "knock" arrives on — see `WireCrypto.remoteRequestPort`
     /// and `handleRemoteConnectRequest`.
@@ -690,6 +699,8 @@ final class SenderController: ObservableObject {
 
     init() {
         _ = TrustStore.shared.ownIdentity()
+        pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
+        pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
         startObservingPhysicalDisplayAvailability()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
@@ -816,6 +827,124 @@ final class SenderController: ObservableObject {
             listener.start(queue: .main)
         } catch {
             pairingMessage = "Pairing listener unavailable"
+        }
+    }
+
+    var remotePairingPhase: RemotePairingPhase {
+        .derive(windowOpen: remotePairingWindow.isOpen(now: Date()),
+                attemptInProgress: remotePairingWindow.attemptInProgress,
+                awaitingConfirmation: pairingPrompt.pending != nil)
+    }
+
+    func openRemotePairing() {
+        guard let localID = TrustStore.shared.installID() else {
+            pairingMessage = "Pairing unavailable — secure identity could not be loaded"
+            return
+        }
+        closeRemotePairing(reason: "reopen")
+        do {
+            let parameters = NWParameters.tcp
+            parameters.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: parameters,
+                                          on: NWEndpoint.Port(rawValue: WireCrypto.remotePairingPort)!)
+            remotePairingListener = listener
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, self.remotePairingListener === listener else {
+                        connection.cancel(); return
+                    }
+                    await self.runRemotePairingAttempt(connection, localID: localID)
+                }
+            }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, self.remotePairingListener === listener else { return }
+                    if case .failed(let error) = state {
+                        Log.info("remotePairing: listener failed: \(error)")
+                        self.closeRemotePairing(reason: "listenerFailed")
+                        self.pairingMessage = "Couldn't start Pair over Remote"
+                    }
+                }
+            }
+            remotePairingWindow.open(now: Date())
+            listener.start(queue: .main)
+            remotePairingExpiryTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(RemotePairingWindow.openDuration * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.closeRemotePairing(reason: "expired")
+            }
+            pairingMessage = "Pair over Remote is on"
+            Log.info("remotePairing: window opened")
+        } catch {
+            Log.info("remotePairing: listener could not be created: \(error)")
+            pairingMessage = "Couldn't start Pair over Remote"
+        }
+    }
+
+    func closeRemotePairing(reason: String = "userClosed") {
+        let wasActive = remotePairingListener != nil
+        remotePairingExpiryTask?.cancel(); remotePairingExpiryTask = nil
+        remotePairingListener?.cancel(); remotePairingListener = nil
+        remotePairingValidity?.invalidate(); remotePairingValidity = nil
+        if remotePairingWindow.attemptInProgress {
+            remotePairingConnection?.cancel()
+            if let token = remotePairingToken { pairingPrompt.cancel(ownedBy: token) }
+        }
+        remotePairingWindow.close()
+        if wasActive {
+            Log.info("remotePairing: window closed reason=\(reason)")
+            if reason != "reopen" && reason != "success", pairingMessage == "Pair over Remote is on" {
+                pairingMessage = reason == "expired" ? "Pair over Remote turned off" : nil
+            }
+        }
+    }
+
+    private func runRemotePairingAttempt(_ connection: NWConnection, localID: String) async {
+        let admission = remotePairingWindow.admit(now: Date())
+        guard admission == .admitted else {
+            Log.info("remotePairing: attempt rejected admission=\(admission)")
+            connection.cancel(); return
+        }
+        Log.info("remotePairing: handshake started")
+        let validity = PairingAttemptValidity()
+        remotePairingValidity = validity
+        remotePairingConnection = connection
+        let token = UUID()
+        remotePairingToken = token
+        let deadline = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(RemotePairingWindow.attemptDeadline * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            Log.info("remotePairing: attempt deadline reached")
+            validity.invalidate()
+            connection.cancel()
+            self?.pairingPrompt.cancel(ownedBy: token)
+        }
+        var success = false
+        do {
+            let paired = try await PairingNetwork.runResponder(
+                connection: connection, localID: localID,
+                localName: Host.current().localizedName ?? "Mac",
+                prompt: pairingPrompt, allowIdentityChange: false,
+                isCurrent: { validity.isValid }, attemptToken: token)
+            success = true
+            finishExplicitPairing(peerID: paired.peerID, success: true)
+            pairingMessage = "Paired with \(paired.peerName)"
+            Log.info("remotePairing: completed")
+        } catch {
+            Log.info("remotePairing: failed error=\(error)")
+            if pairingPrompt.pending == nil {
+                finishAllExplicitPairing(success: false)
+                pairingMessage = RemotePairingFailure.message(for: error)
+            }
+        }
+        deadline.cancel()
+        connection.cancel()
+        if remotePairingValidity === validity {
+            remotePairingConnection = nil
+            remotePairingToken = nil
+            remotePairingWindow.finishAttempt(success: success, now: Date())
+            if success { closeRemotePairing(reason: "success") }
+            objectWillChange.send()
         }
     }
 
@@ -1986,9 +2115,16 @@ final class SenderController: ObservableObject {
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
             }
-            if session.onUSB, !session.usbPairingAttempted,
+            // USB discovery and dialing are automatic; trust is not. A peer that
+            // is already pinned just connects (pinned TLS decides; a changed
+            // key fails there). Only an unpinned peer runs the normal SAS
+            // ceremony, and it can never replace an existing pin.
+            if session.onUSB,
                let udid = session.usbUDID, let peerID = info.id,
-               info.protocolVersion >= WireProtocol.securePairingWireVersion {
+               info.protocolVersion >= WireProtocol.securePairingWireVersion,
+               USBPairingPolicy.shouldBeginPairing(
+                   hasPin: TrustStore.shared.hasPin(peerID: peerID),
+                   alreadyAttemptedThisSession: session.usbPairingAttempted) {
                 session.usbPairingAttempted = true
                 Task { [weak self, weak session] in
                     guard let self, let session else { return }
@@ -2004,7 +2140,7 @@ final class SenderController: ObservableObject {
                             connection: connection, localID: localID,
                             localName: Host.current().localizedName ?? "Mac",
                             prompt: self.pairingPrompt, expectedPeerID: peerID,
-                            autoConfirm: true)
+                            allowIdentityChange: USBPairingPolicy.allowIdentityChange)
                         guard self.owns(session) else { return }
                         self.pairingMessage = "Paired with \(paired.peerName)"
                     } catch {

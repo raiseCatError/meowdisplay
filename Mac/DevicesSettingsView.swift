@@ -89,6 +89,22 @@ struct DevicesSettingsView: View {
                 }
             }
 
+            Section("Pair over Remote") {
+                switch controller.remotePairingPhase {
+                case .off:
+                    Text("Let a device on Tailscale or another reachable address pair with this Mac, for about 3 minutes. Both devices must confirm the same code.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Open Pair over Remote") { controller.openRemotePairing() }
+                case .available, .inProgress, .awaitingConfirmation:
+                    Text(controller.remotePairingPhase == .available
+                         ? "Pair over Remote is on. Enter this Mac's Tailscale address on the other device."
+                         : "Pairing in progress…")
+                        .font(.caption)
+                    Button("Turn Off") { controller.closeRemotePairing() }
+                }
+            }
+
             Section("Nearby") {
                 // Only genuinely unpaired devices — a Known Device that
                 // happens to also be discoverable is reachable through
