@@ -13,6 +13,7 @@ final class VirtualDisplay {
     private(set) var pointsHigh: Int
     private var refreshRate: Int
 
+    private var hidpiBackoff = HiDPIEnforcementBackoff()
     private var restoreTarget: CGPoint?
     private var restoreUntil: Date
     private var lastReportedOrigin: CGPoint?
@@ -135,6 +136,7 @@ final class VirtualDisplay {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
         self.refreshRate = mode
+        hidpiBackoff.reset()
 
         if let origin {
             var config: CGDisplayConfigRef?
@@ -173,22 +175,38 @@ final class VirtualDisplay {
               let hidpi = modes.first(where: {
                   $0.width == pointsWide && $0.pixelWidth == pointsWide * 2
               }) else {
-            if recover {
+            if recover, hidpiBackoff.shouldAttempt(at: Date()) {
                 Log.info("@2x mode vanished from display \(display.displayID) — re-applying settings")
                 _ = display.apply(settings)
+                noteHiDPIFailure()
             }
             return false
         }
         if let current = CGDisplayCopyDisplayMode(display.displayID),
            current.width == hidpi.width, current.pixelWidth == hidpi.pixelWidth {
+            hidpiBackoff.reset()
             return true
         }
+        guard hidpiBackoff.shouldAttempt(at: Date()) else { return false }
         var config: CGDisplayConfigRef?
         CGBeginDisplayConfiguration(&config)
         CGConfigureDisplayWithDisplayMode(config, display.displayID, hidpi, nil)
         let err = CGCompleteDisplayConfiguration(config, .permanently)
         Log.info("HiDPI mode (re)selected: \(hidpi.width)x\(hidpi.height)@2x (result \(err.rawValue))")
-        return err == .success
+        if err == .success {
+            hidpiBackoff.reset()
+            return true
+        }
+        noteHiDPIFailure()
+        return false
+    }
+
+    private func noteHiDPIFailure() {
+        if hidpiBackoff.recordFailure(at: Date()) {
+            Log.info("HiDPI enforcement on display \(display.displayID) failed "
+                + "\(HiDPIEnforcementBackoff.failureThreshold) times in a row — "
+                + "backing off, probing every \(Int(HiDPIEnforcementBackoff.probeInterval))s")
+        }
     }
 
     /// Arrangement restore + observation (#116). For the first few seconds,

@@ -178,6 +178,7 @@ targets:
       - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
       - Mac/DisplayHealth.swift
+      - Mac/HiDPIEnforcementBackoff.swift
       - Mac/RouteArbitration.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
