@@ -58,7 +58,7 @@ struct RemoteEndpointEditorView: View {
 
     @State private var peerID = ""
     @State private var host = ""
-    @State private var port = "9001"
+    @State private var port = String(WireCrypto.remoteRequestPort)
     @State private var errorMessage: String?
     @State private var savedConfirmation = false
 
@@ -134,7 +134,7 @@ struct RemoteEndpointEditorView: View {
         savedConfirmation = false
         guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
             host = ""
-            port = "9001"
+            port = String(WireCrypto.remoteRequestPort)
             return
         }
         host = hint.host
@@ -170,7 +170,7 @@ struct RemoteEndpointEditorView: View {
     private func remove() {
         RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
         host = ""
-        port = "9001"
+        port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil
         savedConfirmation = false
     }
