@@ -3,14 +3,27 @@ import Foundation
 /// One pairing frame. `authenticator` carries the role-bound HMAC for the
 /// commit / commitAck / abort steps (see `PairingResult.Step`).
 struct PairingEnvelope: Codable {
-    enum Kind: String, Codable { case hello, confirmation, commit, commitAck, abort }
+    /// `helloCommit` / `hello` / `helloReveal` are the v13 pre-SAS ceremony,
+    /// strictly ordered: initiator commit → responder hello → initiator
+    /// reveal. They are deliberately distinct from `commit`/`commitAck`,
+    /// which remain the later, unrelated live trust-finalization steps (see
+    /// `PairingResult.Step`) — a cryptographic hello commitment is not the
+    /// authenticated trust commit.
+    enum Kind: String, Codable { case helloCommit, hello, helloReveal, confirmation, commit, commitAck, abort }
     let kind: Kind
     let hello: PairingHello?
     let confirmation: PairingConfirmation?
     var authenticator: Data? = nil
+    var helloCommitment: Data? = nil
 
+    static func helloCommit(_ commitment: Data) -> Self {
+        .init(kind: .helloCommit, hello: nil, confirmation: nil, helloCommitment: commitment)
+    }
     static func hello(_ value: PairingHello) -> Self {
         .init(kind: .hello, hello: value, confirmation: nil)
+    }
+    static func helloReveal(_ value: PairingHello) -> Self {
+        .init(kind: .helloReveal, hello: value, confirmation: nil)
     }
     static func confirmation(_ value: PairingConfirmation) -> Self {
         .init(kind: .confirmation, hello: nil, confirmation: value)

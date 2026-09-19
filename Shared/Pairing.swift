@@ -12,6 +12,8 @@ enum PairingError: LocalizedError, Equatable {
     case cancelledLocally
     case ownerAuthenticationFailed
     case trustStateChanged
+    case commitmentMismatch
+    case tooManyAttempts
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +26,8 @@ enum PairingError: LocalizedError, Equatable {
         case .cancelledLocally: "Pairing was cancelled"
         case .ownerAuthenticationFailed: "Device owner authentication failed"
         case .trustStateChanged: "Trust changed during pairing. Try again"
+        case .commitmentMismatch: "Pairing could not be verified"
+        case .tooManyAttempts: "Too many pairing attempts. Try again in 30 seconds."
         }
     }
 }
@@ -39,7 +43,7 @@ struct PairingHello: Codable, Equatable {
     let nonce: Data
 
     func validate() throws {
-        guard version == WireProtocol.securePairingWireVersion,
+        guard version == WireProtocol.pairingVersion,
               UUID(uuidString: deviceID) != nil,
               !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               displayName.utf8.count <= 128,
@@ -47,13 +51,63 @@ struct PairingHello: Codable, Equatable {
               ephemeralPublicKey.count == 65,
               nonce.count == 32,
               (try? P256.KeyAgreement.PublicKey(x963Representation: ephemeralPublicKey)) != nil
-        else { throw version == WireProtocol.securePairingWireVersion ? PairingError.malformedMessage : .unsupportedVersion }
+        else { throw version == WireProtocol.pairingVersion ? PairingError.malformedMessage : .unsupportedVersion }
     }
 }
 
 struct PairingConfirmation: Codable, Equatable {
     let accepted: Bool
     let authenticator: Data
+}
+
+/// Canonical, unambiguous byte encoding shared by the hello commitment and the
+/// pairing transcript — never JSON, whose field order/whitespace/escaping
+/// isn't a stable security boundary. Every variable-length field is prefixed
+/// with its length (`lp`), so no ambiguous concatenation of two fields can
+/// collide with a different split of the same bytes.
+enum PairingCanonical {
+    static func lp(_ data: Data) -> Data {
+        var length = UInt32(data.count).bigEndian
+        var out = Data()
+        withUnsafeBytes(of: &length) { out.append(contentsOf: $0) }
+        out.append(data)
+        return out
+    }
+
+    /// Constant-time byte comparison — timing must not leak how much of a
+    /// commitment matched.
+    static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for (x, y) in zip(a, b) { diff |= x ^ y }
+        return diff == 0
+    }
+}
+
+/// The initiator's hello commitment: binds the initiator to its real hello
+/// (identity, ephemeral key, nonce) before the responder has seen it, so the
+/// responder cannot choose its own hello adaptively to grind the SAS. The
+/// responder must send its own hello before the initiator ever reveals the
+/// committed one.
+enum PairingHelloCommitment {
+    private static let domain = "MeowDisplay-Pairing-HelloCommit-v13"
+
+    static func compute(initiatorHello hello: PairingHello) -> Data {
+        var data = PairingCanonical.lp(Data(domain.utf8))
+        data.append(PairingHandshake.Role.initiator.rawValue)
+        var version = UInt32(hello.version).bigEndian
+        withUnsafeBytes(of: &version) { data.append(contentsOf: $0) }
+        data.append(PairingCanonical.lp(Data(hello.deviceID.utf8)))
+        data.append(PairingCanonical.lp(Data(hello.displayName.utf8)))
+        data.append(PairingCanonical.lp(hello.identitySPKI))
+        data.append(PairingCanonical.lp(hello.ephemeralPublicKey))
+        data.append(PairingCanonical.lp(hello.nonce))
+        return Data(SHA256.hash(data: data))
+    }
+
+    static func verify(_ commitment: Data, revealedInitiatorHello hello: PairingHello) -> Bool {
+        commitment.count == 32 && PairingCanonical.constantTimeEqual(commitment, compute(initiatorHello: hello))
+    }
 }
 
 /// How an incoming/outgoing pairing request relates to existing trust for
@@ -95,7 +149,7 @@ struct PairingHandshake {
         self.role = role
         self.ephemeralKey = ephemeralKey
         localHello = PairingHello(
-            version: WireProtocol.securePairingWireVersion,
+            version: WireProtocol.pairingVersion,
             deviceID: deviceID,
             displayName: displayName,
             identitySPKI: identitySPKI,
@@ -119,7 +173,7 @@ struct PairingHandshake {
         let root = shared.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: transcriptHash,
-            sharedInfo: Data("OpenDisplay pairing v1".utf8),
+            sharedInfo: Data("OpenDisplay pairing v13".utf8),
             outputByteCount: 32)
         let sasKey = HKDF<SHA256>.deriveKey(inputKeyMaterial: root,
                                             salt: Data("sas".utf8),
@@ -146,22 +200,18 @@ struct PairingHandshake {
     }
 
     private static func transcript(initiator: PairingHello, responder: PairingHello) -> Data {
-        var data = Data("OpenDisplay-Pairing-Transcript-v1".utf8)
-        for hello in [initiator, responder] {
-            append(Data(String(hello.version).utf8), to: &data)
-            append(Data(hello.deviceID.utf8), to: &data)
-            append(Data(hello.displayName.utf8), to: &data)
-            append(hello.identitySPKI, to: &data)
-            append(hello.ephemeralPublicKey, to: &data)
-            append(hello.nonce, to: &data)
+        var data = PairingCanonical.lp(Data("OpenDisplay-Pairing-Transcript-v13".utf8))
+        for (role, hello) in [(Role.initiator, initiator), (Role.responder, responder)] {
+            data.append(role.rawValue)
+            var version = UInt32(hello.version).bigEndian
+            withUnsafeBytes(of: &version) { data.append(contentsOf: $0) }
+            data.append(PairingCanonical.lp(Data(hello.deviceID.utf8)))
+            data.append(PairingCanonical.lp(Data(hello.displayName.utf8)))
+            data.append(PairingCanonical.lp(hello.identitySPKI))
+            data.append(PairingCanonical.lp(hello.ephemeralPublicKey))
+            data.append(PairingCanonical.lp(hello.nonce))
         }
         return data
-    }
-
-    private static func append(_ field: Data, to data: inout Data) {
-        var length = UInt32(field.count).bigEndian
-        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
-        data.append(field)
     }
 }
 

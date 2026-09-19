@@ -81,6 +81,12 @@ struct PhoneInfo: Decodable {
                           // across USB and WiFi
     let pv: Int?          // receiver protocol version (issue #132); absent on
                           // every pre-handshake install → treat as protocol 1
+    let pp: Int?          // pairing-protocol-version hint (unauthenticated,
+                          // separate from `pv`/media version — see
+                          // `WireProtocol.pairingVersion`'s doc comment).
+                          // Early UX only; the in-band v13 ceremony is the
+                          // real pairing-compatibility decision and fails
+                          // closed regardless of this field.
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels

@@ -462,4 +462,164 @@ final class RemotePairingTests: XCTestCase {
         XCTAssertFalse(accepted)
         XCTAssertFalse(cancelled.isSet, "rejection already ends the attempt via the network layer")
     }
+
+    // MARK: - v13 responder anti-reroll throttle
+
+    /// Extracts the ownership token from an `.admitted` result, failing the
+    /// test if the throttle refused admission.
+    private func admittedToken(_ admission: PairingCommitThrottle.Admission,
+                               file: StaticString = #filePath, line: UInt = #line) -> UInt64 {
+        guard case .admitted(let token) = admission else {
+            XCTFail("expected .admitted, got \(admission)", file: file, line: line)
+            return .max
+        }
+        return token
+    }
+
+    func testThrottleAdmitsOneUnrevealedAttemptAtATime() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        _ = admittedToken(throttle.admitCommitment(now: now))
+        XCTAssertEqual(throttle.admitCommitment(now: now), .busy, "a second commit while unrevealed is refused")
+    }
+
+    func testThrottleFailureCountsTowardCooldownAfterThreeFailures() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        for _ in 0..<(PairingCommitThrottle.failuresBeforeCooldown - 1) {
+            _ = admittedToken(throttle.admitCommitment(now: now))
+            throttle.revealFailed(now: now)
+        }
+        _ = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealFailed(now: now)
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown)
+    }
+
+    func testThrottleCooldownExpiresAfterItsDuration() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        for _ in 0..<PairingCommitThrottle.failuresBeforeCooldown {
+            _ = throttle.admitCommitment(now: now)
+            throttle.revealFailed(now: now)
+        }
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown)
+        let later = now.addingTimeInterval(PairingCommitThrottle.cooldownDuration + 1)
+        _ = admittedToken(throttle.admitCommitment(now: later))
+    }
+
+    /// A successful reveal releases the single-flight slot but must NOT clear
+    /// prior failure history: a cheap self-consistent commit/reveal must not
+    /// let an attacker reset the anti-reroll cooldown while still grinding.
+    func testSuccessfulRevealDoesNotClearFailureHistory() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        // Two failed unrevealed attempts.
+        _ = throttle.admitCommitment(now: now)
+        throttle.revealFailed(now: now)
+        _ = throttle.admitCommitment(now: now)
+        throttle.revealFailed(now: now)
+        // One valid self-consistent reveal.
+        _ = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealSucceeded()
+        // The next failed unrevealed attempt trips the cooldown: the
+        // failure count was never reset by the reveal success.
+        _ = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealFailed(now: now)
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown,
+                       "the reveal success must not have reset consecutiveFailures")
+    }
+
+    /// A genuinely completed pairing (the `pairingSucceeded` hook, fired only
+    /// after authenticated trust completion) DOES clear prior failure
+    /// history, and does so for the same admitted attempt.
+    func testFullPairingSuccessClearsFailureHistory() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        _ = throttle.admitCommitment(now: now)
+        throttle.revealFailed(now: now)
+        let token = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealSucceeded()
+        throttle.pairingSucceeded(token: token)
+        // Two more failures after a genuine success must not trip the
+        // 3-failure cooldown on the third attempt from a fresh state.
+        _ = throttle.admitCommitment(now: now)
+        throttle.revealFailed(now: now)
+        _ = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealFailed(now: now)
+        XCTAssertEqual(throttle.admitCommitment(now: now), .admitted(token: token + 3))
+    }
+
+    /// A stale success token (from an attempt superseded by a newer
+    /// admission) must not erase failures the newer attempt has accumulated.
+    func testStalePairingSuccessCannotClearNewerFailures() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        let staleToken = admittedToken(throttle.admitCommitment(now: now))
+        throttle.revealSucceeded()
+        // A newer commitment is admitted and fails three times.
+        for _ in 0..<PairingCommitThrottle.failuresBeforeCooldown {
+            _ = throttle.admitCommitment(now: now)
+            throttle.revealFailed(now: now)
+        }
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown)
+        // The stale attempt's late success must not lift the cooldown.
+        throttle.pairingSucceeded(token: staleToken)
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown,
+                       "a stale success token must not clear a newer attempt's failures")
+    }
+
+    func testThrottleGateActorSerializesAcrossTransports() async {
+        let gate = PairingCommitThrottleGate()
+        await gate.resetForTesting()
+        let admission = await gate.admitCommitment()
+        guard case .admitted = admission else {
+            return XCTFail("a fresh device/listener-scoped gate admits the first attempt")
+        }
+        let second = await gate.admitCommitment()
+        XCTAssertEqual(second, .busy, "the same gate is shared across LAN/Remote/USB responder paths")
+        await gate.revealFailed()
+    }
+
+    /// The gate's `pairingSucceeded` mirrors the value type: it forgives
+    /// failure history only for the admitted attempt's own token.
+    func testThrottleGatePairingSucceededHonorsToken() async {
+        let gate = PairingCommitThrottleGate()
+        await gate.resetForTesting()
+        guard case .admitted(let staleToken) = await gate.admitCommitment() else {
+            return XCTFail("expected admission")
+        }
+        await gate.revealFailed()
+        // A newer attempt is admitted before the stale attempt's late
+        // success arrives, so `staleToken` no longer identifies the current
+        // attempt.
+        guard case .admitted(let secondToken) = await gate.admitCommitment() else {
+            return XCTFail("expected admission")
+        }
+        await gate.revealFailed()
+        guard case .admitted = await gate.admitCommitment() else {
+            return XCTFail("expected admission")
+        }
+        await gate.revealFailed() // third consecutive failure trips the cooldown
+        await gate.pairingSucceeded(token: staleToken)
+        let fourth = await gate.admitCommitment()
+        XCTAssertEqual(fourth, .coolingDown, "stale pairingSucceeded must not have lifted the cooldown")
+        await gate.pairingSucceeded(token: secondToken)
+    }
+
+    // MARK: - v13 pairing/media version decoupling
+
+    func testPairingVersionIsDecoupledFromMediaWireVersion() {
+        XCTAssertEqual(WireProtocol.pairingVersion, 13)
+        XCTAssertEqual(WireProtocol.minPairingVersion, 13)
+        // Media protocol version 19 remains independently valid and unrelated.
+        XCTAssertEqual(WireProtocol.version, 19)
+        XCTAssertNotEqual(WireProtocol.pairingVersion, WireProtocol.version)
+    }
+
+    func testOldOrMissingHelloVersionFailsClosedRegardlessOfMediaVersion() {
+        let old = PairingHello(version: WireProtocol.pairingVersion - 1, deviceID: UUID().uuidString,
+                               displayName: "Phone", identitySPKI: Data([1]),
+                               ephemeralPublicKey: Data(count: 65), nonce: Data(count: 32))
+        XCTAssertThrowsError(try old.validate()) { XCTAssertEqual($0 as? PairingError, .unsupportedVersion) }
+    }
 }

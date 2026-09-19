@@ -13,12 +13,24 @@ enum WireProtocol {
     /// The protocol version this build speaks.
     static let version = 19
 
-    /// First version that requires pinned mutual TLS for LAN/AWDL media and
-    /// supports the transcript-authenticated local pairing protocol.
-    // 12: pairing adds the live commit/ack finalization phase and authenticated
-    // abort (a local accept is provisional until the commit exchange). Older
-    // pairing peers (11) are refused at the hello with "update required".
-    static let securePairingWireVersion = 12
+    /// The pairing protocol's own version, decoupled from `version` (the
+    /// media/streaming wire protocol above). Pairing and media evolve on
+    /// independent schedules — never compare `pairingVersion`/
+    /// `minPairingVersion` against `version`/`assumedWhenAbsent`, and never
+    /// compare `version` against a pairing constant. Bumping this requires a
+    /// new domain-separated ceremony in `Pairing.swift`, not just a number.
+    ///
+    /// v13: commit-then-reveal hello ceremony (`helloCommit` / `hello` /
+    /// `helloReveal`) closes a SAS-grinding vulnerability in v12, where a
+    /// malicious responder could see the initiator's real hello before
+    /// choosing its own and bias the derived SAS. v12 peers are refused at
+    /// the hello with "update required" — there is no v12 fallback.
+    static let pairingVersion = 13
+
+    /// Oldest pairing-protocol version this build will complete a ceremony
+    /// with. Equal to `pairingVersion`: pairing fails closed on any mismatch,
+    /// by design (see `pairingVersion`'s doc comment).
+    static let minPairingVersion = 13
 
     /// Protocol version that introduced Apple Pencil / proximity wire messages.
     /// Peers below this get pencil input as legacy `touch` events.

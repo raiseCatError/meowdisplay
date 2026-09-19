@@ -40,17 +40,104 @@ final class PairingTests: XCTestCase {
     }
 
     func testMalformedAndOldHelloAreRejected() {
-        let malformed = PairingHello(version: WireProtocol.securePairingWireVersion,
+        let malformed = PairingHello(version: WireProtocol.pairingVersion,
             deviceID: "not-a-uuid", displayName: "Phone", identitySPKI: Data(),
             ephemeralPublicKey: Data(), nonce: Data())
         XCTAssertThrowsError(try malformed.validate())
-        let old = PairingHello(version: WireProtocol.securePairingWireVersion - 1,
+        let old = PairingHello(version: WireProtocol.pairingVersion - 1,
             deviceID: UUID().uuidString, displayName: "Phone", identitySPKI: Data([1]),
             ephemeralPublicKey: responderKey.publicKey.x963Representation,
             nonce: Data(repeating: 1, count: 32))
         XCTAssertThrowsError(try old.validate()) {
             XCTAssertEqual($0 as? PairingError, .unsupportedVersion)
         }
+    }
+
+    // MARK: - v13 hello commitment (canonical encoding, grinding fix)
+
+    private func makeInitiatorHello(deviceID: String = "11111111-1111-1111-1111-111111111111",
+                                    displayName: String = "Mac",
+                                    identitySPKI: Data = Data("mac identity".utf8),
+                                    ephemeralKey: P256.KeyAgreement.PrivateKey? = nil,
+                                    nonce: Data = Data(repeating: 3, count: 32)) -> PairingHello {
+        PairingHello(version: WireProtocol.pairingVersion, deviceID: deviceID, displayName: displayName,
+                     identitySPKI: identitySPKI,
+                     ephemeralPublicKey: (ephemeralKey ?? initiatorKey).publicKey.x963Representation,
+                     nonce: nonce)
+    }
+
+    func testCommitmentIsDeterministic() {
+        let hello = makeInitiatorHello()
+        XCTAssertEqual(PairingHelloCommitment.compute(initiatorHello: hello),
+                       PairingHelloCommitment.compute(initiatorHello: hello))
+    }
+
+    func testCommitmentVerifiesAgainstTheExactRevealedHello() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        XCTAssertTrue(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: hello))
+    }
+
+    func testCommitmentRejectsChangedDeviceID() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        let changed = makeInitiatorHello(deviceID: "33333333-3333-3333-3333-333333333333")
+        XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
+    }
+
+    func testCommitmentRejectsChangedDisplayName() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        let changed = makeInitiatorHello(displayName: "Different")
+        XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
+    }
+
+    func testCommitmentRejectsChangedSPKI() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        let changed = makeInitiatorHello(identitySPKI: Data("other identity".utf8))
+        XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
+    }
+
+    func testCommitmentRejectsChangedEphemeralKey() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        let otherKey = try! P256.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 9, count: 32))
+        let changed = makeInitiatorHello(ephemeralKey: otherKey)
+        XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
+    }
+
+    func testCommitmentRejectsChangedNonce() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        let changed = makeInitiatorHello(nonce: Data(repeating: 7, count: 32))
+        XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
+    }
+
+    /// The commitment is computed with a fixed `.initiator` role byte; a
+    /// responder-role commitment over identical field bytes must not verify
+    /// against it — the role byte binds the domain, not just the payload.
+    func testCommitmentDoesNotCollideAcrossDomainLabelOrRole() {
+        let hello = makeInitiatorHello()
+        let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
+        var tampered = commitment
+        tampered[0] ^= 0xFF
+        XCTAssertFalse(PairingHelloCommitment.verify(tampered, revealedInitiatorHello: hello))
+    }
+
+    /// Two fields' length-prefixed concatenation cannot be re-split to
+    /// collide with a different pair of fields carrying the same total bytes.
+    func testCanonicalLengthPrefixingPreventsFieldBoundaryAmbiguity() {
+        let a = makeInitiatorHello(displayName: "AB", identitySPKI: Data("C".utf8))
+        let b = makeInitiatorHello(displayName: "A", identitySPKI: Data("BC".utf8))
+        XCTAssertNotEqual(PairingHelloCommitment.compute(initiatorHello: a),
+                          PairingHelloCommitment.compute(initiatorHello: b))
+    }
+
+    func testShortCommitmentIsRejectedNotJustMismatched() {
+        let hello = makeInitiatorHello()
+        XCTAssertFalse(PairingHelloCommitment.verify(Data(repeating: 0, count: 16),
+                                                      revealedInitiatorHello: hello))
     }
 
     func testPinCannotBeSilentlyOverwrittenAndForgetIsPeerOnly() {

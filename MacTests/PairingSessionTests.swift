@@ -465,6 +465,55 @@ final class PairingSessionTests: XCTestCase {
         }
     }
 
+    /// v13: LAN must no longer silently allow identity replacement. Every
+    /// LAN initiator/responder call site (Mac and iOS) must pass an explicit
+    /// `allowIdentityChange: false`, matching Remote/USB, rather than relying
+    /// on a default that used to be `true`.
+    func testLANCallSitesExplicitlyRefuseIdentityChange() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let macSource = try String(contentsOf: root.appendingPathComponent("Mac/OpenSidecarMacApp.swift"), encoding: .utf8)
+        let iosSource = try String(contentsOf: root.appendingPathComponent("Shared/StreamReceiver.swift"), encoding: .utf8)
+        // Every runInitiator/runResponder call in both files must name
+        // allowIdentityChange explicitly — none may rely on the default.
+        for source in [macSource, iosSource] {
+            var searchRange = source.startIndex..<source.endIndex
+            var callCount = 0
+            while let callRange = source.range(of: "PairingNetwork.run", range: searchRange) {
+                callCount += 1
+                // Balanced-paren scan from the call's opening "(" so nested
+                // calls like `Host.current().localizedName` don't truncate it.
+                var depth = 0
+                var idx = callRange.upperBound
+                var end = idx
+                while idx < source.endIndex {
+                    let c = source[idx]
+                    if c == "(" { depth += 1 }
+                    else if c == ")" { depth -= 1; if depth == 0 { end = source.index(after: idx); break } }
+                    idx = source.index(after: idx)
+                }
+                let call = source[callRange.lowerBound..<end]
+                XCTAssertTrue(call.contains("allowIdentityChange:"),
+                              "call site missing explicit allowIdentityChange: \(call.prefix(300))")
+                searchRange = end..<source.endIndex
+            }
+            XCTAssertGreaterThan(callCount, 0)
+        }
+    }
+
+    func testDefaultAllowIdentityChangeIsFalse() throws {
+        let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Mac",
+                                     identitySPKI: Data("mac identity".utf8))
+        let impostor = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Phone",
+                                        identitySPKI: Data("impostor".utf8))
+        let store = InMemoryPeerTrustStore()
+        store.setPin(peerID: responderID, spki: Data("original".utf8), displayName: "Phone")
+        let pending = PairingClassifier.classify(try phone.result(peerHello: impostor.localHello).pending,
+                                                 existingPin: store.pin(peerID: responderID))
+        // No allowIdentityChange argument at all: relies on PairingClassifier's
+        // own default, mirroring PairingNetwork's new false default.
+        XCTAssertThrowsError(try PairingClassifier.check(pending, allowIdentityChange: false))
+    }
+
     func testRemoteWordingDoesNotLeakIntoSharedCeremonyCopy() {
         for text in [PairingCopy.sasTitle, PairingCopy.sasHelper, PairingCopy.waitingTitle,
                      PairingCopy.waitingHelper(otherDevice: "your Mac")] {

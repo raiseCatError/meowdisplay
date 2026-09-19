@@ -663,6 +663,10 @@ final class StreamReceiver: ObservableObject {
         var txt = NWTXTRecord()
         txt["id"] = Self.installID
         txt["pv"] = String(advertisedProtocolVersion)
+        // Unauthenticated pairing-protocol-version hint, additive and
+        // separate from `pv` (the media wire version) — early UX only, see
+        // `WireProtocol.pairingVersion`'s doc comment.
+        txt["pp"] = String(WireProtocol.pairingVersion)
         return NWListener.Service(name: serviceName, type: "_opendisplay-pair._tcp",
                                   domain: nil, txtRecord: txt)
     }
@@ -826,7 +830,7 @@ final class StreamReceiver: ObservableObject {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: Self.installID,
                     localName: serviceName, prompt: pairingPrompt,
-                    expectedPeerID: expectedPeerID)
+                    expectedPeerID: expectedPeerID, allowIdentityChange: false)
                 await pairingPrompt.finish("Paired with \(paired.peerName)")
                 await notePairingSucceeded()
                 finishExplicitPairing(success: true)
@@ -1297,7 +1301,7 @@ final class StreamReceiver: ObservableObject {
                     do {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: Self.installID,
-                            localName: localName, prompt: prompt)
+                            localName: localName, prompt: prompt, allowIdentityChange: false)
                         await prompt.finish("Paired with \(paired.peerName)")
                         await self?.notePairingSucceeded()
                         self?.finishExplicitPairing(success: true)
@@ -1810,6 +1814,7 @@ final class StreamReceiver: ObservableObject {
             "device": deviceKind,
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
+            "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
         ]
         if deviceKind != "Mac" {
             hello["trayEnabled"] = announcedTrayEnabled

@@ -81,6 +81,98 @@ struct RemotePairingWindow: Equatable {
     }
 }
 
+/// Responder-side anti-reroll throttle for the pre-reveal (`helloCommit` →
+/// `hello` → `helloReveal`) ceremony phase, shared by every transport's
+/// responder path (LAN, Remote, USB) since one-sided commit/reveal still lets
+/// a malicious responder abort and retry online unless the responder itself
+/// limits attempts. Scoped to the pairing listener/device, never to a source
+/// address — a network attacker can trivially spoof or rotate that. Pure
+/// value type with an injected clock, exactly like `RemotePairingWindow`.
+struct PairingCommitThrottle: Equatable {
+    static let revealDeadline: TimeInterval = 5
+    static let failuresBeforeCooldown = 3
+    static let cooldownDuration: TimeInterval = 30
+
+    /// `token` identifies the admitted attempt, so a later full-pairing
+    /// success can prove it belongs to THIS admission rather than some
+    /// earlier, now-stale one (see `pairingSucceeded`).
+    enum Admission: Equatable { case admitted(token: UInt64), busy, coolingDown }
+
+    private(set) var unrevealedInProgress = false
+    private(set) var consecutiveFailures = 0
+    private(set) var cooldownUntil: Date?
+    /// Incremented on every admitted commitment; the value handed out becomes
+    /// that attempt's ownership token.
+    private var generation: UInt64 = 0
+
+    /// Call once a `helloCommit` frame has been received and validated, and
+    /// before the responder's own `hello` is sent.
+    mutating func admitCommitment(now: Date) -> Admission {
+        if let cooldownUntil, now < cooldownUntil { return .coolingDown }
+        guard !unrevealedInProgress else { return .busy }
+        unrevealedInProgress = true
+        generation += 1
+        return .admitted(token: generation)
+    }
+
+    /// A valid, matching `helloReveal` arrived: this attempt is done with the
+    /// single-flight pre-reveal slot, so a new commitment may be admitted.
+    /// Deliberately does NOT clear `consecutiveFailures` — a cheap
+    /// self-consistent commit/reveal must not let an attacker reset the
+    /// anti-reroll cooldown while still grinding. Failure history is only
+    /// cleared by `pairingSucceeded`, once the ceremony is authenticated and
+    /// trust is actually persisted.
+    mutating func revealSucceeded() {
+        unrevealedInProgress = false
+    }
+
+    /// Disconnect before a valid reveal, a reveal timeout, or an
+    /// invalid/mismatched reveal — never a normal user cancellation *after*
+    /// the SAS is shown, which is a separate, later phase this throttle never
+    /// observes (callers only invoke this up to a successful reveal).
+    mutating func revealFailed(now: Date) {
+        unrevealedInProgress = false
+        consecutiveFailures += 1
+        if consecutiveFailures >= Self.failuresBeforeCooldown {
+            consecutiveFailures = 0
+            cooldownUntil = now.addingTimeInterval(Self.cooldownDuration)
+        }
+    }
+
+    /// The full ceremony (confirmation → commit → commitAck →
+    /// `PairingFinalizer`) genuinely succeeded for the attempt identified by
+    /// `token`. Only then is prior failure history forgiven. `token` must be
+    /// the one returned by THIS attempt's `admitCommitment`: if a newer
+    /// commitment has since been admitted (a different, more current
+    /// attempt), `token` is stale and must not erase failures that newer
+    /// attempt may have accumulated.
+    mutating func pairingSucceeded(token: UInt64) {
+        guard token == generation else { return }
+        consecutiveFailures = 0
+        cooldownUntil = nil
+    }
+}
+
+/// Process-wide holder for one responder listener's `PairingCommitThrottle`.
+/// One instance per responder role is shared across LAN, Remote and USB
+/// listeners on that device — deliberately listener/device-scoped rather than
+/// per-connection, so a rerolling attacker cannot simply open a new
+/// connection to reset the throttle.
+actor PairingCommitThrottleGate {
+    static let shared = PairingCommitThrottleGate()
+    private var state = PairingCommitThrottle()
+
+    func admitCommitment(now: Date = Date()) -> PairingCommitThrottle.Admission {
+        state.admitCommitment(now: now)
+    }
+    func revealSucceeded() { state.revealSucceeded() }
+    func revealFailed(now: Date = Date()) { state.revealFailed(now: now) }
+    func pairingSucceeded(token: UInt64) { state.pairingSucceeded(token: token) }
+
+    /// Test-only reset so throttle state never leaks between test cases.
+    func resetForTesting() { state = PairingCommitThrottle() }
+}
+
 /// Generation guard for a single outstanding pairing attempt. A cancelled or
 /// superseded attempt can never complete: its generation stops being current.
 struct PairingAttemptTracker: Equatable {
@@ -160,7 +252,7 @@ final class PairingFlag: @unchecked Sendable {
 /// Why a remote pairing attempt ended, only where the code genuinely knows.
 /// "Rejected" is used only when a handshake actually took place.
 enum RemotePairingFailureKind: Equatable {
-    case unreachable, timedOut, rejected, cancelledByPeer, ownerAuthFailed, keyChanged, codesDidNotMatch, updateRequired, failed
+    case unreachable, timedOut, rejected, cancelledByPeer, ownerAuthFailed, keyChanged, codesDidNotMatch, updateRequired, failed, tooManyAttempts
 
     var title: String {
         switch self {
@@ -173,6 +265,8 @@ enum RemotePairingFailureKind: Equatable {
         case .codesDidNotMatch: "Codes did not match"
         case .updateRequired: "Update MeowDisplay on both devices to pair"
         case .failed: "Pairing failed"
+        // Calm, non-alarmist wording — never "possible attack".
+        case .tooManyAttempts: "Too many pairing attempts. Try again in 30 seconds."
         }
     }
 
@@ -239,8 +333,9 @@ enum RemotePairingFailure {
             case .cancelledLocally: return nil
             case .trustStateChanged: return .failed
             case .ownerAuthenticationFailed: return .ownerAuthFailed
-            case .invalidKey, .invalidConfirmation: return .codesDidNotMatch
+            case .invalidKey, .invalidConfirmation, .commitmentMismatch: return .codesDidNotMatch
             case .unsupportedVersion: return .updateRequired
+            case .tooManyAttempts: return .tooManyAttempts
             case .rejected: return handshakeReached ? (deadlineFired ? .timedOut : .rejected)
                                                    : (deadlineFired ? .unreachable : .failed)
             case .malformedMessage: return handshakeReached ? .failed : .unreachable

@@ -820,6 +820,13 @@ final class SenderController: ObservableObject {
             var txt = NWTXTRecord()
             txt["id"] = localID
             txt["pv"] = String(WireProtocol.version)
+            // `pp`: unauthenticated pairing-protocol-version hint, additive
+            // and separate from `pv` (the media wire version above). It
+            // exists only for early "update required" UX before a connection
+            // is even attempted — never a security decision. The in-band
+            // v13 helloCommit/hello/helloReveal ceremony is the only thing
+            // that actually validates pairing compatibility.
+            txt["pp"] = String(WireProtocol.pairingVersion)
             listener.service = NWListener.Service(
                 name: Host.current().localizedName ?? "Mac",
                 type: "_opendisplay-mac-pair._tcp", txtRecord: txt)
@@ -838,7 +845,7 @@ final class SenderController: ObservableObject {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: localID,
                             localName: Host.current().localizedName ?? "Mac",
-                            prompt: self.pairingPrompt)
+                            prompt: self.pairingPrompt, allowIdentityChange: false)
                         self.finishExplicitPairing(peerID: paired.peerID, success: true)
                         self.pairingMessage = "Paired with \(paired.peerName)"
                         if let result = self.discovered.first(where: { self.txtID(of: $0) == paired.peerID }) {
@@ -1302,9 +1309,14 @@ final class SenderController: ObservableObject {
     }
 
     func pair(_ result: NWBrowser.Result) {
+        // `pp` is an unauthenticated early-UX hint only, never the security
+        // decision — a missing/old/spoofed value never enables a fallback;
+        // it only decides whether to show "update required" before dialing.
+        // The in-band v13 ceremony (`PairingHandshake`) is what actually
+        // enforces pairing-version compatibility, and fails closed regardless.
         if case .bonjour(let txt) = result.metadata,
-           let raw = txt["pv"], let version = Int(raw),
-           version < WireProtocol.securePairingWireVersion {
+           let raw = txt["pp"], let version = Int(raw),
+           version < WireProtocol.minPairingVersion {
             pairingMessage = "Update MeowDisplay on this device to pair securely"
             return
         }
@@ -1335,7 +1347,7 @@ final class SenderController: ObservableObject {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: localID,
                     localName: Host.current().localizedName ?? "Mac",
-                    prompt: pairingPrompt, expectedPeerID: expected)
+                    prompt: pairingPrompt, expectedPeerID: expected, allowIdentityChange: false)
                 finishExplicitPairing(peerID: paired.peerID, success: true)
                 pairingMessage = "Paired with \(paired.peerName)"
                 objectWillChange.send()
@@ -2216,7 +2228,11 @@ final class SenderController: ObservableObject {
             // ceremony, and it can never replace an existing pin.
             if session.onUSB,
                let udid = session.usbUDID, let peerID = info.id,
-               info.protocolVersion >= WireProtocol.securePairingWireVersion,
+               // `pp` (unauthenticated hint) decides only whether to bother
+               // attempting; absent/old/spoofed never enables a fallback —
+               // the in-band v13 ceremony below is what actually enforces
+               // pairing-version compatibility and fails closed regardless.
+               (info.pp ?? 0) >= WireProtocol.minPairingVersion,
                USBPairingPolicy.shouldBeginPairing(
                    hasPin: TrustStore.shared.hasPin(peerID: peerID),
                    alreadyAttemptedThisSession: session.usbPairingAttempted) {
