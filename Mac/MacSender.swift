@@ -157,7 +157,12 @@ struct TLSSessionConfig {
 
 enum SenderTransport {
     case tcp(NWEndpoint, tls: TLSSessionConfig?) // nil is allowed only for explicit local debugging
-    case usb(udid: String?, port: UInt16)  // native usbmuxd dial; nil = first device
+    // Native usbmuxd dial; nil udid = first device. `tls` is REQUIRED — USB
+    // media is only ever reachable through the same pinned mutual-TLS path
+    // as LAN/Remote (see USBTLSBridge). There is deliberately no port here:
+    // the target is always the receiver's existing trusted TLS listener
+    // (WireCrypto.tlsPort), never the legacy plaintext media port.
+    case usb(udid: String?, tls: TLSSessionConfig)
 }
 
 @available(macOS 14.0, *)
@@ -2278,6 +2283,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { [weak self] in
             self?.closeCursorChannel()
             self?.stopUpgradeProbing()
+            self?.activeUSBBridge?.cancel()
+            self?.activeUSBBridge = nil
         }
         if let encoder { VTCompressionSessionInvalidate(encoder) }
         encoder = nil
@@ -2590,6 +2597,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.currentPathDirectLink = false   // the new transport re-classifies
             Task { @MainActor in self.onTransportPath?(nil) }
             self.dialGeneration += 1   // a dial still in flight must not adopt
+            self.activeUSBBridge?.cancel()
+            self.activeUSBBridge = nil
             self.connection?.cancel()
             self.connection = nil
             self.closeCursorChannel()
@@ -2772,6 +2781,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // fire and connect in that window. Bumping the generation here,
             // synchronously on this same queue, invalidates it immediately.
             self.dialGeneration += 1
+            self.activeUSBBridge?.cancel()
+            self.activeUSBBridge = nil
             Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled peer=\(self.endpointName)")
             self.reportGone("auto-reconnect disabled — ending session")
         }
@@ -3340,6 +3351,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Guards against a stale async USB dial adopting after a newer one (or a
     // manual reconnect) superseded it. Only touched on `queue`.
     private var dialGeneration = 0
+    // The USB secure bridge for the in-flight/live USB dial, if any. Owned
+    // here so every generation bump/stop/transport-switch can cancel a
+    // superseded bridge explicitly instead of relying only on TCP-level
+    // teardown propagation. Only touched on `queue`.
+    private var activeUSBBridge: USBTLSBridge?
 
     private func connect() {
         guard !stopped else { return }
@@ -3348,9 +3364,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case .tcp(let endpoint, let tls):
             Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp")
             connectTCP(endpoint, tls: tls)
-        case .usb(let udid, let port):
+        case .usb(let udid, let tls):
             Log.info("connectDebug: dialStarted peer=\(endpointName) route=usb")
-            connectUSB(udid: udid, port: port)
+            connectUSB(udid: udid, tls: tls)
         }
     }
 
@@ -3760,41 +3776,48 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("sessionDebug: invalidated reason=\(reason) generation=\(generation)")
     }
 
-    /// Dial through macOS's built-in usbmuxd — no external tunnel needed.
-    /// The handshake is async, so adoption is gated on `dialGeneration`.
-    private func connectUSB(udid: String?, port: UInt16) {
+    /// Dial through macOS's built-in usbmuxd — no external tunnel needed —
+    /// but treat USB as only a ROUTE to the receiver's existing trusted TLS
+    /// media listener, never a separate trust model. `USBTLSBridge` turns
+    /// the raw usbmux tunnel into a local loopback endpoint, which is then
+    /// dialed through the EXACT SAME `connectTCP`/`TLSConfigurator` path
+    /// LAN and Remote already use — no USB-specific cryptography, no
+    /// plaintext fallback. The handshake is async, so adoption is gated on
+    /// `dialGeneration`; a superseded bridge is explicitly cancelled rather
+    /// than left to time out on its own.
+    private func connectUSB(udid: String?, tls: TLSSessionConfig) {
         dialGeneration += 1
         let generation = dialGeneration
+        activeUSBBridge?.cancel()
+        let bridge = USBTLSBridge(udid: udid, queue: queue, dialTunnel: Usbmux.dial)
+        activeUSBBridge = bridge
         Task { [weak self] in
             guard let self else { return }
             do {
-                let conn = try await Usbmux.dial(udid: udid, port: port, queue: queue)
+                let bridgePort = try await bridge.start()
                 queue.async {
                     guard generation == self.dialGeneration, !self.stopped else {
-                        conn.cancel()
+                        bridge.cancel()
                         return
                     }
-                    self.connection = conn
-                    conn.stateUpdateHandler = { [weak self] state in
-                        guard let self, self.connection === conn else { return }
-                        switch state {
-                        case .failed(let error):
-                            Log.info("usb connection failed: \(error)")
-                            self.invalidateApplicationSession(reason: "usbConnectionFailed")
-                            self.scheduleReconnect()
-                        case .cancelled:
-                            self.invalidateApplicationSession(reason: "usbConnectionCancelled")
-                        default:
-                            break
-                        }
-                    }
-                    self.becomeReady(conn)
+                    // Reuse connectTCP unmodified: same TLSConfigurator call,
+                    // same pin verification, same authenticated-session
+                    // machinery LAN/Remote already exercise. `self.transport`
+                    // stays `.usb(...)` throughout, so route classification
+                    // (`reportRoute`) still reports USB even though this
+                    // dial's literal endpoint is the loopback bridge.
+                    self.connectTCP(.hostPort(host: "127.0.0.1", port: bridgePort), tls: tls)
                 }
             } catch {
+                bridge.cancel()
                 queue.async {
                     guard generation == self.dialGeneration, !self.stopped else { return }
                     // Distinct guidance per failure: cable missing vs app
                     // closed. Composed on `queue`: awaitingWake lives there.
+                    // No plaintext downgrade on any USB failure — a failed
+                    // secure USB attempt only ever leads to a redial of the
+                    // same secure USB path (or the controller's own choice
+                    // of a different, independently-secure route).
                     let hint: String
                     switch error as? Usbmux.Failure {
                     case .noDevice:
@@ -3848,6 +3871,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         currentPathDirectLink = false
         Task { @MainActor in self.onTransportPath?(nil) }
         dialGeneration += 1   // a USB dial still in flight must not adopt
+        activeUSBBridge?.cancel()
+        activeUSBBridge = nil
         let generation = dialGeneration
         connection?.cancel()
         connection = nil

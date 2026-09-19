@@ -672,6 +672,12 @@ final class SenderController: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "installIDByUDID") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(installIDByUDID, forKey: "installIDByUDID") }
     }
+    // UDIDs a proactive USB pairing attempt has already been made for this
+    // process lifetime — mirrors `DeviceSession.usbPairingAttempted`'s
+    // per-attach dedupe, but keyed by hardware rather than by session, since
+    // an unpaired device never gets a `DeviceSession` at all (buildTransport
+    // refuses to construct a transport with no pin — see below).
+    private var usbPairingAttemptedUDIDs: Set<String> = []
     private let autoConnectEnabled = UserDefaults.standard.object(forKey: "autostart") == nil
         || UserDefaults.standard.bool(forKey: "autostart")
     /// Auto-Reconnect (Settings toggle, System category): gates only
@@ -735,8 +741,10 @@ final class SenderController: ObservableObject {
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
             let detached = Set(self.usbDevices.map(\.udid)).subtracting(devices.map(\.udid))
+            self.usbPairingAttemptedUDIDs.subtract(detached)
             self.usbDevices = devices
             self.failover(detachedUDIDs: detached)
+            self.attemptUSBPairingIfNeeded(devices: devices)
             self.scheduleAutoConnect()
         }
         #if DEBUG
@@ -1327,6 +1335,50 @@ final class SenderController: ObservableObject {
         if !success { scheduleAutoConnect() }
     }
 
+    /// USB media is now gated by a TrustStore pin (see `buildTransport`), so
+    /// an unpaired/never-seen device never reaches a live session and can
+    /// therefore never self-report an identity to trigger pairing reactively
+    /// — pairing must instead be offered as soon as the hardware attaches.
+    /// Dials the pairing ceremony directly over usbmux (port
+    /// `WireCrypto.pairingPort`), independent of any media session; the
+    /// ceremony itself discovers the peer's identity (`expectedPeerID` is
+    /// only supplied when one is already known, e.g. a previously-paired
+    /// UDID whose pin was later forgotten — same semantics as the reactive
+    /// hello-triggered path this mirrors).
+    private func attemptUSBPairingIfNeeded(devices: [UsbmuxDevice]) {
+        for device in devices {
+            let udid = device.udid
+            let knownPeerID = installIDByUDID[udid]
+            let hasPin = knownPeerID.map { TrustStore.shared.hasPin(peerID: $0) } ?? false
+            guard USBPairingPolicy.shouldBeginPairing(
+                hasPin: hasPin, alreadyAttemptedThisSession: usbPairingAttemptedUDIDs.contains(udid)
+            ) else { continue }
+            usbPairingAttemptedUDIDs.insert(udid)
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let connection = try await Usbmux.dial(
+                        udid: udid, port: WireCrypto.pairingPort,
+                        queue: DispatchQueue(label: "pairing.usb.proactive"))
+                    defer { connection.cancel() }
+                    guard let localID = TrustStore.shared.installID() else {
+                        throw PairingError.invalidKey
+                    }
+                    let paired = try await PairingNetwork.runInitiator(
+                        connection: connection, localID: localID,
+                        localName: Host.current().localizedName ?? "Mac",
+                        prompt: self.pairingPrompt, expectedPeerID: knownPeerID,
+                        allowIdentityChange: USBPairingPolicy.allowIdentityChange)
+                    self.installIDByUDID[udid] = paired.peerID
+                    self.pairingMessage = "Paired with \(paired.peerName)"
+                    self.scheduleAutoConnect()   // the fresh pin makes buildTransport succeed now
+                } catch {
+                    self.pairingMessage = "USB pairing failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     private func finishAllExplicitPairing(success: Bool) {
         let peerIDs = activePairingPeerIDs
         for peerID in peerIDs { finishExplicitPairing(peerID: peerID, success: success) }
@@ -1665,17 +1717,23 @@ final class SenderController: ObservableObject {
     /// Cable plugged in while the device streams over WiFi: migrate the live
     /// session onto USB. No-op when the session is already cabled.
     private func upgradeToUSB(_ session: DeviceSession, device: UsbmuxDevice) {
-        guard !session.onUSB, let portNum = UInt16(port) else { return }
+        guard !session.onUSB else { return }
         #if DEBUG
         guard routeAdmission(for: .usb(udid: device.udid)) else { return }
         #endif
+        // The match may have been by name only — pin the strong identity so
+        // future matching (and the next launch) recognizes the pair, and so
+        // buildTransport below can find this peer's TrustStore pin.
+        if let id = session.deviceID { installIDByUDID[device.udid] = id }
+        guard let transport = buildTransport(for: .usb(udid: device.udid)) else {
+            // No trusted pin for this hardware (yet) — stay on the current
+            // route rather than attempting an unauthenticated USB session.
+            return
+        }
         Log.info("cable attached for \(session.id) — migrating to USB")
         session.onUSB = true
         session.usbUDID = device.udid
-        // The match may have been by name only — pin the strong identity so
-        // future matching (and the next launch) recognizes the pair.
-        if let id = session.deviceID { installIDByUDID[device.udid] = id }
-        session.sender.switchTransport(to: .usb(udid: device.udid, port: portNum))
+        session.sender.switchTransport(to: transport)
     }
 
     /// Cable unplugged under a live session: fail over to the device's WiFi
@@ -1881,13 +1939,29 @@ final class SenderController: ObservableObject {
     private func buildTransport(for target: ConnectionTarget) -> SenderTransport? {
         switch target {
         case .usb(let udid):
-            guard let portNum = UInt16(port) else { return nil }
             if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
                 // Manual override: dial a plain TCP endpoint instead of usbmuxd.
+                // Explicit local-debugging escape hatch only — untouched by
+                // the secure-USB path below.
+                guard let portNum = UInt16(port) else { return nil }
                 return .tcp(.hostPort(host: NWEndpoint.Host(host),
                                       port: NWEndpoint.Port(rawValue: portNum)!), tls: nil)
             }
-            return .usb(udid: udid, port: portNum)
+            // USB is only a ROUTE — media must be gated by the same pinned
+            // cryptographic identity as LAN/Remote. No pin (unknown/never-
+            // paired hardware, or a forgotten peer) means no transport at
+            // all: nil here is exactly the existing "not dialable right
+            // now" contract this function already documents, so callers
+            // fail closed automatically rather than falling back to
+            // anything unauthenticated.
+            guard let udid,
+                  let resolved = USBSecureTransportPolicy.resolve(
+                    udid: udid, installIDByUDID: installIDByUDID,
+                    pin: { TrustStore.shared.pin(peerID: $0) }),
+                  let identity = TrustStore.shared.ownIdentity() else { return nil }
+            return .usb(udid: udid, tls: TLSSessionConfig(identity: identity,
+                                                            pinnedPeerSPKI: resolved.pin,
+                                                            peerID: resolved.peerID))
         case .wifi(let result):
             return secureWiFiTransport(for: result)
         case .remote(let peerID):
