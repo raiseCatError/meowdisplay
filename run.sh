@@ -5,9 +5,14 @@
 set -e
 cd "$(dirname "$0")"
 
-APP=build/Build/Products/Debug/MeowDisplay.app
-if [[ ! -d $APP ]]; then
-  echo "Mac app not built — run: ./generate-local.sh && xcodebuild -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -configuration Debug -derivedDataPath build build"
+# Resolve the Debug product from Xcode's own build settings (DerivedData location
+# and product name vary by machine/config), so nothing is hard-coded.
+SETTINGS=$(xcodebuild -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -configuration Debug -showBuildSettings 2>/dev/null)
+BUILD_DIR=$(print -r -- "$SETTINGS" | sed -n 's/^ *TARGET_BUILD_DIR = //p' | head -1)
+PRODUCT=$(print -r -- "$SETTINGS" | sed -n 's/^ *FULL_PRODUCT_NAME = //p' | head -1)
+APP="$BUILD_DIR/$PRODUCT"
+if [[ -z $BUILD_DIR || -z $PRODUCT || ! -d $APP ]]; then
+  echo "Mac app not built — run: ./generate-local.sh && xcodebuild -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -configuration Debug build"
   exit 1
 fi
 
