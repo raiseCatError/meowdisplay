@@ -78,6 +78,10 @@ struct MacSettingsView: View {
                     }
                 }
                 .navigationTitle((selection ?? .overview).label)
+                // Opaque title-bar backing so scrolled content doesn't
+                // show through the toolbar area.
+                .toolbarBackground(Color(nsColor: .windowBackgroundColor), for: .windowToolbar)
+                .toolbarBackground(.visible, for: .windowToolbar)
                 .toolbar {
                     // Trailing/utility position — `.principal` centers and
                     // competes with the page title; a status indicator reads
@@ -87,8 +91,8 @@ struct MacSettingsView: View {
                         if let session = soleActiveSession {
                             ToolbarQuickActions(session: session, controller: controller)
                         }
-                        StatusBadge(controller: controller)
                     }
+                    StatusPillsToolbarItem(controller: controller)
                 }
             }
         }
@@ -140,6 +144,48 @@ struct StatusBadge: View {
         .padding(.horizontal, 13)
         .padding(.vertical, 6)
         .frame(minWidth: 76)
+        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+    }
+}
+
+/// The status pill and (only while the assertion is actually held) the
+/// Keep Mac Available pill, as two independent capsules side by side. The
+/// system's shared toolbar background is hidden where supported so it
+/// can't fuse them into one glass capsule.
+struct StatusPillsToolbarItem: ToolbarContent {
+    @ObservedObject var controller: SenderController
+
+    var body: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .primaryAction) { pills }
+                .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .primaryAction) { pills }
+        }
+    }
+
+    private var pills: some View {
+        HStack(spacing: 8) {
+            StatusBadge(controller: controller)
+            if controller.keepMacAvailableActive {
+                KeepAvailablePill()
+            }
+        }
+    }
+}
+
+/// Shown only while the power assertion is actually held.
+struct KeepAvailablePill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(Color.green).frame(width: 8, height: 8)
+            Text("Keeping Mac Available")
+                .font(.callout)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 6)
         .background(Capsule().fill(Color.secondary.opacity(0.12)))
     }
 }

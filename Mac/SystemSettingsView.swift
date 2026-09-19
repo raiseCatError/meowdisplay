@@ -95,6 +95,47 @@ struct SystemSettingsView: View {
                 }
             }
 
+            Section {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(controller.keepMacAvailableActive ? Color.green
+                              : controller.keepMacAvailableRequested ? Color.orange
+                              : Color.secondary.opacity(0.5))
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Toggle("Keep Mac Available", isOn: $controller.keepMacAvailableRequested)
+                }
+                if controller.keepMacAvailableRequested && !controller.keepMacAvailableActive {
+                    Text("macOS didn't allow the sleep-prevention request, so this Mac may still sleep.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Prevent this Mac from automatically sleeping while MEOW is running, so remote devices can connect without Wake-on-LAN.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("The display can still turn off normally. Closing a MacBook's lid can still put it to sleep; closed-lid use requires your MacBook to be connected to power and is up to macOS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("Prefer Terminal?") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("caffeinate -i")
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("Press Ctrl-C to stop. Add -t 3600 to stop after an hour. On a Mac connected to power, caffeinate -is also requests system-sleep prevention.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Copy Command") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("caffeinate -i", forType: .string)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .font(.caption)
+            } header: {
+                Text("Availability")
+            }
+
             Section("Updates") {
                 if let updater {
                     CheckForUpdatesView(updater: updater)

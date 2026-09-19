@@ -65,6 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        SenderController.shared.releaseKeepMacAvailable()
+    }
+
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock
     // click) brings up the Settings window — Hammerspoon-style. Also handles
     // a Dock click while the window already exists: it focuses the same
@@ -319,6 +323,39 @@ final class SenderController: ObservableObject {
         }
     }
     @Published var startAtLoginStatusMessage: String? = StartAtLoginPolicy.statusMessage()
+
+    /// Keep Mac Available: the saved preference vs. what macOS actually
+    /// granted. UI reads `keepMacAvailableActive` for state, never the
+    /// preference. Acquired at init when saved ON; a failure is not retried.
+    private let keepAvailableAssertion = KeepMacAvailableAssertion()
+    @Published var keepMacAvailableRequested = UserDefaults.standard.bool(forKey: "keepMacAvailable") {
+        didSet {
+            guard keepMacAvailableRequested != oldValue else { return }
+            UserDefaults.standard.set(keepMacAvailableRequested, forKey: "keepMacAvailable")
+            applyKeepMacAvailable()
+        }
+    }
+    @Published private(set) var keepMacAvailableActive = false
+
+    private func applyKeepMacAvailable() {
+        if keepMacAvailableRequested {
+            keepMacAvailableActive = keepAssertionEnable()
+        } else {
+            keepAvailableAssertion.disable()
+            keepMacAvailableActive = false
+        }
+    }
+
+    private func keepAssertionEnable() -> Bool {
+        let ok = keepAvailableAssertion.enable()
+        if !ok { Log.info("keepMacAvailable: assertion unavailable") }
+        return ok
+    }
+
+    func releaseKeepMacAvailable() {
+        keepAvailableAssertion.disable()
+        keepMacAvailableActive = false
+    }
 
     @Published var sessions: [DeviceSession] = []
     private var suppressModeRestart = false
@@ -704,6 +741,7 @@ final class SenderController: ObservableObject {
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
         pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
+        if keepMacAvailableRequested { keepMacAvailableActive = keepAssertionEnable() }
         startObservingPhysicalDisplayAvailability()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
