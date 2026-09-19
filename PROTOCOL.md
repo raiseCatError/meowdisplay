@@ -48,7 +48,13 @@ unless marked normative.
 
 ## 1. Roles and transport
 
-* The **receiver listens** on TCP port **9000** and advertises itself.
+* The **receiver listens** on the pinned mutual-TLS 1.3 media port
+  (`WireCrypto.tlsPort`) and advertises itself. **Production media, control
+  and input sessions never run over plaintext**: LAN, Remote and USB all
+  converge on that one pinned-mTLS listener. The former plaintext TCP 9000
+  media listener (and the UDP cursor listener that hung off it) is removed;
+  older plaintext-only senders simply fail to connect (no downgrade).
+  Pairing (port 9002) is a separate bootstrap protocol.
 * The **sender connects** to the receiver.
 
 This role assignment is the most load-bearing decision in the protocol and
@@ -56,12 +62,13 @@ MUST be preserved: because the receiver is always the listening end, the
 sender reaches it identically over WiFi (dial the discovered address) and
 over USB (dial a tunneled port), and one code path serves both transports.
 
-* The protocol runs over a **single TCP connection**. Video, control
-  messages, and telemetry all share it, in both directions. The one
-  optional exception is the UDP cursor side channel (section 6.3), which
-  carries nothing a receiver cannot also get over TCP.
-* There is no TLS and no authentication at `pv` 3. The protocol is designed
-  for trusted local networks and direct cables. Implementations SHOULD
+* The protocol runs over a **single pinned mutual-TLS 1.3 connection**.
+  Video, control messages, cursor and telemetry all share it, in both
+  directions. (The historical UDP cursor side channel, section 6.3, is
+  removed.)
+* The framing described below is the *inner* application stream; the
+  historical `pv` 3 text describing "no TLS, no authentication" no longer
+  applies to production. Implementations SHOULD
   disable Nagle's algorithm (TCP_NODELAY); input events are tiny packets and
   coalescing them reads as input lag.
 * A receiver serves **one sender at a time**. When a new inbound connection
@@ -71,8 +78,8 @@ over USB (dial a tunneled port), and one code path serves both transports.
 
 ## 2. Transport bindings
 
-The core protocol is transport-agnostic beyond "a TCP byte stream to port
-9000 on the receiver". How the sender finds that port is a *binding*. Two
+The core protocol is transport-agnostic beyond "a pinned mutual-TLS byte stream to the
+receiver's media port". How the sender finds that port is a *binding*. Two
 bindings exist today; ports to other platforms MAY define their own (for
 example an Android receiver reachable over `adb reverse`) without touching
 anything else in this document.
@@ -111,7 +118,8 @@ pairing advertisements carry only `id` and `pv` discovery metadata.
 For iPhones/iPads on a cable, the sender dials through **usbmuxd**, the
 device-multiplexing daemon that ships with macOS and is available on Linux
 and Windows via [libimobiledevice](https://libimobiledevice.org). The
-sender asks usbmuxd to `Connect` to TCP port 9000 on the chosen device;
+sender asks usbmuxd to `Connect` to the receiver's mTLS media port on the chosen device
+(through a one-shot loopback bridge that only splices ciphertext);
 after the `OK` result the usbmuxd socket becomes a transparent byte pipe
 and the protocol proceeds exactly as over WiFi.
 
@@ -119,9 +127,8 @@ Bonjour plays no role on this path. The official receiver classifies a
 connection arriving from loopback as "USB" purely for its stats display;
 this has no protocol significance.
 
-At pv 11, port 9000 is loopback-only on iOS and is therefore reachable via
-usbmux but not LAN/AWDL. It remains plaintext under the physical-channel
-assumption that the user authorized the attached device. Port 9002 can be
+USB is only a route: the same pinned mutual TLS runs inside the usbmux pipe,
+and there is no plaintext USB path. Port 9002 can be
 reached through the same tunnel to create exactly the same peer pins without
 manual SAS comparison. There is no separate USB trust record.
 
@@ -408,10 +415,9 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
   transports and renames.
 * `pv` (int, optional): the receiver's protocol version. **Absent means
   1** (every pre-handshake install).
-* `cursorPort` (int, optional): a UDP port on the receiver that accepts
-  cursor datagrams (section 6.3). Present only while that listener is
-  actually bound. Absent means the receiver takes cursor positions over
-  TCP only. Additive at `pv` 3, no bump.
+* `cursorPort` (int, optional, **removed**): formerly advertised the UDP
+  cursor side channel. Current receivers never send it; current senders
+  ignore it. Cursor positions always travel over the main transport.
 * `addrs` (array of strings, optional): every IP address the receiver is
   reachable on (section 6.4). Link-local IPv6 entries carry no zone id.
   The receiver SHOULD re-send `hello` when this set changes (a cable
@@ -696,51 +702,15 @@ receiver can scale it without knowing the sender's HiDPI factor; `ax`, `ay`
 are the hotspot **normalized within the sprite** (0..1 of its own size).
 Sent when the sprite changes and re-sent after reconnects.
 
-### 6.3 Cursor side channel (UDP)
+### 6.3 Cursor side channel (UDP) — removed
 
-Cursor positions share the TCP connection with video frames of several
-hundred KB. Over WiFi one late frame holds every cursor update queued
-behind it (head-of-line blocking), and the cursor stutters while the video
-is fine. The side channel moves the position messages, and only those, onto
-UDP where a lost or late datagram costs nothing: the next one supersedes it.
-
-* **Capability-gated and optional.** A receiver that offers it binds a UDP
-  listener (the official receiver uses TCP port + 1, so 9001 by default)
-  and advertises the port as `hello.cursorPort`. A sender that sees no
-  `cursorPort`, or cannot reach it, MUST keep sending `cursor` over TCP.
-  Either side may lack the feature with no loss beyond cursor smoothness.
-* **Bindings.** WiFi/LAN only. usbmuxd (section 2.2) tunnels TCP streams
-  and cannot carry UDP; a sender on the USB binding MUST ignore
-  `cursorPort`. The sender dials the same host the TCP connection reached.
-* **Datagram format.** One datagram is one `cursor` message (section 6.2)
-  as UTF-8 JSON, without the 4-byte length prefix, plus `s` (unsigned
-  integer): a sequence number that starts at 1 and increments by one per
-  datagram sent, e.g. `{"type":"cursor","x":0.4210,"y":0.7735,"v":1,"s":88}`.
-  Nothing but `cursor` messages travel here; `cursorImg` stays on TCP
-  because a sprite must arrive intact.
-* **Sequence semantics.** The receiver keeps the highest `s` seen and MUST
-  drop any `cursor` message — datagram or TCP frame — whose `s` is not
-  greater than it (UDP reorders, and around a path switch a TCP frame
-  queued behind video can arrive after a newer datagram). The sequence is
-  per TCP session: it restarts when the TCP connection is (re-)established
-  and runs across both paths. The receiver resets its tracker on every new
-  TCP connection and on every new UDP flow, and accepts datagrams only
-  from the most recently seen flow. A TCP `cursor` frame without `s` (an
-  older sender) applies unconditionally.
-* **Delivery confirmation.** `.ready` on a UDP socket proves only a local
-  route — a firewalled port would swallow the cursor silently. On the
-  first accepted datagram of a flow the receiver sends `cursorAck` (a
-  control message with no other fields) over TCP. Until it arrives the
-  sender MUST keep mirroring every position onto TCP (same `s`, so the
-  receiver deduplicates); if no ack arrives within a few seconds the
-  sender SHOULD drop the UDP flow and stay on TCP. A receiver that stops
-  listening mid-session SHOULD re-send `hello` without `cursorPort` to
-  withdraw the offer.
-* **Mixing.** A sender MAY switch between UDP and TCP for `cursor` at any
-  time. Both deliver into the same cursor state on the receiver.
-* **Firewall note.** A receiver offering the channel now also listens on
-  UDP (port + 1 for the official receiver). The official Mac receiver
-  therefore needs UDP 9001 open in addition to TCP 9000.
+Historical: an optional unauthenticated UDP channel carried `cursor`
+positions (`hello.cursorPort`, `cursorAck`). It is removed: receivers do not
+listen on UDP and senders never open it, so cursor positions and sprites
+travel over the authenticated main transport. The per-session sequence `s`
+rule still applies: the receiver MUST drop any `cursor` message whose `s` is
+not greater than the highest seen, and a message without `s` applies
+unconditionally.
 
 ### 6.4 Cable upgrade (`hello.addrs`)
 
@@ -1017,7 +987,7 @@ session, but the sender keeps waiting for the device to come back.
 sequenceDiagram
     participant R as Receiver
     participant S as Sender
-    Note over R: listen on TCP :9000, advertise (id, pv)
+    Note over R: listen on pinned-mTLS media port, advertise (id, pv)
     Note over S: discover via Bonjour, or pick a USB device
     S->>R: TCP connect
     R->>S: hello (panel, scale, id, pv)
@@ -1080,7 +1050,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 1 | Baseline: framing, demux heuristic, video format, `hello`, `ping`/`pong`, `touch`, `scroll`, `kf`, `stats`, `cursor`, `cursorImg`, Bonjour TXT `id` |
 | 2 | Version handshake: `pv` in `hello` and TXT, `welcome`, `updateRequired`, `sleeping`, `closing` |
 | 3 | `pencil`, `proximity`; below pv 3 the receiver degrades stylus to `touch` |
-| 3 (additive) | `hello.cursorPort` and the UDP cursor side channel (6.3); optional, no bump |
+| 3 (additive) | `hello.cursorPort` and the UDP cursor side channel (6.3); optional, no bump — later removed |
 | 4 | `keyboard` (text/press/down/up); below pv 4 the receiver has no keyboard fallback and MUST NOT offer keyboard UI |
 | 5 | `pointer` (absolute/relative movement, clicks, right button); below pv 5 the receiver uses legacy `touch` fallback |
 | 6 | Receiver control-tray preference fields/messages; modifier down/up and modified atomic keyboard presses |
@@ -1102,16 +1072,15 @@ What a third-party client actually has to do, distilled. MUSTs from the
 body of the spec apply; this is the checklist form.
 
 **A minimal receiver** (turn a device into a display, no input):
-listen on 9000 (advertise via Bonjour if WiFi discovery is wanted), send
+listen on the pinned-mTLS media port (advertise via Bonjour if WiFi discovery is wanted), send
 `hello` on connect, send `ping` every 2 s, deframe, apply the section 4
 demux, feed video frames to an H.264 decoder honoring section 5 (skip the
 telemetry prefix, watch for SPS/PPS changes), send `kf` when decode is
 lost, ignore every control message it does not care about. `pong`
 handling, stats, cursor rendering, and input are all optional layers on
-top. The 74-line `tools/fake-receiver.swift` in this repository is a
-working (video-discarding) example of the skeleton.
+top.
 
-**A minimal sender**: discover or be told an address, dial 9000, wait for
+**A minimal sender**: discover or be told an address, dial the mTLS media port with a pinned identity, wait for
 `hello`, reply `welcome`, encode H.264 per section 5 (4-byte start codes,
 SPS/PPS on every IDR, one picture per frame), send an IDR on connect and on
 `kf`, send `ping` every 2 s, ignore unknown control types. Input injection
@@ -1164,7 +1133,7 @@ recorded as hints for porters:
   only its `.screen` output stops being encoded.
 * **USB from non-Mac senders:** libimobiledevice's usbmuxd implementation;
   `iproxy` demonstrates the tunnel. For non-Apple *receivers*, defining an
-  analogous binding (e.g. `adb reverse tcp:9000 tcp:9000`) is enough.
+  analogous binding (e.g. `adb reverse` of the mTLS media port) is enough; it must still terminate pinned mTLS.
 * The sender logs receiver `stats` lines prefixed `PHONE-STATS`, so one
   log file tells the whole story when debugging a session.
 

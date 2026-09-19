@@ -81,8 +81,6 @@ struct PhoneInfo: Decodable {
                           // across USB and WiFi
     let pv: Int?          // receiver protocol version (issue #132); absent on
                           // every pre-handshake install → treat as protocol 1
-    let cursorPort: Int?  // UDP port for the cursor side channel (PROTOCOL.md
-                          // 6.3); absent = cursor stays on TCP
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
@@ -156,7 +154,8 @@ struct TLSSessionConfig {
 }
 
 enum SenderTransport {
-    case tcp(NWEndpoint, tls: TLSSessionConfig?) // nil is allowed only for explicit local debugging
+    // `tls` is REQUIRED: no production or debug path dials plaintext media.
+    case tcp(NWEndpoint, tls: TLSSessionConfig)
     // Native usbmuxd dial; nil udid = first device. `tls` is REQUIRED — USB
     // media is only ever reachable through the same pinned mutual-TLS path
     // as LAN/Remote (see USBTLSBridge). There is deliberately no port here:
@@ -689,20 +688,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var currentRoute: ConnectionRoute?
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
     private var lastCursorPNGHash = 0
-    // Cursor side channel (UDP, WiFi only): positions queue behind video
-    // frames on the shared TCP socket and stutter under head-of-line
-    // blocking. Opened when hello advertises cursorPort; while ready,
-    // pollCursorPosition sends there instead. Sprites stay on TCP (up to
-    // 24 KB, must arrive intact). All state lives on `queue`.
-    private var cursorConnection: NWConnection?
-    private var cursorChannelPort: NWEndpoint.Port?
-    // True once the receiver acked a datagram (cursorAck). Until then every
-    // position also rides TCP: UDP .ready proves only a local route, and a
-    // silently firewalled port must not eat the cursor. Duplicates are
-    // harmless — both paths carry the same sequence and the receiver drops
-    // whatever is not newer.
-    private var cursorChannelConfirmed = false
-    private var cursorConnectionReady = false
     private var cursorSeq: UInt64 = 0
     private var captureDisplayID: CGDirectDisplayID = 0
     private let captureLifecycleLock = NSLock()
@@ -2277,11 +2262,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Task { await self.audioCaptureEncoder.reset() }
         connection?.cancel()
         connection = nil
-        // Cursor-channel state is confined to `queue` (the 120Hz poll and the
-        // UDP callbacks run there); tearing it down from the main actor races
-        // them.
         queue.async { [weak self] in
-            self?.closeCursorChannel()
             self?.stopUpgradeProbing()
             self?.activeUSBBridge?.cancel()
             self?.activeUSBBridge = nil
@@ -2601,7 +2582,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.activeUSBBridge = nil
             self.connection?.cancel()
             self.connection = nil
-            self.closeCursorChannel()
             self.stopUpgradeProbing()
             self.pendingSends = 0
             self.pipelineLock.lock()
@@ -3535,26 +3515,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         for host in candidates.prefix(16) {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
-            let tlsOptions: NWProtocolTLS.Options?
-            if case .tcp(_, let config?) = transport {
-                tlsOptions = TLSConfigurator.mutualTLSOptions(
+            guard case .tcp(_, let config) = transport,
+                  let tlsOptions = TLSConfigurator.mutualTLSOptions(
                     identity: config.identity,
                     pinnedSPKIs: { [config.pinnedPeerSPKI] },
-                    isListener: false, queue: queue)
-            } else {
-                tlsOptions = nil
-            }
-            let allowsPlaintext: Bool
-            if case .tcp(_, nil) = transport { allowsPlaintext = true }
-            else { allowsPlaintext = false }
-            guard allowsPlaintext || tlsOptions != nil else { continue }
+                    isListener: false, queue: queue) else { continue }
             let params = NWParameters(tls: tlsOptions, tcp: tcp)
             params.prohibitedInterfaceTypes = [.wifi, .cellular]
-            let probePort: NWEndpoint.Port = if case .tcp(_, .some) = transport {
-                NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!
-            } else {
-                9000
-            }
+            let probePort = NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!
             let probe = NWConnection(host: host, port: probePort, using: params)
             upgradeProbes.append(probe)
             probe.stateUpdateHandler = { [weak self] state in
@@ -3598,7 +3566,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         upgradeProbes.removeAll { $0 === conn }
         stopUpgradeProbing()
         dialGeneration += 1   // a redial in flight must not clobber this
-        closeCursorChannel()  // rebuilt from the next hello on the new path
         // Detach the old connection's handler BEFORE cancelling: its
         // .cancelled callback arrives after becomeReady below and would
         // reset connectionReady, silently blackholing every send on the
@@ -3657,7 +3624,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return result
     }
 
-    private func connectTCP(_ endpoint: NWEndpoint, tls: TLSSessionConfig?) {
+    private func connectTCP(_ endpoint: NWEndpoint, tls: TLSSessionConfig) {
         let options = NWProtocolTCP.Options()
         options.noDelay = true   // latency matters more than throughput here
         // No interface steering: macOS already ranks a Thunderbolt Bridge or
@@ -3665,18 +3632,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // there is one (field-tested: en10 chosen over en0). A WiFi-prohibited
         // pre-dial was tried and only ever hung until its timeout, adding 2s
         // to every connect. becomeReady reports which path won.
-        let tlsOptions: NWProtocolTLS.Options?
-        if let tls {
-            tlsOptions = TLSConfigurator.mutualTLSOptions(
-                identity: tls.identity,
-                pinnedSPKIs: { [tls.pinnedPeerSPKI] },
-                isListener: false, queue: queue)
-            guard tlsOptions != nil else {
-                Task { await self.status("Secure connection unavailable") }
-                return
-            }
-        } else {
-            tlsOptions = nil
+        guard let tlsOptions = TLSConfigurator.mutualTLSOptions(
+            identity: tls.identity,
+            pinnedSPKIs: { [tls.pinnedPeerSPKI] },
+            isListener: false, queue: queue) else {
+            Task { await self.status("Secure connection unavailable") }
+            return
         }
         let params = NWParameters(tls: tlsOptions, tcp: options)
         params.includePeerToPeer = true
@@ -3704,7 +3665,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Log.info("connection failed: \(error)")
                 self.invalidateApplicationSession(reason: Self.isTLSFailure(error)
                     ? "certificateRejected" : "connectionFailed")
-                if tls != nil, Self.isTLSFailure(error) {
+                if Self.isTLSFailure(error) {
                     self.reportTrustFailure()
                     return
                 }
@@ -3717,12 +3678,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.scheduleReconnect()
             case .waiting(let error):
                 // On loopback there is no "path change" to wake us up again
-                // (e.g. a manual -host tunnel not started yet) — treat
+                // (e.g. the receiver is not up yet) — treat
                 // waiting as failure and poll by reconnecting.
                 Log.info("connection waiting: \(error) — will retry")
                 self.invalidateApplicationSession(reason: Self.isTLSFailure(error)
                     ? "certificateRejected" : "connectionWaiting")
-                if tls != nil, Self.isTLSFailure(error) {
+                if Self.isTLSFailure(error) {
                     self.reportTrustFailure()
                     return
                 }
@@ -3876,7 +3837,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = dialGeneration
         connection?.cancel()
         connection = nil
-        closeCursorChannel()   // rebuilt from the next hello
         pendingSends = 0
         pipelineLock.lock()
         pendingEncodes = 0
@@ -4081,101 +4041,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     #endif
 
-    /// Cursor position: UDP side channel while it is up, TCP otherwise. The
-    /// datagram carries a sequence so the receiver can drop reordered ones;
-    /// the TCP frame is byte-identical to the pre-side-channel wire. Never
-    /// blocks: a send on a dead UDP socket just fails in its completion.
+    /// Cursor position over the authenticated main transport. The sequence
+    /// lets the receiver drop reordered frames (e.g. around a path switch).
     private func sendCursor(_ fields: String) {
         cursorSeq &+= 1
-        let message = "{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}"
-        let udpAvailable = cursorConnection != nil && cursorConnectionReady
-        if let cursorConnection, cursorConnectionReady {
-            cursorConnection.send(content: Data(message.utf8),
-                                  completion: .contentProcessed { _ in })
-        }
-        if CursorTransportPolicy.shouldSendOnPrimary(
-            udpAvailable: udpAvailable, udpConfirmed: cursorChannelConfirmed) {
-            sendJSONFrame(message)
-        }
-    }
-
-    /// Dial the receiver's UDP cursor port (must be called on `queue`). WiFi
-    /// only: usbmuxd tunnels TCP streams, there is no UDP through it. The
-    /// host is the one the live TCP connection actually reached, so a
-    /// Bonjour or Thunderbolt-bridged dial lands on the same interface. Any
-    /// failure here is silent: the cursor keeps riding TCP.
-    private func openCursorChannel(port: Int) {
-        guard case .tcp = transport, let conn = connection, connectionReady,
-              port > 0, port <= Int(UInt16.max),
-              let udpPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            closeCursorChannel()
-            return
-        }
-        if let existing = cursorConnection, cursorChannelPort == udpPort {
-            switch existing.state {
-            case .failed, .cancelled: break   // dead flow, dial again below
-            default: return   // rotation re-hello: keep the flow and its sequence
-            }
-        }
-        guard case .hostPort(let host, _)? = conn.currentPath?.remoteEndpoint else {
-            Log.info("cursor channel: no remote host for \(endpointName), cursor stays on TCP")
-            closeCursorChannel()
-            return
-        }
-        closeCursorChannel()
-        let params = NWParameters.udp
-        params.includePeerToPeer = true
-        params.serviceClass = .responsiveData
-        let udp = NWConnection(host: host, port: udpPort, using: params)
-        cursorConnection = udp
-        cursorChannelPort = udpPort
-        // cursorSeq is session-scoped (reset in becomeReady), not per flow:
-        // TCP frames carry the same sequence, and a flow-local restart would
-        // read as stale against a floor the TCP path already advanced.
-        udp.stateUpdateHandler = { [weak self] state in
-            guard let self, self.cursorConnection === udp else { return }
-            switch state {
-            case .ready:
-                self.cursorConnectionReady = true
-                Log.info("cursor channel ready: udp \(host):\(udpPort)")
-                // Probe immediately: positions only flow while the cursor is
-                // on the captured display, which can be minutes away — the
-                // ack round-trip must not wait for that.
-                if self.lastCursorSent.visible {
-                    self.sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1",
-                                           self.lastCursorSent.x, self.lastCursorSent.y))
-                } else {
-                    self.sendCursor("\"v\":0")
-                }
-                // No ack = nobody is listening (firewall, dead listener):
-                // drop the channel and let the TCP fallback carry on.
-                self.queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                    guard let self, self.cursorConnection === udp,
-                          !self.cursorChannelConfirmed else { return }
-                    Log.info("cursor channel: no ack after 3s — staying on TCP")
-                    self.closeCursorChannel()
-                }
-            case .failed(let error):
-                Log.info("cursor channel failed: \(error), cursor stays on TCP")
-                self.closeCursorChannel()
-            case .waiting(let error):
-                Log.info("cursor channel waiting: \(error), cursor stays on TCP")
-                self.cursorConnectionReady = false
-            case .cancelled:
-                self.cursorConnectionReady = false
-            default:
-                break
-            }
-        }
-        udp.start(queue: queue)
-    }
-
-    private func closeCursorChannel() {
-        cursorChannelConfirmed = false
-        cursorConnectionReady = false
-        cursorConnection?.cancel()
-        cursorConnection = nil
-        cursorChannelPort = nil
+        sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
     }
 
     private static let maxCursorPNGBytes = 24_000
@@ -4343,13 +4213,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 dropsEncThisWindow = 0
                 dropsNetThisWindow = 0
             }
-        case "cursorAck":
-            // The receiver saw our first datagram: the side channel delivers,
-            // stop mirroring positions onto TCP (PROTOCOL.md 6.3).
-            if cursorConnection != nil, !cursorChannelConfirmed {
-                cursorChannelConfirmed = true
-                Log.info("cursor channel confirmed by the receiver")
-            }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
                 let authenticatedSPKI: Data? = {
@@ -4366,7 +4229,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     return result
                 }()
-                if case .tcp(_, let tls?) = transport,
+                if case .tcp(_, let tls) = transport,
                    !SenderApplicationAuthorization.isAllowed(
                        intendedPeerID: tls.peerID, authenticatedPeerID: info.id ?? "",
                        authenticatedSPKI: authenticatedSPKI,
@@ -4380,7 +4243,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     return
                 }
-                if case .tcp(_, let tls?) = transport, info.id != tls.peerID {
+                if case .tcp(_, let tls) = transport, info.id != tls.peerID {
                     Log.info("SECURITY: authenticated key claimed unexpected peer id")
                     invalidateApplicationSession(reason: "applicationIdentityMismatch")
                     stopped = true
@@ -4420,14 +4283,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // now that it has, decide again (see the comment on the func).
                 if let conn = connection { refreshDirectLinkClassification(for: conn) }
                 Task { @MainActor in self.onHello?(info) }
-                let secureNetworkSession: Bool = if case .tcp(_, .some) = transport { true } else { false }
-                if CursorTransportPolicy.shouldOpenUDP(
-                    isSecureNetworkSession: secureNetworkSession,
-                    advertisedPort: info.cursorPort), let port = info.cursorPort {
-                    openCursorChannel(port: port)
-                } else {
-                    closeCursorChannel()
-                }
                 let addrs = info.addrs ?? []
                 if addrs != peerAddrs {
                     let firstHello = peerAddrs.isEmpty

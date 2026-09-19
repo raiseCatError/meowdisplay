@@ -47,11 +47,6 @@ struct DeveloperSettingsView: View {
                         Divider()
                     }
                 }
-                LabeledContent("Manual Host", value: controller.host)
-                LabeledContent("Manual Port", value: controller.port)
-                Text("Set via -host/-port launch arguments — a debugging escape hatch, not a user setting.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section {

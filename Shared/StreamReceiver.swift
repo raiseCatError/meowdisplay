@@ -42,7 +42,7 @@ struct PerfStats: Equatable {
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
     var transport = "—"          // USB, AWDL, or LAN from the live NWPath
     var cursorPerSec = 0         // cursor position updates applied (this window)
-    var cursorLost = 0           // UDP cursor datagrams missing or reordered (this window)
+    var cursorLost = 0           // cursor updates dropped as stale/reordered (this window)
     var macDrops = 0             // enc + net drops, this ~2s ping window
     var macEncDrops = 0          // Mac skipped capture: encoder busy (this ~2s ping window)
     var macNetDrops = 0          // Mac skipped capture: TCP queue full (this ~2s ping window)
@@ -412,7 +412,6 @@ final class StreamReceiver: ObservableObject {
     private var audioEnqueueCount = 0
     #endif
 
-    private var listener: NWListener?
     private var tlsListener: NWListener?
     private var pairingListener: NWListener?
     // Receiver-originated Connect (see connectDebug): a short-lived token
@@ -441,18 +440,12 @@ final class StreamReceiver: ObservableObject {
     @MainActor private var remotePairingAttempt = PairingAttemptTracker()
     @MainActor private var remotePairingConnection: NWConnection?
     @MainActor private var remotePairingValidity: PairingAttemptValidity?
-    private var listenerHealthy = false
-    private var listenerRestartState = StreamListenerRestartState()
     private var connection: NWConnection?
     // Cursor side channel: UDP on port+1. Cursor positions ride TCP behind
     // multi-hundred-KB video frames, so over WiFi one late frame stalls the
     // cursor with it (head-of-line blocking). UDP datagrams skip that queue.
     // Optional end to end: advertised in hello only once the listener is
     // ready, and the sender keeps using TCP when it is absent.
-    private var cursorListener: NWListener?
-    private var cursorListenerReady = false
-    private var cursorConnection: NWConnection?
-    private var cursorPortAnnounced = false
     // Newcomer connections still proving themselves against a live session
     // (see the listener). Tracked so stop() and adoption can cancel them —
     // an untracked silent socket would sit parked forever and could even
@@ -486,7 +479,6 @@ final class StreamReceiver: ObservableObject {
     // count or high loss means the network.
     private var cursorUpdatesThisWindow = 0
     private var cursorLostThisWindow = 0
-    private var cursorPort: UInt16 { port &+ 1 }
     private let queue = DispatchQueue(label: "receiver.video")
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
@@ -502,7 +494,6 @@ final class StreamReceiver: ObservableObject {
     // for 5s the connection is half-open (Mac killed, tunnel died) — drop it
     // so the listener can accept a fresh one.
     private var lastDataReceived = Date()
-    private var port: UInt16 = 9000
     // Liveness monitors: cancel-and-replace timers (not self-rescheduling
     // asyncAfter chains) so stop() can actually silence them — see #75.
     private var pingTimer: DispatchSourceTimer?
@@ -683,7 +674,7 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             guard resolved != self.serviceName else { return }
             self.serviceName = resolved
-            if self.listener != nil {
+            if self.tlsListener != nil {
                 self.tlsListener?.service = self.advertisedService
                 self.pairingListener?.service = self.advertisedPairingService
                 Log.info("re-advertising as \"\(resolved)\"")
@@ -778,10 +769,8 @@ final class StreamReceiver: ObservableObject {
         displayLayer.videoGravity = .resizeAspect
     }
 
-    func start(port: UInt16 = 9000) {
-        self.port = port
+    func start() {
         queue.async {
-            self.startListener()
             TrustStore.shared.refreshSnapshot()
             self.startTLSListener()
             self.startPairingListener()
@@ -1004,13 +993,6 @@ final class StreamReceiver: ObservableObject {
     func ensureListening() {
         queue.async {
             self.ensureTLSListening()
-            guard !self.listenerHealthy else { return }
-            guard !self.listenerRestartState.shouldDeferEnsureListening else {
-                Log.info("listener start/restart already in flight — letting it finish")
-                return
-            }
-            Log.info("listener not healthy — restarting")
-            self.restartListener()
         }
     }
 
@@ -1149,15 +1131,8 @@ final class StreamReceiver: ObservableObject {
                 finished = true
                 self.connection?.cancel()
                 self.connection = nil
-                self.listener?.stateUpdateHandler = nil
-                self.listener?.newConnectionHandler = nil
-                self.listener?.cancel()
-                self.listener = nil
                 self.tlsListener?.cancel(); self.tlsListener = nil
                 self.pairingListener?.cancel(); self.pairingListener = nil
-                self.listenerHealthy = false
-                self.listenerRestartState.invalidate()
-                self.stopCursorListener()
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it cannot
                 // resurrect the session afterwards.
@@ -1188,247 +1163,6 @@ final class StreamReceiver: ObservableObject {
             // let that keep us accepting connections after going dark.
             self.queue.asyncAfter(deadline: .now() + 1) { finish() }
         }
-    }
-
-    /// Re-arm the listener after cancellation has had time to release its
-    /// fixed port. Duplicate requests collapse into the already-pending bind.
-    private func restartListener(after delay: TimeInterval = 0) {
-        guard let restart = listenerRestartState.scheduleRestart(after: delay) else { return }
-        prepareListenerForRestart(restart)
-    }
-
-    private func scheduleListenerRetry() {
-        guard let restart = listenerRestartState.scheduleRetry() else { return }
-        Log.info("re-arming listener in \(restart.delay)s")
-        prepareListenerForRestart(restart)
-    }
-
-    private func prepareListenerForRestart(
-        _ restart: StreamListenerRestartState.ScheduledRestart
-    ) {
-        listenerHealthy = false
-        if let old = listener {
-            old.stateUpdateHandler = nil
-            old.newConnectionHandler = nil
-            old.cancel()
-        }
-        listener = nil
-        stopCursorListener()
-        queue.asyncAfter(deadline: .now() + restart.delay) { [weak self] in
-            guard let self, self.listenerRestartState.consume(restart) else { return }
-            self.startListener()
-        }
-    }
-
-    /// The UDP cursor listener follows the TCP listener's lifecycle: created
-    /// right after it, torn down with it. Losing it is never fatal; the
-    /// sender falls back to TCP when hello carries no cursorPort.
-    private func startCursorListener() {
-        stopCursorListener()
-        let params = NWParameters.udp
-        params.allowLocalEndpointReuse = true
-        params.includePeerToPeer = true
-        params.serviceClass = .responsiveData
-        let udp: NWListener
-        do {
-            udp = try NWListener(using: params, on: NWEndpoint.Port(rawValue: cursorPort)!)
-        } catch {
-            Log.info("cursor listener failed on udp :\(cursorPort): \(error) (cursor stays on TCP)")
-            return
-        }
-        cursorListener = udp
-        udp.newConnectionHandler = { [weak self] conn in
-            guard let self, self.cursorListener === udp else { conn.cancel(); return }
-            // A UDP "connection" is one remote host:port flow. The newest
-            // one is the live sender (a rebuilt sender socket gets a fresh
-            // ephemeral port) and starts its sequence over.
-            self.cursorConnection?.cancel()
-            self.cursorConnection = conn
-            self.lastCursorSeq = 0
-            conn.stateUpdateHandler = { [weak self] state in
-                guard let self, self.cursorConnection === conn else { return }
-                if case .failed(let error) = state {
-                    Log.info("cursor channel failed: \(error)")
-                    self.cursorConnection = nil
-                }
-            }
-            conn.start(queue: self.queue)
-            self.receiveCursorDatagrams(on: conn)
-        }
-        udp.stateUpdateHandler = { [weak self] state in
-            guard let self, self.cursorListener === udp else { return }
-            switch state {
-            case .ready:
-                self.cursorListenerReady = true
-                Log.info("cursor listener ready on udp :\(self.cursorPort)")
-                // hello may already be out without the port (the sender
-                // connected before UDP bound); re-send so it can switch.
-                if let connection, connection.state == .ready, !self.cursorPortAnnounced {
-                    self.sendHello(on: connection)
-                }
-            case .failed(let error):
-                Log.info("cursor listener failed: \(error) (cursor stays on TCP)")
-                let wasAnnounced = self.cursorPortAnnounced
-                self.stopCursorListener()
-                // Withdraw the offer: a hello without cursorPort makes the
-                // sender close its channel and return to TCP.
-                if wasAnnounced, let connection = self.connection, connection.state == .ready {
-                    self.sendHello(on: connection)
-                }
-            case .cancelled:
-                self.cursorListenerReady = false
-            default: break
-            }
-        }
-        udp.start(queue: queue)
-    }
-
-    private func stopCursorListener() {
-        cursorConnection?.cancel()
-        cursorConnection = nil
-        cursorListener?.cancel()
-        cursorListener = nil
-        cursorListenerReady = false
-        cursorPortAnnounced = false
-    }
-
-    private func receiveCursorDatagrams(on conn: NWConnection) {
-        conn.receiveMessage { [weak self] data, _, _, error in
-            guard let self, self.cursorConnection === conn else { return }
-            if let error {
-                Log.info("cursor channel receive error: \(error)")
-                return
-            }
-            if let data, !data.isEmpty { self.handleCursorDatagram(data) }
-            self.receiveCursorDatagrams(on: conn)
-        }
-    }
-
-    /// One datagram = one cursor JSON plus `s`, a per-flow sequence. UDP can
-    /// reorder, and a stale position after a fresh one reads as jitter, so
-    /// anything at or below the last seen sequence is dropped.
-    private func handleCursorDatagram(_ data: Data) {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              obj["type"] as? String == "cursor",
-              let seq = (obj["s"] as? NSNumber)?.uint64Value else { return }
-        // Loss accounting only; the floor itself is enforced in applyCursor,
-        // shared with TCP. Counts run slightly hot during the brief window
-        // where the sender still mirrors to TCP (duplicates read as drops).
-        guard seq > lastCursorSeq else { cursorLostThisWindow += 1; return }
-        if lastCursorSeq == 0 {
-            // First datagram of this flow: tell the sender the channel truly
-            // delivers (UDP .ready proves only a local route — a firewalled
-            // port would otherwise eat the cursor forever, PROTOCOL.md 6.3).
-            Log.info("cursor channel: receiving datagrams")
-            sendControl(["type": "cursorAck"])
-        } else {
-            cursorLostThisWindow += Int(seq - lastCursorSeq - 1)
-        }
-        applyCursor(obj)
-    }
-
-    private func startListener() {
-        guard listener == nil, listenerRestartState.beginStarting() else { return }
-        let newListener: NWListener
-        do {
-            // noDelay matters most in THIS direction: touch events are tiny
-            // packets, and Nagle would hold each one until the previous is
-            // ACKed — batched, late drags read as input lag.
-            let tcp = NWProtocolTCP.Options()
-            tcp.noDelay = true
-            let params = NWParameters(tls: nil, tcp: tcp)
-            params.allowLocalEndpointReuse = true
-            params.includePeerToPeer = true
-            params.serviceClass = .interactiveVideo
-            params.requiredLocalEndpoint = .hostPort(
-                host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
-            newListener = try NWListener(using: params)
-        } catch {
-            listenerRestartState.listenerStopped()
-            Log.info("listener could not be created: \(error)")
-            setStatus("Listener failed — restarting…")
-            scheduleListenerRetry()
-            return
-        }
-        listener = newListener
-        // Advertise on the local network so the Mac can discover us for WiFi
-        // mode (USB/usbmux connects straight to the port and ignores this).
-        // Plaintext media is deliberately loopback-only for usbmux. Bonjour
-        // advertises the separate pinned-TLS listener below.
-        newListener.newConnectionHandler = { [weak self] conn in
-            guard let self, self.listener === newListener else {
-                conn.cancel()
-                return
-            }
-            Log.info("new connection from \(String(describing: conn.endpoint))")
-            // A Bonjour dial races IPv6 and IPv4 and both handshakes can
-            // complete; the sender cancels its loser within milliseconds.
-            // Adopting every newcomer at once evicted the winner for a
-            // connection that was already dying (seen in the field as a
-            // reset-by-peer storm). With a connection in hand, a newcomer
-            // has to stay alive for a moment before it replaces it.
-            // A closed socket still reads as .ready until a receive hits
-            // EOF, so the proof is bytes: greet the newcomer and adopt it
-            // the moment it streams something back; a socket that closes
-            // or errors first is discarded and the session stays put.
-            if let current = self.connection, current.state != .cancelled,
-               !Self.isFailed(current.state) {
-                self.pendingConnections.append(conn)
-                conn.stateUpdateHandler = { [weak self] state in
-                    guard let self, case .ready = state else { return }
-                    self.sendHello(on: conn)
-                    conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) {
-                        [weak self] data, _, isComplete, error in
-                        guard let self else { return }
-                        // Only a still-tracked candidate may adopt: adoption
-                        // of a rival and stop() both clear the list, so a
-                        // late callback can't evict a session or resurrect a
-                        // stopped receiver.
-                        guard self.pendingConnections.contains(where: { $0 === conn }) else {
-                            conn.cancel()
-                            return
-                        }
-                        self.pendingConnections.removeAll { $0 === conn }
-                        if let data, !data.isEmpty {
-                            self.adopt(conn, greeted: true, initialData: data)
-                        } else {
-                            Log.info("ignored a twin connection that closed at once"
-                                     + (error.map { " (\($0))" } ?? ""))
-                            conn.cancel()
-                        }
-                        _ = isComplete
-                    }
-                }
-                conn.start(queue: self.queue)
-            } else {
-                self.adopt(conn)
-            }
-        }
-        newListener.stateUpdateHandler = { [weak self] state in
-            guard let self, self.listener === newListener else { return }
-            switch state {
-            case .ready:
-                self.listenerRestartState.listenerReady()
-                self.listenerHealthy = true
-                self.setStatus("Waiting for Mac")
-            case .waiting(let error):
-                // Network.framework owns transient waiting states and may
-                // recover without releasing/rebinding the fixed port.
-                Log.info("listener waiting: \(error)")
-            case .failed(let error):
-                Log.info("listener failed: \(error)")
-                self.listenerRestartState.listenerStopped()
-                self.listenerHealthy = false
-                self.setStatus("Listener failed — restarting…")
-                self.scheduleListenerRetry()
-            case .cancelled:
-                self.listenerRestartState.listenerStopped()
-                self.listenerHealthy = false
-            default: break
-            }
-        }
-        newListener.start(queue: queue)
-        startCursorListener()
     }
 
     private func startTLSListener() {
@@ -1648,7 +1382,6 @@ final class StreamReceiver: ObservableObject {
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
-        cursorPortAnnounced = false
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
@@ -2107,7 +1840,6 @@ final class StreamReceiver: ObservableObject {
         }
         // Additive capability: only offered while the UDP listener is bound,
         // so a sender never dials a port nobody answers on.
-        if cursorListenerReady { hello["cursorPort"] = Int(cursorPort) }
         // Additive: decode ceiling (PROTOCOL.md 6.5) — ask for the full
         // desktop but a stream no larger than this machine can decode.
         if let maxEncodeWide, let maxEncodeHigh {
@@ -2138,9 +1870,8 @@ final class StreamReceiver: ObservableObject {
         let addrs = advertisesAddresses ? Self.reachableAddresses() : []
         if !addrs.isEmpty { hello["addrs"] = addrs }
         lastAdvertisedAddrs = addrs
-        cursorPortAnnounced = cursorListenerReady
         sendControl(hello, on: conn)
-        Log.info("hello sent\(cursorListenerReady ? " (cursorPort \(cursorPort))" : "")")
+        Log.info("hello sent")
     }
 
     /// Every IP address of an up, non-loopback interface, for hello.addrs.
@@ -4129,7 +3860,6 @@ final class StreamReceiver: ObservableObject {
         Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
         setStatus("Reconnecting…")
         ensureTLSListening()
-        if !listenerHealthy { restartListener() }
         if let peerID = manualConnectPeerID ?? authenticatedPeerID ?? recoveryPeerID {
             requestRemoteConnect(peerID: peerID)
         }
@@ -4273,7 +4003,7 @@ final class StreamReceiver: ObservableObject {
             // If the listener is healthy, `armReconnect` (fired reactively)
             // won't rebuild it. A manual retry is explicitly a user asking
             // to un-stick a broken state, so force a rebind.
-            self.restartListener()
+            self.ensureTLSListening()
         }
     }
 

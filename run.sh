@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Start the Mac sender app. The phone app must be running (it listens on
-# :9000); USB connectivity goes through macOS's built-in usbmuxd — no tunnel
+# its pinned TLS port); USB connectivity goes through macOS's built-in usbmuxd — no tunnel
 # tool needed. The Mac app retries until the device shows up.
 set -e
 cd "$(dirname "$0")"

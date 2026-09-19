@@ -2005,7 +2005,7 @@ final class ReceiverModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        receiver.start(port: 9000)
+        receiver.start()
     }
 
     // MARK: - Lock vs app switch vs app quit

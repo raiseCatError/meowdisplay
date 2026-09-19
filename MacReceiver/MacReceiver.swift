@@ -72,7 +72,7 @@ final class ReceiverController: ObservableObject {
         // every welcome, so reconnects and migrations restore it.
         receiver.primeAudioPreference(UserDefaults.standard.bool(forKey: Self.audioPreferredKey))
         self.receiver = receiver
-        receiver.start(port: 9000)
+        receiver.start()
 
         receiver.$connected
             .removeDuplicates()

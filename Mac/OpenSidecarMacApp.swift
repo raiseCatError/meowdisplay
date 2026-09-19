@@ -333,10 +333,6 @@ final class SenderController: ObservableObject {
     /// only one prompt is ever live at a time.
     let inputControlPrompt = InputControlRequestPromptModel()
     private var pairingObservation: AnyCancellable?
-    // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
-    // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
-    @Published var host = UserDefaults.standard.string(forKey: "host") ?? "127.0.0.1"
-    @Published var port = UserDefaults.standard.string(forKey: "port") ?? "9000"
     // `-mode mirror` / `-mode extend` launch argument also works.
     // Mode/quality apply per-pipeline at construction, so a change rebuilds
     // every session. Doing that here — rather than in the Settings picker's
@@ -1373,7 +1369,8 @@ final class SenderController: ObservableObject {
                     self.pairingMessage = "Paired with \(paired.peerName)"
                     self.scheduleAutoConnect()   // the fresh pin makes buildTransport succeed now
                 } catch {
-                    self.pairingMessage = "USB pairing failed: \(error.localizedDescription)"
+                    Log.info("usbPairing: failed error=\(error)")
+                    self.pairingMessage = RemotePairingFailure.message(for: error)
                 }
             }
         }
@@ -1661,12 +1658,6 @@ final class SenderController: ObservableObject {
         let candidates = autoConnectCandidates
         autoConnectPolicy.updateAvailableIdentifiers(
             candidates.reduce(into: Set<String>()) { $0.formUnion($1.identifiers) })
-        // The -host/-port escape hatch is an explicit choice — dial it like
-        // the wired devices (it joins them, not replaces them).
-        if UserDefaults.standard.object(forKey: "host") != nil,
-           session(for: "usb:first") == nil {
-            connect(to: .usb(udid: nil))
-        }
         var successfullyStartedLogicalIDs = Set<String>()
         for candidate in candidates {
             if successfullyStartedLogicalIDs.contains(candidate.logicalID) { continue }
@@ -1860,7 +1851,7 @@ final class SenderController: ObservableObject {
             if let device = usbDevices.first(where: { $0.udid == udid }), let name = device.name {
                 return name
             }
-            return udid == nil ? "Manual (\(host):\(port))" : "iPhone / iPad"
+            return "iPhone / iPad"
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
         case .remote(let peerID), .remoteCallback(let peerID, _, _):
@@ -1939,14 +1930,6 @@ final class SenderController: ObservableObject {
     private func buildTransport(for target: ConnectionTarget) -> SenderTransport? {
         switch target {
         case .usb(let udid):
-            if UserDefaults.standard.object(forKey: "host") != nil, udid == nil {
-                // Manual override: dial a plain TCP endpoint instead of usbmuxd.
-                // Explicit local-debugging escape hatch only — untouched by
-                // the secure-USB path below.
-                guard let portNum = UInt16(port) else { return nil }
-                return .tcp(.hostPort(host: NWEndpoint.Host(host),
-                                      port: NWEndpoint.Port(rawValue: portNum)!), tls: nil)
-            }
             // USB is only a ROUTE — media must be gated by the same pinned
             // cryptographic identity as LAN/Remote. No pin (unknown/never-
             // paired hardware, or a forgotten peer) means no transport at
@@ -2219,7 +2202,8 @@ final class SenderController: ObservableObject {
                         self.pairingMessage = "Paired with \(paired.peerName)"
                     } catch {
                         guard self.owns(session) else { return }
-                        self.pairingMessage = "USB pairing failed: \(error.localizedDescription)"
+                        Log.info("usbPairing: failed error=\(error)")
+                    self.pairingMessage = RemotePairingFailure.message(for: error)
                     }
                 }
             }
@@ -2445,12 +2429,6 @@ final class SenderController: ObservableObject {
                     ?? "iPhone / iPad",
                 usbTarget: usbTarget,
                 wifiTarget: twin.map { .wifi($0) }))
-        }
-        if UserDefaults.standard.object(forKey: "host") != nil {
-            let target = ConnectionTarget.usb(udid: nil)
-            coveredSessionIDs.insert(target.sessionID)
-            entries.append(DeviceEntry(id: target.sessionID, name: label(for: target),
-                                       usbTarget: target, wifiTarget: nil))
         }
         for result in discovered {
             guard let name = serviceName(of: result), !mergedServices.contains(name)

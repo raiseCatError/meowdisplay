@@ -277,16 +277,6 @@ enum WireCrypto {
     static let fingerprintHKDFInfo = Data("fingerprint".utf8)
 }
 
-enum CursorTransportPolicy {
-    static func shouldOpenUDP(isSecureNetworkSession: Bool, advertisedPort: Int?) -> Bool {
-        !isSecureNetworkSession && advertisedPort.map { $0 > 0 && $0 <= Int(UInt16.max) } == true
-    }
-
-    static func shouldSendOnPrimary(udpAvailable: Bool, udpConfirmed: Bool) -> Bool {
-        !udpAvailable || !udpConfirmed
-    }
-}
-
 enum NativeAppGestureKind: String, Codable, CaseIterable, Hashable {
     case magnify
     case rotate
