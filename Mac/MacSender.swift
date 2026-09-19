@@ -2043,8 +2043,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               + "the screen may be locked; if this persists unlocked, re-grant "
                               + "Screen Recording in System Settings and relaunch"])
         }
+        let state = DisplayHealth.reading(for: id).diagnosticSummary
+        Log.info("virtual display never appeared in SCShareableContent — CG state: \(state)")
         throw NSError(domain: "MacSender", code: 3,
-                      userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent"])
+                      userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent (\(state))"])
     }
 
     private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int,

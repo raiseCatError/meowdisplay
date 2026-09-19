@@ -58,4 +58,12 @@ final class DisplayHealthTests: XCTestCase {
         let result = DisplayUsability.evaluate(reading(isOnline: false, isActive: false, boundsEmpty: true))
         XCTAssertEqual(result, .stale(reason: "CGDisplayIsOnline=false"))
     }
+
+    func testDiagnosticSummaryIncludesMirrorAndMainState() {
+        var r = reading(isActive: false, mirrorState: .mirrored)
+        r.mirrorsDisplay = 7
+        r.isMain = true
+        XCTAssertEqual(r.diagnosticSummary,
+                       "displayID=1 inMirrorSet=mirrored mirrors=7 active=false online=true main=true")
+    }
 }

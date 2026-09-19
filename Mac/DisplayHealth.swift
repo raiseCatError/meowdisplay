@@ -14,6 +14,16 @@ struct DisplayReading: Equatable {
     /// released/nonexistent display) is `.unknown` — see PR #250's fix and
     /// the identical strict check already in `VirtualDisplay.ensureNotMirrored`.
     let mirrorState: MirrorState
+    /// Display this one mirrors (`CGDisplayMirrorsDisplay`), or
+    /// `kCGNullDirectDisplay`. Diagnostics only — not part of usability.
+    var mirrorsDisplay: CGDirectDisplayID = kCGNullDirectDisplay
+    var isMain = false
+
+    /// Compact one-line CG state for SCK-failure logs.
+    var diagnosticSummary: String {
+        "displayID=\(id) inMirrorSet=\(mirrorState) mirrors=\(mirrorsDisplay) "
+            + "active=\(isActive) online=\(isOnline) main=\(isMain)"
+    }
 
     enum MirrorState: Equatable {
         case mirrored
@@ -64,7 +74,9 @@ enum DisplayHealth {
             isActive: CGDisplayIsActive(id) != 0,
             boundsEmpty: CGDisplayBounds(id).isEmpty,
             hasValidMode: CGDisplayCopyDisplayMode(id) != nil,
-            mirrorState: mirrorState
+            mirrorState: mirrorState,
+            mirrorsDisplay: CGDisplayMirrorsDisplay(id),
+            isMain: CGDisplayIsMain(id) != 0
         )
     }
 
