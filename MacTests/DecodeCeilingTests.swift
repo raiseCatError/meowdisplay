@@ -41,6 +41,20 @@ final class DecodeCeilingTests: XCTestCase {
         XCTAssertEqual(result.height, 2880)
     }
 
+    func test5120x2880MirrorRasterClampsWithin4096x2304() {
+        // Exercises the exact operating point a 5K Mirror-at-Best capture
+        // would request against the common 4096x2304 legacy decode ceiling
+        // (see `MacSender.startMirrorCapture(display:)`).
+        let result = DecodeCeiling.clamp(width: 5120, height: 2880, maxWide: 4096, maxHigh: 2304)
+        XCTAssertLessThanOrEqual(result.width, 4096)
+        XCTAssertLessThanOrEqual(result.height, 2304)
+        let originalAspect = 5120.0 / 2880.0
+        let resultAspect = Double(result.width) / Double(result.height)
+        XCTAssertEqual(originalAspect, resultAspect, accuracy: 0.01)
+        XCTAssertEqual(result.width % 2, 0)
+        XCTAssertEqual(result.height % 2, 0)
+    }
+
     func testOnlyOneAxisOverCeilingStillClampsBoth() {
         // Width fits, height doesn't — the scale factor must still apply to
         // both axes together (aspect-preserving), not clamp height alone.

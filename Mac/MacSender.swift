@@ -2974,17 +2974,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
         let pixelsW = displayMode?.pixelWidth ?? display.width
         let pixelsH = displayMode?.pixelHeight ?? display.height
-        let captureW = (Int(Double(pixelsW) * quality.scale)) & ~1
-        let captureH = (Int(Double(pixelsH) * quality.scale)) & ~1
+        let nativeCaptureW = (Int(Double(pixelsW) * quality.scale)) & ~1
+        let nativeCaptureH = (Int(Double(pixelsH) * quality.scale)) & ~1
+        // Clamp to the receiver's advertised decode ceiling (PROTOCOL.md
+        // 6.5) exactly like Extend does via `clampedCaptureSize` — Mirror
+        // used to skip this because capture started before any hello was
+        // available, but `start()` now awaits `waitForHello()` before
+        // either mode begins, and every recovery path here runs only after
+        // the current session's hello is already in `lastHello`, so the
+        // ceiling is always known by this point.
+        let (maxWide, maxHigh) = lastHello.map {
+            CodecDecodeCeiling.applicable(
+                codec: .h264, legacyMaxEncodeWide: $0.maxEncodeWide, legacyMaxEncodeHigh: $0.maxEncodeHigh)
+        } ?? (nil, nil)
+        let (captureW, captureH) = DecodeCeiling.clamp(
+            width: nativeCaptureW, height: nativeCaptureH, maxWide: maxWide, maxHigh: maxHigh)
+        if captureW != nativeCaptureW || captureH != nativeCaptureH {
+            Log.info("mirror stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling "
+                + "\(maxWide ?? 0)x\(maxHigh ?? 0)")
+        }
 
         // Logical (point) size vs. native backing-pixel size are frequently
         // different (HiDPI @2x, or a virtual display like BetterDisplay
         // configured with a large backing framebuffer) — log both plus the
         // actual capture/encode target distinctly so a huge backing store
         // is visible as exactly that, not confused with the encoded size.
-        // NB: unlike Extend mode, Mirror does not currently clamp to the
-        // receiver's advertised decode ceiling (PROTOCOL.md 6.5) — Mirror
-        // starts capture before any hello is available to read it from.
         let displayName = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
         }?.localizedName ?? "Display \(display.displayID)"
