@@ -12,7 +12,7 @@ final class LocalOwnerAuthenticator: OwnerAuthenticating, @unchecked Sendable {
 
     func authenticate(reason: String) async -> OwnerAuthResult {
         let context = LAContext()
-        lock.lock(); self.context = context; lock.unlock()
+        setContext(context)
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             Log.info("ownerAuth: unavailable code=\(error?.code ?? 0)")
@@ -33,8 +33,20 @@ final class LocalOwnerAuthenticator: OwnerAuthenticating, @unchecked Sendable {
         }
     }
 
+    // Synchronous so the lock is never held across an async context.
+    private func setContext(_ new: LAContext) {
+        lock.lock(); defer { lock.unlock() }
+        context = new
+    }
+
+    private func takeContext() -> LAContext? {
+        lock.lock(); defer { lock.unlock() }
+        let current = context
+        context = nil
+        return current
+    }
+
     func invalidate() {
-        lock.lock(); let current = context; context = nil; lock.unlock()
-        current?.invalidate()
+        takeContext()?.invalidate()
     }
 }

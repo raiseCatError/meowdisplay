@@ -72,7 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPanel() {
         if panel == nil {
-            let content = ReceiverContentView(controller: ReceiverController.shared,
+            // AppKit delegate callbacks and the onNeedsAttention hook run on the main thread.
+            let controller = MainActor.assumeIsolated { ReceiverController.shared }
+            let content = ReceiverContentView(controller: controller,
                                               updater: updater)
             let hosting = NSHostingView(rootView: content)
             let w = NSWindow(contentRect: NSRect(origin: .zero, size: ReceiverContentView.size),
