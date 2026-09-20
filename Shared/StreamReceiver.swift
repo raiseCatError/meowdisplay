@@ -67,24 +67,24 @@ enum PeerUpdateSignal: Equatable {
 
 final class StreamReceiver: ObservableObject {
 
-    @Published var status = "Starting…"
-    @Published var fps = 0
-    @Published private(set) var streamingProfile: StreamingProfile = .performance
+    @MainActor @Published var status = "Starting…"
+    @MainActor @Published var fps = 0
+    @MainActor @Published private(set) var streamingProfile: StreamingProfile = .performance
     @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
     /// Mac-authoritative Streaming Priority mirror. Default `.auto` matches
     /// the Mac's own default so an old-peer/pre-hello receiver never assumes
     /// a different bounded encode depth than the Mac is actually running.
-    @Published private(set) var streamingPriority: StreamingPriority = .auto
+    @MainActor @Published private(set) var streamingPriority: StreamingPriority = .auto
     /// Mac-authoritative confirmed codec (HEVC milestone) — the receiver's
     /// own diagnostics mirror of `streamCodecState`. Default `.h264`: the
     /// only codec a pre-`hevcCodecWireVersion` Mac can ever send, and the
     /// safe assumption until the first `streamCodecState` (or first video
     /// frame) arrives.
-    @Published private(set) var activeStreamCodec: StreamCodec = .h264
-    @Published var connected = false
-    @Published var videoSize = CGSize.zero   // for touch coordinate mapping
-    @Published private(set) var displayState = DisplayState.running
-    @Published private(set) var videoEnabled = true
+    @MainActor @Published private(set) var activeStreamCodec: StreamCodec = .h264
+    @MainActor @Published var connected = false
+    @MainActor @Published var videoSize = CGSize.zero   // for touch coordinate mapping
+    @MainActor @Published private(set) var displayState = DisplayState.running
+    @MainActor @Published private(set) var videoEnabled = true
     /// Queue-confined copy used to distinguish an idempotent state push from
     /// an actual off/on transition that must retire decoder state.
     private var receivedVideoEnabled = true
@@ -92,55 +92,55 @@ final class StreamReceiver: ObservableObject {
     /// `receivedVideoEnabled` — this is compared/written on the control-
     /// message queue, never the main-thread `@Published` mirror.
     private var receivedStreamCodec: StreamCodec = .h264
-    @Published var perf = PerfStats()
+    @MainActor @Published var perf = PerfStats()
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
-    @Published var peerSignal: PeerUpdateSignal?
+    @MainActor @Published var peerSignal: PeerUpdateSignal?
     /// Mac protocol version from the most recent `welcome` message.
-    @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
-    @Published private(set) var inputResetGeneration = 0
-    @Published private(set) var controlResetGeneration = 0
-    @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
-    @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
-    @Published private(set) var displayModeConfirmationGeneration = 0
-    private var displayModeRequestState = DisplayModeRequestState()
+    @MainActor @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
+    @MainActor @Published private(set) var inputResetGeneration = 0
+    @MainActor @Published private(set) var controlResetGeneration = 0
+    @MainActor @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
+    @MainActor @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
+    @MainActor @Published private(set) var displayModeConfirmationGeneration = 0
+    @MainActor private var displayModeRequestState = DisplayModeRequestState()
     /// Set when the Mac reports Mirror has no usable physical display (a
     /// headless/clamshell Mac) — see `WireMessage.mirrorUnavailable`. The UI
     /// offers switching to Extend via `acceptMirrorUnavailableOffer()`,
     /// which sends the EXISTING `displayModeRequest` — never a parallel
     /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
     /// the user acts on it.
-    @Published private(set) var mirrorUnavailable = false
+    @MainActor @Published private(set) var mirrorUnavailable = false
     /// Set when the Mac authoritatively rejects a Mirror request made
     /// WHILE already confirmed extending (see `SenderController.requestMode`)
     /// — a simple informational state, never the "Use Extend?" offer, since
     /// the user is already using Extend. Dismissed with `dismissMirrorRejection()`,
     /// on any disconnect, or once any mode confirmation resolves it.
-    @Published private(set) var mirrorRejectedWhileExtending = false
+    @MainActor @Published private(set) var mirrorRejectedWhileExtending = false
     /// The connected Mac's canonical Mirror capture-source report — see
     /// `MirrorDisplayStateUpdate`. `nil` until a Mac speaking
     /// `mirrorDisplayWireVersion` has actually reported one (distinct from
     /// `selectedUUID == nil`, which means Auto).
-    @Published private(set) var mirrorDisplayState: MirrorDisplayStateUpdate?
+    @MainActor @Published private(set) var mirrorDisplayState: MirrorDisplayStateUpdate?
     /// The Mac's confirmed active Extend display shape (`extendShapeState`,
     /// `pv` 14) — same request/confirm bookkeeping as `confirmedDisplayMode`.
-    @Published private(set) var confirmedExtendShape: ExtendDisplayShapePreference?
-    @Published private(set) var pendingExtendShape: ExtendDisplayShapePreference?
-    private var extendShapeRequestState = ExtendShapeRequestState()
+    @MainActor @Published private(set) var confirmedExtendShape: ExtendDisplayShapePreference?
+    @MainActor @Published private(set) var pendingExtendShape: ExtendDisplayShapePreference?
+    @MainActor private var extendShapeRequestState = ExtendShapeRequestState()
     // Receiver-enforced max FPS (PART 2/3/4) — same request/confirm shape as
     // Extend shape above. `maxFPSState` (`lastMaxFPSState`) additionally
     // carries the diagnostic ceilings (encoder-safe FPS, available tiers,
     // limitation reason) PART 5's UI text needs; it is NOT itself the
     // confirmed preference — that stays in `confirmedMaxFPS`/`pendingMaxFPS`
     // via the same `MaxFPSRequestState` bookkeeping.
-    @Published private(set) var confirmedMaxFPS: ReceiverMaxFPSPreference?
-    @Published private(set) var pendingMaxFPS: ReceiverMaxFPSPreference?
-    @Published private(set) var lastMaxFPSState: MaxFPSStateUpdate?
-    private var maxFPSRequestState = MaxFPSRequestState()
+    @MainActor @Published private(set) var confirmedMaxFPS: ReceiverMaxFPSPreference?
+    @MainActor @Published private(set) var pendingMaxFPS: ReceiverMaxFPSPreference?
+    @MainActor @Published private(set) var lastMaxFPSState: MaxFPSStateUpdate?
+    @MainActor private var maxFPSRequestState = MaxFPSRequestState()
 
     /// The single authoritative session state the UI derives from. Mutated
     /// only on `queue` via `sessionState`; this is its main-thread mirror.
-    @Published private(set) var session = ReceiverSessionState()
+    @MainActor @Published private(set) var session = ReceiverSessionState()
     /// Queue-confined authority. Every transition goes through
     /// `mutateSession` so there is exactly one logging and publishing path.
     private var sessionState = ReceiverSessionState()
@@ -164,7 +164,7 @@ final class StreamReceiver: ObservableObject {
     /// Set by `forgetPeer(_:)` so `WakeConnectCoordinator` can end an attempt
     /// targeting a peer whose trust was just revoked instead of letting a
     /// late/stale authentication complete it (P13).
-    @Published private(set) var lastForgottenPeerID: String?
+    @MainActor @Published private(set) var lastForgottenPeerID: String?
 
     /// Coarse, interruption-aware connection headline — "Connected", an
     /// interruption title ("Reconnecting…", "Display Paused", …), or
@@ -172,7 +172,7 @@ final class StreamReceiver: ObservableObject {
     /// that needs a phase-level label reads this instead of independently
     /// re-deriving it from `connected` alone, which used to miss states
     /// like reconnecting/paused.
-    var canonicalPhaseTitle: String {
+    @MainActor var canonicalPhaseTitle: String {
         session.interruption?.title ?? (session.phase == .connected ? "Connected" : "Waiting for a Mac…")
     }
     /// The one timer driving automatic recovery — never a second one.
@@ -231,22 +231,22 @@ final class StreamReceiver: ObservableObject {
     var onAllowInputStateChange: ((SessionInputWireState) -> Void)?
 
     /// True when the connected Mac understands pencil/proximity wire messages.
-    var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
+    @MainActor var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
 
-    var macSupportsVideoControl: Bool {
+    @MainActor var macSupportsVideoControl: Bool {
         macProtocolVersion >= WireProtocol.videoControlWireVersion
     }
 
     /// True when the connected Mac understands the `keyboard` message family (M4).
-    var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
+    @MainActor var macSupportsKeyboardWire: Bool { macProtocolVersion >= WireProtocol.keyboardWireVersion }
 
     /// True when the connected Mac understands the `pointer` message family (M7).
-    var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
+    @MainActor var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
 
     /// True when the connected Mac understands Mac system audio (`pv` 12).
     /// No legacy fallback, same as keyboard: below this, Audio simply stays
     /// unavailable rather than degrading to something else.
-    var macSupportsAudio: Bool { macProtocolVersion >= WireProtocol.audioWireVersion }
+    @MainActor var macSupportsAudio: Bool { macProtocolVersion >= WireProtocol.audioWireVersion }
 
     // MARK: - Mac system audio playback
     //
@@ -263,7 +263,7 @@ final class StreamReceiver: ObservableObject {
     // right real moment with only a small bounded preroll.
 
     /// Mac-confirmed actual audio production state (`audioState`).
-    @Published var audioEnabled = false
+    @MainActor @Published var audioEnabled = false
     /// What this receiver last asked for — resent on every `welcome` so it
     /// survives reconnection and transport migration without the user
     /// re-enabling it (SESSION BEHAVIOR).
@@ -427,7 +427,7 @@ final class StreamReceiver: ObservableObject {
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
     private var mediaSuppressedForPairing = false
-    @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
+    @MainActor @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
     private var macPairingBrowser: NWBrowser?
     /// Bumped only after a pairing (any transport) truly finalized: both
     /// confirmations, commit exchange and the TrustStore pin. Drives the
@@ -553,8 +553,8 @@ final class StreamReceiver: ObservableObject {
     // when the cursor changes shape, so a plain arrow would stay invisible
     // forever). Keep the latest of each so a late-attaching view replays
     // them. Main-thread, like the callbacks.
-    private(set) var cursorState: (x: Double, y: Double, visible: Bool) = (0.5, 0.5, false)
-    private(set) var cursorSprite: (image: CGImage, anchor: CGPoint, normSize: CGSize)?
+    @MainActor private(set) var cursorState: (x: Double, y: Double, visible: Bool) = (0.5, 0.5, false)
+    @MainActor private(set) var cursorSprite: (image: CGImage, anchor: CGPoint, normSize: CGSize)?
 
     // Metal renderer path (experimental, "metalRenderer" setting): we decode
     // explicitly and hand BGRA buffers out; called on the receiver queue.
@@ -1914,7 +1914,7 @@ final class StreamReceiver: ObservableObject {
     /// Touch events: x/y normalized [0,1] in video space, origin top-left.
     /// Stamped in *Mac* clock time (our clock + sync offset) so the Mac can
     /// measure touch→injection latency without doing its own clock sync.
-    func sendTouch(phase: String, x: Double, y: Double) {
+    @MainActor func sendTouch(phase: String, x: Double, y: Double) {
         guard displayState == .running else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
@@ -1922,7 +1922,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
-    func sendScroll(dx: Double, dy: Double) {
+    @MainActor func sendScroll(dx: Double, dy: Double) {
         guard displayState == .running else { return }
         sendControl(["type": "scroll", "dx": dx, "dy": dy])
     }
@@ -1938,14 +1938,14 @@ final class StreamReceiver: ObservableObject {
     ///
     /// Absolute cursor move: `x`/`y` normalized [0,1] in video space, no
     /// button implied.
-    func sendPointerMove(x: Double, y: Double) {
+    @MainActor func sendPointerMove(x: Double, y: Double) {
         guard displayState == .running else { return }
         sendControl(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
     /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
     /// `scroll`), no button implied.
-    func sendPointerMoveRelative(dx: Double, dy: Double) {
+    @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
         guard displayState == .running else { return }
         sendControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
     }
@@ -1953,7 +1953,7 @@ final class StreamReceiver: ObservableObject {
     /// Presses `button` down at the Mac's current cursor position with the
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
-    func sendPointerDown(button: PointerButton, clickCount: Int) {
+    @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
         sendControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
     }
@@ -1962,14 +1962,14 @@ final class StreamReceiver: ObservableObject {
     /// a matching `up` (or disconnect — senders MUST release a still-held
     /// button on session loss regardless, mirroring `keyboard`'s down/up
     /// contract).
-    func sendPointerUp(button: PointerButton, clickCount: Int) {
+    @MainActor func sendPointerUp(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
         sendControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
     /// rotation is always 0 until Apple Pencil Pro barrel roll is wired up.
-    func sendPencil(phase: String, x: Double, y: Double,
+    @MainActor func sendPencil(phase: String, x: Double, y: Double,
                     pressure: Double, azimuth: Double, altitude: Double) {
         guard displayState == .running else { return }
         var msg: [String: Any] = [
@@ -1985,7 +1985,7 @@ final class StreamReceiver: ObservableObject {
         sendControl(msg)
     }
 
-    func sendProximity(entering: Bool, x: Double, y: Double) {
+    @MainActor func sendProximity(entering: Bool, x: Double, y: Double) {
         guard displayState == .running else { return }
         sendControl(["type": "proximity", "entering": entering, "x": x, "y": y])
     }
@@ -1993,7 +1993,7 @@ final class StreamReceiver: ObservableObject {
     /// Committed Unicode text from the native software/hardware keyboard
     /// (M4). Never carries marked/IME-intermediate text — callers commit
     /// only finished text (see `RemoteKeyboardInputView`).
-    func sendKeyboardText(_ text: String) {
+    @MainActor func sendKeyboardText(_ text: String) {
         guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
         sendControl(["type": "keyboard", "action": "text", "text": text])
     }
@@ -2001,7 +2001,7 @@ final class StreamReceiver: ObservableObject {
     /// An atomic special key from the software keyboard (e.g. Return,
     /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
     /// keyboard-page usage number.
-    func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
+    @MainActor func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
         #if DEBUG
         // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
@@ -2015,14 +2015,14 @@ final class StreamReceiver: ObservableObject {
                      "modifiers": modifiers])
     }
 
-    func sendModifier(_ modifier: ControlModifier, down: Bool) {
+    @MainActor func sendModifier(_ modifier: ControlModifier, down: Bool) {
         guard displayState == .running,
               macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
         sendControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
                      "modifier": modifier.rawValue])
     }
 
-    func sendCancelActiveInput() {
+    @MainActor func sendCancelActiveInput() {
         guard macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
         sendControl(["type": "keyboard", "action": "cancel"])
     }
@@ -2035,12 +2035,12 @@ final class StreamReceiver: ObservableObject {
     /// honored immediately with no Mac decision needed (narrowing is always
     /// safe). A no-op against an older Mac (pre `allowInputWireVersion`) or
     /// while disconnected.
-    func requestAllowInput(_ allowed: Bool) {
+    @MainActor func requestAllowInput(_ allowed: Bool) {
         guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
         sendControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
     }
 
-    func requestVideoEnabled(_ enabled: Bool) {
+    @MainActor func requestVideoEnabled(_ enabled: Bool) {
         guard connected, macSupportsVideoControl else { return }
         sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
     }
@@ -2048,7 +2048,7 @@ final class StreamReceiver: ObservableObject {
     /// Requests a Mac-side streaming profile over the existing authenticated
     /// control channel. The Mac remains authoritative and reports the
     /// accepted profile back through `streamingProfileState`.
-    func requestStreamingProfile(_ profile: StreamingProfile,
+    @MainActor func requestStreamingProfile(_ profile: StreamingProfile,
                                  customFrameRate: CustomFrameRateSelection = .auto) {
         guard connected else { return }
         sendControl(["type": WireMessage.streamingProfileRequest,
@@ -2059,7 +2059,7 @@ final class StreamReceiver: ObservableObject {
     /// Requests a Mac-side Streaming Priority change over the existing
     /// authenticated control channel. The Mac remains authoritative and
     /// reports the accepted priority back through `streamingPriorityState`.
-    func requestStreamingPriority(_ priority: StreamingPriority) {
+    @MainActor func requestStreamingPriority(_ priority: StreamingPriority) {
         guard connected else { return }
         sendControl(["type": WireMessage.streamingPriorityRequest,
                      "priority": priority.rawValue])
@@ -2072,7 +2072,7 @@ final class StreamReceiver: ObservableObject {
     /// never a stale callback re-enabling audio after those transitions,
     /// because each one re-derives the request from this single value
     /// rather than replaying anything queued.
-    func requestAudioEnabled(_ enabled: Bool) {
+    @MainActor func requestAudioEnabled(_ enabled: Bool) {
         audioPreferred = enabled
         guard connected, macSupportsAudio else { return }
         sendControl(["type": WireMessage.audioRequest, "enabled": enabled])
@@ -2092,15 +2092,15 @@ final class StreamReceiver: ObservableObject {
     /// could never send this even if it wanted to. Driven automatically by
     /// `WakeConnectCoordinator`; `PromoteInteractiveWakeView` (DEBUG-only)
     /// also exposes it as a manual diagnostic.
-    @Published var promoteInteractiveWakeResult: String?
+    @MainActor @Published var promoteInteractiveWakeResult: String?
 
-    func requestPromoteInteractiveWake() {
+    @MainActor func requestPromoteInteractiveWake() {
         guard connected else { return }
         Log.info("wakeDebug: promoteInteractiveWake request sent")
         sendControl(["type": WireMessage.promoteInteractiveWake])
     }
 
-    func sendNativeAppGesture(kind: NativeAppGestureKind,
+    @MainActor func sendNativeAppGesture(kind: NativeAppGestureKind,
                               phase: NativeAppGesturePhase,
                               delta: Double) {
         guard displayState == .running,
@@ -2206,7 +2206,7 @@ final class StreamReceiver: ObservableObject {
     /// `uuid: nil` requests Auto. A no-op against an older Mac, while
     /// disconnected, or for a display not in the Mac's own last-reported
     /// inventory (never trust a stale/local UUID the Mac hasn't vouched for).
-    func requestMirrorDisplaySelection(_ uuid: String?) {
+    @MainActor func requestMirrorDisplaySelection(_ uuid: String?) {
         guard connected, macProtocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
         let knownUUIDs = Set(mirrorDisplayState?.displays.map(\.uuid) ?? [])
         if let uuid, !knownUUIDs.contains(uuid) { return }
@@ -2337,13 +2337,13 @@ final class StreamReceiver: ObservableObject {
     /// A hardware key going down, for keys the Mac must hold (arrows,
     /// modified shortcuts). `modifiers` are named protocol modifiers, not
     /// raw UIKit flags.
-    func sendKeyboardDown(usage: Int, modifiers: [String]) {
+    @MainActor func sendKeyboardDown(usage: Int, modifiers: [String]) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
         sendControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
     }
 
     /// The matching release for `sendKeyboardDown`.
-    func sendKeyboardUp(usage: Int, modifiers: [String]) {
+    @MainActor func sendKeyboardUp(usage: Int, modifiers: [String]) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
         sendControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
     }
