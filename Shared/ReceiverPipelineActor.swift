@@ -107,14 +107,21 @@ actor ReceiverPipelineActor {
     nonisolated let reconnectContext: ReconnectContext
     nonisolated let uiEffects: UIEffects
     nonisolated let hostEffects: HostControlEffects
+    /// C3: the high-frequency receive/frame-assembly actor. `adopt()`
+    /// sequences this actor's reset and receive-loop start directly — see
+    /// `ReceiverFramePipeline`'s file header for why that is one `Task`'s
+    /// two sequential `await`s, never two independent ones.
+    nonisolated let framePipeline: ReceiverFramePipeline
 
     init(queue: DispatchQueue, sendTargetBox: StreamReceiver.SendTargetBox,
-         reconnectContext: ReconnectContext, uiEffects: UIEffects, hostEffects: HostControlEffects) {
+         reconnectContext: ReconnectContext, uiEffects: UIEffects, hostEffects: HostControlEffects,
+         framePipeline: ReceiverFramePipeline) {
         self.queue = queue
         self.sendTargetBox = sendTargetBox
         self.reconnectContext = reconnectContext
         self.uiEffects = uiEffects
         self.hostEffects = hostEffects
+        self.framePipeline = framePipeline
     }
 
     /// Permanent facade/UI-mirror outputs: every call here means "publish
@@ -155,26 +162,33 @@ actor ReceiverPipelineActor {
         var ensureTLSListening: @Sendable () -> Void
         var requestRemoteConnect: @Sendable (String) -> Void
 
-        // `lastDataReceived`/`activeReceiveGeneration` are read together,
-        // synchronously, from inside the watchdog timer's own handler —
-        // which runs ON `queue` because the timer is scheduled there — so
-        // this is not the same unsynchronized-getter problem as the ones
-        // above: it is a plain queue-confined read from queue-confined code.
-        var getLastDataReceived: @Sendable () -> Date
-        var getActiveReceiveGeneration: @Sendable () -> Int
+        // `lastDataReceived` and the active receive generation are read
+        // together, as ONE atomic pair, synchronously, from inside the
+        // watchdog timer's own handler — which runs ON `queue` because the
+        // timer is scheduled there. Both values now live in `framePipeline.
+        // syncState` (C3, `FramePipelineSyncState`) — an `NSLock`-protected
+        // mirror of actor-isolated state, not a queue-confined property —
+        // and MUST be read via its single `snapshot()` call, never two
+        // independent reads: a `recordAdoption` landing in between two
+        // separate calls would hand the watchdog a torn pair (a fresh
+        // generation with a stale timestamp from the connection it just
+        // superseded), which could misjudge a brand-new, healthy
+        // connection as silent.
+        var getReceiveLiveness: @Sendable () -> (generation: Int, lastDataReceived: Date)
         var advertisesAddresses: @Sendable () -> Bool
 
         // Adoption seam (resetStreamState boundary): runs exactly once per
         // accepted adoption, strictly before the connection's own callbacks
-        // can reach `queue` (see `adopt`), and strictly before the matching
-        // `finishAdoption` — both are plain `queue.async` hops, never a
-        // detached `Task`, so GCD's own FIFO-per-queue ordering is what
-        // keeps "reset, then drain/receive" deterministic. `generation`
-        // (the just-bumped `sessionState.generation`) is threaded through
-        // so the host can stamp its own `activeReceiveGeneration` — see
-        // `StreamReceiver.receive(on:generation:)`.
+        // can reach `queue` (see `adopt`) — a plain `queue.async` hop, never
+        // a detached `Task`, so GCD's own FIFO-per-queue ordering is what
+        // keeps this host-only reset (display/decoder/audio state — the
+        // frame-assembly reset itself is `framePipeline.beginAdoption`,
+        // sequenced separately, see `adopt`) deterministic relative to the
+        // rest of `queue`-confined host work. `generation` (the just-bumped
+        // `sessionState.generation`) is threaded through for parity with
+        // that call, though this closure no longer needs to stamp anything
+        // with it itself.
         var beginAdoption: @Sendable (NWConnection, _ generation: Int) -> Void
-        var finishAdoption: @Sendable (NWConnection, _ generation: Int, _ initialData: Data?) -> Void
 
         // Ready-transition host work (manualConnectPeerID/lastDataReceived/
         // transport/authenticatedPeerID) and the two remaining callers of
@@ -219,13 +233,10 @@ actor ReceiverPipelineActor {
         watchdog.schedule(deadline: .now() + 2.0, repeating: 2.0)
         watchdog.setEventHandler { [weak self] in
             guard let self else { return }
-            // Both reads happen here, synchronously, inside the timer's own
-            // handler — which runs ON `queue` because the timer itself is
-            // scheduled there — so they are a consistent, queue-confined
-            // snapshot, not two independent unsynchronized reads.
-            let last = self.hostEffects.getLastDataReceived()
-            let generation = self.hostEffects.getActiveReceiveGeneration()
-            Task { await self.watchdogTick(lastDataReceived: last, generation: generation) }
+            // ONE call, so the pair can never be observed torn — see
+            // `HostControlEffects.getReceiveLiveness`.
+            let liveness = self.hostEffects.getReceiveLiveness()
+            Task { await self.watchdogTick(lastDataReceived: liveness.lastDataReceived, generation: liveness.generation) }
         }
         watchdog.resume()
         watchdogTimer = watchdog
@@ -254,15 +265,16 @@ actor ReceiverPipelineActor {
         hostEffects.checkAddressChangeAndSendHello(conn)
     }
 
-    /// `generation` was captured on `queue` at the same instant as
-    /// `lastDataReceived` (see `armLivenessTimers`). If a fresh adoption has
-    /// already superseded it by the time this actually runs, the captured
-    /// `lastDataReceived` no longer describes the connection this actor
-    /// currently holds — skip rather than judge a new, healthy connection
-    /// by a stale timestamp that raced its own reset (see `beginAdoption`/
-    /// `StreamReceiver.beginAdoptionHostWork`, which reset both
-    /// `activeReceiveGeneration` and `lastDataReceived` together, and again
-    /// at ready-time, so a still-current generation's timestamp is always
+    /// `generation` was captured together with `lastDataReceived`, as one
+    /// atomic pair (see `armLivenessTimers`/`FramePipelineSyncState.
+    /// snapshot`). If a fresh adoption has already superseded it by the
+    /// time this actually runs, the captured `lastDataReceived` no longer
+    /// describes the connection this actor currently holds — skip rather
+    /// than judge a new, healthy connection by a stale timestamp that
+    /// raced its own reset (see `ReceiverFramePipeline.beginAdoption`,
+    /// which records both together, and `StreamReceiver.
+    /// onConnectionReadyHostWork`, which refreshes the timestamp again at
+    /// ready-time, so a still-current generation's timestamp is always
     /// trustworthy here).
     private func watchdogTick(lastDataReceived: Date, generation: Int) {
         guard generation == sessionState.generation else { return }
@@ -379,7 +391,18 @@ actor ReceiverPipelineActor {
         } else {
             conn.start(queue: queue)
         }
-        hostEffects.finishAdoption(conn, generation, initialData)
+
+        // `framePipeline`'s own reset, then its receive-loop start — ONE
+        // `Task`'s two sequential `await`s, never two independent sibling
+        // Tasks (see `ReceiverFramePipeline`'s file header for why that
+        // distinction matters: this actor's mailbox does not guarantee two
+        // separately-created Tasks enter in creation order, but it does
+        // guarantee one Task's own sequential awaits do).
+        let framePipeline = framePipeline
+        Task {
+            await framePipeline.beginAdoption(generation: generation)
+            await framePipeline.finishAdoption(connection: conn, generation: generation, initialData: initialData)
+        }
     }
 
     private func handlePathUpdate(conn: NWConnection, path: NWPath) {

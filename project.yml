@@ -197,6 +197,7 @@ targets:
       - Shared/ReceiverPanelPresentation.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
+      - Shared/ReceiverFramePipeline.swift
       - Shared/PCMPlaybackEngine.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift

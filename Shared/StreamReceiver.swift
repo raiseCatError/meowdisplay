@@ -471,31 +471,23 @@ final class StreamReceiver: ObservableObject {
     private var cursorUpdatesThisWindow = 0
     private var cursorLostThisWindow = 0
     private let queue = DispatchQueue(label: "receiver.video")
-    private var buffer = Data()
-    private var formatDesc: CMVideoFormatDescription?
-    private var sps: Data?
-    private var pps: Data?
-    /// HEVC-only parameter set; nil whenever the active codec is H.264.
-    /// Kept separate from `sps`/`pps` rather than reusing them under a new
-    /// meaning — the two codecs' parameter sets are never mixed into one
-    /// format description (see `resetDecoderForCodecChange`).
-    private var vps: Data?
 
     // Liveness: the Mac streams video and pings every 2s; if nothing arrives
     // for 5s the connection is half-open (Mac killed, tunnel died) — drop it
     // so the listener can accept a fresh one.
-    private var lastDataReceived = Date()
     // C1: the ping/watchdog/addrWatch liveness timers moved into `pipeline`
     // (`ReceiverPipelineActor`) — their correctness is inseparable from the
     // authoritative `connection`/`sessionState` they now read directly.
-    /// The generation of the session `receive(on:generation:)`/
-    /// `processReceivedData` currently believe they own — `pipeline`'s
-    /// `sessionState.generation` at the moment of the accepted adoption,
-    /// stamped here by `beginAdoptionHostWork` and checked, synchronously
-    /// and entirely on `queue`, before every packet touches `buffer`/decode
-    /// state. Deliberately a separate counter from `videoGeneration` (a
-    /// distinct, decode-level generation) — the two must never be merged.
-    private var activeReceiveGeneration = 0
+    // C3: `buffer`/`formatDesc`/`sps`/`pps`/`vps`, the active receive
+    // generation (previously `activeReceiveGeneration`), and the liveness
+    // timestamp itself (previously `lastDataReceived`, a plain stored
+    // property here) all moved into `framePipeline` (`ReceiverFramePipeline`)
+    // — the timestamp because per-packet updates now happen entirely
+    // inside its own `ingest`, with no host round trip needed just to bump
+    // a `Date`. Nothing here holds a writable shadow of any of this; the
+    // one synchronous cross-actor read the watchdog still needs
+    // (`makePipelineHostEffects`'s `getReceiveLiveness`) goes through
+    // `framePipeline.syncState.snapshot()`, never a local copy.
 
     private var framesThisWindow = 0
     private var fpsWindowStart = Date()
@@ -1034,6 +1026,10 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             guard paused != self.renderingPaused else { return }
             self.renderingPaused = paused
+            // C3: mirrored synchronously for `framePipeline`, which checks
+            // this before building a sample buffer — see
+            // `FramePipelineSyncState`.
+            self.framePipeline.syncState.setRenderingPaused(paused)
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
                 self.displayLayer.flush()
@@ -1335,24 +1331,14 @@ final class StreamReceiver: ObservableObject {
     // below are the host-side effects it calls out to, in the exact order
     // the original inline `adopt`/`onReady` closures ran them.
 
-    /// Runs before `pipeline` starts (or resumes) `conn` — the
-    /// resetStreamState seam: enqueued to `queue` strictly before the
-    /// connection's own callbacks can reach it (see `ReceiverPipelineActor.adopt`),
-    /// so this always completes first. `generation` is `pipeline`'s just-
-    /// bumped `sessionState.generation` (never `videoGeneration`, a
-    /// separate decode-level counter) — stamped into `activeReceiveGeneration`
-    /// here, and reset alongside `lastDataReceived` so a watchdog tick that
-    /// captures both together (see `ReceiverPipelineActor.armLivenessTimers`)
-    /// always sees a consistent, non-torn pair for whichever generation it
-    /// observes. Resetting `lastDataReceived` at adoption time (in addition
-    /// to `onConnectionReadyHostWork`, which resets it again at actual
-    /// readiness) closes the specific window a review of this seam found:
-    /// a watchdog tick racing between `pipeline` marking `conn` `.ready` and
-    /// this queue-confined reset would otherwise see an arbitrarily stale
-    /// timestamp for a connection that just proved itself.
+    /// Runs before/alongside `pipeline` starting (or resuming) `conn` — see
+    /// `ReceiverPipelineActor.adopt`. Only the display/decoder/audio reset
+    /// this method still owns directly (see `resetStreamState`); the
+    /// frame-assembly reset (`buffer`/SPS/PPS/VPS/`formatDesc`/the active
+    /// receive generation, AND its liveness-timestamp reset) is
+    /// `framePipeline.beginAdoption` — sequenced by `ReceiverPipelineActor.
+    /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
-        activeReceiveGeneration = generation
-        lastDataReceived = Date()
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
@@ -1366,23 +1352,17 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    /// Runs after `pipeline` has started (or synchronously resolved
-    /// readiness for) `conn` — drains any bytes a greeted newcomer already
-    /// proved itself with, then arms the read loop.
-    private func finishAdoptionHostWork(_ conn: NWConnection, generation: Int, initialData: Data?) {
-        if let initialData, !initialData.isEmpty {
-            bytesThisWindow += initialData.count
-            buffer.append(initialData)
-            drainFrames()
-        }
-        receive(on: conn, generation: generation)
-    }
-
     /// The host-only half of the former `onReady` closure: everything except
-    /// `setConnected(true)` itself, which stays inside `pipeline`.
+    /// `setConnected(true)` itself, which stays inside `pipeline`. Refreshes
+    /// the liveness timestamp again at actual readiness (in addition to
+    /// `framePipeline.beginAdoption`'s reset at accept time) — closes the
+    /// specific window a review of this seam found: a watchdog tick racing
+    /// between `pipeline` marking `conn` `.ready` and adoption's own reset
+    /// would otherwise see an arbitrarily stale timestamp for a connection
+    /// that just proved itself.
     private func onConnectionReadyHostWork(_ conn: NWConnection) {
         reconnectContext.update { $0.manualConnectPeerID = nil }
-        lastDataReceived = Date()
+        framePipeline.syncState.recordDataReceived(Date())
         if let path = conn.currentPath {
             updateTransport(for: conn, path: path)
         }
@@ -1677,19 +1657,12 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func resetStreamState() {
-        buffer.removeAll(keepingCapacity: true)
-        formatDesc = nil
-        sps = nil
-        pps = nil
-        // HEVC milestone: cleared alongside `sps`/`pps` for the same reason
-        // — a new session (different sender, or the same one after a full
-        // reconnect) must never let a stale VPS from the OLD session mix
-        // with fresh SPS/PPS from a NEW one while `formatDesc == nil` gates
-        // the rebuild at line ~2583. In practice the `formatDesc == nil`
-        // gate there already requires a fresh SPS/PPS (cleared here) before
-        // it rebuilds anything, so a stale `vps` was never actually usable
-        // — this closes the gap for hygiene/consistency, not a live bug.
-        vps = nil
+        // C3: `buffer`/`formatDesc`/`sps`/`pps`/`vps` reset moved into
+        // `framePipeline.beginAdoption` — sequenced by `ReceiverPipelineActor.
+        // adopt` strictly ahead of this method (see its call site,
+        // `beginAdoptionHostWork`, and `ReceiverFramePipeline`'s file
+        // header). Everything below is display/decoder/audio state this
+        // method still owns directly.
         lastFrameAt = nil
         frameIntervals.removeAll()
         decodeFlushes = 0
@@ -2040,11 +2013,11 @@ final class StreamReceiver: ObservableObject {
     /// Retire every decoded/presented frame without forgetting `videoSize`:
     /// that geometry is still the Direct Touch mapping surface while video is
     /// off. The next video-on stream begins from fresh SPS/PPS + an IDR.
+    /// C3: `framePipeline` independently notices this same `videoState`
+    /// message (see `ReceiverFramePipeline.applyControlStateIfNeeded`) and
+    /// clears its own `formatDesc`/SPS/PPS/VPS there — this method now only
+    /// owns the display/decoder (C4/D) half of the reset.
     private func resetDecoderForVideoStateChange() {
-        formatDesc = nil
-        sps = nil
-        pps = nil
-        vps = nil
         displayLayer.flushAndRemoveImage()
         if let session = decompressionSession {
             VTDecompressionSessionInvalidate(session)
@@ -2305,202 +2278,17 @@ final class StreamReceiver: ObservableObject {
         sendControl(message, on: sendTargetBox.current()?.connection)
     }
 
-    // MARK: - Socket read + length-prefixed deframing
+    // MARK: - Socket read + length-prefixed deframing + Annex B parse
 
-    /// C1 minimum inseparable seam, corrected after review: an actor round
-    /// trip here (`await pipeline.isCurrentConnection(conn)`, then hop back
-    /// to `queue`) left a real window — cancelling `conn` does not retract
-    /// data already delivered to ITS receive callback, so a newer generation
-    /// could finish adopting (and reset `buffer`/decode state) in the gap
-    /// between the actor check passing and the `queue.async` continuation
-    /// actually running, letting generation N's data mutate generation
-    /// N+1's fresh state.
-    ///
-    /// `conn.receive`'s completion always runs ON `queue` already (`conn`
-    /// was started with `queue:`), so the fix needs no actor hop at all:
-    /// `generation` — `pipeline`'s `sessionState.generation` at the moment
-    /// THIS connection was adopted, threaded through from
-    /// `finishAdoptionHostWork` — is compared here, synchronously, against
-    /// `activeReceiveGeneration`, the same queue-confined counter
-    /// `beginAdoptionHostWork` stamps before any of a new connection's
-    /// callbacks can reach `queue` (see that method). A stale generation's
-    /// callback becomes a no-op before it ever touches `buffer`; a current
-    /// generation's callback behaves exactly as before, with no added
-    /// round trip.
-    private func receive(on conn: NWConnection, generation: Int) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) {
-            [weak self] data, _, isComplete, error in
-            guard let self, generation == self.activeReceiveGeneration else { return }
-            self.processReceivedData(on: conn, data: data, isComplete: isComplete, error: error, generation: generation)
-        }
-    }
-
-    private func processReceivedData(on conn: NWConnection, data: Data?, isComplete: Bool, error: NWError?, generation: Int) {
-        if let data, !data.isEmpty {
-            self.lastDataReceived = Date()
-            self.bytesThisWindow += data.count
-            self.buffer.append(data)
-            self.drainFrames()
-        }
-        if let error {
-            // FORENSIC FIX (media-death-with-input-still-working): this
-            // used to just log and return WITHOUT re-arming `receive`
-            // and WITHOUT calling `setConnected(false)` — the read loop
-            // stopped forever while `connected` stayed true and nothing
-            // ever told session state the connection was gone. TCP is
-            // full-duplex: our own outbound writes (touch/pointer input)
-            // keep working fine over the same socket, so from the user's
-            // side "input still works" while nothing we're owed (video,
-            // audio, cursor) ever arrives again, and no automatic
-            // recovery ever kicks in because nothing marked the session
-            // down. Treat any receive error exactly like EOF: it is
-            // this connection's own health, not a per-call fluke.
-            Log.info("receive error: \(error)")
-            Task { await self.pipeline.setConnected(false) }
-            return
-        }
-        if isComplete {
-            Log.info("peer closed connection")
-            Task { await self.pipeline.setConnected(false) }
-            return
-        }
-        self.receive(on: conn, generation: generation)
-    }
-
-    private func drainFrames() {
-        // Cursor-based drain so we only compact the buffer once per batch.
-        var cursor = buffer.startIndex
-        while buffer.distance(from: cursor, to: buffer.endIndex) >= 4 {
-            let len = buffer[cursor..<buffer.index(cursor, offsetBy: 4)]
-                .withUnsafeBytes { Int(UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self))) }
-            guard buffer.distance(from: cursor, to: buffer.endIndex) >= 4 + len else { break }
-            let start = buffer.index(cursor, offsetBy: 4)
-            let end = buffer.index(start, offsetBy: len)
-            let payload = Data(buffer[start..<end])
-            if AudioMediaFrame.isAudioFrame(payload) {
-                handleAudioMediaFrame(payload)
-            } else {
-                handleAnnexB(payload)
-            }
-            cursor = end
-        }
-        buffer.removeSubrange(buffer.startIndex..<cursor)
-    }
-
-    // MARK: - Annex B -> CMSampleBuffer
-
-    private func handleAnnexB(_ data: Data) {
-        // Pure JSON payload = control message (pong, cursor sprite etc.).
-        // Video frames also begin with '{' (telemetry prefix) but always
-        // contain start codes — the null bytes make them unambiguous even
-        // against multi-KB JSON (cursor sprites are base64, NUL-free).
-        if data.count < 32_768, data.first == UInt8(ascii: "{"), !data.contains(0x00) {
-            handleVideoChannelJSON(data)
-            return
-        }
-
-        // Split on 4-byte start codes (our sender only emits 00 00 00 01).
-        // Bytes before the FIRST start code are the telemetry prefix
-        // ({"cap":…,"snd":…} stamped by the Mac).
-        var nalus: [Data] = []
-        var metaPrefix: Data?
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            let bytes = raw.bindMemory(to: UInt8.self)
-            var naluStart: Int? = nil
-            var firstSC: Int? = nil
-            var i = 0
-            while i + 4 <= bytes.count {
-                if bytes[i] == 0, bytes[i+1] == 0, bytes[i+2] == 0, bytes[i+3] == 1 {
-                    if firstSC == nil { firstSC = i }
-                    if let s = naluStart, s < i { nalus.append(Data(bytes[s..<i])) }
-                    naluStart = i + 4
-                    i += 4
-                } else {
-                    i += 1
-                }
-            }
-            if let s = naluStart, s < bytes.count { nalus.append(Data(bytes[s...])) }
-            if let f = firstSC, f > 0 { metaPrefix = Data(bytes[0..<f]) }
-        }
-
-        var captureMs: Double?
-        var sendMs: Double?
-        if let metaPrefix,
-           let meta = try? JSONSerialization.jsonObject(with: metaPrefix) as? [String: Any] {
-            captureMs = meta["cap"] as? Double
-            sendMs = meta["snd"] as? Double
-        }
-
-        var vclNALUs: [Data] = []
-        // Codec-aware NAL classification — `receivedStreamCodec` is the
-        // AUTHORITATIVE source (set from `streamCodecState` before this
-        // codec's first frame arrives), never inferred from the NAL bytes
-        // themselves. HEVC's NAL type is a different bit layout AND a
-        // different type space than H.264's `& 0x1F`: type is bits 1-6 of
-        // the first byte (`(first >> 1) & 0x3F`), and 32/33/34 are
-        // VPS/SPS/PPS versus H.264's 7/8 for SPS/PPS.
-        if receivedStreamCodec == .hevc {
-            for nalu in nalus {
-                guard let first = nalu.first else { continue }
-                switch HEVCNALUnitType.classify(firstByte: first) {
-                case .vps:
-                    if vps != nalu { vps = nalu; formatDesc = nil }
-                case .sps:
-                    if sps != nalu { sps = nalu; formatDesc = nil }
-                case .pps:
-                    if pps != nalu { pps = nalu; formatDesc = nil }
-                case .seiPrefix, .seiSuffix: break     // skip
-                case .other: vclNALUs.append(nalu)     // slice data
-                }
-            }
-            if formatDesc == nil, let vps, let sps, let pps {
-                displayLayer.flushAndRemoveImage()
-                buildHEVCFormatDescription(vps: vps, sps: sps, pps: pps)
-            }
-        } else {
-            for nalu in nalus {
-                guard let first = nalu.first else { continue }
-                switch first & 0x1F {
-                case 7:                                  // SPS (stream may change
-                    if sps != nalu {                     //  size on rotation)
-                        sps = nalu
-                        formatDesc = nil
-                    }
-                case 8:                                  // PPS
-                    if pps != nalu {
-                        pps = nalu
-                        formatDesc = nil
-                    }
-                case 6: break                            // SEI — skip
-                default: vclNALUs.append(nalu)           // slice data
-                }
-            }
-            if formatDesc == nil, let sps, let pps {
-                // The SPS/PPS actually changed mid-stream (a real geometry/
-                // profile change — e.g. Extend shape or decode-ceiling
-                // reconfigure — not a pure FPS change, which never touches
-                // SPS/PPS). `flushAndRemoveImage()` retires the currently-
-                // displayed frame too, so a stale image decoded under the OLD
-                // format never stays on screen mapped into the NEW geometry
-                // while the fresh IDR is still in flight.
-                displayLayer.flushAndRemoveImage()
-                buildFormatDescription(sps: sps, pps: pps)
-            }
-        }
-        guard !vclNALUs.isEmpty else { return }
-        #if DEBUG
-        debugFramesReceivedWindow += 1
-        let arrivalNow = Date()
-        if let last = debugLastArrivalAt {
-            debugArrivalIntervals.append(arrivalNow.timeIntervalSince(last) * 1000)
-            if debugArrivalIntervals.count > maxSamples { debugArrivalIntervals.removeFirst() }
-        }
-        debugLastArrivalAt = arrivalNow
-        #endif
-        // All slices of one wire frame go into ONE sample buffer.
-        enqueueFrame(vclNALUs, captureMs: captureMs, sendMs: sendMs)
-    }
-
+    // C3: the ordered receive loop, length-prefixed deframing, and Annex-B/
+    // SPS-PPS-VPS/format-description parsing that used to live here all
+    // moved into `framePipeline` (`ReceiverFramePipeline`) as one coherent
+    // high-frequency cluster — see its file header for the ingress-
+    // ordering and reset/adoption-seam invariants it preserves.
+    // `handleVideoChannelJSON` below is unchanged and still owns every
+    // control-message effect; it is now reached via `OutputEffects.
+    // controlMessage` (see `makeFramePipelineOutputEffects`) instead of a
+    // direct call from what was `handleAnnexB`.
 
     // MARK: - Mac system audio (PROTOCOL.md section 5A)
 
@@ -3287,138 +3075,39 @@ final class StreamReceiver: ObservableObject {
     }
     #endif
 
-    private func buildFormatDescription(sps: Data, pps: Data) {
-        sps.withUnsafeBytes { spsBuf in
-            pps.withUnsafeBytes { ppsBuf in
-                let ptrs: [UnsafePointer<UInt8>] = [
-                    spsBuf.bindMemory(to: UInt8.self).baseAddress!,
-                    ppsBuf.bindMemory(to: UInt8.self).baseAddress!
-                ]
-                let sizes = [sps.count, pps.count]
-                let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    allocator: kCFAllocatorDefault,
-                    parameterSetCount: 2,
-                    parameterSetPointers: ptrs,
-                    parameterSetSizes: sizes,
-                    nalUnitHeaderLength: 4,
-                    formatDescriptionOut: &formatDesc
-                )
-                if status == noErr, let formatDesc {
-                    let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
-                    Log.info("format description built: \(dims.width)x\(dims.height)")
-                    #if DEBUG
-                    // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
-                    // decode generation — re-arm the decoded-frame luma
-                    // probe (see `debugProbeDecodedLuma`) for it.
-                    debugDecodedFramesSinceFormatChange = 0
-                    if let session = debugProbeDecompressionSession {
-                        VTDecompressionSessionInvalidate(session)
-                        debugProbeDecompressionSession = nil
-                    }
-                    #endif
-                    publishToUI {
-                        self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
-                    }
-                    setStatus("Receiving \(dims.width)×\(dims.height)")
-                } else {
-                    Log.info("format description FAILED: \(status)")
-                }
-            }
-        }
-    }
+    // C3: `buildFormatDescription`/`buildHEVCFormatDescription` and the
+    // first half of what was `enqueueFrame` (AVCC framing through
+    // `CMSampleBufferCreateReady`) moved into `framePipeline`
+    // (`ReceiverFramePipeline`) — see its file header. Everything from the
+    // presentation-ready sample buffer onward is `presentDecodedSample`
+    // below, reached via `OutputEffects.presentationFrame` instead of a
+    // direct call from what was `enqueueFrame`.
 
-    /// HEVC counterpart of `buildFormatDescription` — same shape, three
-    /// parameter sets (VPS, SPS, PPS) via the HEVC-specific CoreMedia API
-    /// rather than reusing the H.264 one under a different parameter count.
-    private func buildHEVCFormatDescription(vps: Data, sps: Data, pps: Data) {
-        vps.withUnsafeBytes { vpsBuf in
-            sps.withUnsafeBytes { spsBuf in
-                pps.withUnsafeBytes { ppsBuf in
-                    let ptrs: [UnsafePointer<UInt8>] = [
-                        vpsBuf.bindMemory(to: UInt8.self).baseAddress!,
-                        spsBuf.bindMemory(to: UInt8.self).baseAddress!,
-                        ppsBuf.bindMemory(to: UInt8.self).baseAddress!
-                    ]
-                    let sizes = [vps.count, sps.count, pps.count]
-                    let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                        allocator: kCFAllocatorDefault,
-                        parameterSetCount: 3,
-                        parameterSetPointers: ptrs,
-                        parameterSetSizes: sizes,
-                        nalUnitHeaderLength: 4,
-                        extensions: nil,
-                        formatDescriptionOut: &formatDesc
-                    )
-                    if status == noErr, let formatDesc {
-                        let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
-                        Log.info("format description built (HEVC): \(dims.width)x\(dims.height)")
-                        #if DEBUG
-                        debugDecodedFramesSinceFormatChange = 0
-                        if let session = debugProbeDecompressionSession {
-                            VTDecompressionSessionInvalidate(session)
-                            debugProbeDecompressionSession = nil
-                        }
-                        #endif
-                        publishToUI {
-                            self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
-                        }
-                        setStatus("Receiving \(dims.width)×\(dims.height)")
-                    } else {
-                        Log.info("HEVC format description FAILED: \(status)")
-                    }
-                }
-            }
-        }
-    }
-
-    private func enqueueFrame(_ nalus: [Data], captureMs: Double? = nil, sendMs: Double? = nil) {
-        guard let formatDesc else { return }
-        // Backgrounded linger: hardware decode is off-limits there, so drop
-        // frames at the door instead of feeding a failing display layer at
-        // frame rate. setRenderingPaused(false) re-syncs with a keyframe.
+    /// The tail of what was `enqueueFrame`: decode/present a sample buffer
+    /// `framePipeline` already built (stopping at `CMSampleBufferCreateReady`)
+    /// and record its telemetry. `sample`'s own format description (set by
+    /// `framePipeline` from the SAME `formatDesc` this method used to read
+    /// as a stored property) is used directly wherever C4 code needs it —
+    /// see `ensureDecompressionSession`/`debugProbeDecodedLuma` — since this
+    /// class no longer keeps a copy of its own.
+    private func presentDecodedSample(_ sample: CMSampleBuffer, captureMs: Double?, sendMs: Double?) {
+        // Backgrounded linger is already gated in `framePipeline` before it
+        // builds a sample at all; `renderingPaused` itself stays host-owned
+        // since C4/D (decode/presentation) still read it below.
         if renderingPaused { return }
-
-        // Build one AVCC buffer: each NALU prefixed with 4-byte big-endian length.
-        var avcc = Data(capacity: nalus.reduce(0) { $0 + $1.count + 4 })
-        for nalu in nalus {
-            var len = UInt32(nalu.count).bigEndian
-            avcc.append(Data(bytes: &len, count: 4))
-            avcc.append(nalu)
-        }
-
-        // Allocate a block buffer that OWNS its memory and copy the bytes in —
-        // referencing a transient Swift buffer here is a use-after-free.
-        var blockBuffer: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: nil,                   // let CoreMedia allocate
-                blockLength: avcc.count,
-                blockAllocator: kCFAllocatorDefault,
-                customBlockSource: nil, offsetToData: 0,
-                dataLength: avcc.count, flags: 0,
-                blockBufferOut: &blockBuffer) == noErr,
-              let blockBuffer else { return }
-        let copyStatus = avcc.withUnsafeBytes { raw in
-            CMBlockBufferReplaceDataBytes(
-                with: raw.baseAddress!, blockBuffer: blockBuffer,
-                offsetIntoDestination: 0, dataLength: avcc.count)
-        }
-        guard copyStatus == noErr else { return }
-
-        var sample: CMSampleBuffer?
-        var sizeArr = [avcc.count]
-        CMSampleBufferCreateReady(
-            allocator: kCFAllocatorDefault,
-            dataBuffer: blockBuffer,
-            formatDescription: formatDesc,
-            sampleCount: 1,
-            sampleTimingEntryCount: 0, sampleTimingArray: nil,
-            sampleSizeEntryCount: 1, sampleSizeArray: &sizeArr,
-            sampleBufferOut: &sample)
-
-        guard let sample else { return }
-
+        // Proxy for wire throughput: the AVCC-framed size of this one video
+        // frame dominates real throughput next to audio/control traffic,
+        // and is more precise than counting raw TCP chunks (which could
+        // span multiple frames or arrive as a fraction of one).
+        bytesThisWindow += CMSampleBufferGetTotalSampleSize(sample)
         #if DEBUG
+        debugFramesReceivedWindow += 1
+        let arrivalNow = Date()
+        if let last = debugLastArrivalAt {
+            debugArrivalIntervals.append(arrivalNow.timeIntervalSince(last) * 1000)
+            if debugArrivalIntervals.count > maxSamples { debugArrivalIntervals.removeFirst() }
+        }
+        debugLastArrivalAt = arrivalNow
         debugProbeDecodedLuma(sample)
         #endif
 
@@ -3593,8 +3282,7 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Explicit decode (Metal renderer path)
 
-    private func ensureDecompressionSession() {
-        guard let formatDesc else { return }
+    private func ensureDecompressionSession(formatDescription formatDesc: CMFormatDescription) {
         if let session = decompressionSession {
             if VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: formatDesc) {
                 return
@@ -3621,7 +3309,8 @@ final class StreamReceiver: ObservableObject {
     /// Synchronous hardware decode — the handler runs before this returns,
     /// so blocking in the renderer (nextDrawable) is our frame pacing.
     private func decodeAndRender(_ sample: CMSampleBuffer, captureMs: Double?) {
-        ensureDecompressionSession()
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sample) else { return }
+        ensureDecompressionSession(formatDescription: formatDesc)
         guard let session = decompressionSession else { return }
         let t0 = nowMs
         #if DEBUG
@@ -3668,7 +3357,8 @@ final class StreamReceiver: ObservableObject {
     /// decodes internally and is unaffected by this probe running
     /// alongside it).
     private func debugProbeDecodedLuma(_ sample: CMSampleBuffer) {
-        guard debugDecodedFramesSinceFormatChange < 5, let formatDesc else { return }
+        guard debugDecodedFramesSinceFormatChange < 5,
+              let formatDesc = CMSampleBufferGetFormatDescription(sample) else { return }
         debugDecodedFramesSinceFormatChange += 1
         let frameNumber = debugDecodedFramesSinceFormatChange
         if let session = debugProbeDecompressionSession,
@@ -4007,6 +3697,13 @@ final class StreamReceiver: ObservableObject {
     /// see `ReceiverPipelineActor.ReconnectContext`.
     private let reconnectContext = ReconnectContext()
 
+    /// C3: the sole authoritative owner of the high-frequency receive/
+    /// frame-assembly cluster (`buffer`/SPS/PPS/VPS/`formatDesc`/the active
+    /// receive generation) — see its file header. `lazy` for the same
+    /// reason as `pipeline` below: `makeFramePipelineOutputEffects()`
+    /// captures `self` weakly, and actual use starts well after `init`.
+    private lazy var framePipeline = ReceiverFramePipeline(outputEffects: makeFramePipelineOutputEffects())
+
     /// C1: the sole authoritative owner of `connection`/`pendingConnections`/
     /// `sessionState` and the coupled reconnect/liveness timers. `lazy`
     /// purely so `makePipelineUIEffects()`/`makePipelineHostEffects()` can
@@ -4014,7 +3711,8 @@ final class StreamReceiver: ObservableObject {
     /// `init` completes.
     private lazy var pipeline = ReceiverPipelineActor(
         queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
-        uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects())
+        uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects(),
+        framePipeline: framePipeline)
 
     /// The permanent facade/UI-mirror outputs `pipeline` calls out to — see
     /// `ReceiverPipelineActor.UIEffects`. Each closure captures `self`
@@ -4048,14 +3746,12 @@ final class StreamReceiver: ObservableObject {
             requestRemoteConnect: { [weak self] peerID in
                 self?.queue.async { self?.requestRemoteConnect(peerID: peerID) }
             },
-            getLastDataReceived: { [weak self] in self?.lastDataReceived ?? .distantPast },
-            getActiveReceiveGeneration: { [weak self] in self?.activeReceiveGeneration ?? -1 },
+            getReceiveLiveness: { [weak self] in
+                self?.framePipeline.syncState.snapshot() ?? (generation: -1, lastDataReceived: .distantPast)
+            },
             advertisesAddresses: { [weak self] in self?.advertisesAddresses ?? false },
             beginAdoption: { [weak self] conn, generation in
                 self?.queue.async { self?.beginAdoptionHostWork(conn, generation: generation) }
-            },
-            finishAdoption: { [weak self] conn, generation, initialData in
-                self?.queue.async { self?.finishAdoptionHostWork(conn, generation: generation, initialData: initialData) }
             },
             onConnectionReady: { [weak self] conn in
                 self?.queue.async { self?.onConnectionReadyHostWork(conn) }
@@ -4073,6 +3769,63 @@ final class StreamReceiver: ObservableObject {
             },
             checkAddressChangeAndSendHello: { [weak self] conn in
                 self?.queue.async { self?.checkAddressChangeAndSendHello(conn) }
+            })
+    }
+
+    /// The narrow, purpose-built output surface `framePipeline` calls out
+    /// to for everything downstream of its presentation-ready
+    /// `CMSampleBuffer` boundary — see `ReceiverFramePipeline.
+    /// OutputEffects`. Each closure captures `self` weakly and hops onto
+    /// `queue` before touching any `queue`-confined state, exactly like
+    /// `makePipelineHostEffects()` above.
+    private func makeFramePipelineOutputEffects() -> ReceiverFramePipeline.OutputEffects {
+        .init(
+            controlMessage: { [weak self] data in
+                self?.queue.async { self?.handleVideoChannelJSON(data) }
+            },
+            audioPayload: { [weak self] data in
+                self?.queue.async { self?.handleAudioMediaFrame(data) }
+            },
+            codecConfigurationChanged: { [weak self] box, videoSize in
+                self?.queue.async { guard let self else { return }
+                    // Retires the previous session's/format's currently-
+                    // displayed frame — see `handleAnnexB`'s old inline
+                    // comment (now `ReceiverFramePipeline.handleAnnexB`)
+                    // for why this must happen before any sample built
+                    // from the new format description is presented.
+                    self.displayLayer.flushAndRemoveImage()
+                    #if DEBUG
+                    // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
+                    // decode generation — re-arm the decoded-frame luma probe.
+                    self.debugDecodedFramesSinceFormatChange = 0
+                    if let session = self.debugProbeDecompressionSession {
+                        VTDecompressionSessionInvalidate(session)
+                        self.debugProbeDecompressionSession = nil
+                    }
+                    #endif
+                    self.publishToUI { self.videoSize = videoSize }
+                    self.setStatus("Receiving \(Int(videoSize.width))×\(Int(videoSize.height))")
+                }
+            },
+            presentationFrame: { [weak self] box, captureMs, sendMs in
+                self?.queue.async { self?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
+            },
+            connectionFailed: { [weak self] error in
+                self?.queue.async { guard let self else { return }
+                    // FORENSIC FIX (media-death-with-input-still-working):
+                    // see the original `processReceivedData`'s doc comment
+                    // this replaces — any receive error is this
+                    // connection's own health, not a per-call fluke, and
+                    // must mark the session down exactly like EOF.
+                    Log.info("receive error: \(error)")
+                    Task { await self.pipeline.setConnected(false) }
+                }
+            },
+            connectionClosedByPeer: { [weak self] in
+                self?.queue.async { guard let self else { return }
+                    Log.info("peer closed connection")
+                    Task { await self.pipeline.setConnected(false) }
+                }
             })
     }
 
