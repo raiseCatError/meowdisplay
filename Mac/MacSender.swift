@@ -413,16 +413,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // sent, not just the most recent); it still applies at the admission
     // gate one level up — `FrameRateLimiter` — which decides which SCK
     // samples are even eligible to reach here.
-    private var pendingEncodes = 0
-    // Streaming Priority (Auto/Prefer FPS/Prefer Latency) picks this bounded
-    // depth via `StreamingPriorityPolicy.maxPendingEncodes` — Auto keeps the
-    // 2-deep balance documented above; Prefer Latency tightens back to the
-    // pre-fix 1 (accepting the throughput ceiling this comment describes, in
-    // exchange for the smallest possible admission-to-callback latency);
-    // Prefer FPS opens one step further to 3. Still small, fixed, and always
-    // drop-not-queue once full — this is not the adaptive controller in #287.
-    private let maxPendingEncodes: Int
-
+    //
     // ── Outstanding send backpressure (maxPendingSends = 3) ──────────────────
     //
     // pendingSends counts video frames whose NWConnection.send completion has
@@ -435,44 +426,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // “encoder busy” — split counters (enc↓ vs net↓) so the HUD shows which
     // bottleneck fired. Never encode-then-discard: dropping here avoids wasting
     // VT work on frames that would only add latency.
-    private var pendingSends = 0
-    private let maxPendingSends = 3
-    private let pipelineLock = NSLock()
-    private var dropsEncThisWindow = 0
-    private var dropsNetThisWindow = 0
-    private var dropsEncTotal = 0
-    private var dropsNetTotal = 0
-    // HUD-only per-ping-interval counters (~2s, reset in `schedulePing`) —
-    // separate from `dropsEncThisWindow`/`dropsNetThisWindow` above, which
-    // are reset on the phone's own independent "stats" cadence for the
-    // PHONE-STATS debug log. The `enc↓`/`net↓` HUD metric (`PerfOverlay`)
-    // previously showed `dropsEncTotal`/`dropsNetTotal`, which only ever grow
-    // for the life of the session — misleading on a long-running stream. This
-    // makes the HUD counter answer "how many drops in roughly the last
-    // couple seconds", the same per-window shape `capFps` already uses.
-    private var dropsEncPingWindow = 0
-    private var dropsNetPingWindow = 0
+    //
+    // `pendingEncodes`/`maxPendingEncodes`, `pendingSends`/`maxPendingSends`,
+    // the enc/net drop counters (this-window, total, and ping-window), and the
+    // DEBUG VT submitted/completed counters below are all written from the
+    // ScreenCaptureKit sample-buffer callback and/or the VideoToolbox encode
+    // -completion callback — never `queue` — and read back on `queue`. That
+    // shared cross-thread invariant is exactly `MacSenderPipelineState`'s
+    // single responsibility; see its header comment.
+    private let pipelineState: MacSenderPipelineState
+    // HUD-only per-ping-interval drop counters (~2s, reset in `schedulePing`)
+    // — separate from the this-window counters, which are reset on the
+    // phone's own independent "stats" cadence for the PHONE-STATS debug log.
+    // The `enc↓`/`net↓` HUD metric (`PerfOverlay`) previously showed the
+    // lifetime totals, which only ever grow for the life of the session —
+    // misleading on a long-running stream. This makes the HUD counter answer
+    // "how many drops in roughly the last couple seconds", the same
+    // per-window shape `capFps` already uses.
     private var needsKeyframe = true
     #if DEBUG
     // Rolling ~1s sender-pipeline instrumentation (LAN FPS-collapse
-    // diagnosis). All touched from `queue` except the two marked, which the
-    // VideoToolbox callback thread also writes and so share `pipelineLock`
-    // with `pendingEncodes`/drops above.
+    // diagnosis). All `queue`-confined except the VT submitted/completed
+    // counters, which live on `pipelineState` (see above).
     private var debugSCKWindow = 0
     private var debugAdmittedWindow = 0
-    private var debugVTSubmittedWindow = 0   // pipelineLock
-    private var debugVTCompletedWindow = 0   // pipelineLock
     private var debugSendsStartedWindow = 0
     private var debugSendsCompletedWindow = 0
     private var debugPeakPendingSends = 0
     private var debugSendTimingsMs: [Double] = []
-    #endif
-    #if DEBUG
-    // BLACK-VIDEO forensics (encoder stage) — guarded by `pipelineLock`
-    // like the other counters the VideoToolbox callback queue touches; see
-    // `encode`'s completion closure.
-    private var debugEncodeLogGeneration: UInt64?
-    private var debugEncodeLogCount = 0
     #endif
     /// The persisted preference and the state actually applied to this peer
     /// differ until its hello proves support for protocol v9. Older peers are
@@ -493,18 +474,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var audioConfigSent = false
     // Bumped at every point that resets `audioConfigSent`/`audioPacketSeq`
     // (i.e. every fresh audio generation: capture start, Audio Off→On,
-    // pause, reconnect). Guarded by `pipelineLock` like `captureGeneration`
+    // pause, reconnect). Lives on `pipelineState` like `captureGeneration`
     // because it's read from the SCStream audio callback (not `queue`) and
     // compared again once that callback's async encode work completes back
     // on `queue` — the same stale-completion guard `captureGenerationNow`
     // already provides for video, extended to cover an audio-only generation
     // change too (Audio Off→On doesn't necessarily bump `captureGeneration`).
-    private var audioGeneration: UInt64 = 0
-    private var audioGenerationNow: UInt64 {
-        pipelineLock.lock()
-        defer { pipelineLock.unlock() }
-        return audioGeneration
-    }
+    private var audioGenerationNow: UInt64 { pipelineState.audioGenerationNow }
     #if DEBUG
     // DEBUG-only telemetry, piggybacked on the existing throttled `ping`
     // (PROTOCOL.md 6.2 — free-form, no version bump). Never raw audio.
@@ -547,10 +523,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func beginAudioGeneration() {
         audioConfigSent = false
         audioPacketSeq = 0
-        pipelineLock.lock()
-        audioGeneration &+= 1
-        let generation = audioGeneration
-        pipelineLock.unlock()
+        let generation = pipelineState.beginAudioGeneration()
         #if DEBUG
         pcmConfigSent = false
         pcmPacketSeq = 0
@@ -649,7 +622,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // ambiguous failure kinds.
     private var consecutiveRefusals = 0
     private let refusalsBeforeGivingUp = 3
-    private var dropsTotal: Int { dropsEncTotal + dropsNetTotal }
+    private var dropsTotal: Int { pipelineState.dropsEncTotal + pipelineState.dropsNetTotal }
 
     // Local cursor echo: a cursor baked into the video carries the full
     // capture→encode→stream→display latency (~30ms perceived). Instead we
@@ -702,7 +675,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // rotation, an old capture callback or a late encoder completion must not
     // put a frame from the retired display onto this device's new socket.
     // Bumped on `queue` but read from the SCK sample queue and the VideoToolbox
-    // callback queue, so it lives under `pipelineLock` like the other counters
+    // callback queue, so it lives on `pipelineState` like the other counters
     // those callbacks touch — read it via `captureGenerationNow`.
     // Bounded encoder-failure safety net (PART 8): the theoretical
     // `EncoderCapability` ceiling should prevent a size x fps combination
@@ -711,27 +684,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // frames within `encodeFailureStreakLimit` attempts, that is treated as
     // proof of the same class of failure, not a transient glitch — recover
     // once by dropping to the next lower supported FPS tier rather than
-    // leaving the receiver black forever. Guarded under `pipelineLock` like
+    // leaving the receiver black forever. Guarded on `pipelineState` like
     // the other per-generation counters the encode callback touches;
     // `encoderRecoveryDowngradedGeneration` ensures at most one downgrade
     // per generation, so a persistently broken encoder degrades once and
     // then surfaces as an ordinary capture-recovery/failed-session instead
     // of bouncing between FPS levels forever.
-    private var encodeFailureStreakGeneration: UInt64?
-    private var encodeFailureStreakCount = 0
-    /// The most recent generation that produced at least one successful
-    /// frame — compared by value, never reset by a later failure, so a
-    /// generation that already proved itself can't be re-flagged as "never
-    /// succeeded" by subsequent occasional failures.
-    private var encodeLastSuccessGeneration: UInt64?
-    private var encoderRecoveryDowngradedGeneration: UInt64?
-    private let encodeFailureStreakLimit = 30
-    private var captureGeneration: UInt64 = 0
-    private var captureGenerationNow: UInt64 {
-        pipelineLock.lock()
-        defer { pipelineLock.unlock() }
-        return captureGeneration
-    }
+    private var encodeFailureStreakLimit: Int { pipelineState.encodeFailureStreakLimit }
+    private var captureGenerationNow: UInt64 { pipelineState.captureGenerationNow }
     #if DEBUG
     // BLACK-VIDEO forensics (SCK stage) — `didOutputSampleBuffer`'s `queue`-
     // confined per-generation frame counter; see its call site.
@@ -750,8 +710,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`-confined like the rest of the capture-recovery state; the two
     // "awaiting" generations are read from the SCK sample-buffer callback
     // and the VideoToolbox encode-completion callback (different queues),
-    // so — like `captureGeneration`/`audioGeneration` — they live under
-    // `pipelineLock`.
+    // so — like `captureGeneration`/`audioGeneration` — they live on
+    // `pipelineState`.
     private var wakeCaptureObserver: NSObjectProtocol?
     // Not itself part of the wake-capture-recovery machinery above — this is
     // the fixed 60s post-authentication display/system-sleep stabilization
@@ -776,15 +736,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // event started can recognize itself as stale and no-op instead of
     // acting on outdated readings. `queue`-confined.
     private var topologyGenerationNow: UInt64 = 0
-    private var wakeCaptureAwaitingFirstFrameGenerationStorage: UInt64?
     private var wakeCaptureAwaitingFirstFrameGeneration: UInt64? {
-        get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return wakeCaptureAwaitingFirstFrameGenerationStorage }
-        set { pipelineLock.lock(); wakeCaptureAwaitingFirstFrameGenerationStorage = newValue; pipelineLock.unlock() }
+        get { pipelineState.wakeCaptureAwaitingFirstFrameGeneration }
+        set { pipelineState.wakeCaptureAwaitingFirstFrameGeneration = newValue }
     }
-    private var wakeCaptureAwaitingEncodedFrameGenerationStorage: UInt64?
     private var wakeCaptureAwaitingEncodedFrameGeneration: UInt64? {
-        get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return wakeCaptureAwaitingEncodedFrameGenerationStorage }
-        set { pipelineLock.lock(); wakeCaptureAwaitingEncodedFrameGenerationStorage = newValue; pipelineLock.unlock() }
+        get { pipelineState.wakeCaptureAwaitingEncodedFrameGeneration }
+        set { pipelineState.wakeCaptureAwaitingEncodedFrameGeneration = newValue }
     }
 
     // Input latency: touches arrive stamped in our clock (the phone applies
@@ -793,14 +751,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // These policies bound noisy paths while retaining an explicit record when
     // details were suppressed. Unknown types and unparseable messages live on
     // `queue` with the rest of the control-connection state; encoder failures
-    // are guarded by `pipelineLock` with the other pipeline counters.
+    // (submit and output-callback, kept as separate policies so "submit
+    // failed" and "output rejected" stay distinguishable) live on
+    // `pipelineState` with the other pipeline counters.
     private var unknownTypeLogPolicy = UnknownControlTypeLogPolicy()
-    // Encode failures repeat every frame once the session goes bad; throttle
-    // the log to one line a second and carry the count.
-    private var encodeFailureLogPolicy = ThrottledLogPolicy<OSStatus>()
-    // Same for the encoder output callback rejecting a frame; separate policy
-    // so "submit failed" and "output rejected" stay distinguishable.
-    private var encodeOutputFailureLogPolicy = ThrottledLogPolicy<OSStatus>()
     // A framing desync feeds this garbage at the peer's message rate until the
     // watchdog redials, so it needs the same treatment. Detail is the byte
     // count of the last message that would not parse.
@@ -871,7 +825,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
-        self.maxPendingEncodes = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
+        self.pipelineState = MacSenderPipelineState(
+            maxPendingEncodes: StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority))
         self.codecPreference = codecPreference
         super.init()
     }
@@ -2591,10 +2546,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.connection?.cancel()
             self.connection = nil
             self.stopUpgradeProbing()
-            self.pendingSends = 0
-            self.pipelineLock.lock()
-            self.pendingEncodes = 0
-            self.pipelineLock.unlock()
+            self.pipelineState.setPendingSends(0)
+            self.pipelineState.resetPendingEncodes()
             self.connect()
         }
     }
@@ -3859,10 +3812,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = dialGeneration
         connection?.cancel()
         connection = nil
-        pendingSends = 0
-        pipelineLock.lock()
-        pendingEncodes = 0
-        pipelineLock.unlock()
+        pipelineState.setPendingSends(0)
+        pipelineState.resetPendingEncodes()
         queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             // Generation-guarded so a switchTransport (or another reconnect)
             // that landed in this 1s window supersedes this dial instead of
@@ -3902,11 +3853,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // total that only ever climbs. `drops` (the sum) stays the
                 // session-lifetime total for anything relying on that legacy
                 // meaning.
-                let encDropsWindow = self.dropsEncPingWindow
-                let netDropsWindow = self.dropsNetPingWindow
-                self.dropsEncPingWindow = 0
-                self.dropsNetPingWindow = 0
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(encDropsWindow),\"netDrops\":\(netDropsWindow),\"pending\":\(self.pendingSends),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
+                let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
             }
             self.schedulePing()
         }
@@ -3948,11 +3896,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // treat it exactly like inbound silence, since silently sitting
             // on a wedged writer forever is the "connected but frozen"
             // failure this exists to catch.
-            if self.connectionReady, self.pendingSends > 0,
+            if self.connectionReady, self.pipelineState.pendingSendsNow > 0,
                Date().timeIntervalSince(self.lastSendCompletionAt) > 5 {
                 if !self.sendStallReported {
                     self.sendStallReported = true
-                    Log.info("watchdog: outbound writer stalled — pendingSends=\(self.pendingSends) "
+                    Log.info("watchdog: outbound writer stalled — pendingSends=\(self.pipelineState.pendingSendsNow) "
                         + "idle for >5s — reconnecting")
                 }
                 if self.currentPathDirectLink, case .tcp = self.transport {
@@ -4231,9 +4179,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // so one file holds both ends of the story.
             if let json = try? JSONSerialization.data(withJSONObject: obj),
                let line = String(data: json, encoding: .utf8) {
-                Log.info("PHONE-STATS \(line) | mac enc↓=\(dropsEncThisWindow) net↓=\(dropsNetThisWindow) pending=\(pendingSends)")
-                dropsEncThisWindow = 0
-                dropsNetThisWindow = 0
+                let thisWindowDrops = pipelineState.drainThisWindowDrops()
+                Log.info("PHONE-STATS \(line) | mac enc↓=\(thisWindowDrops.enc) net↓=\(thisWindowDrops.net) pending=\(pipelineState.pendingSendsNow)")
             }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
@@ -4948,9 +4895,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func isPipelineBackedUp() -> Bool {
-        pipelineLock.lock()
-        defer { pipelineLock.unlock() }
-        return pendingEncodes >= maxPendingEncodes || pendingSends >= maxPendingSends
+        pipelineState.isBackedUp()
     }
 
     /// Schedule (or reset) a one-shot replay of `lastPixelBuffer` after drops.
@@ -4988,18 +4933,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// chain stays intact, so the next frame can be a normal P-frame (n → n+2).
     /// Do NOT force keyframes here; that causes IDR pulsing / blockiness.
     private func shouldDropFrame(reason: String) -> Bool {
-        pipelineLock.lock()
-        let drop: Bool
-        switch reason {
-        case "pending_encode":
-            drop = pendingEncodes >= maxPendingEncodes
-        case "pending_sends":
-            drop = pendingSends >= maxPendingSends
-        default:
-            drop = false
-        }
-        pipelineLock.unlock()
-        guard drop else { return false }
+        guard pipelineState.admitFrame(reason: reason) else { return false }
         // Only arm the replay for genuine network backpressure. With
         // `maxPendingEncodes` now a real (>1) pipeline and the
         // FrameRateLimiter already gating admission upstream, an
@@ -5014,26 +4948,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if reason == "pending_sends" {
             scheduleDropReplayTimer()
         }
-        switch reason {
-        case "pending_encode":
-            dropsEncThisWindow += 1
-            dropsEncTotal += 1
-            dropsEncPingWindow += 1
-        case "pending_sends":
-            dropsNetThisWindow += 1
-            dropsNetTotal += 1
-            dropsNetPingWindow += 1
-        default:
-            break
-        }
         return true
     }
 
     private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64) {
         guard generation == captureGenerationNow, let encoder else { return }
-        pipelineLock.lock()
-        pendingEncodes += 1
-        pipelineLock.unlock()
+        pipelineState.incrementPendingEncodes()
         let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
         var frameProperties: CFDictionary?
         if needsKeyframe {
@@ -5049,29 +4969,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             infoFlagsOut: nil
         ) { [weak self] status, _, buffer in
             guard let self else { return }
-            defer {
-                self.pipelineLock.lock()
-                self.pendingEncodes = max(0, self.pendingEncodes - 1)
-                self.pipelineLock.unlock()
-            }
+            defer { self.pipelineState.decrementPendingEncodes() }
             guard status == noErr, let buffer else {
                 // A session rejecting every frame looks healthy in all other
                 // counters — the receiver just stays black. Don't be silent.
-                self.pipelineLock.lock()
-                let logAction = self.encodeOutputFailureLogPolicy.record(
-                    status,
-                    at: ProcessInfo.processInfo.systemUptime
+                let (logAction, shouldAttemptRecovery) = self.pipelineState.recordEncodeOutputFailure(
+                    status, at: ProcessInfo.processInfo.systemUptime, generation: generation
                 )
-                if self.encodeFailureStreakGeneration != generation {
-                    self.encodeFailureStreakGeneration = generation
-                    self.encodeFailureStreakCount = 0
-                }
-                self.encodeFailureStreakCount += 1
-                let shouldAttemptRecovery = self.encodeLastSuccessGeneration != generation
-                    && self.encodeFailureStreakCount >= self.encodeFailureStreakLimit
-                    && self.encoderRecoveryDowngradedGeneration != generation
-                if shouldAttemptRecovery { self.encoderRecoveryDowngradedGeneration = generation }
-                self.pipelineLock.unlock()
                 self.handleEncodeOutputFailureLogAction(logAction)
                 if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
                     self.wakeCaptureAwaitingEncodedFrameGeneration = nil
@@ -5082,12 +4986,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 return
             }
-            self.pipelineLock.lock()
-            self.encodeLastSuccessGeneration = generation
+            self.pipelineState.recordEncodeSuccess(generation: generation)
             #if DEBUG
-            self.debugVTCompletedWindow += 1
+            self.pipelineState.incrementDebugVTCompletedWindow()
             #endif
-            self.pipelineLock.unlock()
             guard generation == self.captureGenerationNow else { return }
             if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
                 self.wakeCaptureAwaitingEncodedFrameGeneration = nil
@@ -5099,16 +5001,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // actually emitting non-trivial output — and whether it's the
             // keyframe/parameter-set-bearing packet a dimension change
             // needs — for the first few encoded frames of every generation.
-            self.pipelineLock.lock()
-            if self.debugEncodeLogGeneration != generation {
-                self.debugEncodeLogGeneration = generation
-                self.debugEncodeLogCount = 0
-            }
-            let shouldLogEncode = self.debugEncodeLogCount < 5
-            if shouldLogEncode { self.debugEncodeLogCount += 1 }
-            let encodeLogNumber = self.debugEncodeLogCount
-            self.pipelineLock.unlock()
-            if shouldLogEncode {
+            let encodeLogNumber = self.pipelineState.nextDebugEncodeLogNumber(generation: generation)
+            if let encodeLogNumber {
                 let dims = CMSampleBufferGetFormatDescription(buffer).map { CMVideoFormatDescriptionGetDimensions($0) }
                 Log.info("extendDebug: encoder output gen=\(generation) #\(encodeLogNumber) "
                     + "dims=\(dims.map { "\($0.width)x\($0.height)" } ?? "?") "
@@ -5138,22 +5032,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // encodes started before a drop won't reach here again, so cancel replay.
             cancelDropReplayTimer()
             #if DEBUG
-            pipelineLock.lock()
-            debugVTSubmittedWindow += 1
-            pipelineLock.unlock()
+            pipelineState.incrementDebugVTSubmitted()
             #endif
         } else {
-            pipelineLock.lock()
-            pendingEncodes = max(0, pendingEncodes - 1)
             // A dead encoder session keeps failing, and this runs per frame, so
             // an unthrottled line here is ~60/sec for as long as the problem
             // lasts. Report at most once a second and carry the count: the
             // status code is the diagnosis, the rate is just a number.
-            let logAction = encodeFailureLogPolicy.record(
-                submitStatus,
-                at: ProcessInfo.processInfo.systemUptime
+            let logAction = pipelineState.recordEncodeSubmitFailure(
+                submitStatus, at: ProcessInfo.processInfo.systemUptime
             )
-            pipelineLock.unlock()
             handleEncodeFailureLogAction(logAction)
         }
     }
@@ -5172,9 +5060,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func flushEncodeFailureLog() {
-        pipelineLock.lock()
-        let report = encodeFailureLogPolicy.flush(at: ProcessInfo.processInfo.systemUptime)
-        pipelineLock.unlock()
+        let report = pipelineState.flushEncodeSubmitFailureLog(at: ProcessInfo.processInfo.systemUptime)
         if let report { reportEncodeFailures(report) }
     }
 
@@ -5196,9 +5082,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func flushEncodeOutputFailureLog() {
-        pipelineLock.lock()
-        let report = encodeOutputFailureLogPolicy.flush(at: ProcessInfo.processInfo.systemUptime)
-        pipelineLock.unlock()
+        let report = pipelineState.flushEncodeOutputFailureLog(at: ProcessInfo.processInfo.systemUptime)
         if let report { reportEncodeOutputFailures(report) }
     }
 
@@ -5513,16 +5397,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
-        pendingSends += 1
+        let pendingSendsAfterIncrement = pipelineState.incrementPendingSends()
         #if DEBUG
         let queuedAt = Date()
         let queuedByteCount = frame.count
         debugSendsStartedWindow += 1
-        debugPeakPendingSends = max(debugPeakPendingSends, pendingSends)
+        debugPeakPendingSends = max(debugPeakPendingSends, pendingSendsAfterIncrement)
         #endif
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            self.pendingSends = TransportSafety.decrementedPendingCount(self.pendingSends)
+            _ = self.pipelineState.decrementPendingSends()
             self.lastSendCompletionAt = Date()
             self.sendStallReported = false
             if let error {
@@ -5540,7 +5424,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // small audio packet is the primary suspect for anything
                 // much slower — this is evidence-gathering, not a fix.
                 if writeMs > 15 {
-                    Log.info("audioTrace: TCP write latency \(String(format: "%.1f", writeMs))ms bytes=\(queuedByteCount) pendingSends=\(self.pendingSends) lastVideoBytes=\(self.lastVideoFrameByteCount)")
+                    Log.info("audioTrace: TCP write latency \(String(format: "%.1f", writeMs))ms bytes=\(queuedByteCount) pendingSends=\(self.pipelineState.pendingSendsNow) lastVideoBytes=\(self.lastVideoFrameByteCount)")
                 }
             } else {
                 self.lastVideoFrameByteCount = queuedByteCount
@@ -5564,21 +5448,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.onMediaState?(videoActive, audioActive, width, height, fps)
                 }
                 #if DEBUG
-                self.pipelineLock.lock()
-                let vtSubmitted = self.debugVTSubmittedWindow
-                let vtCompleted = self.debugVTCompletedWindow
-                self.debugVTSubmittedWindow = 0
-                self.debugVTCompletedWindow = 0
-                self.pipelineLock.unlock()
+                let vtWindow = self.pipelineState.drainDebugVTWindow()
                 let sendTimings = self.debugSendTimingsMs.sorted()
                 let sendP50 = sendTimings.isEmpty ? 0 : sendTimings[sendTimings.count / 2]
                 let sendP95 = sendTimings.isEmpty ? 0 :
                     sendTimings[min(sendTimings.count - 1, Int(Double(sendTimings.count) * 0.95))]
                 let sendMax = sendTimings.last ?? 0
                 Log.info("senderPipeline: sck=\(self.debugSCKWindow) admit=\(self.debugAdmittedWindow) "
-                    + "vtSub=\(vtSubmitted) vtOK=\(vtCompleted) "
-                    + "encDrop=\(self.dropsEncThisWindow) netDrop=\(self.dropsNetThisWindow) "
-                    + "pending=\(self.pendingSends) peakPending=\(self.debugPeakPendingSends) "
+                    + "vtSub=\(vtWindow.submitted) vtOK=\(vtWindow.completed) "
+                    + "encDrop=\(self.pipelineState.dropsEncThisWindow) netDrop=\(self.pipelineState.dropsNetThisWindow) "
+                    + "pending=\(self.pipelineState.pendingSendsNow) peakPending=\(self.debugPeakPendingSends) "
                     + "sendStart=\(self.debugSendsStartedWindow) sendOK=\(self.debugSendsCompletedWindow) "
                     + "sendMs(p50=\(String(format: "%.1f", sendP50)) p95=\(String(format: "%.1f", sendP95)) max=\(String(format: "%.1f", sendMax))) "
                     + "frames=\(frames) mbps=\(String(format: "%.2f", mbps))")
@@ -5586,7 +5465,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.debugAdmittedWindow = 0
                 self.debugSendsStartedWindow = 0
                 self.debugSendsCompletedWindow = 0
-                self.debugPeakPendingSends = self.pendingSends
+                self.debugPeakPendingSends = self.pipelineState.pendingSendsNow
                 self.debugSendTimingsMs.removeAll(keepingCapacity: true)
                 #endif
             }
@@ -5615,9 +5494,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `pollCursorImage` both guard on `captureDisplayID != 0`) even while
     /// capture was healthy and streaming.
     private func invalidateCapturePipeline(discardingLastFrame: Bool = false) {
-        pipelineLock.lock()
-        captureGeneration &+= 1
-        pipelineLock.unlock()
+        pipelineState.bumpCaptureGeneration()
         if discardingLastFrame {
             lastPixelBuffer = nil
             lastCaptureAt = .distantPast
