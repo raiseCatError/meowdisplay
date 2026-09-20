@@ -1,4 +1,9 @@
-import AVFoundation
+// `@preconcurrency`: AVAudioEngine/AVAudioPlayerNode/AVAudioPCMBuffer predate
+// the SDK's Sendable audit — this only downgrades THEIR incomplete
+// annotations to warnings, it does not touch how MeowDisplay-owned state
+// below is isolated (see `PCMPlaybackEngine`'s `@unchecked Sendable` doc
+// comment for that).
+@preconcurrency import AVFoundation
 import CoreMedia
 
 // PCMPlaybackEngine — the production audio playback path (PROTOCOL.md
@@ -146,7 +151,22 @@ enum PCMSchedulingContinuity {
 /// use elsewhere in this codebase, not an actor (kept consistent with the
 /// project's existing concurrency style; see repo guardrails against
 /// actor-converting the sender/receiver architecture).
-final class PCMPlaybackEngine {
+///
+/// `@unchecked Sendable`: every stored property below is touched only from
+/// closures dispatched onto `queue` (a private serial `DispatchQueue`) —
+/// `enqueue`/`completed`/`reset`/`reanchorLocked` all either run on `queue`
+/// already or hop onto it before touching state, and `queuedMs` reads
+/// through `queue.sync`. That is the same "confined by one serial
+/// execution context, not by the type system" shape as
+/// `PairingCommitGate`/`PairingAbortSlot`/`PairingFramePump`
+/// (`Shared/PairingSession.swift`), which use the identical annotation for
+/// the identical reason (there: an `NSLock`; here: a serial queue).
+/// Converting to an actor was considered and rejected for this class: its
+/// callers (`StreamReceiver.scheduleAudioPacket`) are synchronous,
+/// real-time packet-arrival callbacks that must not become `async`/`Task`
+/// hops per-packet without risking reordering or added latency in the
+/// audio scheduling path this file's forensic note above is about.
+final class PCMPlaybackEngine: @unchecked Sendable {
     private let queue: DispatchQueue
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
