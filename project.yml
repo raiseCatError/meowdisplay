@@ -198,6 +198,7 @@ targets:
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift
+      - Shared/ReceiverVideoDecoder.swift
       - Shared/PCMPlaybackEngine.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift

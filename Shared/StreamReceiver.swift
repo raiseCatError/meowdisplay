@@ -548,24 +548,13 @@ final class StreamReceiver: ObservableObject {
 
     // Metal renderer path (experimental, "metalRenderer" setting): we decode
     // explicitly and hand BGRA buffers out; called on the receiver queue.
+    // The decode itself (session, generation, DEBUG luma probe) is C4:
+    // `ReceiverVideoDecoder` below — this remains only the telemetry ring
+    // its `decodeDurationMs` effect feeds, and the app-facing sink.
     var onDecodedFrame: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)?
-    private var decompressionSession: VTDecompressionSession?
     private var decodeWindow: [Double] = []
     private var photonWindow: [Double] = []
     private var loggedDisplayPath = false
-    private var decodeErrorCount = 0
-    #if DEBUG
-    // BLACK-VIDEO forensics: an independent, diagnostic-only decode of the
-    // first few frames after every format-description change (see
-    // `debugProbeDecodedLuma`) — separate from `decompressionSession`
-    // (the production Metal-path decoder) and from the actual render path
-    // (`displayLayer.enqueue`, which decodes internally and is never
-    // bypassed by this). Answers "did the receiver's OWN H.264 decode of
-    // these NALUs produce a real image, or black?" independent of whatever
-    // `AVSampleBufferDisplayLayer` does with the same bytes.
-    private var debugProbeDecompressionSession: VTDecompressionSession?
-    private var debugDecodedFramesSinceFormatChange = 0
-    #endif
     // Default OFF: A/B measurement showed the system video layer reaches
     // glass faster than our CAMetalLayer path (iOS gives AVSBDL a dedicated
     // compositor plane). Kept as an experimental toggle + for its metrics.
@@ -1674,10 +1663,7 @@ final class StreamReceiver: ObservableObject {
         // last frame can't linger on screen through the gap before the new
         // session's first IDR decodes.
         displayLayer.flushAndRemoveImage()
-        if let session = decompressionSession {
-            VTDecompressionSessionInvalidate(session)
-            decompressionSession = nil
-        }
+        videoDecoder.enqueueReset()
         decodeWindow.removeAll(keepingCapacity: true)
         photonWindow.removeAll(keepingCapacity: true)
         // A new connection is a new generation (RECONNECT — never play
@@ -2019,10 +2005,7 @@ final class StreamReceiver: ObservableObject {
     /// owns the display/decoder (C4/D) half of the reset.
     private func resetDecoderForVideoStateChange() {
         displayLayer.flushAndRemoveImage()
-        if let session = decompressionSession {
-            VTDecompressionSessionInvalidate(session)
-            decompressionSession = nil
-        }
+        videoDecoder.enqueueReset()
     }
 
     /// HEVC milestone: a codec change (Auto re-deciding, an explicit
@@ -3088,7 +3071,7 @@ final class StreamReceiver: ObservableObject {
     /// and record its telemetry. `sample`'s own format description (set by
     /// `framePipeline` from the SAME `formatDesc` this method used to read
     /// as a stored property) is used directly wherever C4 code needs it —
-    /// see `ensureDecompressionSession`/`debugProbeDecodedLuma` — since this
+    /// see `ReceiverVideoDecoder`'s `decode`/`probeDecodedLuma` — since this
     /// class no longer keeps a copy of its own.
     private func presentDecodedSample(_ sample: CMSampleBuffer, captureMs: Double?, sendMs: Double?) {
         // Backgrounded linger is already gated in `framePipeline` before it
@@ -3108,7 +3091,7 @@ final class StreamReceiver: ObservableObject {
             if debugArrivalIntervals.count > maxSamples { debugArrivalIntervals.removeFirst() }
         }
         debugLastArrivalAt = arrivalNow
-        debugProbeDecodedLuma(sample)
+        videoDecoder.enqueueProbeDecodedLuma(FrameMediaBox(sample))
         #endif
 
         if loggedDisplayPath != (useMetalPath && onDecodedFrame != nil) {
@@ -3131,7 +3114,10 @@ final class StreamReceiver: ObservableObject {
         let present = { [weak self] in
             guard let self, self.videoGeneration == scheduledVideoGeneration else { return }
             if self.useMetalPath, self.onDecodedFrame != nil {
-                self.decodeAndRender(sample, captureMs: captureMs)
+                #if DEBUG
+                self.debugFramesToDecoderWindow += 1
+                #endif
+                self.videoDecoder.enqueueDecode(FrameMediaBox(sample), captureMs: captureMs)
             } else {
                 // Display immediately: low latency, no PTS scheduling.
                 if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
@@ -3280,152 +3266,13 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    // MARK: - Explicit decode (Metal renderer path)
-
-    private func ensureDecompressionSession(formatDescription formatDesc: CMFormatDescription) {
-        if let session = decompressionSession {
-            if VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: formatDesc) {
-                return
-            }
-            VTDecompressionSessionInvalidate(session)
-            decompressionSession = nil
-        }
-        // NV12: the decoder's native output — BGRA would add a conversion
-        // pass inside VideoToolbox (measured ~7ms); the YUV→RGB happens in
-        // the renderer's fragment shader instead (~free).
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-            kCVPixelBufferMetalCompatibilityKey: true,
-        ]
-        var session: VTDecompressionSession?
-        let status = VTDecompressionSessionCreate(
-            allocator: nil, formatDescription: formatDesc, decoderSpecification: nil,
-            imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
-            decompressionSessionOut: &session)
-        if status != noErr { Log.info("VTDecompressionSessionCreate failed: \(status)") }
-        decompressionSession = session
-    }
-
-    /// Synchronous hardware decode — the handler runs before this returns,
-    /// so blocking in the renderer (nextDrawable) is our frame pacing.
-    private func decodeAndRender(_ sample: CMSampleBuffer, captureMs: Double?) {
-        guard let formatDesc = CMSampleBufferGetFormatDescription(sample) else { return }
-        ensureDecompressionSession(formatDescription: formatDesc)
-        guard let session = decompressionSession else { return }
-        let t0 = nowMs
-        #if DEBUG
-        debugFramesToDecoderWindow += 1
-        #endif
-        let status = VTDecompressionSessionDecodeFrame(
-            session, sampleBuffer: sample, flags: [], infoFlagsOut: nil
-        ) { [weak self] status, _, imageBuffer, _, _ in
-            guard let self else { return }
-            if status == noErr, let imageBuffer {
-                self.decodeWindow.append(self.nowMs - t0)
-                #if DEBUG
-                self.debugFramesDecodedWindow += 1
-                #endif
-                self.onDecodedFrame?(imageBuffer, captureMs)
-            } else {
-                if self.decodeErrorCount % 60 == 0 {
-                    Log.info("decode output error: \(status) imageBuffer=\(imageBuffer != nil)")
-                }
-                self.decodeErrorCount += 1
-                // Joined mid-GOP (e.g. the renderer attached after the
-                // connect-time IDR, and periodic keyframes are off) — ask
-                // the Mac for a fresh sync point.
-                self.requestKeyframeIfNeeded()
-            }
-        }
-        if status != noErr {
-            decodeFlushes += 1
-            decodeErrorCount += 1
-            if decodeErrorCount % 60 == 1 {
-                Log.info("decode call error: \(status) (\(decodeErrorCount) total)")
-            }
-            requestKeyframeIfNeeded()
-        }
-    }
-
-    #if DEBUG
-    /// BLACK-VIDEO forensics (iOS decoder stage): decodes the first few
-    /// frames of every format-description generation through an
-    /// independent, throwaway `VTDecompressionSession` — regardless of
-    /// `useMetalPath` — purely to answer "did the receiver's decoder
-    /// produce a real image from these NALUs, or black?", without touching
-    /// or duplicating the actual render path (`displayLayer.enqueue`
-    /// decodes internally and is unaffected by this probe running
-    /// alongside it).
-    private func debugProbeDecodedLuma(_ sample: CMSampleBuffer) {
-        guard debugDecodedFramesSinceFormatChange < 5,
-              let formatDesc = CMSampleBufferGetFormatDescription(sample) else { return }
-        debugDecodedFramesSinceFormatChange += 1
-        let frameNumber = debugDecodedFramesSinceFormatChange
-        if let session = debugProbeDecompressionSession,
-           !VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: formatDesc) {
-            VTDecompressionSessionInvalidate(session)
-            debugProbeDecompressionSession = nil
-        }
-        if debugProbeDecompressionSession == nil {
-            let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
-            var session: VTDecompressionSession?
-            let status = VTDecompressionSessionCreate(
-                allocator: nil, formatDescription: formatDesc, decoderSpecification: nil,
-                imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
-                decompressionSessionOut: &session)
-            guard status == noErr, let session else {
-                Log.info("extendDebug: iOS decode probe session create failed status=\(status)")
-                return
-            }
-            debugProbeDecompressionSession = session
-        }
-        guard let session = debugProbeDecompressionSession else { return }
-        let status = VTDecompressionSessionDecodeFrame(
-            session, sampleBuffer: sample, flags: [], infoFlagsOut: nil
-        ) { status, _, imageBuffer, _, _ in
-            guard status == noErr, let imageBuffer else {
-                Log.info("extendDebug: iOS decode probe frame #\(frameNumber) failed status=\(status)")
-                return
-            }
-            let luma = Self.debugAverageLuma(imageBuffer)
-            Log.info("extendDebug: iOS decode probe frame #\(frameNumber) "
-                + "\(CVPixelBufferGetWidth(imageBuffer))x\(CVPixelBufferGetHeight(imageBuffer)) "
-                + "avgLuma=\(luma.map { String(format: "%.1f", $0) } ?? "n/a")")
-        }
-        if status != noErr {
-            Log.info("extendDebug: iOS decode probe submit failed frame #\(frameNumber) status=\(status)")
-        }
-    }
-
-    /// See `MacSender.debugAverageLuma` (identical purpose, independent
-    /// copy — the two live in different compilation targets). A cheap,
-    /// sparse-sampled average luma, never a full-frame scan.
-    private static func debugAverageLuma(_ pixelBuffer: CVPixelBuffer) -> Double? {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
-        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
-        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
-        guard width > 0, height > 0 else { return nil }
-        let buf = base.assumingMemoryBound(to: UInt8.self)
-        let stepX = max(width / 32, 1), stepY = max(height / 32, 1)
-        var sum = 0.0
-        var count = 0
-        var y = 0
-        while y < height {
-            var x = 0
-            while x < width {
-                sum += Double(buf[y * stride + x])
-                count += 1
-                x += stepX
-            }
-            y += stepY
-        }
-        guard count > 0 else { return nil }
-        return sum / Double(count)
-    }
-    #endif
+    // MARK: - Explicit decode (Metal renderer path) — C4: ReceiverVideoDecoder
+    //
+    // The session, its generation, and the DEBUG luma probe all moved to
+    // `ReceiverVideoDecoder` — see its file header. This class now only
+    // decides WHETHER to route a frame through it (`present`, above) and
+    // wires its `OutputEffects` back onto `queue` — see
+    // `makeVideoDecoderOutputEffects` and `videoDecoder` below.
 
     private var lastKeyframeRequest = Date.distantPast
     private func requestKeyframeIfNeeded() {
@@ -3704,6 +3551,33 @@ final class StreamReceiver: ObservableObject {
     /// captures `self` weakly, and actual use starts well after `init`.
     private lazy var framePipeline = ReceiverFramePipeline(outputEffects: makeFramePipelineOutputEffects())
 
+    /// C4: the sole authoritative owner of the VideoToolbox decode domain
+    /// (Metal renderer path) — see its file header. `lazy` for the same
+    /// reason as `framePipeline` above.
+    private lazy var videoDecoder = ReceiverVideoDecoder(outputEffects: makeVideoDecoderOutputEffects())
+
+    /// The narrow output surface `videoDecoder` calls out to — see
+    /// `ReceiverVideoDecoder.OutputEffects`. Each closure hops onto `queue`
+    /// before touching queue-confined state, exactly like
+    /// `makeFramePipelineOutputEffects()`.
+    private func makeVideoDecoderOutputEffects() -> ReceiverVideoDecoder.OutputEffects {
+        .init(
+            decodedFrameReady: { [weak self] box, captureMs in
+                self?.queue.async { guard let self else { return }
+                    #if DEBUG
+                    self.debugFramesDecodedWindow += 1
+                    #endif
+                    self.onDecodedFrame?(box.value, captureMs)
+                }
+            },
+            decodeDurationMs: { [weak self] ms in
+                self?.queue.async { self?.decodeWindow.append(ms) }
+            },
+            requestKeyframe: { [weak self] in
+                self?.queue.async { self?.requestKeyframeIfNeeded() }
+            })
+    }
+
     /// C1: the sole authoritative owner of `connection`/`pendingConnections`/
     /// `sessionState` and the coupled reconnect/liveness timers. `lazy`
     /// purely so `makePipelineUIEffects()`/`makePipelineHostEffects()` can
@@ -3797,11 +3671,7 @@ final class StreamReceiver: ObservableObject {
                     #if DEBUG
                     // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
                     // decode generation — re-arm the decoded-frame luma probe.
-                    self.debugDecodedFramesSinceFormatChange = 0
-                    if let session = self.debugProbeDecompressionSession {
-                        VTDecompressionSessionInvalidate(session)
-                        self.debugProbeDecompressionSession = nil
-                    }
+                    self.videoDecoder.enqueueFormatDescriptionChanged()
                     #endif
                     self.publishToUI { self.videoSize = videoSize }
                     self.setStatus("Receiving \(Int(videoSize.width))×\(Int(videoSize.height))")
