@@ -139,11 +139,10 @@ final class StreamReceiver: ObservableObject {
     @MainActor private var maxFPSRequestState = MaxFPSRequestState()
 
     /// The single authoritative session state the UI derives from. Mutated
-    /// only on `queue` via `sessionState`; this is its main-thread mirror.
+    /// only inside `pipeline` (`ReceiverPipelineActor`, C1) via its own
+    /// `mutateSession`; this is its main-thread mirror, published through
+    /// `HostEffects.publishSessionSnapshot`.
     @MainActor @Published private(set) var session = ReceiverSessionState()
-    /// Queue-confined authority. Every transition goes through
-    /// `mutateSession` so there is exactly one logging and publishing path.
-    private var sessionState = ReceiverSessionState()
 
     /// The pinned peerID that actually completed mutual TLS for the CURRENT
     /// `session` — derived from the connection's own certificate (SPKI →
@@ -156,10 +155,6 @@ final class StreamReceiver: ObservableObject {
     /// peerID, a hostname, or wake metadata are never sufficient on their
     /// own (see `resolveAuthenticatedPeerID`).
     @Published private(set) var authenticatedPeerID: String?
-
-    /// Stored when a connection is lost, so `armReconnect()` can knock the Mac
-    /// even if `authenticatedPeerID` has been cleared by the UI.
-    private var recoveryPeerID: String?
 
     /// Set by `forgetPeer(_:)` so `WakeConnectCoordinator` can end an attempt
     /// targeting a peer whose trust was just revoked instead of letting a
@@ -175,8 +170,6 @@ final class StreamReceiver: ObservableObject {
     @MainActor var canonicalPhaseTitle: String {
         session.interruption?.title ?? (session.phase == .connected ? "Connected" : "Waiting for a Mac…")
     }
-    /// The one timer driving automatic recovery — never a second one.
-    private var reconnectTimer: DispatchSourceTimer?
     /// Auto-Reconnect preference (Settings/Home toggle) — this receiver's own
     /// local setting, independent of the paired Mac's and not synced with
     /// it. Default true preserves existing behavior for installs with no
@@ -190,20 +183,22 @@ final class StreamReceiver: ObservableObject {
         || UserDefaults.standard.bool(forKey: "autoReconnectEnabled") {
         didSet {
             guard autoReconnectEnabled != oldValue else { return }
+            reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
             UserDefaults.standard.set(autoReconnectEnabled, forKey: "autoReconnectEnabled")
             Log.info("reconnectPolicy: autoReconnect enabled=\(autoReconnectEnabled)")
             if autoReconnectEnabled {
                 Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
             } else {
-                queue.async { [weak self] in self?.cancelAutomaticRecoveryIfNeeded() }
+                Task { [weak self] in await self?.pipeline.cancelAutomaticRecoveryIfNeeded() }
             }
         }
     }
-    /// Set when the peer told us the two apps are version-incompatible. The
-    /// live session is left alone; the flag only reclassifies the eventual
-    /// loss so recovery never loops against a peer that cannot work with us.
-    private var peerIsIncompatible = false
-    private var manualConnectPeerID: String?
+    // C1 review fix: `peerIsIncompatible`/`manualConnectPeerID` moved into
+    // `reconnectContext` (`ReceiverPipelineActor.ReconnectContext`) — the
+    // synchronized box `pipeline`'s reconnect logic reads. Both are written
+    // only here on the host (the flag's meaning: set when the peer told us
+    // the two apps are version-incompatible, so the flag only reclassifies
+    // the eventual loss and never touches the live session).
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
@@ -440,22 +435,18 @@ final class StreamReceiver: ObservableObject {
     @MainActor private var remotePairingAttempt = PairingAttemptTracker()
     @MainActor private var remotePairingConnection: NWConnection?
     @MainActor private var remotePairingValidity: PairingAttemptValidity?
-    private var connection: NWConnection?
     // Cursor side channel: UDP on port+1. Cursor positions ride TCP behind
     // multi-hundred-KB video frames, so over WiFi one late frame stalls the
     // cursor with it (head-of-line blocking). UDP datagrams skip that queue.
     // Optional end to end: advertised in hello only once the listener is
     // ready, and the sender keeps using TCP when it is absent.
-    // Newcomer connections still proving themselves against a live session
-    // (see the listener). Tracked so stop() and adoption can cancel them —
-    // an untracked silent socket would sit parked forever and could even
-    // adopt into a receiver that was stopped in the meantime.
-    private var pendingConnections: [NWConnection] = []
+    // C1: `connection`/`pendingConnections` moved into `pipeline`
+    // (`ReceiverPipelineActor`) — see that file for the newcomer-race
+    // handling that used to live here.
     // What the last hello advertised, to notice a cable appearing
     // mid-session: plugging one creates new interfaces, and a sender can
     // only probe addresses it has been told about.
     private var lastAdvertisedAddrs: [String] = []
-    private var addrWatchTimer: DispatchSourceTimer?
     // The cable upgrade (PROTOCOL.md 6.4) is Mac-to-Mac: only Mac
     // receivers put addrs in their hello — see sendHello for why phones
     // must not.
@@ -494,10 +485,17 @@ final class StreamReceiver: ObservableObject {
     // for 5s the connection is half-open (Mac killed, tunnel died) — drop it
     // so the listener can accept a fresh one.
     private var lastDataReceived = Date()
-    // Liveness monitors: cancel-and-replace timers (not self-rescheduling
-    // asyncAfter chains) so stop() can actually silence them — see #75.
-    private var pingTimer: DispatchSourceTimer?
-    private var watchdogTimer: DispatchSourceTimer?
+    // C1: the ping/watchdog/addrWatch liveness timers moved into `pipeline`
+    // (`ReceiverPipelineActor`) — their correctness is inseparable from the
+    // authoritative `connection`/`sessionState` they now read directly.
+    /// The generation of the session `receive(on:generation:)`/
+    /// `processReceivedData` currently believe they own — `pipeline`'s
+    /// `sessionState.generation` at the moment of the accepted adoption,
+    /// stamped here by `beginAdoptionHostWork` and checked, synchronously
+    /// and entirely on `queue`, before every packet touches `buffer`/decode
+    /// state. Deliberately a separate counter from `videoGeneration` (a
+    /// distinct, decode-level generation) — the two must never be merged.
+    private var activeReceiveGeneration = 0
 
     private var framesThisWindow = 0
     private var fpsWindowStart = Date()
@@ -707,7 +705,7 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             self.announcedTrayEnabled = trayEnabled
             self.announcedKeyboardButtonEnabled = keyboardButtonEnabled
-            if let connection = self.connection, connection.state == .ready {
+            if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
                 self.sendHello(on: connection)
             }
         }
@@ -730,7 +728,7 @@ final class StreamReceiver: ObservableObject {
             self.announcedSnapRotation = preferences.snapRotation
             self.announcedAppGestureCommands = preferences.appGestureCommands
             self.avSyncOffsetMs = AVSyncOffset.clamped(preferences.avSyncOffsetMs)
-            if let connection = self.connection, connection.state == .ready {
+            if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
                 self.sendHello(on: connection)
             }
         }
@@ -746,7 +744,7 @@ final class StreamReceiver: ObservableObject {
         devicePixelsWide = w
         devicePixelsHigh = h
         Log.info("panel changed -> \(w)x\(h) @\(scale)x")
-        if let connection { sendHello(on: connection) }
+        if let connection = sendTargetBox.current()?.connection { sendHello(on: connection) }
     }
 
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
@@ -758,6 +756,10 @@ final class StreamReceiver: ObservableObject {
         self.maxEncodeWide = maxEncodeWide
         self.maxEncodeHigh = maxEncodeHigh
         self.maxFPS = maxFPS
+        // Seed the box with the real initial preference — `didSet` above
+        // only fires on a subsequent change, never for this stored
+        // property's own initial value.
+        reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
@@ -779,8 +781,8 @@ final class StreamReceiver: ObservableObject {
             self.startTLSListener()
             self.startPairingListener()
             self.startMacPairingBrowser()
-            self.armLivenessTimers()
         }
+        Task { await pipeline.armLivenessTimers() }
     }
 
     /// Leave receiver duty for good: announce "closing" to a live sender (so
@@ -789,12 +791,8 @@ final class StreamReceiver: ObservableObject {
     /// app calls this when the user leaves receiver mode or quits; the
     /// instance is discarded afterwards (start() re-arms if it isn't).
     func stop(completion: (() -> Void)? = nil) {
+        Task { await pipeline.teardownForStop() }
         queue.async {
-            self.pingTimer?.cancel(); self.pingTimer = nil
-            self.watchdogTimer?.cancel(); self.watchdogTimer = nil
-            self.addrWatchTimer?.cancel(); self.addrWatchTimer = nil
-            self.pendingConnections.forEach { $0.cancel() }
-            self.pendingConnections.removeAll()
             self.macPairingBrowser?.cancel(); self.macPairingBrowser = nil
         }
         closeSession(announcing: WireMessage.closing, status: "Stopped",
@@ -807,9 +805,7 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
-            self.connection?.cancel()
-            self.connection = nil
-            self.setConnected(false, reason: .explicitDisconnect)
+            Task { await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
 
@@ -958,9 +954,7 @@ final class StreamReceiver: ObservableObject {
         Log.info("pairDebug: explicit pairing started peerID=\(peerID ?? "unknown")")
         queue.async {
             self.mediaSuppressedForPairing = true
-            self.connection?.cancel()
-            self.connection = nil
-            self.setConnected(false, reason: .explicitDisconnect)
+            Task { await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
 
@@ -1019,11 +1013,11 @@ final class StreamReceiver: ObservableObject {
     /// there would land us in Connection Lost for no reason); foregrounding
     /// resumes it from where it stopped.
     func setAppActive(_ active: Bool) {
-        queue.async {
+        Task {
             if active {
-                self.resumeReconnectIfNeeded()
+                await pipeline.resumeReconnectIfNeeded()
             } else {
-                self.suspendReconnectForBackground()
+                await pipeline.suspendReconnectForBackground()
             }
         }
     }
@@ -1043,7 +1037,7 @@ final class StreamReceiver: ObservableObject {
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
                 self.displayLayer.flush()
-                if self.connection?.state == .ready {
+                if self.sendTargetBox.current()?.connection.state == .ready {
                     self.sendControl(["type": "kf"])
                 }
             }
@@ -1088,27 +1082,35 @@ final class StreamReceiver: ObservableObject {
                 guard let self, !finished else { return }
                 finished = true
                 self.pendingDisconnectFinish = nil
-                self.connection?.cancel()
-                self.connection = nil
+                self.reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it
                 // cannot resurrect the session afterwards. A subsequent
                 // manual Connect (`requestConnect()`) clears this the same
                 // way it already clears a Mac-initiated disconnect.
-                self.cancelReconnect()
-                self.setConnected(false, reason: .explicitDisconnect)
-                self.resetDisplayModeState()
-                self.resetExtendShapeState()
-                self.resetMaxFPSState()
-                self.resetAudioPlayback()
-                self.manualConnectPeerID = nil
-                self.recoveryPeerID = nil
-                self.setStatus("Disconnected")
-                self.publishDisplayState(.running)
-                completion?()
+                //
+                // C1 review fix: `await` the actor's own teardown (which
+                // sets its own status, e.g. "Waiting for Mac") BEFORE
+                // setting "Disconnected" below, hopping back onto `queue`
+                // for the rest of this closure's queue-confined work. An
+                // un-awaited `Task` here previously let the actor's status
+                // write land AFTER this one, sometimes overwriting
+                // "Disconnected" with a stale interruption label.
+                Task {
+                    await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    self.queue.async {
+                        self.resetDisplayModeState()
+                        self.resetExtendShapeState()
+                        self.resetMaxFPSState()
+                        self.resetAudioPlayback()
+                        self.setStatus("Disconnected")
+                        self.publishDisplayState(.running)
+                        completion?()
+                    }
+                }
             }
             self.pendingDisconnectFinish = finish
-            guard let conn = self.connection, conn.state == .ready else {
+            guard let conn = self.sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
                 return
@@ -1130,25 +1132,29 @@ final class StreamReceiver: ObservableObject {
             let finish = { [weak self] in
                 guard let self, !finished else { return }
                 finished = true
-                self.connection?.cancel()
-                self.connection = nil
                 self.tlsListener?.cancel(); self.tlsListener = nil
                 self.pairingListener?.cancel(); self.pairingListener = nil
+                self.reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it cannot
                 // resurrect the session afterwards.
-                self.cancelReconnect()
-                self.setConnected(false, reason: .explicitDisconnect)
-                self.resetDisplayModeState()
-                self.resetExtendShapeState()
-                self.resetMaxFPSState()
-                self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
-                self.manualConnectPeerID = nil
-                self.setStatus(status)
-                self.publishDisplayState(.running)
-                completion?()
+                //
+                // C1 review fix: same status-order fix as `disconnect()` —
+                // await the actor's teardown before writing `status` here.
+                Task {
+                    await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    self.queue.async {
+                        self.resetDisplayModeState()
+                        self.resetExtendShapeState()
+                        self.resetMaxFPSState()
+                        self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
+                        self.setStatus(status)
+                        self.publishDisplayState(.running)
+                        completion?()
+                    }
+                }
             }
-            guard let conn = self.connection, conn.state == .ready else {
+            guard let conn = self.sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("closing session (\(type)) — no live connection")
                 finish()
                 return
@@ -1196,45 +1202,12 @@ final class StreamReceiver: ObservableObject {
                 // handshake already in this listener's accept queue — a
                 // straggler from the connection just cancelled can complete
                 // its TLS handshake moments after the real replacement is
-                // already live. Adopting every newcomer unconditionally let
-                // that straggler evict the healthy winner (`adopt()` cancels
-                // whatever `self.connection` currently is), producing an
-                // endless reconnect loop after every streaming-setting
-                // change. Park it and only adopt once it proves itself with
-                // real bytes; a straggler that closes/errors first is
-                // discarded and the live session stays put.
-                if let current = self.connection, current.state != .cancelled,
-                   !Self.isFailed(current.state) {
-                    Log.info("reconnectDebug: incomingReplacement peer via TLS listener — parked pending proof")
-                    self.pendingConnections.append(connection)
-                    connection.stateUpdateHandler = { [weak self] state in
-                        guard let self, case .ready = state else { return }
-                        self.sendHello(on: connection)
-                        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) {
-                            [weak self] data, _, isComplete, error in
-                            guard let self else { return }
-                            // Only a still-tracked candidate may adopt — see
-                            // the identical guard on the plaintext listener.
-                            guard self.pendingConnections.contains(where: { $0 === connection }) else {
-                                connection.cancel()
-                                return
-                            }
-                            self.pendingConnections.removeAll { $0 === connection }
-                            if let data, !data.isEmpty {
-                                self.adopt(connection, greeted: true, initialData: data)
-                            } else {
-                                Log.info("ignored a stale TLS connection that closed at once"
-                                         + (error.map { " (\($0))" } ?? ""))
-                                connection.cancel()
-                            }
-                            _ = isComplete
-                        }
-                    }
-                    connection.start(queue: self.queue)
-                } else {
-                    Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
-                    self.adopt(connection)
-                }
+                // already live. C1: the decision (park pending proof, or
+                // adopt outright) now lives in `pipeline`
+                // (`ReceiverPipelineActor.handleIncomingConnection`), which
+                // owns `connection`/`pendingConnections` and reads/writes
+                // them coherently.
+                Task { await self.pipeline.handleIncomingConnection(connection) }
             }
             listener.stateUpdateHandler = { [weak self, weak listener] state in
                 switch state {
@@ -1356,33 +1329,30 @@ final class StreamReceiver: ObservableObject {
         macPairingBrowser = browser
     }
 
-    /// Make `conn` the session: replace any existing connection and reset
-    /// decoder state. `greeted` marks a newcomer that already got its hello
-    /// while it proved itself (see the listener), with the bytes it sent
-    /// back in `initialData`; a second hello would make the sender rebuild.
-    private func adopt(_ conn: NWConnection, greeted: Bool = false, initialData: Data? = nil) {
-        if greeted { Log.info("newcomer proved itself — adopting it as the session") }
-        let supersededGeneration = sessionState.generation
-        let hadPriorConnection = connection != nil
-        connection?.cancel()
-        connection = conn
-        // A new session supersedes any recovery run: retries scheduled
-        // against the old generation can no longer win.
-        cancelReconnect()
-        mutateSession { $0.connectionAdopted() }
-        if hadPriorConnection {
-            Log.info("reconnectDebug: superseded oldGeneration=\(supersededGeneration)"
-                     + " newGeneration=\(sessionState.generation)")
-        }
-        // RC-3 SendTarget checkpoint: install synchronously, right here on
-        // `queue`, as soon as the replacement and its generation are both
-        // committed — the same instant `connection` itself becomes this new
-        // value, matching today's un-gated (no `.ready` check) implicit-send
-        // behavior exactly, with no publication lag (see `SendTargetBox`).
-        sendTargetBox.install(SendTarget(connection: conn, generation: sessionState.generation))
-        // The race is decided: rival candidates die here.
-        for pending in pendingConnections where pending !== conn { pending.cancel() }
-        pendingConnections.removeAll()
+    // C1: connection adoption (including the pending-connection race and
+    // the pathUpdateHandler/stateUpdateHandler pair that decide adoption's
+    // outcome) moved into `pipeline` (`ReceiverPipelineActor`). The pieces
+    // below are the host-side effects it calls out to, in the exact order
+    // the original inline `adopt`/`onReady` closures ran them.
+
+    /// Runs before `pipeline` starts (or resumes) `conn` — the
+    /// resetStreamState seam: enqueued to `queue` strictly before the
+    /// connection's own callbacks can reach it (see `ReceiverPipelineActor.adopt`),
+    /// so this always completes first. `generation` is `pipeline`'s just-
+    /// bumped `sessionState.generation` (never `videoGeneration`, a
+    /// separate decode-level counter) — stamped into `activeReceiveGeneration`
+    /// here, and reset alongside `lastDataReceived` so a watchdog tick that
+    /// captures both together (see `ReceiverPipelineActor.armLivenessTimers`)
+    /// always sees a consistent, non-torn pair for whichever generation it
+    /// observes. Resetting `lastDataReceived` at adoption time (in addition
+    /// to `onConnectionReadyHostWork`, which resets it again at actual
+    /// readiness) closes the specific window a review of this seam found:
+    /// a watchdog tick racing between `pipeline` marking `conn` `.ready` and
+    /// this queue-confined reset would otherwise see an arbitrarily stale
+    /// timestamp for a connection that just proved itself.
+    private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
+        activeReceiveGeneration = generation
+        lastDataReceived = Date()
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
@@ -1394,44 +1364,42 @@ final class StreamReceiver: ObservableObject {
             self.cursorSprite = nil
             self.onCursor?(0.5, 0.5, false)
         }
-        let onReady: () -> Void = { [weak self] in
-            guard let self else { return }
-            self.manualConnectPeerID = nil
-            self.lastDataReceived = Date()
-            if let path = conn.currentPath {
-                self.updateTransport(for: conn, path: path)
-            }
-            let resolvedPeerID = Self.resolveAuthenticatedPeerID(from: conn)
-            publishToUI { self.authenticatedPeerID = resolvedPeerID }
-            self.setConnected(true)
-            if !greeted { self.sendHello(on: conn) }
-        }
-        conn.pathUpdateHandler = { [weak self] path in
-            guard let self, conn === self.connection else { return }
-            self.updateTransport(for: conn, path: path)
-            if conn.state == .ready {
-                self.setStatus("Connected · \(self.transport)")
-            }
-        }
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self, conn === self.connection else { return }   // replaced: stay quiet
-            switch state {
-            case .ready: onReady()
-            case .failed, .cancelled: self.setConnected(false)
-            default: break
-            }
-        }
-        if conn.state == .ready {
-            onReady()   // already up: the handler will not fire again
-        } else {
-            conn.start(queue: queue)
-        }
+    }
+
+    /// Runs after `pipeline` has started (or synchronously resolved
+    /// readiness for) `conn` — drains any bytes a greeted newcomer already
+    /// proved itself with, then arms the read loop.
+    private func finishAdoptionHostWork(_ conn: NWConnection, generation: Int, initialData: Data?) {
         if let initialData, !initialData.isEmpty {
             bytesThisWindow += initialData.count
             buffer.append(initialData)
             drainFrames()
         }
-        receive(on: conn)
+        receive(on: conn, generation: generation)
+    }
+
+    /// The host-only half of the former `onReady` closure: everything except
+    /// `setConnected(true)` itself, which stays inside `pipeline`.
+    private func onConnectionReadyHostWork(_ conn: NWConnection) {
+        reconnectContext.update { $0.manualConnectPeerID = nil }
+        lastDataReceived = Date()
+        if let path = conn.currentPath {
+            updateTransport(for: conn, path: path)
+        }
+        let resolvedPeerID = Self.resolveAuthenticatedPeerID(from: conn)
+        reconnectContext.update { $0.authenticatedPeerIDHint = resolvedPeerID }
+        publishToUI { self.authenticatedPeerID = resolvedPeerID }
+    }
+
+    /// The address-watch liveness timer's host-only work — see
+    /// `ReceiverPipelineActor.addrWatchTick`, which only checks readiness.
+    private func checkAddressChangeAndSendHello(_ conn: NWConnection) {
+        let now = Self.reachableAddresses()
+        guard now != lastAdvertisedAddrs else { return }
+        // A cable was plugged (or pulled) mid-session: tell the sender,
+        // it re-probes on the fresh list (PROTOCOL.md 6.4).
+        Log.info("reachable addresses changed — re-sending hello")
+        sendHello(on: conn)
     }
 
     private func updateTransport(for conn: NWConnection, path: NWPath) {
@@ -1445,11 +1413,6 @@ final class StreamReceiver: ObservableObject {
         transport = route.rawValue
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
         Log.info("connection path from \(peer): \(names) route=\(route.rawValue)")
-    }
-
-    private static func isFailed(_ state: NWConnection.State) -> Bool {
-        if case .failed = state { return true }
-        return false
     }
 
     /// Same same-source SPKI re-encode `TrustStore`/`TLSConfigurator` use
@@ -1477,50 +1440,11 @@ final class StreamReceiver: ObservableObject {
     }
 
     // MARK: - Liveness (ping + watchdog)
-
-    /// Arm (or re-arm) the ping and watchdog timers on the receiver queue.
-    private func armLivenessTimers() {
-        pingTimer?.cancel()
-        let ping = DispatchSource.makeTimerSource(queue: queue)
-        ping.schedule(deadline: .now() + 2.0, repeating: 2.0)
-        ping.setEventHandler { [weak self] in
-            guard let self, self.connection?.state == .ready else { return }
-            self.sendControl(["type": "ping", "t": self.nowMs])
-        }
-        ping.resume()
-        pingTimer = ping
-
-        addrWatchTimer?.cancel()
-        if advertisesAddresses {
-            let addrWatch = DispatchSource.makeTimerSource(queue: queue)
-            addrWatch.schedule(deadline: .now() + 5.0, repeating: 5.0)
-            addrWatch.setEventHandler { [weak self] in
-                guard let self, let conn = self.connection, conn.state == .ready else { return }
-                let now = Self.reachableAddresses()
-                guard now != self.lastAdvertisedAddrs else { return }
-                // A cable was plugged (or pulled) mid-session: tell the sender,
-                // it re-probes on the fresh list (PROTOCOL.md 6.4).
-                Log.info("reachable addresses changed — re-sending hello")
-                self.sendHello(on: conn)
-            }
-            addrWatch.resume()
-            addrWatchTimer = addrWatch
-        }
-
-        watchdogTimer?.cancel()
-        let watchdog = DispatchSource.makeTimerSource(queue: queue)
-        watchdog.schedule(deadline: .now() + 2.0, repeating: 2.0)
-        watchdog.setEventHandler { [weak self] in
-            guard let self, let conn = self.connection, conn.state == .ready,
-                  Date().timeIntervalSince(self.lastDataReceived) > 5 else { return }
-            Log.info("watchdog: nothing from the Mac for >5s — dropping connection")
-            conn.cancel()
-            self.connection = nil
-            self.setConnected(false)
-        }
-        watchdog.resume()
-        watchdogTimer = watchdog
-    }
+    //
+    // C1: the ping/addrWatch/watchdog timers themselves now live in
+    // `pipeline` (`ReceiverPipelineActor.armLivenessTimers`), armed from
+    // `start()`. Their host-only work is `checkAddressChangeAndSendHello`
+    // above; ping and the watchdog need nothing else from the host.
 
     /// JSON on the video channel (pong, ping liveness) — payloads starting '{'.
     private func handleVideoChannelJSON(_ data: Data) {
@@ -1581,7 +1505,7 @@ final class StreamReceiver: ObservableObject {
                                                   value: obj["state"] as? String) else { return }
             // Pause is intentional, not a failure: it shares the interruption
             // presentation but must never start automatic recovery.
-            mutateSession { state == .paused ? $0.displayPaused() : $0.displayResumed() }
+            Task { await pipeline.applyDisplayPauseTransition(paused: state == .paused) }
             // PAUSE stops both media: release/flush audio here so Resume
             // starts on a clean synchronized timeline (SESSION BEHAVIOR).
             // The Mac's own capture pipeline dies underneath a pause too, so
@@ -1637,7 +1561,7 @@ final class StreamReceiver: ObservableObject {
                 }
             }
             if macPV < WireProtocol.minSupportedPeer {
-                peerIsIncompatible = true
+                reconnectContext.update { $0.peerIsIncompatible = true }
                 let msg = "The MeowDisplay app on your Mac is too old for this \(deviceKind) app. Update MeowDisplay on your Mac to reconnect."
                 publishToUI { self.peerSignal = .updateMac(message: msg) }
             }
@@ -1654,11 +1578,7 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.closing:
             // The Mac explicitly ended this session. Do not treat it as a transport failure.
             Log.info("Mac explicitly closed the session")
-            queue.async {
-                self.connection?.cancel()
-                self.connection = nil
-                self.setConnected(false, reason: .peerClosed)
-            }
+            Task { await pipeline.disconnectCurrentConnection(reason: .peerClosed) }
         case WireMessage.wakeInfo:
             // The Mac self-labels this with its own install ID purely as a
             // cache key — this is a network hint only (Remote Wake-on-LAN
@@ -1684,7 +1604,7 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             // Retrying cannot fix that, so the eventual loss is terminal.
-            peerIsIncompatible = true
+            reconnectContext.update { $0.peerIsIncompatible = true }
             let message = obj["message"] as? String
                 ?? "Update MeowDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
@@ -2356,7 +2276,13 @@ final class StreamReceiver: ObservableObject {
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
                              completion: (() -> Void)? = nil) {
-        guard let conn = conn ?? connection,
+        // C1: `connection` moved into `pipeline`; every background-queue-
+        // confined caller that used to fall through to it (liveness ping,
+        // decoder-reset keyframe requests, the periodic stats report) now
+        // falls through to `sendTargetBox` instead — the same synchronous,
+        // generation-guarded mirror the `@MainActor` input surface already
+        // reads via `sendUIControl`.
+        guard let conn = conn ?? sendTargetBox.current()?.connection,
               let payload = try? JSONSerialization.data(withJSONObject: message) else {
             completion?()
             return
@@ -2373,15 +2299,7 @@ final class StreamReceiver: ObservableObject {
     /// RC-3 SendTarget checkpoint: the entry point for the `@MainActor`
     /// input/request surface (touch, pointer, keyboard, modifiers, gestures,
     /// and the `request*` preference methods). Reads `sendTargetBox`
-    /// synchronously — always instantaneously current, no publication lag —
-    /// instead of letting `sendControl` fall through to the
-    /// background-queue-confined `connection` field, so this call site no
-    /// longer has any dependency on `connection`'s eventual actor ownership
-    /// (C1). `sendControl` itself is unchanged and still serves its
-    /// background-queue-confined callers (liveness ping, decoder-reset
-    /// keyframe requests, the periodic stats report) via the original
-    /// `connection` fallback — those callers run on `queue`, not the main
-    /// actor, and are out of scope for this checkpoint.
+    /// synchronously — always instantaneously current, no publication lag.
     @MainActor
     private func sendUIControl(_ message: [String: Any]) {
         sendControl(message, on: sendTargetBox.current()?.connection)
@@ -2389,42 +2307,64 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Socket read + length-prefixed deframing
 
-    private func receive(on conn: NWConnection) {
+    /// C1 minimum inseparable seam, corrected after review: an actor round
+    /// trip here (`await pipeline.isCurrentConnection(conn)`, then hop back
+    /// to `queue`) left a real window — cancelling `conn` does not retract
+    /// data already delivered to ITS receive callback, so a newer generation
+    /// could finish adopting (and reset `buffer`/decode state) in the gap
+    /// between the actor check passing and the `queue.async` continuation
+    /// actually running, letting generation N's data mutate generation
+    /// N+1's fresh state.
+    ///
+    /// `conn.receive`'s completion always runs ON `queue` already (`conn`
+    /// was started with `queue:`), so the fix needs no actor hop at all:
+    /// `generation` — `pipeline`'s `sessionState.generation` at the moment
+    /// THIS connection was adopted, threaded through from
+    /// `finishAdoptionHostWork` — is compared here, synchronously, against
+    /// `activeReceiveGeneration`, the same queue-confined counter
+    /// `beginAdoptionHostWork` stamps before any of a new connection's
+    /// callbacks can reach `queue` (see that method). A stale generation's
+    /// callback becomes a no-op before it ever touches `buffer`; a current
+    /// generation's callback behaves exactly as before, with no added
+    /// round trip.
+    private func receive(on conn: NWConnection, generation: Int) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) {
             [weak self] data, _, isComplete, error in
-            // A replaced connection's last callback must not touch the
-            // session (its EOF used to flip `connected` off for the new one).
-            guard let self, conn === self.connection else { return }
-            if let data, !data.isEmpty {
-                self.lastDataReceived = Date()
-                self.bytesThisWindow += data.count
-                self.buffer.append(data)
-                self.drainFrames()
-            }
-            if let error {
-                // FORENSIC FIX (media-death-with-input-still-working): this
-                // used to just log and return WITHOUT re-arming `receive`
-                // and WITHOUT calling `setConnected(false)` — the read loop
-                // stopped forever while `connected` stayed true and nothing
-                // ever told session state the connection was gone. TCP is
-                // full-duplex: our own outbound writes (touch/pointer input)
-                // keep working fine over the same socket, so from the user's
-                // side "input still works" while nothing we're owed (video,
-                // audio, cursor) ever arrives again, and no automatic
-                // recovery ever kicks in because nothing marked the session
-                // down. Treat any receive error exactly like EOF: it is
-                // this connection's own health, not a per-call fluke.
-                Log.info("receive error: \(error)")
-                self.setConnected(false)
-                return
-            }
-            if isComplete {
-                Log.info("peer closed connection")
-                self.setConnected(false)
-                return
-            }
-            self.receive(on: conn)
+            guard let self, generation == self.activeReceiveGeneration else { return }
+            self.processReceivedData(on: conn, data: data, isComplete: isComplete, error: error, generation: generation)
         }
+    }
+
+    private func processReceivedData(on conn: NWConnection, data: Data?, isComplete: Bool, error: NWError?, generation: Int) {
+        if let data, !data.isEmpty {
+            self.lastDataReceived = Date()
+            self.bytesThisWindow += data.count
+            self.buffer.append(data)
+            self.drainFrames()
+        }
+        if let error {
+            // FORENSIC FIX (media-death-with-input-still-working): this
+            // used to just log and return WITHOUT re-arming `receive`
+            // and WITHOUT calling `setConnected(false)` — the read loop
+            // stopped forever while `connected` stayed true and nothing
+            // ever told session state the connection was gone. TCP is
+            // full-duplex: our own outbound writes (touch/pointer input)
+            // keep working fine over the same socket, so from the user's
+            // side "input still works" while nothing we're owed (video,
+            // audio, cursor) ever arrives again, and no automatic
+            // recovery ever kicks in because nothing marked the session
+            // down. Treat any receive error exactly like EOF: it is
+            // this connection's own health, not a per-call fluke.
+            Log.info("receive error: \(error)")
+            Task { await self.pipeline.setConnected(false) }
+            return
+        }
+        if isComplete {
+            Log.info("peer closed connection")
+            Task { await self.pipeline.setConnected(false) }
+            return
+        }
+        self.receive(on: conn, generation: generation)
     }
 
     private func drainFrames() {
@@ -3813,86 +3753,10 @@ final class StreamReceiver: ObservableObject {
     }
 
     // MARK: - Session state + automatic recovery
-
-    /// Apply one transition to the authoritative session state, log it if it
-    /// actually changed anything, mirror it to the UI, and let the recovery
-    /// driver react. Must run on `queue`.
-    private func mutateSession(_ transition: (inout ReceiverSessionState) -> Bool) {
-        let previous = sessionState.phase
-        let changed = transition(&sessionState)
-        let snapshot = sessionState
-        publishSessionSnapshot(snapshot)
-        guard changed else { return }
-        #if DEBUG
-        Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
-                 + " reason=\(snapshot.lossReason?.rawValue ?? "none")"
-                 + " generation=\(snapshot.generation)"
-                 + " attempt=\(snapshot.reconnectAttempt)"
-                 + " transport=\(transport)")
-        #else
-        Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
-                 + " reason=\(snapshot.lossReason?.rawValue ?? "none")")
-        #endif
-        if snapshot.phase == .reconnecting {
-            armReconnect()
-        } else {
-            cancelReconnect()
-        }
-    }
-
-    private func cancelReconnect() {
-        reconnectTimer?.cancel()
-        reconnectTimer = nil
-    }
-
-    /// Auto-Reconnect turned off mid-recovery: settle into the stable
-    /// "Connection Lost" state immediately rather than let an already-
-    /// scheduled automatic attempt keep retrying behind the user's back.
-    /// Manual Reconnect remains available from here, exactly as after normal
-    /// attempt exhaustion. Must run on `queue`.
-    private func cancelAutomaticRecoveryIfNeeded() {
-        guard sessionState.phase == .reconnecting else { return }
-        Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled")
-        mutateSession { $0.exhaustRecovery() }
-        setStatus("Connection lost")
-    }
-
-    /// One automatic recovery step. The Mac is the dialing side (it runs its
-    /// own bounded redial loop), so all this side can act on is its own
-    /// listening half — re-arm it if it is unhealthy and wait out the
-    /// backoff window. Never starts a second attempt or a second timer.
-    private func armReconnect() {
-        cancelReconnect()
-        guard sessionState.phase == .reconnecting else { return }
-        let delay = sessionState.nextReconnectDelay
-        guard let attempt = sessionState.beginReconnectAttempt() else {
-            mutateSession { $0.exhaustRecovery() }
-            Log.info("reconnectDebug: retryExhausted generation=\(sessionState.generation)")
-            setStatus("Connection lost")
-            return
-        }
-        let generation = sessionState.generation
-        let snapshot = sessionState   // never read queue-confined state off-queue
-        publishSessionSnapshot(snapshot)
-        Log.info("reconnect attempt \(attempt)/\(ReceiverSessionState.maximumReconnectAttempts)"
-                 + " generation=\(generation) in \(delay)s")
-        Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
-        setStatus("Reconnecting…")
-        ensureTLSListening()
-        if let peerID = manualConnectPeerID ?? authenticatedPeerID ?? recoveryPeerID {
-            requestRemoteConnect(peerID: peerID)
-        }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + delay)
-        timer.setEventHandler { [weak self] in
-            guard let self, self.sessionState.generation == generation else { return }
-            _ = self.sessionState.endReconnectAttempt()
-            self.armReconnect()
-        }
-        timer.resume()
-        reconnectTimer = timer
-        Log.info("reconnectDebug: retryScheduled generation=\(generation) in \(delay)s")
-    }
+    //
+    // C1: the authoritative `sessionState`, its transitions (`mutateSession`),
+    // the reconnect timer/`armReconnect`, and `cancelAutomaticRecoveryIfNeeded`
+    // all moved into `pipeline` (`ReceiverPipelineActor`) — see that file.
 
     /// The user tapped Reconnect on the Connection Lost presentation. Runs
     /// one clean recovery run through exactly the same path as automatic
@@ -3909,10 +3773,11 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             Log.info("connectDebug: receiverConnectRequest peer=local")
             self.pendingDisconnectFinish?()
-            self.cancelReconnect()
-            self.peerIsIncompatible = false
-            self.mutateSession { $0.requestManualReconnect() }
-            self.signalConnectRequest()
+            self.reconnectContext.update { $0.peerIsIncompatible = false }
+            Task {
+                await self.pipeline.requestManualReconnectTransition()
+                self.signalConnectRequest()
+            }
         }
     }
 
@@ -3959,7 +3824,7 @@ final class StreamReceiver: ObservableObject {
     /// already replaces any in-flight connection, so there is no risk of a
     /// duplicate session from racing routes.
     func connectPrimary(peerID: String) {
-        queue.async { self.manualConnectPeerID = peerID }
+        reconnectContext.update { $0.manualConnectPeerID = peerID }
         requestConnect()
     }
 
@@ -4006,46 +3871,30 @@ final class StreamReceiver: ObservableObject {
     func reconnectNow() {
         queue.async {
             self.pendingDisconnectFinish?()
-            if self.sessionState.phase == .peerDisconnected {
-                // Fresh explicit intent after the Mac ended the session:
-                // the same single path Home → Connect uses.
-                Log.info("connectDebug: peerDisconnected reconnect -> requestConnect")
-                self.requestConnect()
-                return
+            Task {
+                let phase = await self.pipeline.currentPhase
+                if phase == .peerDisconnected {
+                    // Fresh explicit intent after the Mac ended the session:
+                    // the same single path Home → Connect uses.
+                    Log.info("connectDebug: peerDisconnected reconnect -> requestConnect")
+                    self.requestConnect()
+                    return
+                }
+                guard phase == .reconnectFailed || phase == .disconnected else { return }
+                Log.info("manual reconnect requested")
+                self.reconnectContext.update { $0.peerIsIncompatible = false }
+                await self.pipeline.requestManualReconnectTransition()
+                // If the listener is healthy, `armReconnect` (fired reactively)
+                // won't rebuild it. A manual retry is explicitly a user asking
+                // to un-stick a broken state, so force a rebind.
+                self.ensureTLSListening()
             }
-            guard self.sessionState.phase == .reconnectFailed
-                    || self.sessionState.phase == .disconnected else { return }
-            Log.info("manual reconnect requested")
-            self.cancelReconnect()
-            self.peerIsIncompatible = false
-            self.mutateSession { $0.requestManualReconnect() }
-            // If the listener is healthy, `armReconnect` (fired reactively)
-            // won't rebuild it. A manual retry is explicitly a user asking
-            // to un-stick a broken state, so force a rebind.
-            self.ensureTLSListening()
         }
     }
 
-    /// iOS is suspending us: recovery cannot run, so park the run instead of
-    /// burning its budget against a radio we do not have.
-    private func suspendReconnectForBackground() {
-        cancelReconnect()
-        // Deliberately not through `mutateSession`: the phase is unchanged
-        // (still reconnecting), and its reactive arm would immediately
-        // schedule the very attempt this is parking.
-        guard sessionState.suspendRecoveryForBackground() else { return }
-        Log.info("sessionState: recovery parked for background"
-                 + " generation=\(sessionState.generation)"
-                 + " attempt=\(sessionState.reconnectAttempt)")
-        let snapshot = sessionState
-        publishSessionSnapshot(snapshot)
-    }
-
-    /// Foregrounding: resume a parked recovery run from where it stopped.
-    private func resumeReconnectIfNeeded() {
-        guard sessionState.phase == .reconnecting, reconnectTimer == nil else { return }
-        armReconnect()
-    }
+    // C1: `suspendReconnectForBackground`/`resumeReconnectIfNeeded` moved
+    // into `pipeline` (`ReceiverPipelineActor`) — called directly from
+    // `setAppActive` above.
 
     // MARK: - Helpers
 
@@ -4112,7 +3961,16 @@ final class StreamReceiver: ObservableObject {
     /// exposes exactly three synchronized operations and nothing else — it
     /// cannot be used to bypass isolation for anything but this one
     /// send-only capability.
-    final class SendTargetBox {
+    /// C1: `ReceiverPipelineActor` now holds a reference to this box (to
+    /// install/clear it as the sole authoritative writer) and stores it as
+    /// an actor property, which requires `Sendable`. The narrow `@unchecked`
+    /// conformance is safe by the same construction described above: `target`
+    /// is a private `var` touched only inside `lock`/`unlock`, exactly three
+    /// synchronized operations are exposed, and no mutable reference ever
+    /// escapes a critical section — the class was already thread-safe by
+    /// construction before this conformance made that fact visible to the
+    /// type system.
+    final class SendTargetBox: @unchecked Sendable {
         private let lock = NSLock()
         private var target: SendTarget?
 
@@ -4142,6 +4000,73 @@ final class StreamReceiver: ObservableObject {
 
     private let sendTargetBox = SendTargetBox()
 
+    /// The synchronized replacement for what was an unsynchronized-getter
+    /// design: `pipeline`'s reconnect logic reads this instead of calling
+    /// back into `StreamReceiver` off its own isolation domain. Every write
+    /// site below updates it at the same point it updates its own field —
+    /// see `ReceiverPipelineActor.ReconnectContext`.
+    private let reconnectContext = ReconnectContext()
+
+    /// C1: the sole authoritative owner of `connection`/`pendingConnections`/
+    /// `sessionState` and the coupled reconnect/liveness timers. `lazy`
+    /// purely so `makePipelineEffects()` can capture `self` weakly — actual
+    /// use starts from `start()`, well after `init` completes.
+    private lazy var pipeline = ReceiverPipelineActor(
+        queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
+        effects: makePipelineEffects())
+
+    /// The `HostEffects` `pipeline` calls out to for every side effect
+    /// outside its own state — see `ReceiverPipelineActor.HostEffects`.
+    /// Each closure captures `self` weakly and is responsible for its own
+    /// thread-safety: one that touches `queue`-confined state hops onto
+    /// `queue` itself before touching it.
+    private func makePipelineEffects() -> ReceiverPipelineActor.HostEffects {
+        .init(
+            publishSessionSnapshot: { [weak self] snapshot in self?.publishSessionSnapshot(snapshot) },
+            setStatus: { [weak self] text in self?.setStatus(text) },
+            setStatusConnected: { [weak self] in
+                self?.queue.async { guard let self else { return }
+                    self.setStatus("Connected · \(self.transport)")
+                }
+            },
+            applyConnectedUIMirror: { [weak self] value in self?.applyConnectedUIMirror(value) },
+            clearTransport: { [weak self] in
+                self?.queue.async { self?.transport = "—" }
+            },
+            ensureTLSListening: { [weak self] in
+                self?.queue.async { self?.ensureTLSListening() }
+            },
+            requestRemoteConnect: { [weak self] peerID in
+                self?.queue.async { self?.requestRemoteConnect(peerID: peerID) }
+            },
+            getLastDataReceived: { [weak self] in self?.lastDataReceived ?? .distantPast },
+            getActiveReceiveGeneration: { [weak self] in self?.activeReceiveGeneration ?? -1 },
+            advertisesAddresses: { [weak self] in self?.advertisesAddresses ?? false },
+            beginAdoption: { [weak self] conn, generation in
+                self?.queue.async { self?.beginAdoptionHostWork(conn, generation: generation) }
+            },
+            finishAdoption: { [weak self] conn, generation, initialData in
+                self?.queue.async { self?.finishAdoptionHostWork(conn, generation: generation, initialData: initialData) }
+            },
+            onConnectionReady: { [weak self] conn in
+                self?.queue.async { self?.onConnectionReadyHostWork(conn) }
+            },
+            sendHello: { [weak self] conn in
+                self?.queue.async { self?.sendHello(on: conn) }
+            },
+            onPathUpdate: { [weak self] conn, path in
+                self?.queue.async { self?.updateTransport(for: conn, path: path) }
+            },
+            sendPing: { [weak self] in
+                self?.queue.async { guard let self else { return }
+                    self.sendControl(["type": "ping", "t": self.nowMs])
+                }
+            },
+            checkAddressChangeAndSendHello: { [weak self] conn in
+                self?.queue.async { self?.checkAddressChangeAndSendHello(conn) }
+            })
+    }
+
     /// The `displayState` mirror and its callback always change together —
     /// duplicated verbatim at three call sites before this consolidation.
     private func publishDisplayState(_ state: DisplayState) {
@@ -4151,20 +4076,29 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    /// The `session` mirror snapshot — duplicated verbatim at three call
-    /// sites (`mutateSession`, `armReconnect`, `suspendReconnectForBackground`)
+    /// The `session` mirror snapshot — called by `pipeline`
+    /// (`ReceiverPipelineActor`) as its `HostEffects.publishSessionSnapshot`,
+    /// from `mutateSession`, `armReconnect`, `suspendReconnectForBackground`
     /// before this consolidation. Callers still capture the snapshot at the
     /// same point they always did; this only names the hop.
     private func publishSessionSnapshot(_ snapshot: ReceiverSessionState) {
         publishToUI { self.session = snapshot }
     }
 
-    /// The single funnel for connection up/down. `reason` classifies a loss
-    /// so the session state can tell an interruption worth recovering from
-    /// apart from a deliberate end — see `ReceiverSessionLossReason`.
-    private func setConnected(_ value: Bool,
-                              reason: ReceiverSessionLossReason = .transportLost) {
-        let peerID = authenticatedPeerID
+    /// The `HostEffects.applyConnectedUIMirror` half of the former
+    /// `setConnected` — the UI-mirror-only side effects, unrelated to
+    /// session/generation ownership, which stays inside `pipeline`
+    /// (`ReceiverPipelineActor.setConnected`) — see `ReceiverSessionLossReason`.
+    private func applyConnectedUIMirror(_ value: Bool) {
+        if !value {
+            // Synchronous, not deferred into the `publishToUI` hop below —
+            // `pipeline` already captured the old hint for `recoveryPeerID`
+            // purposes before calling this, so clearing it here promptly
+            // (rather than only after a MainActor round trip) keeps a
+            // subsequent `armReconnect` from ever seeing a stale hint tied
+            // to a session that has already ended.
+            reconnectContext.update { $0.authenticatedPeerIDHint = nil }
+        }
         publishToUI {
             self.connected = value
             if !value {
@@ -4193,59 +4127,6 @@ final class StreamReceiver: ObservableObject {
                 // a fresh one arrives on the Mac's own next attempt, if any.
                 self.mirrorUnavailable = false
                 self.mirrorRejectedWhileExtending = false
-            }
-        }
-        if !value {
-            let oldGeneration = sessionState.generation
-            // RC-3 SendTarget checkpoint: `setConnected` is the single funnel
-            // for every "connection went away" path (explicit disconnect,
-            // watchdog drop, peer close, receive error/EOF) — clearing here,
-            // synchronously, covers all of them uniformly. Guarded by
-            // generation so a clear racing a newer adopt() can never remove
-            // a target that has already superseded this one.
-            sendTargetBox.clear(forGeneration: oldGeneration)
-            transport = "—"
-            // A peer that already told us the two apps are incompatible must
-            // not be retried; every other loss is transport-shaped.
-            let classified: ReceiverSessionLossReason = {
-                guard peerIsIncompatible, reason == .transportLost else { return reason }
-                return .protocolIncompatible
-            }()
-            let wasConnected = sessionState.phase == .connected
-                || sessionState.phase == .paused
-            Log.info("reconnectDebug: lost reason=\(classified.rawValue) oldGeneration=\(oldGeneration)")
-            let staleAfterIntent = classified == .transportLost
-                && (sessionState.lossReason == .explicitDisconnect || sessionState.lossReason == .peerClosed)
-                && (sessionState.phase == .disconnected || sessionState.phase == .peerDisconnected)
-            if staleAfterIntent {
-                Log.info("connectDebug: ignored stale transportLost after explicit disconnect generation=\(oldGeneration)")
-            } else if classified == .explicitDisconnect {
-                Log.info("connectDebug: localExplicitDisconnect generation=\(oldGeneration)")
-                self.recoveryPeerID = nil
-            } else {
-                self.recoveryPeerID = peerID
-            }
-            mutateSession { $0.connectionLost(reason: classified,
-                                              autoReconnectPreferenceEnabled: autoReconnectEnabled) }
-            if sessionState.phase != .reconnecting {
-                if classified == .peerClosed {
-                    setStatus("Mac Disconnected")
-                } else {
-                    setStatus(wasConnected && classified != .explicitDisconnect
-                        ? "Connection lost" : "Waiting for Mac")
-                }
-            }
-        }
-        else {
-            self.recoveryPeerID = nil
-            peerIsIncompatible = false
-            mutateSession { $0.connectionEstablished() }
-            Log.info("reconnectDebug: authenticated generation=\(sessionState.generation)")
-            setStatus("Connected · \(transport)")
-            // Remember the first ever successful connection to a Mac so the
-            // first-run onboarding hint never reappears (issue #49).
-            if !UserDefaults.standard.bool(forKey: "hasConnectedBefore") {
-                UserDefaults.standard.set(true, forKey: "hasConnectedBefore")
             }
         }
     }
