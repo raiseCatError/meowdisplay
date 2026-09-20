@@ -22,7 +22,21 @@ import SwiftASN1
 /// unsigned build (`DEVELOPMENT_TEAM` unset, as in CI) will get
 /// `errSecMissingEntitlement` at runtime. Every method below fails soft
 /// (nil / false / empty, logged) in that case — never crashes.
-final class TrustStore: PeerTrustStoring {
+/// `@unchecked Sendable`: the only mutable stored property is `snapshot`.
+/// Every read (`allPinnedPeerSPKIs`, `peerID(forSPKI:)`) and write
+/// (`refreshSnapshot`, `purgeAll`) of it is bracketed by `lock.lock()` /
+/// `lock.unlock()`, and both reads copy out value types (`Data`, `String`
+/// tuples) rather than handing out a reference into `snapshot` itself, so
+/// nothing protected escapes the lock. All Keychain-facing helpers
+/// (`queryIdentity`, `queryInstallID`, `generateAndStoreIdentity`,
+/// `deletePartialIdentityItems`, `spkiFromCertificate`) touch only local
+/// state and the Keychain APIs — never `snapshot` — so their lock-held
+/// contract (documented at each call site) exists only to serialize
+/// Keychain generation, not to protect additional shared state. `lock`
+/// itself and `shared` are `let`s; `shared`'s one-time initialization is
+/// guaranteed by Swift's `static let` semantics. No trust/pinning/Keychain
+/// behavior was changed — this is an annotation only.
+final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     static let shared = TrustStore()
 
     private let lock = NSLock()

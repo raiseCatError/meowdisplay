@@ -84,7 +84,19 @@ enum Log {
 /// Stateful file sink behind `Log`. Calls are serialized by `Log.queue` in the
 /// app; keeping the sink synchronous also makes its filesystem behavior
 /// directly testable.
-final class RotatingLogFile {
+///
+/// `@unchecked Sendable`: the only mutable stored state is `handle` and
+/// `lockHandle`. Every read and write of both is confined to the body
+/// closure passed to `withExclusiveLock`, which holds `processLock`
+/// (`NSLock`) for the duration — including the `currentLockHandle()` call
+/// that first populates `lockHandle`, itself made only after `processLock`
+/// is acquired. Every other stored property (`directory`, `fileURL`,
+/// `rotatedURL`, `maxBytes`, `lockURL`, `fileManager`, `reportError`) is a
+/// `let` fixed at `init` and never reassigned. No handle or other reference
+/// to the locked state escapes a `withExclusiveLock` body. `processLock` is
+/// `static`, so it also serializes access across independent instances,
+/// which is required here since the file lock it guards is process-wide.
+final class RotatingLogFile: @unchecked Sendable {
     typealias ErrorReporter = (String) -> Void
     private static let processLock = NSLock()
 

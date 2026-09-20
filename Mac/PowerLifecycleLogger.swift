@@ -6,6 +6,12 @@ import AppKit
 /// a wake at all, did the screens actually wake, what changed about display
 /// topology) alongside the `wakeDebug:` lines from a manual test action.
 /// Observation only — never reacts to any of these by rebuilding capture.
+///
+/// `@MainActor`: `start()` is only ever called from `OpenSidecarMacApp`'s
+/// main-actor setup path, and every notification it registers already
+/// delivers on `.main`. That makes main-actor isolation the actual ownership
+/// model for `started`, not an added lock around incidental cross-thread use.
+@MainActor
 enum PowerLifecycleLogger {
     private static var started = false
 
