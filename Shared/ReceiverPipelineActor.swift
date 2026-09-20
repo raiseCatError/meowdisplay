@@ -10,12 +10,14 @@
 // Everything else — frame assembly, decode, audio, presentation, the TLS/
 // pairing listener machinery itself — stays on `StreamReceiver`, still
 // confined to its own `queue`. This actor never touches any of that
-// directly: instead it calls a small, fixed set of `@Sendable` host
-// callbacks (`HostEffects`) for every side effect outside its own state,
-// and those callbacks are themselves responsible for hopping back onto
-// `queue` (or `DispatchQueue.main`) before touching queue-/MainActor-
-// confined state. Every `HostEffects` closure captures `StreamReceiver`
-// only weakly, so nothing here extends its lifetime.
+// directly: instead it calls two small, fixed sets of `@Sendable` host
+// callbacks — `UIEffects` (permanent facade/UI-mirror outputs) and
+// `HostControlEffects` (transitional bridge back onto `queue`-confined
+// listener/adoption/hello/reconnect-target work) — for every side effect
+// outside its own state. Each callback is itself responsible for hopping
+// back onto `queue` (or `DispatchQueue.main`) before touching queue-/
+// MainActor-confined state, and every closure in both sets captures
+// `StreamReceiver` only weakly, so nothing here extends its lifetime.
 //
 import Foundation
 import Network
@@ -103,29 +105,47 @@ actor ReceiverPipelineActor {
     /// `getPeerIsIncompatible`/`getAutoReconnectPreferenceEnabled` getter
     /// closures an earlier revision used.
     nonisolated let reconnectContext: ReconnectContext
-    nonisolated let effects: HostEffects
+    nonisolated let uiEffects: UIEffects
+    nonisolated let hostEffects: HostControlEffects
 
     init(queue: DispatchQueue, sendTargetBox: StreamReceiver.SendTargetBox,
-         reconnectContext: ReconnectContext, effects: HostEffects) {
+         reconnectContext: ReconnectContext, uiEffects: UIEffects, hostEffects: HostControlEffects) {
         self.queue = queue
         self.sendTargetBox = sendTargetBox
         self.reconnectContext = reconnectContext
-        self.effects = effects
+        self.uiEffects = uiEffects
+        self.hostEffects = hostEffects
     }
 
-    /// Every host-owned side effect this actor needs, injected once at
-    /// construction. Each closure captures its `StreamReceiver` weakly and
-    /// is responsible for its OWN thread-safety — one that touches
-    /// `queue`-confined state hops onto `queue` itself (mirroring
-    /// `publishToUI`'s existing `DispatchQueue.main.async` pattern for
-    /// `@MainActor` state) so this actor never assumes a particular
-    /// execution context on the other side of the call.
-    struct HostEffects: Sendable {
-        // Session/status mirrors (fire-and-forget MainActor/queue hops).
+    /// Permanent facade/UI-mirror outputs: every call here means "publish
+    /// this to the UI," nothing more. Each closure hops onto
+    /// `DispatchQueue.main` (via the host's `publishToUI`) before touching
+    /// `@MainActor` state; `setStatusConnected` additionally reads the one
+    /// piece of queue-confined host context it needs (`transport`) before
+    /// composing the string it publishes, but its job — like every member
+    /// here — is still "produce a UI update," not "do host work." This is
+    /// the long-term shape for this half of what C1 called `HostEffects`:
+    /// later stages (frame/decode/presentation/audio) add to
+    /// `HostControlEffects`, if anything, never here.
+    struct UIEffects: Sendable {
         var publishSessionSnapshot: @Sendable (ReceiverSessionState) -> Void
         var setStatus: @Sendable (String) -> Void
         var setStatusConnected: @Sendable () -> Void
         var applyConnectedUIMirror: @Sendable (Bool) -> Void
+    }
+
+    /// Transitional bridge back onto `queue`-confined `StreamReceiver` host
+    /// state: listener control, hello/ping sends, adoption reset work, and
+    /// the reconnect-target lookups that still live outside this actor.
+    /// Every closure captures `StreamReceiver` weakly and is responsible for
+    /// its OWN thread-safety — one that touches `queue`-confined state hops
+    /// onto `queue` itself — because this actor never assumes a particular
+    /// execution context on the other side of the call. This is scaffolding,
+    /// not a permanent boundary: it narrows only as the listener/adoption/
+    /// hello machinery it calls into gets absorbed into actors of its own in
+    /// a later stage. Frame/decode/presentation/audio work must not be added
+    /// here.
+    struct HostControlEffects: Sendable {
         /// Clears the host's `transport` label on disconnect (it is only
         /// ever meaningful for a live connection).
         var clearTransport: @Sendable () -> Void
@@ -183,7 +203,7 @@ actor ReceiverPipelineActor {
         pingTimer = ping
 
         addrWatchTimer?.cancel()
-        if effects.advertisesAddresses() {
+        if hostEffects.advertisesAddresses() {
             let addrWatch = DispatchSource.makeTimerSource(queue: queue)
             addrWatch.schedule(deadline: .now() + 5.0, repeating: 5.0)
             addrWatch.setEventHandler { [weak self] in
@@ -203,8 +223,8 @@ actor ReceiverPipelineActor {
             // handler — which runs ON `queue` because the timer itself is
             // scheduled there — so they are a consistent, queue-confined
             // snapshot, not two independent unsynchronized reads.
-            let last = self.effects.getLastDataReceived()
-            let generation = self.effects.getActiveReceiveGeneration()
+            let last = self.hostEffects.getLastDataReceived()
+            let generation = self.hostEffects.getActiveReceiveGeneration()
             Task { await self.watchdogTick(lastDataReceived: last, generation: generation) }
         }
         watchdog.resume()
@@ -226,12 +246,12 @@ actor ReceiverPipelineActor {
 
     private func pingTick() {
         guard let conn = connection, conn.state == .ready else { return }
-        effects.sendPing()
+        hostEffects.sendPing()
     }
 
     private func addrWatchTick() {
         guard let conn = connection, conn.state == .ready else { return }
-        effects.checkAddressChangeAndSendHello(conn)
+        hostEffects.checkAddressChangeAndSendHello(conn)
     }
 
     /// `generation` was captured on `queue` at the same instant as
@@ -287,7 +307,7 @@ actor ReceiverPipelineActor {
     }
 
     private func handlePendingConnectionReady(_ pending: NWConnection) {
-        effects.sendHello(pending)
+        hostEffects.sendHello(pending)
         pending.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             Task { await self.finishPendingConnection(pending, data: data, isComplete: isComplete, error: error) }
@@ -346,7 +366,7 @@ actor ReceiverPipelineActor {
         // a distinct, decode-level counter) so `queue`-confined code can
         // gate on it directly instead of re-asking this actor per packet.
         let generation = sessionState.generation
-        effects.beginAdoption(conn, generation)
+        hostEffects.beginAdoption(conn, generation)
 
         conn.pathUpdateHandler = { [weak self] path in
             Task { await self?.handlePathUpdate(conn: conn, path: path) }
@@ -359,14 +379,14 @@ actor ReceiverPipelineActor {
         } else {
             conn.start(queue: queue)
         }
-        effects.finishAdoption(conn, generation, initialData)
+        hostEffects.finishAdoption(conn, generation, initialData)
     }
 
     private func handlePathUpdate(conn: NWConnection, path: NWPath) {
         guard conn === connection else { return }
-        effects.onPathUpdate(conn, path)
+        hostEffects.onPathUpdate(conn, path)
         if conn.state == .ready {
-            effects.setStatusConnected()
+            uiEffects.setStatusConnected()
         }
     }
 
@@ -387,9 +407,9 @@ actor ReceiverPipelineActor {
     }
 
     private func performOnReady(_ conn: NWConnection, greeted: Bool) {
-        effects.onConnectionReady(conn)
+        hostEffects.onConnectionReady(conn)
         setConnected(true)
-        if !greeted { effects.sendHello(conn) }
+        if !greeted { hostEffects.sendHello(conn) }
     }
 
     // MARK: - Session state + automatic recovery
@@ -402,7 +422,7 @@ actor ReceiverPipelineActor {
         let previous = sessionState.phase
         let changed = transition(&sessionState)
         let snapshot = sessionState
-        effects.publishSessionSnapshot(snapshot)
+        uiEffects.publishSessionSnapshot(snapshot)
         guard changed else { return }
         #if DEBUG
         Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
@@ -431,7 +451,7 @@ actor ReceiverPipelineActor {
         guard sessionState.phase == .reconnecting else { return }
         Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled")
         mutateSession { $0.exhaustRecovery() }
-        effects.setStatus("Connection lost")
+        uiEffects.setStatus("Connection lost")
     }
 
     /// One automatic recovery step. Never starts a second attempt or timer.
@@ -442,19 +462,19 @@ actor ReceiverPipelineActor {
         guard let attempt = sessionState.beginReconnectAttempt() else {
             mutateSession { $0.exhaustRecovery() }
             Log.info("reconnectDebug: retryExhausted generation=\(sessionState.generation)")
-            effects.setStatus("Connection lost")
+            uiEffects.setStatus("Connection lost")
             return
         }
         let generation = sessionState.generation
-        effects.publishSessionSnapshot(sessionState)
+        uiEffects.publishSessionSnapshot(sessionState)
         Log.info("reconnect attempt \(attempt)/\(ReceiverSessionState.maximumReconnectAttempts)"
                  + " generation=\(generation) in \(delay)s")
         Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
-        effects.setStatus("Reconnecting…")
-        effects.ensureTLSListening()
+        uiEffects.setStatus("Reconnecting…")
+        hostEffects.ensureTLSListening()
         let reconnect = reconnectContext.current()
         if let peerID = reconnect.manualConnectPeerID ?? reconnect.authenticatedPeerIDHint ?? recoveryPeerID {
-            effects.requestRemoteConnect(peerID)
+            hostEffects.requestRemoteConnect(peerID)
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
@@ -497,7 +517,7 @@ actor ReceiverPipelineActor {
         Log.info("sessionState: recovery parked for background"
                  + " generation=\(sessionState.generation)"
                  + " attempt=\(sessionState.reconnectAttempt)")
-        effects.publishSessionSnapshot(sessionState)
+        uiEffects.publishSessionSnapshot(sessionState)
     }
 
     func resumeReconnectIfNeeded() {
@@ -514,7 +534,7 @@ actor ReceiverPipelineActor {
     /// apart from a deliberate end.
     func setConnected(_ value: Bool, reason: ReceiverSessionLossReason = .transportLost) {
         let peerID = reconnectContext.current().authenticatedPeerIDHint
-        effects.applyConnectedUIMirror(value)
+        uiEffects.applyConnectedUIMirror(value)
         if !value {
             let oldGeneration = sessionState.generation
             // Clearing here, synchronously, covers every "connection went
@@ -523,7 +543,7 @@ actor ReceiverPipelineActor {
             // racing a newer adopt() can never remove a target that has
             // already superseded this one.
             sendTargetBox.clear(forGeneration: oldGeneration)
-            effects.clearTransport()
+            hostEffects.clearTransport()
             let peerIsIncompatible = reconnectContext.current().peerIsIncompatible
             let classified: ReceiverSessionLossReason = {
                 guard peerIsIncompatible, reason == .transportLost else { return reason }
@@ -546,9 +566,9 @@ actor ReceiverPipelineActor {
                                               autoReconnectPreferenceEnabled: reconnectContext.current().autoReconnectPreferenceEnabled) }
             if sessionState.phase != .reconnecting {
                 if classified == .peerClosed {
-                    effects.setStatus("Mac Disconnected")
+                    uiEffects.setStatus("Mac Disconnected")
                 } else {
-                    effects.setStatus(wasConnected && classified != .explicitDisconnect
+                    uiEffects.setStatus(wasConnected && classified != .explicitDisconnect
                         ? "Connection lost" : "Waiting for Mac")
                 }
             }
@@ -560,7 +580,7 @@ actor ReceiverPipelineActor {
             reconnectContext.update { $0.peerIsIncompatible = false }
             mutateSession { $0.connectionEstablished() }
             Log.info("reconnectDebug: authenticated generation=\(sessionState.generation)")
-            effects.setStatusConnected()
+            uiEffects.setStatusConnected()
             if !UserDefaults.standard.bool(forKey: "hasConnectedBefore") {
                 UserDefaults.standard.set(true, forKey: "hasConnectedBefore")
             }

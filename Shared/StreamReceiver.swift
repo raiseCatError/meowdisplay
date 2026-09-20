@@ -141,7 +141,7 @@ final class StreamReceiver: ObservableObject {
     /// The single authoritative session state the UI derives from. Mutated
     /// only inside `pipeline` (`ReceiverPipelineActor`, C1) via its own
     /// `mutateSession`; this is its main-thread mirror, published through
-    /// `HostEffects.publishSessionSnapshot`.
+    /// `UIEffects.publishSessionSnapshot`.
     @MainActor @Published private(set) var session = ReceiverSessionState()
 
     /// The pinned peerID that actually completed mutual TLS for the CURRENT
@@ -4009,18 +4009,17 @@ final class StreamReceiver: ObservableObject {
 
     /// C1: the sole authoritative owner of `connection`/`pendingConnections`/
     /// `sessionState` and the coupled reconnect/liveness timers. `lazy`
-    /// purely so `makePipelineEffects()` can capture `self` weakly — actual
-    /// use starts from `start()`, well after `init` completes.
+    /// purely so `makePipelineUIEffects()`/`makePipelineHostEffects()` can
+    /// capture `self` weakly — actual use starts from `start()`, well after
+    /// `init` completes.
     private lazy var pipeline = ReceiverPipelineActor(
         queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
-        effects: makePipelineEffects())
+        uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects())
 
-    /// The `HostEffects` `pipeline` calls out to for every side effect
-    /// outside its own state — see `ReceiverPipelineActor.HostEffects`.
-    /// Each closure captures `self` weakly and is responsible for its own
-    /// thread-safety: one that touches `queue`-confined state hops onto
-    /// `queue` itself before touching it.
-    private func makePipelineEffects() -> ReceiverPipelineActor.HostEffects {
+    /// The permanent facade/UI-mirror outputs `pipeline` calls out to — see
+    /// `ReceiverPipelineActor.UIEffects`. Each closure captures `self`
+    /// weakly and its only job is producing a UI update.
+    private func makePipelineUIEffects() -> ReceiverPipelineActor.UIEffects {
         .init(
             publishSessionSnapshot: { [weak self] snapshot in self?.publishSessionSnapshot(snapshot) },
             setStatus: { [weak self] text in self?.setStatus(text) },
@@ -4029,7 +4028,17 @@ final class StreamReceiver: ObservableObject {
                     self.setStatus("Connected · \(self.transport)")
                 }
             },
-            applyConnectedUIMirror: { [weak self] value in self?.applyConnectedUIMirror(value) },
+            applyConnectedUIMirror: { [weak self] value in self?.applyConnectedUIMirror(value) })
+    }
+
+    /// The transitional host-control callbacks `pipeline` calls out to for
+    /// every side effect outside its own state that is NOT a UI publish —
+    /// see `ReceiverPipelineActor.HostControlEffects`. Each closure captures
+    /// `self` weakly and is responsible for its own thread-safety: one that
+    /// touches `queue`-confined state hops onto `queue` itself before
+    /// touching it.
+    private func makePipelineHostEffects() -> ReceiverPipelineActor.HostControlEffects {
+        .init(
             clearTransport: { [weak self] in
                 self?.queue.async { self?.transport = "—" }
             },
@@ -4077,7 +4086,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// The `session` mirror snapshot — called by `pipeline`
-    /// (`ReceiverPipelineActor`) as its `HostEffects.publishSessionSnapshot`,
+    /// (`ReceiverPipelineActor`) as its `UIEffects.publishSessionSnapshot`,
     /// from `mutateSession`, `armReconnect`, `suspendReconnectForBackground`
     /// before this consolidation. Callers still capture the snapshot at the
     /// same point they always did; this only names the hop.
@@ -4085,7 +4094,7 @@ final class StreamReceiver: ObservableObject {
         publishToUI { self.session = snapshot }
     }
 
-    /// The `HostEffects.applyConnectedUIMirror` half of the former
+    /// The `UIEffects.applyConnectedUIMirror` half of the former
     /// `setConnected` — the UI-mirror-only side effects, unrelated to
     /// session/generation ownership, which stays inside `pipeline`
     /// (`ReceiverPipelineActor.setConnected`) — see `ReceiverSessionLossReason`.
