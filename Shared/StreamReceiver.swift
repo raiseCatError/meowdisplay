@@ -803,7 +803,7 @@ final class StreamReceiver: ObservableObject {
 
     func forgetPeer(_ peerID: String) {
         TrustStore.shared.forget(peerID: peerID)
-        DispatchQueue.main.async { self.lastForgottenPeerID = peerID }
+        publishToUI { self.lastForgottenPeerID = peerID }
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
@@ -1104,10 +1104,7 @@ final class StreamReceiver: ObservableObject {
                 self.manualConnectPeerID = nil
                 self.recoveryPeerID = nil
                 self.setStatus("Disconnected")
-                DispatchQueue.main.async {
-                    self.displayState = .running
-                    self.onDisplayStateChange?(.running)
-                }
+                self.publishDisplayState(.running)
                 completion?()
             }
             self.pendingDisconnectFinish = finish
@@ -1148,10 +1145,7 @@ final class StreamReceiver: ObservableObject {
                 self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
                 self.manualConnectPeerID = nil
                 self.setStatus(status)
-                DispatchQueue.main.async {
-                    self.displayState = .running
-                    self.onDisplayStateChange?(.running)
-                }
+                self.publishDisplayState(.running)
                 completion?()
             }
             guard let conn = self.connection, conn.state == .ready else {
@@ -1389,7 +1383,7 @@ final class StreamReceiver: ObservableObject {
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
-        DispatchQueue.main.async {
+        publishToUI {
             self.cursorState = (0.5, 0.5, false)
             self.cursorSprite = nil
             self.onCursor?(0.5, 0.5, false)
@@ -1402,7 +1396,7 @@ final class StreamReceiver: ObservableObject {
                 self.updateTransport(for: conn, path: path)
             }
             let resolvedPeerID = Self.resolveAuthenticatedPeerID(from: conn)
-            DispatchQueue.main.async { self.authenticatedPeerID = resolvedPeerID }
+            publishToUI { self.authenticatedPeerID = resolvedPeerID }
             self.setConnected(true)
             if !greeted { self.sendHello(on: conn) }
         }
@@ -1572,7 +1566,7 @@ final class StreamReceiver: ObservableObject {
             #if DEBUG
             Log.info("cursorTrace: cursorImg received bytes=\(png.count) nw=\(nw) nh=\(nh) anchor=\(anchor)")
             #endif
-            DispatchQueue.main.async {
+            publishToUI {
                 self.cursorSprite = (image, anchor, normSize)
                 self.onCursorImage?(image, anchor, normSize)
             }
@@ -1588,16 +1582,13 @@ final class StreamReceiver: ObservableObject {
             // no more packets would arrive anyway — this just makes sure
             // nothing already-scheduled keeps playing into the pause.
             if state == .paused { resetAudioPlayback() }
-            DispatchQueue.main.async {
-                self.displayState = state
-                self.onDisplayStateChange?(state)
-            }
+            publishDisplayState(state)
         case WireMessage.displayModeState:
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
-            DispatchQueue.main.async { self.applyConfirmedDisplayMode(mode) }
+            publishToUI { self.applyConfirmedDisplayMode(mode) }
         case WireMessage.mirrorUnavailable:
-            DispatchQueue.main.async {
+            publishToUI {
                 if self.confirmedDisplayMode == .extend {
                     // Already extending — the user doesn't need the "Use
                     // Extend?" offer (they're already using Extend); this
@@ -1613,27 +1604,27 @@ final class StreamReceiver: ObservableObject {
             }
         case WireMessage.mirrorDisplayState:
             guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
-            DispatchQueue.main.async { self.mirrorDisplayState = update }
+            publishToUI { self.mirrorDisplayState = update }
         case WireMessage.extendShapeState:
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
-            DispatchQueue.main.async { self.applyConfirmedExtendShape(preference) }
+            publishToUI { self.applyConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
             guard let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
-            DispatchQueue.main.async { self.streamingProfile = profile }
+            publishToUI { self.streamingProfile = profile }
         case WireMessage.streamingPriorityState:
             guard let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
-            DispatchQueue.main.async { self.streamingPriority = priority }
+            publishToUI { self.streamingPriority = priority }
         case WireMessage.maxFPSState:
             guard let update = MaxFPSStateUpdate(message: obj) else { return }
-            DispatchQueue.main.async { self.applyConfirmedMaxFPS(update) }
+            publishToUI { self.applyConfirmedMaxFPS(update) }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
-            DispatchQueue.main.async {
+            publishToUI {
                 self.macProtocolVersion = macPV
                 if macPV < WireProtocol.videoControlWireVersion {
                     self.videoEnabled = true
@@ -1642,7 +1633,7 @@ final class StreamReceiver: ObservableObject {
             if macPV < WireProtocol.minSupportedPeer {
                 peerIsIncompatible = true
                 let msg = "The MeowDisplay app on your Mac is too old for this \(deviceKind) app. Update MeowDisplay on your Mac to reconnect."
-                DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
+                publishToUI { self.peerSignal = .updateMac(message: msg) }
             }
             // Reassert this receiver's audio preference on every welcome —
             // covers first connect, reconnect, and transport migration in
@@ -1652,7 +1643,7 @@ final class StreamReceiver: ObservableObject {
             if macPV >= WireProtocol.audioWireVersion {
                 sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferred])
             } else {
-                DispatchQueue.main.async { self.audioEnabled = false }
+                publishToUI { self.audioEnabled = false }
             }
         case WireMessage.closing:
             // The Mac explicitly ended this session. Do not treat it as a transport failure.
@@ -1683,7 +1674,7 @@ final class StreamReceiver: ObservableObject {
                 text = "Failed: \(obj["code"] as? Int ?? -1)"
             }
             Log.info("wakeDebug: promoteInteractiveWake result=\(text)")
-            DispatchQueue.main.async { self.promoteInteractiveWakeResult = text }
+            publishToUI { self.promoteInteractiveWakeResult = text }
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             // Retrying cannot fix that, so the eventual loss is terminal.
@@ -1691,12 +1682,12 @@ final class StreamReceiver: ObservableObject {
             let message = obj["message"] as? String
                 ?? "Update MeowDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
-            DispatchQueue.main.async { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
+            publishToUI { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
         case WireMessage.receiverUI:
             guard let update = ReceiverUIPreferenceUpdate(message: obj) else { return }
-            DispatchQueue.main.async { self.onReceiverUIPreferences?(update) }
+            publishToUI { self.onReceiverUIPreferences?(update) }
         case WireMessage.inputReset:
-            DispatchQueue.main.async { self.inputResetGeneration &+= 1 }
+            publishToUI { self.inputResetGeneration &+= 1 }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -1704,7 +1695,7 @@ final class StreamReceiver: ObservableObject {
             // understands. See `SessionInputWireState`.
             let state = (obj["state"] as? String).flatMap(SessionInputWireState.init(rawValue:))
                 ?? (allowed ? .allowed : .off)
-            DispatchQueue.main.async { self.onAllowInputStateChange?(state) }
+            publishToUI { self.onAllowInputStateChange?(state) }
         case WireMessage.videoState:
             guard let update = VideoStateUpdate(message: obj) else { return }
             let changed = update.enabled != receivedVideoEnabled
@@ -1712,7 +1703,7 @@ final class StreamReceiver: ObservableObject {
             if changed || !update.enabled {
                 resetDecoderForVideoStateChange()
             }
-            DispatchQueue.main.async {
+            publishToUI {
                 if let width = update.width, let height = update.height {
                     self.videoSize = CGSize(width: width, height: height)
                 }
@@ -1721,7 +1712,7 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.audioState:
             guard let update = AudioStateUpdate(message: obj) else { return }
             if !update.enabled { resetAudioPlayback() }
-            DispatchQueue.main.async { self.audioEnabled = update.enabled }
+            publishToUI { self.audioEnabled = update.enabled }
         case WireMessage.streamCodecState:
             guard let update = StreamCodecStateUpdate(message: obj) else { return }
             if update.codec != receivedStreamCodec {
@@ -1729,7 +1720,7 @@ final class StreamReceiver: ObservableObject {
                 resetDecoderForCodecChange()
             }
             Log.info("effective codec: \(update.codec.wireValue) reason: \(update.reason)")
-            DispatchQueue.main.async { self.activeStreamCodec = update.codec }
+            publishToUI { self.activeStreamCodec = update.codec }
         default:
             break
         }
@@ -1753,7 +1744,7 @@ final class StreamReceiver: ObservableObject {
         #if DEBUG
         logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
         #endif
-        DispatchQueue.main.async {
+        publishToUI {
             self.cursorState = (x, y, visible)
             self.onCursor?(x, y, visible)
         }
@@ -2197,7 +2188,7 @@ final class StreamReceiver: ObservableObject {
     /// action (`disconnect()`). Trust, pairing, the Remote endpoint, and
     /// Wake metadata all remain; only this attempt ends.
     func declineMirrorUnavailableOffer() {
-        DispatchQueue.main.async { self.mirrorUnavailable = false }
+        publishToUI { self.mirrorUnavailable = false }
         disconnect()
     }
 
@@ -2205,7 +2196,7 @@ final class StreamReceiver: ObservableObject {
     /// physical display" state — no wire message, purely local UI state
     /// (unlike the offer, there is nothing to accept/decline here).
     func dismissMirrorRejection() {
-        DispatchQueue.main.async { self.mirrorRejectedWhileExtending = false }
+        publishToUI { self.mirrorRejectedWhileExtending = false }
     }
 
     /// Asks the connected Mac to change its Mirror capture source. The Mac
@@ -2227,7 +2218,7 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown (stop/sleep/close): the Mac's mode is no
     /// longer known and any in-flight request dies with the session.
     func resetDisplayModeState() {
-        DispatchQueue.main.async {
+        publishToUI {
             self.displayModeRequestState.reset()
             self.confirmedDisplayMode = nil
             self.pendingDisplayMode = nil
@@ -2282,7 +2273,7 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown: the Mac's active shape is no longer
     /// known and any in-flight request dies with the session.
     func resetExtendShapeState() {
-        DispatchQueue.main.async {
+        publishToUI {
             self.extendShapeRequestState.reset()
             self.confirmedExtendShape = nil
             self.pendingExtendShape = nil
@@ -2327,7 +2318,7 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown: the Mac's active max-FPS state is no
     /// longer known and any in-flight request dies with the session.
     func resetMaxFPSState() {
-        DispatchQueue.main.async {
+        publishToUI {
             self.maxFPSRequestState.reset()
             self.confirmedMaxFPS = nil
             self.pendingMaxFPS = nil
@@ -3362,7 +3353,7 @@ final class StreamReceiver: ObservableObject {
                         debugProbeDecompressionSession = nil
                     }
                     #endif
-                    DispatchQueue.main.async {
+                    publishToUI {
                         self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
                     }
                     setStatus("Receiving \(dims.width)×\(dims.height)")
@@ -3405,7 +3396,7 @@ final class StreamReceiver: ObservableObject {
                             debugProbeDecompressionSession = nil
                         }
                         #endif
-                        DispatchQueue.main.async {
+                        publishToUI {
                             self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
                         }
                         setStatus("Receiving \(dims.width)×\(dims.height)")
@@ -3630,7 +3621,7 @@ final class StreamReceiver: ObservableObject {
                 photonWindow.removeAll(keepingCapacity: true)
             }
 
-            DispatchQueue.main.async {
+            publishToUI {
                 self.fps = fps
                 self.perf = stats
             }
@@ -3807,7 +3798,7 @@ final class StreamReceiver: ObservableObject {
         let previous = sessionState.phase
         let changed = transition(&sessionState)
         let snapshot = sessionState
-        DispatchQueue.main.async { self.session = snapshot }
+        publishSessionSnapshot(snapshot)
         guard changed else { return }
         #if DEBUG
         Log.info("sessionState: \(previous.rawValue) -> \(snapshot.phase.rawValue)"
@@ -3859,7 +3850,7 @@ final class StreamReceiver: ObservableObject {
         }
         let generation = sessionState.generation
         let snapshot = sessionState   // never read queue-confined state off-queue
-        DispatchQueue.main.async { self.session = snapshot }
+        publishSessionSnapshot(snapshot)
         Log.info("reconnect attempt \(attempt)/\(ReceiverSessionState.maximumReconnectAttempts)"
                  + " generation=\(generation) in \(delay)s")
         Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
@@ -4024,7 +4015,7 @@ final class StreamReceiver: ObservableObject {
                  + " generation=\(sessionState.generation)"
                  + " attempt=\(sessionState.reconnectAttempt)")
         let snapshot = sessionState
-        DispatchQueue.main.async { self.session = snapshot }
+        publishSessionSnapshot(snapshot)
     }
 
     /// Foregrounding: resume a parked recovery run from where it stopped.
@@ -4037,7 +4028,34 @@ final class StreamReceiver: ObservableObject {
 
     private func setStatus(_ text: String) {
         Log.info("status: \(text)")
-        DispatchQueue.main.async { self.status = text }
+        publishToUI { self.status = text }
+    }
+
+    // RC-3 Stage A: a single, explicit seam for crossing from the receiver's
+    // background `queue` into the `@Published` UI mirror. This replaces
+    // scattered `DispatchQueue.main.async` call sites with one named boundary
+    // so a later stage can give it real `@MainActor` isolation without having
+    // to rediscover every crossing point. Purely organizational: behavior,
+    // ordering, and timing are unchanged (still a plain `.main.async` hop).
+    private func publishToUI(_ update: @MainActor @escaping () -> Void) {
+        DispatchQueue.main.async { update() }
+    }
+
+    /// The `displayState` mirror and its callback always change together —
+    /// duplicated verbatim at three call sites before this consolidation.
+    private func publishDisplayState(_ state: DisplayState) {
+        publishToUI {
+            self.displayState = state
+            self.onDisplayStateChange?(state)
+        }
+    }
+
+    /// The `session` mirror snapshot — duplicated verbatim at three call
+    /// sites (`mutateSession`, `armReconnect`, `suspendReconnectForBackground`)
+    /// before this consolidation. Callers still capture the snapshot at the
+    /// same point they always did; this only names the hop.
+    private func publishSessionSnapshot(_ snapshot: ReceiverSessionState) {
+        publishToUI { self.session = snapshot }
     }
 
     /// The single funnel for connection up/down. `reason` classifies a loss
@@ -4046,7 +4064,7 @@ final class StreamReceiver: ObservableObject {
     private func setConnected(_ value: Bool,
                               reason: ReceiverSessionLossReason = .transportLost) {
         let peerID = authenticatedPeerID
-        DispatchQueue.main.async {
+        publishToUI {
             self.connected = value
             if !value {
                 self.authenticatedPeerID = nil
