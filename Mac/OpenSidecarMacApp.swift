@@ -93,15 +93,18 @@ enum MacSettingsWindow {
 
     static func show() {
         if window == nil {
+            let splitVC = MacSettingsSplitViewController(
+                controller: SenderController.shared,
+                updater: updater
+            )
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 820, height: 600),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                contentRect: NSRect(x: 0, y: 0, width: 840, height: 600),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered, defer: false)
             w.title = "MeowDisplay Settings"
-            w.minSize = NSSize(width: 700, height: 500)
-            w.contentView = NSHostingView(
-                rootView: MacSettingsView(controller: SenderController.shared,
-                                          updater: updater))
+            w.minSize = NSSize(width: 720, height: 500)
+            w.contentViewController = splitVC
+            splitVC.configureWindowAndToolbar(for: w)
             w.isReleasedWhenClosed = false
             w.center()
             window = w
