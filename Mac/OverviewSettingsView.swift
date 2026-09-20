@@ -33,14 +33,20 @@ struct OverviewSettingsView: View {
             }
             if controller.activeDisplayEntries.isEmpty {
                 Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("No active display")
-                            .font(.headline)
-                        Text("Ready to connect")
-                            .font(.subheadline)
+                    HStack(spacing: 12) {
+                        Image(systemName: "display")
+                            .font(.title2)
                             .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No active display")
+                                .font(.headline)
+                            Text("Ready to connect")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 4)
                 }
                 disconnectedSuggestions
             } else {
