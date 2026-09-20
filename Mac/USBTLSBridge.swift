@@ -89,7 +89,12 @@ private final class ByteSplice {
 /// (denial-of-service at worst) — it gains no MEOW session, because nothing
 /// here performs or implies authentication. That happens entirely on the
 /// far side of the splice, in `TLSConfigurator`, unaffected by this file.
-final class USBTLSBridge {
+///
+/// All mutable state (`tunnel`, `listener`, `splice`, `cancelled`) is
+/// actor-isolated rather than merely convention-confined to `queue`: the
+/// compiler, not a comment, now enforces the single-owner invariant this
+/// type has always relied on.
+actor USBTLSBridge {
     enum Failure: Error, LocalizedError {
         case listenerFailed(Error)
         case cancelled
@@ -103,12 +108,18 @@ final class USBTLSBridge {
     }
 
     private let udid: String?
+    // Not this actor's synchronization mechanism (the actor already
+    // serializes `tunnel`/`listener`/`splice`/`cancelled`) — this is the
+    // Network.framework callback queue every NWListener/NWConnection here
+    // is started on, kept as a caller-supplied queue because `dialTunnel`
+    // (`Usbmux.dial` in production) requires one.
     private let queue: DispatchQueue
     private let dialTunnel: (String?, UInt16, DispatchQueue) async throws -> NWConnection
     private var tunnel: NWConnection?
     private var listener: NWListener?
     private var splice: ByteSplice?
     private var cancelled = false
+    private var resumedStart = false
 
     /// `dialTunnel` is `Usbmux.dial` in production (always targeting
     /// `WireCrypto.tlsPort` — see `start()`) and an injected fake opaque
@@ -124,89 +135,105 @@ final class USBTLSBridge {
 
     /// Dials usbmuxd (`WireCrypto.tlsPort` — the receiver's existing trusted
     /// TLS media listener, never the legacy plaintext port) and binds the
-    /// local one-shot listener. Must be awaited from `queue`. Throws without
-    /// leaving anything running on failure.
+    /// local one-shot listener. Throws without leaving anything running on
+    /// failure.
     func start() async throws -> NWEndpoint.Port {
         let tunnelConn = try await dialTunnel(udid, WireCrypto.tlsPort, queue)
-        let bound: NWEndpoint.Port = try await withCheckedThrowingContinuation { cont in
-            queue.async { [self] in
-                guard !cancelled else {
-                    tunnelConn.cancel()
-                    cont.resume(throwing: Failure.cancelled)
-                    return
-                }
-                self.tunnel = tunnelConn
-                let params = NWParameters.tcp
-                params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 0)
-                let listener: NWListener
-                do {
-                    listener = try NWListener(using: params)
-                } catch {
-                    self.tunnel = nil
-                    tunnelConn.cancel()
-                    cont.resume(throwing: Failure.listenerFailed(error))
-                    return
-                }
-                self.listener = listener
-                var resumed = false
-                listener.newConnectionHandler = { [weak self] localConn in
-                    guard let self else { localConn.cancel(); return }
-                    self.queue.async {
-                        // One-shot: only ever act on the FIRST accepted
-                        // connection, and stop listening before doing
-                        // anything else with it.
-                        guard self.listener === listener, !self.cancelled else {
-                            localConn.cancel()
-                            return
-                        }
-                        listener.cancel()
-                        self.listener = nil
-                        localConn.start(queue: self.queue)
-                        let splice = ByteSplice(localConn, tunnelConn) { [weak self] in
-                            self?.cancel()
-                        }
-                        self.splice = splice
-                        splice.start()
-                    }
-                }
-                listener.stateUpdateHandler = { [weak self] state in
-                    self?.queue.async {
-                        guard let self, self.listener === listener else { return }
-                        switch state {
-                        case .ready:
-                            guard !resumed, let port = listener.port else { return }
-                            resumed = true
-                            cont.resume(returning: port)
-                        case .failed(let error):
-                            if !resumed {
-                                resumed = true
-                                cont.resume(throwing: Failure.listenerFailed(error))
-                            }
-                            self.cancel()
-                        default:
-                            break
-                        }
-                    }
-                }
-                listener.start(queue: queue)
-            }
+        guard !cancelled else {
+            tunnelConn.cancel()
+            throw Failure.cancelled
         }
-        return bound
+        tunnel = tunnelConn
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 0)
+        let listener: NWListener
+        do {
+            listener = try NWListener(using: params)
+        } catch {
+            tunnel = nil
+            tunnelConn.cancel()
+            throw Failure.listenerFailed(error)
+        }
+        self.listener = listener
+        return try await withCheckedThrowingContinuation { cont in
+            // `listener.cancel()` is idempotent and thread-safe on its own,
+            // so it's called unconditionally and synchronously right here,
+            // on the raw Network.framework callback, rather than after
+            // hopping onto the actor — that keeps the one-accept race
+            // window as tight as the original queue-confined
+            // implementation's. Which accepted connection (if more than
+            // one raced in) actually wins is still decided by actor state,
+            // in `acceptFirstConnection`.
+            listener.newConnectionHandler = { [weak self] localConn in
+                guard let self else { localConn.cancel(); return }
+                listener.cancel()
+                Task { await self.acceptFirstConnection(localConn, listener: listener, tunnelConn: tunnelConn) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                Task { await self.handleListenerState(state, listener: listener, continuation: cont) }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private var acceptedConnection = false
+
+    /// One-shot: only ever act on the FIRST accepted connection — later
+    /// racing accepts (the listener may already be cancelled but a second
+    /// connection can still land in `newConnectionHandler`) are rejected
+    /// here by actor-isolated state, never spliced to anything.
+    private func acceptFirstConnection(_ localConn: NWConnection, listener: NWListener, tunnelConn: NWConnection) {
+        guard !cancelled, !acceptedConnection else {
+            localConn.cancel()
+            return
+        }
+        acceptedConnection = true
+        self.listener = nil
+        localConn.start(queue: queue)
+        let splice = ByteSplice(localConn, tunnelConn) { [weak self] in
+            self?.cancel()
+        }
+        self.splice = splice
+        splice.start()
+    }
+
+    private func handleListenerState(
+        _ state: NWListener.State, listener: NWListener,
+        continuation: CheckedContinuation<NWEndpoint.Port, Error>
+    ) {
+        guard self.listener === listener else { return }
+        switch state {
+        case .ready:
+            guard !resumedStart, let port = listener.port else { return }
+            resumedStart = true
+            continuation.resume(returning: port)
+        case .failed(let error):
+            if !resumedStart {
+                resumedStart = true
+                continuation.resume(throwing: Failure.listenerFailed(error))
+            }
+            performCancel()
+        default:
+            break
+        }
     }
 
     /// Tears down whatever part of the bridge is currently alive. Idempotent
     /// and safe to call from any queue, at any point in the lifecycle —
     /// before `start()` returns, mid-splice, or after normal teardown.
-    func cancel() {
-        queue.async { [self] in
-            guard !cancelled else { return }
-            cancelled = true
-            listener?.cancel()
-            listener = nil
-            splice?.teardown()
-            splice = nil
-            tunnel?.cancel()
-            tunnel = nil
-        }
+    nonisolated func cancel() {
+        Task { await self.performCancel() }
+    }
+
+    private func performCancel() {
+        guard !cancelled else { return }
+        cancelled = true
+        listener?.cancel()
+        listener = nil
+        splice?.teardown()
+        splice = nil
+        tunnel?.cancel()
+        tunnel = nil
     }
 }

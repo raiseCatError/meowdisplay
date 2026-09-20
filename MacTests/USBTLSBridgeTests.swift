@@ -84,12 +84,19 @@ final class USBTLSBridgeTests: XCTestCase {
         let second = NWConnection(host: "127.0.0.1", port: bridgePort, using: .tcp)
         let secondSettled = expectation(description: "second dial settles")
         var secondReachedReady = false
+        var settled = false
         second.stateUpdateHandler = { state in
+            // `.waiting` can transition into `.failed` afterwards — only the
+            // FIRST settling transition matters here, so guard against a
+            // second fulfill() rather than assuming exactly one state fires.
+            guard !settled else { return }
             switch state {
             case .ready:
+                settled = true
                 secondReachedReady = true
                 secondSettled.fulfill()
             case .failed, .waiting:
+                settled = true
                 secondSettled.fulfill()
             default: break
             }
