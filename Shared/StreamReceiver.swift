@@ -357,18 +357,14 @@ final class StreamReceiver: ObservableObject {
     private var lastAppliedAudioConfigDescription: String?
     #endif
 
-    /// The shared AAC→PCM decoder — used both by `PCMPlaybackEngine`
-    /// production playback (`scheduleAudioPacket`, when
-    /// `activePlaybackPath == .pcmEngine`) and by the DEBUG-only
-    /// `analyzeReceivedAACDecode`/`Audio Comparison Dump` diagnostics.
-    /// Deliberately NOT `#if DEBUG` — this became core production
-    /// playback infrastructure once PCM Engine became the default, and
-    /// there must be exactly ONE AAC→PCM conversion chain, not a
-    /// production one and an independently-maintained diagnostic one that
-    /// could silently drift apart.
-    private var receiverAACDecoder: AVAudioConverter?
-    private var receiverAACDecoderFormatDescription: CMAudioFormatDescription?
-    private var receiverDecodeAnomalyCount = 0
+    /// RC-3 Stage E1: the AAC→PCM `AVAudioConverter` ownership, and the
+    /// DEBUG-only anomaly/dump diagnostics that examine only its output,
+    /// now live on `ReceiverAudioDecoder` — see its file header. Used both
+    /// by `PCMPlaybackEngine` production playback (`scheduleAudioPacket`,
+    /// when `activePlaybackPath == .pcmEngine`) and by the DEBUG-only
+    /// local-decode diagnostics; deliberately not itself `#if DEBUG` for
+    /// the same reason.
+    private let audioDecoder = ReceiverAudioDecoder()
 
     #if DEBUG
     // MARK: Receiver-side AAC investigation (GOAL: local playback still
@@ -385,14 +381,6 @@ final class StreamReceiver: ObservableObject {
     private var receiverAACLocalDecodeEnabled: Bool {
         UserDefaults.standard.bool(forKey: "audioReceiverLocalDecode")
     }
-    /// Separate from `receiverAACLocalDecodeEnabled`: lets a physical
-    /// device run the (cheap) decode+anomaly-log path without also paying
-    /// for the ~5s CAF file write, or vice versa isn't meaningful — the
-    /// dump needs a successful decode — but keeping them independent
-    /// toggles matches what `SettingsView` exposes.
-    private var receiverAACDumpEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "audioReceiverDumpEnabled")
-    }
     /// Gates the periodic `AAC integrity side=receiver ...` checksum log
     /// (GOAL: was unconditional before this toggle existed — now default
     /// OFF, so it must be explicitly enabled for the sender/receiver
@@ -400,10 +388,6 @@ final class StreamReceiver: ObservableObject {
     private var aacIntegrityLoggingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "audioAACIntegrityLogging")
     }
-    private var lastReceiverDecodedSample: Float?
-    private var receiverDecodeDumpFile: AVAudioFile?
-    private var receiverDecodeDumpFrames = 0
-    private static let receiverDecodeDumpFrameLimit = 48_000 * 5   // ~5s at 48kHz
     /// Total successful `audioRenderer.enqueue` calls this generation —
     /// `enqueue` itself returns no status, so this is only useful compared
     /// against the periodic `PCM sanity`/`AAC integrity` packet counts to
@@ -2397,7 +2381,7 @@ final class StreamReceiver: ObservableObject {
         lastAudioTarget = nil
         lastAudioDiagnosticCaptureMs = nil
         audioEnqueueCount = 0
-        Log.info("audioTrace: generation=\(audioGenerationCount) codec=\(codec == .aac ? "AAC" : "PCM") playbackPath=\(activePlaybackPath == .pcmEngine ? "pcmEngine" : "legacyRenderer") starting bundleID=\(Bundle.main.bundleIdentifier ?? "?") audioReceiverLocalDecode=\(receiverAACLocalDecodeEnabled) audioReceiverDumpEnabled=\(receiverAACDumpEnabled) audioAACIntegrityLogging=\(aacIntegrityLoggingEnabled) dumpDirectory=\(Self.receiverDecodeDumpDirectory().path)")
+        Log.info("audioTrace: generation=\(audioGenerationCount) codec=\(codec == .aac ? "AAC" : "PCM") playbackPath=\(activePlaybackPath == .pcmEngine ? "pcmEngine" : "legacyRenderer") starting bundleID=\(Bundle.main.bundleIdentifier ?? "?") audioReceiverLocalDecode=\(receiverAACLocalDecodeEnabled) audioReceiverDumpEnabled=\(audioDecoder.dumpEnabled) audioAACIntegrityLogging=\(aacIntegrityLoggingEnabled) dumpDirectory=\(ReceiverAudioDecoder.dumpDirectory().path)")
         #endif
     }
 
@@ -2461,8 +2445,7 @@ final class StreamReceiver: ObservableObject {
         }
         audioAnchor = nil
         if !keepingFormat {
-            receiverAACDecoder = nil
-            receiverAACDecoderFormatDescription = nil
+            audioDecoder.reset()
         }
         // Unconditional (not gated on `!keepingFormat`, not DEBUG-only):
         // every reset call site — Audio Off, reconnect, pause, codec
@@ -2477,10 +2460,6 @@ final class StreamReceiver: ObservableObject {
         lastAudioTarget = nil
         if !keepingFormat { lastAppliedAudioConfigDescription = nil }
         audioErrorObservation = nil
-        if !keepingFormat {
-            finalizeReceiverDecodeDump()
-            lastReceiverDecodedSample = nil
-        }
         #endif
     }
 
@@ -2612,16 +2591,16 @@ final class StreamReceiver: ObservableObject {
         switch activePlaybackPath {
         case .pcmEngine:
             // Production path: decode via the SAME shared decoder DEBUG
-            // diagnostics validated (`decodeReceivedAAC`), then hand the
-            // PCM straight to `PCMPlaybackEngine` — the legacy compressed-
-            // `CMSampleBuffer` path below is not touched at all.
+            // diagnostics validated (`ReceiverAudioDecoder.decode`), then
+            // hand the PCM straight to `PCMPlaybackEngine` — the legacy
+            // compressed-`CMSampleBuffer` path below is not touched at all.
             guard let audioFormatDescription, let clockOffsetMs else { return }
-            guard let decoded = decodeReceivedAAC(packet.payload, formatDescription: audioFormatDescription) else {
+            guard let decoded = audioDecoder.decode(packet.payload, formatDescription: audioFormatDescription) else {
                 Log.info("audioTrace: ⚠️ PCM engine: decode failed, dropping packet seq=\(packet.sequence)")
                 return
             }
             #if DEBUG
-            if receiverAACLocalDecodeEnabled { analyzeReceivedAACDecode(decoded) }
+            if receiverAACLocalDecodeEnabled { audioDecoder.analyze(decoded) }
             #endif
             let receiverCaptureMs = Double(packet.capturedAtMs) - clockOffsetMs
             pcmPlaybackEngine.enqueue(decoded, captureMs: receiverCaptureMs, avSyncOffsetMs: avSyncOffsetMs)
@@ -2642,8 +2621,8 @@ final class StreamReceiver: ObservableObject {
                 sampleSizeEntryCount: 1) { [payload = packet.payload] in [payload.count] }
             #if DEBUG
             if receiverAACLocalDecodeEnabled, let audioFormatDescription,
-               let decoded = decodeReceivedAAC(packet.payload, formatDescription: audioFormatDescription) {
-                analyzeReceivedAACDecode(decoded)
+               let decoded = audioDecoder.decode(packet.payload, formatDescription: audioFormatDescription) {
+                audioDecoder.analyze(decoded)
             }
             #endif
         }
@@ -2866,58 +2845,6 @@ final class StreamReceiver: ObservableObject {
     }
     #endif
 
-    /// The shared AAC→PCM decoder (see `receiverAACDecoder`'s doc comment
-    /// on why this is NOT `#if DEBUG`): decodes the EXACT bytes just
-    /// received into PCM, using a plain `AVAudioConverter` rather than the
-    /// legacy compressed-`CMSampleBuffer` path. `PCMPlaybackEngine`
-    /// playback calls this every packet in production; the DEBUG-only
-    /// `analyzeReceivedAACDecode` (anomaly checks + optional CAF dump)
-    /// calls it as an independent validation pass regardless of which
-    /// playback path is active.
-    private func decodeReceivedAAC(_ payload: Data, formatDescription: CMAudioFormatDescription) -> AVAudioPCMBuffer? {
-        if receiverAACDecoderFormatDescription == nil
-            || !CMFormatDescriptionEqual(receiverAACDecoderFormatDescription!, otherFormatDescription: formatDescription) {
-            let compressedFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
-            guard let pcmFormat = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32, sampleRate: compressedFormat.sampleRate,
-                    channels: compressedFormat.channelCount, interleaved: false),
-                  let decoder = AVAudioConverter(from: compressedFormat, to: pcmFormat) else {
-                Log.info("audioTrace: ⚠️ could not build receiver-local AAC decoder from received format description")
-                return nil
-            }
-            receiverAACDecoder = decoder
-            receiverAACDecoderFormatDescription = formatDescription
-        }
-        guard let decoder = receiverAACDecoder else { return nil }
-
-        let compressed = AVAudioCompressedBuffer(
-            format: decoder.inputFormat, packetCapacity: 1, maximumPacketSize: payload.count)
-        payload.withUnsafeBytes { raw in
-            compressed.data.copyMemory(from: raw.baseAddress!, byteCount: payload.count)
-        }
-        compressed.byteLength = UInt32(payload.count)
-        compressed.packetCount = 1
-        compressed.packetDescriptions?[0] = AudioStreamPacketDescription(
-            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(payload.count))
-
-        guard let pcmOut = AVAudioPCMBuffer(
-            pcmFormat: decoder.outputFormat, frameCapacity: 1024) else { return nil }
-        var suppliedInput = false
-        var error: NSError?
-        let status = decoder.convert(to: pcmOut, error: &error) { _, outStatus in
-            if suppliedInput { outStatus.pointee = .noDataNow; return nil }
-            suppliedInput = true
-            outStatus.pointee = .haveData
-            return compressed
-        }
-        guard status == .haveData, pcmOut.floatChannelData != nil else {
-            receiverDecodeAnomalyCount += 1
-            Log.info("audioTrace: ⚠️ receiver-local AAC decode failed status=\(status) error=\(String(describing: error)) (anomaly #\(receiverDecodeAnomalyCount))")
-            return nil
-        }
-        return pcmOut
-    }
-
     // MARK: - Playback path (PROTOCOL.md 5A milestone note). Mac source
     // PCM, Mac AAC encode, the wire transport (checksum-verified), and this
     // device's own AAC decode all proved clean across a multi-pass forensic
@@ -2964,99 +2891,6 @@ final class StreamReceiver: ObservableObject {
     }
 
     #if DEBUG
-    /// Anomaly checks + optional CAF dump over an already-decoded packet —
-    /// split from the decode itself (`decodeReceivedAAC`) so the
-    /// production `PCMPlaybackEngine` path can reuse the identical decode
-    /// without also paying for or depending on this DEBUG-only analysis.
-    private func analyzeReceivedAACDecode(_ pcmOut: AVAudioPCMBuffer) {
-        guard let channelData = pcmOut.floatChannelData else { return }
-        let frameLength = Int(pcmOut.frameLength)
-        var hasNaNOrInf = false
-        var maxAbsSample: Float = 0
-        var jumpDetected = false
-        let buf0 = channelData[0]
-        for i in 0..<frameLength {
-            let v = buf0[i]
-            if v.isNaN || v.isInfinite { hasNaNOrInf = true }
-            let a = abs(v)
-            if a > maxAbsSample { maxAbsSample = a }
-            if let last = lastReceiverDecodedSample, abs(v - last) > 1.5 { jumpDetected = true }
-            lastReceiverDecodedSample = v
-        }
-        if hasNaNOrInf {
-            receiverDecodeAnomalyCount += 1
-            Log.info("audioTrace: ⚠️ receiver-local AAC decode produced NaN/Inf (anomaly #\(receiverDecodeAnomalyCount)) — reconstruction/decoder-input defect on THIS device")
-        }
-        if maxAbsSample >= 0.999 {
-            receiverDecodeAnomalyCount += 1
-            Log.info("audioTrace: ⚠️ receiver-local AAC decode near/at full-scale (\(maxAbsSample)) — possible clipping (anomaly #\(receiverDecodeAnomalyCount))")
-        }
-        if jumpDetected {
-            receiverDecodeAnomalyCount += 1
-            Log.info("audioTrace: ⚠️ receiver-local AAC decode inter-sample discontinuity at packet boundary (anomaly #\(receiverDecodeAnomalyCount))")
-        }
-        if receiverAACDumpEnabled { dumpReceiverDecodedPCM(pcmOut) }
-    }
-
-    /// ~5s bounded dump of the receiver-local decode above, for an actual
-    /// listening A/B on-device. Path is platform-specific (see
-    /// `receiverDecodeDumpDirectory`) and self-reports every step — same
-    /// no-silent-failure discipline as `AudioCaptureEncoder`'s dumps on the
-    /// Mac side, after that class of bug bit the PCM diagnostic once
-    /// already.
-    private func dumpReceiverDecodedPCM(_ pcm: AVAudioPCMBuffer) {
-        guard receiverDecodeDumpFrames < Self.receiverDecodeDumpFrameLimit else { return }
-        if receiverDecodeDumpFile == nil {
-            let dir = Self.receiverDecodeDumpDirectory()
-            do {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            } catch {
-                Log.info("audioTrace: ⚠️ could not create \(dir.path): \(error)")
-                return
-            }
-            let url = dir.appendingPathComponent("audio-compare-received-decoded-aac.caf")
-            do {
-                receiverDecodeDumpFile = try AVAudioFile(forWriting: url, settings: pcm.format.settings)
-                Log.info("audioTrace: opened receiver-local AAC decode dump \(url.path) — pull it from the Files app (On My iPhone/iPad → MeowDisplay) or Xcode's Devices window on iOS, or open directly on macOS")
-            } catch {
-                Log.info("audioTrace: ⚠️ could not open \(url.path) for writing: \(error)")
-                return
-            }
-        }
-        guard let receiverDecodeDumpFile else { return }
-        do {
-            try receiverDecodeDumpFile.write(from: pcm)
-            receiverDecodeDumpFrames += Int(pcm.frameLength)
-            if receiverDecodeDumpFrames >= Self.receiverDecodeDumpFrameLimit {
-                Log.info("audioTrace: audio-compare-received-decoded-aac.caf reached \(receiverDecodeDumpFrames) frames — finalizing")
-                finalizeReceiverDecodeDump()
-            }
-        } catch {
-            Log.info("audioTrace: ⚠️ audio-compare-received-decoded-aac.caf write failed: \(error)")
-        }
-    }
-
-    private func finalizeReceiverDecodeDump() {
-        if let receiverDecodeDumpFile {
-            Log.info("audioTrace: finalized \(receiverDecodeDumpFile.url.lastPathComponent) frames=\(receiverDecodeDumpFrames)")
-        }
-        receiverDecodeDumpFile = nil
-        receiverDecodeDumpFrames = 0
-    }
-
-    /// iOS: the app's own Documents directory, so the dump is reachable
-    /// from the Files app (On My iPhone/iPad → MeowDisplay) without Xcode.
-    /// macOS (the `OpenSidecarMacReceiver` test target): the same
-    /// `Log.directory` the Mac sender's dumps already use, for one
-    /// consistent place to look.
-    private static func receiverDecodeDumpDirectory() -> URL {
-        #if os(iOS)
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        #else
-        return Log.directory
-        #endif
-    }
-
     /// Anomaly-only (GOAL section 7 "RECEIVER"): the renderer's playout
     /// schedule must be monotonic — a packet scheduled to play before the
     /// previous one means an anchor/offset computation went backwards,
