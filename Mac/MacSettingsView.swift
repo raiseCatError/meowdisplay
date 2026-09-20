@@ -17,6 +17,7 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
     private var didConfigureToolbar = false
     private weak var detailTitleField: NSTextField?
     private weak var navigationSegmentedControl: NSSegmentedControl?
+    private weak var toolbar: NSToolbar?
     private var cancellables = Set<AnyCancellable>()
 
     init(controller: SenderController, updater: SPUStandardUpdaterController?) {
@@ -71,6 +72,13 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
                 self.navigationSegmentedControl?.setEnabled(self.navigationModel.canGoForward, forSegment: 1)
             }
             .store(in: &cancellables)
+
+        controller.$keepMacAvailableActive
+            .removeDuplicates()
+            .sink { [weak self] isActive in
+                self?.updateKeepAvailableToolbarItem(isActive: isActive)
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
@@ -103,6 +111,27 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
+        self.toolbar = toolbar
+    }
+
+    /// Inserts/removes the Keep Available item (plus the spacer that keeps
+    /// its Liquid Glass capsule from merging with the status item's) as the
+    /// assertion is acquired/released, so no empty gap is left when hidden.
+    private func updateKeepAvailableToolbarItem(isActive: Bool) {
+        guard let toolbar else { return }
+        let keepIndex = toolbar.items.firstIndex { $0.itemIdentifier == Self.detailKeepAvailableID }
+        if isActive {
+            guard keepIndex == nil else { return }
+            let insertionIndex = toolbar.items.count
+            toolbar.insertItem(withItemIdentifier: .space, at: insertionIndex)
+            toolbar.insertItem(withItemIdentifier: Self.detailKeepAvailableID, at: insertionIndex + 1)
+        } else {
+            guard let keepIndex else { return }
+            toolbar.removeItem(at: keepIndex)
+            if keepIndex - 1 >= 0, toolbar.items[keepIndex - 1].itemIdentifier == .space {
+                toolbar.removeItem(at: keepIndex - 1)
+            }
+        }
     }
 
     // MARK: - NSToolbarDelegate
@@ -110,7 +139,8 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
     private static let trackingSeparatorID = NSToolbarItem.Identifier("TrackingSeparator")
     private static let detailLeadingID = NSToolbarItem.Identifier("DetailLeading")
     private static let detailTitleID = NSToolbarItem.Identifier("DetailTitle")
-    private static let detailTrailingID = NSToolbarItem.Identifier("DetailTrailing")
+    private static let detailStatusID = NSToolbarItem.Identifier("DetailStatus")
+    private static let detailKeepAvailableID = NSToolbarItem.Identifier("DetailKeepAvailable")
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
@@ -119,19 +149,28 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
             .space,
             Self.detailTitleID,
             .flexibleSpace,
-            Self.detailTrailingID
+            Self.detailStatusID,
+            Self.detailKeepAvailableID
         ]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
+        // The Keep Available item (and its preceding spacer) is added/removed
+        // dynamically as the assertion is acquired/released; see
+        // `updateKeepAvailableToolbarItem(isActive:)`.
+        var items: [NSToolbarItem.Identifier] = [
             Self.trackingSeparatorID,
             Self.detailLeadingID,
             .space,
             Self.detailTitleID,
             .flexibleSpace,
-            Self.detailTrailingID
+            Self.detailStatusID
         ]
+        if controller.keepMacAvailableActive {
+            items.append(.space)
+            items.append(Self.detailKeepAvailableID)
+        }
+        return items
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -185,10 +224,19 @@ final class MacSettingsSplitViewController: NSSplitViewController, NSToolbarDele
             detailTitleField = field
             return item
 
-        case Self.detailTrailingID:
+        case Self.detailStatusID:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let view = DetailToolbarTrailingView(controller: controller)
+            let view = DetailToolbarStatusView(controller: controller)
             let hosting = NSHostingView(rootView: view)
+            if #available(macOS 13.0, *) {
+                hosting.sizingOptions = [.intrinsicContentSize]
+            }
+            item.view = hosting
+            return item
+
+        case Self.detailKeepAvailableID:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            let hosting = NSHostingView(rootView: KeepAvailablePill())
             if #available(macOS 13.0, *) {
                 hosting.sizingOptions = [.intrinsicContentSize]
             }
@@ -222,9 +270,10 @@ struct DetailNavigationKeyboardShortcuts: View {
     }
 }
 
-/// Trailing toolbar item placed at the right side of the detail pane.
-/// Houses status badges as visually separate capsules without clipping or truncation.
-struct DetailToolbarTrailingView: View {
+/// Status toolbar item placed at the right side of the detail pane. Kept as
+/// its own `NSToolbarItem` (separate from `DetailKeepAvailable`) so macOS 26
+/// gives each its own Liquid Glass capsule instead of merging them into one.
+struct DetailToolbarStatusView: View {
     @ObservedObject var controller: SenderController
 
     private var soleActiveSession: DeviceSession? {
@@ -239,9 +288,6 @@ struct DetailToolbarTrailingView: View {
                 ToolbarQuickActions(session: session, controller: controller)
             }
             StatusBadge(controller: controller)
-            if controller.keepMacAvailableActive {
-                KeepAvailablePill()
-            }
         }
         .fixedSize(horizontal: true, vertical: false)
         .padding(.trailing, 6)
@@ -513,14 +559,6 @@ struct StatusBadge: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 5)
-        .background(
-            Capsule()
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.85))
-        )
-        .overlay(
-            Capsule()
-                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
-        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Status: \(controller.canonicalStatusText)")
     }
@@ -540,14 +578,6 @@ struct KeepAvailablePill: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 5)
-        .background(
-            Capsule()
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.85))
-        )
-        .overlay(
-            Capsule()
-                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
-        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Keeping Mac Available")
     }
