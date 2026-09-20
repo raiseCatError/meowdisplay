@@ -1968,7 +1968,7 @@ final class StreamReceiver: ObservableObject {
     /// because each one re-derives the request from this single value
     /// rather than replaying anything queued.
     @MainActor func requestAudioEnabled(_ enabled: Bool) {
-        audioPreferred = enabled
+        queue.async { [weak self] in self?.audioPreferred = enabled }
         guard connected, macSupportsAudio else { return }
         sendUIControl(["type": WireMessage.audioRequest, "enabled": enabled])
     }
@@ -1978,7 +1978,7 @@ final class StreamReceiver: ObservableObject {
     /// before there is a connection). Use `requestAudioEnabled` for a live
     /// user toggle.
     func primeAudioPreference(_ enabled: Bool) {
-        audioPreferred = enabled
+        queue.async { [weak self] in self?.audioPreferred = enabled }
     }
 
     /// Asks the connected Mac to call IOPMAssertionDeclareUserActivity, over
