@@ -263,8 +263,10 @@ final class StreamReceiver: ObservableObject {
     /// survives reconnection and transport migration without the user
     /// re-enabling it (SESSION BEHAVIOR).
     private var audioPreferred = false
-    private var audioRenderer: AVSampleBufferAudioRenderer?
-    private var audioSynchronizer: AVSampleBufferRenderSynchronizer?
+    /// RC-3 Stage E2: the renderer/synchronizer/anchor scheduling domain
+    /// moved to `ReceiverAudioPresenter` — see its file header. Owned here,
+    /// constructed with `queue` for its DEBUG KVO callback's re-hop.
+    private lazy var audioPresenter = ReceiverAudioPresenter(queue: queue)
     private var audioFormatDescription: CMAudioFormatDescription?
     private var audioSampleRate: Double = 48_000
     #if os(iOS)
@@ -282,27 +284,11 @@ final class StreamReceiver: ObservableObject {
     /// only) each touch exactly what they claim to.
     private var avSyncOffsetMs = 0
 
-    /// A stable capture-timeline -> host-time mapping, established ONCE per
-    /// generation (first audio packet after a reset) or on `resync()`, and
-    /// otherwise left alone. FORENSIC NOTE: an earlier version of this
-    /// receiver recomputed this mapping from EVERY displayed video frame's
-    /// own arrival time, which is itself jittery (that jitter is exactly
-    /// why the video path displays immediately instead of scheduling on a
-    /// timebase) — feeding it straight into audio's schedule made audio
-    /// inherit video's arrival jitter, producing the stutter this fix
-    /// addresses. A one-shot anchor plus audio's own evenly-spaced capture
-    /// deltas (real AAC frames are ~21.333 ms apart at 48 kHz) schedules
-    /// smoothly regardless of how jittery video's arrival is.
-    private struct MediaAnchor {
-        var captureMs: Double
-        var hostTime: CFTimeInterval
-    }
-    private var audioAnchor: MediaAnchor?
-    /// Small bounded preroll folded into a fresh anchor's lead time —
-    /// ~3 AAC packets. Enough to absorb ordinary scheduling jitter without
-    /// the renderer starving; nowhere near enough to feel like added
-    /// interactive latency.
-    private let audioPrerollSeconds = 0.064
+    /// RC-3 Stage E2: the capture-timeline -> host-time anchor mapping now
+    /// lives on `audioPresenter` (`ReceiverAudioPresenter`'s `MediaAnchor`)
+    /// — see its file header. This receiver holds no shadow of it; it hands
+    /// `audioPresenter` an `AudioTimingSnapshot` per scheduling call instead.
+    ///
     /// A slow, one-shot measurement — "how much later than its own capture
     /// moment does video actually appear right now" — updated cheaply on
     /// every displayed video frame but consulted ONLY when establishing a
@@ -349,8 +335,6 @@ final class StreamReceiver: ObservableObject {
     /// fire only when something is actually unexpected.
     private var audioFrameDecodeFailureCount = 0
     private var lastAudioSequence: UInt32?
-    private var lastAudioTarget: CFTimeInterval?
-    private var audioErrorObservation: NSKeyValueObservation?
     /// Last applied config (AAC sample rate/channels, or PCM sample
     /// rate/channels) — logged only when a fresh config frame changes it
     /// mid-session, which should never happen within one generation.
@@ -388,13 +372,6 @@ final class StreamReceiver: ObservableObject {
     private var aacIntegrityLoggingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "audioAACIntegrityLogging")
     }
-    /// Total successful `audioRenderer.enqueue` calls this generation —
-    /// `enqueue` itself returns no status, so this is only useful compared
-    /// against the periodic `PCM sanity`/`AAC integrity` packet counts to
-    /// spot silent enqueue-path attrition (e.g. every packet reaching
-    /// `scheduleDecodedAudio` but a growing fraction failing
-    /// `CMSampleBufferCreateReady` upstream of it).
-    private var audioEnqueueCount = 0
     #endif
 
     private var tlsListener: NWListener?
@@ -2363,8 +2340,9 @@ final class StreamReceiver: ObservableObject {
     /// doc comment) — tear the whole playback chain down and rebuild fresh
     /// rather than let a live `AVSampleBufferAudioRenderer` see samples in
     /// a format it wasn't built for. Also resets every piece of
-    /// generation-scoped monotonicity state (`lastAudioSequence`,
-    /// `lastAudioTarget`) so a new generation's counters, which restart
+    /// generation-scoped monotonicity state (`lastAudioSequence` here,
+    /// `audioPresenter`'s own `lastAudioTarget` via `reset()`) so a new
+    /// generation's counters, which restart
     /// from a fresh baseline on the sender, are never compared against the
     /// previous generation's — that mismatch is exactly what produced the
     /// "expected=4856 got=1" / "non-monotonic audio playout target" log
@@ -2378,9 +2356,8 @@ final class StreamReceiver: ObservableObject {
         #if DEBUG
         audioGenerationCount += 1
         lastAudioSequence = nil
-        lastAudioTarget = nil
         lastAudioDiagnosticCaptureMs = nil
-        audioEnqueueCount = 0
+        audioPresenter.debugResetEnqueueCount()
         Log.info("audioTrace: generation=\(audioGenerationCount) codec=\(codec == .aac ? "AAC" : "PCM") playbackPath=\(activePlaybackPath == .pcmEngine ? "pcmEngine" : "legacyRenderer") starting bundleID=\(Bundle.main.bundleIdentifier ?? "?") audioReceiverLocalDecode=\(receiverAACLocalDecodeEnabled) audioReceiverDumpEnabled=\(audioDecoder.dumpEnabled) audioAACIntegrityLogging=\(aacIntegrityLoggingEnabled) dumpDirectory=\(ReceiverAudioDecoder.dumpDirectory().path)")
         #endif
     }
@@ -2395,30 +2372,7 @@ final class StreamReceiver: ObservableObject {
     #endif
 
     private func ensureAudioPlaybackChain() {
-        guard audioRenderer == nil else { return }
-        let renderer = AVSampleBufferAudioRenderer()
-        let synchronizer = AVSampleBufferRenderSynchronizer()
-        synchronizer.addRenderer(renderer)
-        // Ties the synchronizer's virtual clock 1:1 to the host clock from
-        // this instant on — every sample buffer's PTS is then simply "the
-        // host time it should play at" (see `targetHostTime`), with no
-        // separate anchor/rate bookkeeping needed on this end.
-        synchronizer.setRate(1, time: CMClockGetTime(CMClockGetHostTimeClock()))
-        audioRenderer = renderer
-        audioSynchronizer = synchronizer
-        activateAudioSessionIfNeeded()
-        #if DEBUG
-        // Anomaly diagnostic (GOAL section 7): `error` is KVO-observable on
-        // AVSampleBufferAudioRenderer and fires if the renderer itself hits
-        // an unrecoverable playback error — exactly the kind of event that
-        // would explain a sudden dead-audio patch without a corresponding
-        // network/framing symptom.
-        audioErrorObservation = renderer.observe(\.error, options: [.new]) { [weak self] _, change in
-            guard let error = change.newValue ?? nil else { return }
-            Log.info("audioTrace: ⚠️ audio renderer reported error: \(error)")
-            self?.queue.async { self?.audioAnchor = nil }
-        }
-        #endif
+        audioPresenter.ensurePlaybackChain(activateSession: activateAudioSessionIfNeeded)
     }
 
     /// Stops and releases playback state. Called on Audio Off, pause, a new
@@ -2431,19 +2385,18 @@ final class StreamReceiver: ObservableObject {
     /// config frame won't be resent, and this receiver must keep the
     /// format description it already has to keep decoding the packets that
     /// keep arriving. A new connection/Audio Off DOES drop it — the next
-    /// audio start (if any) resends a fresh one anyway.
+    /// audio start (if any) resends a fresh one anyway. RC-3 Stage E2:
+    /// `audioPresenter.reset()` itself does not distinguish this flag — see
+    /// its file header's "Reset modes" note — it always tears the
+    /// renderer/synchronizer/anchor down; `keepingFormat` only gates the
+    /// host-owned state below.
     private func resetAudioPlayback(keepingFormat: Bool = false) {
-        audioRenderer?.stopRequestingMediaData()
-        if let audioRenderer { audioRenderer.flush() }
-        audioSynchronizer?.setRate(0, time: .zero)
-        audioRenderer = nil
-        audioSynchronizer = nil
+        audioPresenter.reset()
         if !keepingFormat {
             audioFormatDescription = nil
             audioCodecKind = nil
             deactivateAudioSessionIfNeeded()
         }
-        audioAnchor = nil
         if !keepingFormat {
             audioDecoder.reset()
         }
@@ -2457,9 +2410,7 @@ final class StreamReceiver: ObservableObject {
         #if DEBUG
         lastAudioDiagnosticCaptureMs = nil
         lastAudioSequence = nil
-        lastAudioTarget = nil
         if !keepingFormat { lastAppliedAudioConfigDescription = nil }
-        audioErrorObservation = nil
         #endif
     }
 
@@ -2669,91 +2620,16 @@ final class StreamReceiver: ObservableObject {
         sampleSizeEntryCount: Int, sampleSizes: () -> [Int]
     ) {
         guard let audioFormatDescription else { return }
-        ensureAudioPlaybackChain()   // lazily recreates the renderer after resync/reset
-        guard let audioRenderer else { return }
         guard let clockOffsetMs else { return }   // clock sync not settled yet (first ~2s) — drop
-        // Mac wall-clock ms -> this receiver's equivalent wall-clock ms
-        // (section 8.1: offset = macClock - receiverClock).
-        let receiverCaptureMs = Double(capturedAtMs) - clockOffsetMs
-
-        if audioAnchor == nil {
-            establishAudioAnchor(captureMs: receiverCaptureMs)
-        }
-        guard let anchor = audioAnchor else { return }
-
-        let audioDelaySeconds = Double(AVSyncOffset.audioDelayMs(for: avSyncOffsetMs)) / 1000.0
-        let target = anchor.hostTime + (receiverCaptureMs - anchor.captureMs) / 1000.0 + audioDelaySeconds
-        #if DEBUG
-        checkNonMonotonicTarget(target)
-        #endif
-
-        var blockBuffer: CMBlockBuffer?
-        let blockStatus = payload.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> OSStatus in
-            var buffer: CMBlockBuffer?
-            let createStatus = CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: raw.count,
-                blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-                dataLength: raw.count, flags: 0, blockBufferOut: &buffer)
-            guard createStatus == noErr, let buffer else { return createStatus }
-            let copyStatus = CMBlockBufferReplaceDataBytes(
-                with: raw.baseAddress!, blockBuffer: buffer, offsetIntoDestination: 0, dataLength: raw.count)
-            blockBuffer = buffer
-            return copyStatus
-        }
-        guard blockStatus == noErr, let blockBuffer else {
-            #if DEBUG
-            Log.info("audioTrace: ⚠️ CMBlockBuffer creation/copy failed status=\(blockStatus) — sample dropped before reaching the renderer")
-            #endif
-            return
-        }
-
-        let pts = CMTime(seconds: target, preferredTimescale: 1_000_000)
-        var timing = CMSampleTimingInfo(
-            duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
-        var sizes = sampleSizes()
-        var sample: CMSampleBuffer?
-        let createStatus = sizes.withUnsafeMutableBufferPointer { sizesPtr -> OSStatus in
-            CMSampleBufferCreateReady(
-                allocator: kCFAllocatorDefault, dataBuffer: blockBuffer,
-                formatDescription: audioFormatDescription, sampleCount: sampleCount,
-                sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-                sampleSizeEntryCount: sampleSizeEntryCount,
-                sampleSizeArray: sampleSizeEntryCount > 0 ? sizesPtr.baseAddress : nil,
-                sampleBufferOut: &sample)
-        }
-        guard createStatus == noErr, let sample else {
-            #if DEBUG
-            Log.info("audioTrace: ⚠️ CMSampleBufferCreateReady failed status=\(createStatus) — sample dropped before reaching the renderer")
-            #endif
-            return
-        }
-        audioRenderer.enqueue(sample)
-        #if DEBUG
-        audioEnqueueCount += 1
-        #endif
-    }
-
-    /// Establishes the ONE anchor mapping audio's capture timeline to host
-    /// time for this generation (see the `audioAnchor` doc comment) — never
-    /// called again until `resetAudioPlayback` clears it (new packet after
-    /// a reset/resync/Video-Off-only-session).  Folds in a small preroll
-    /// plus, if a recent video-latency measurement exists, an automatic
-    /// baseline correction so audio settles near video's real latency
-    /// instead of an arbitrary fixed lead — computed once, not chased.
-    private func establishAudioAnchor(captureMs: Double) {
-        let now = CACurrentMediaTime()
-        var lead = audioPrerollSeconds
-        var baselineMs = 0.0
-        if let lastVideoLatencySeconds, nowMs - lastVideoLatencyUpdatedAtWallMs < 1_000 {
-            // Sanity-bounded: a video path that is itself somehow stalled
-            // must not inject an enormous lead into audio's schedule.
-            baselineMs = min(max(lastVideoLatencySeconds, 0), 0.3) * 1000
-            lead = max(lead, baselineMs / 1000)
-        }
-        audioAnchor = MediaAnchor(captureMs: captureMs, hostTime: now + lead)
-        #if DEBUG
-        Log.info("audioTrace: anchor established captureMs=\(Int(captureMs)) leadMs=\(Int(lead * 1000)) baselineMs=\(Int(baselineMs))")
-        #endif
+        let timing = ReceiverAudioPresenter.AudioTimingSnapshot(
+            clockOffsetMs: clockOffsetMs, avSyncOffsetMs: avSyncOffsetMs,
+            lastVideoLatencySeconds: lastVideoLatencySeconds,
+            lastVideoLatencyUpdatedAtWallMs: lastVideoLatencyUpdatedAtWallMs, nowMs: nowMs)
+        audioPresenter.scheduleDecodedAudio(
+            capturedAtMs: capturedAtMs, payload: payload, sampleCount: sampleCount, duration: duration,
+            sampleSizeEntryCount: sampleSizeEntryCount, sampleSizes: sampleSizes,
+            formatDescription: audioFormatDescription, timing: timing,
+            activateSession: activateAudioSessionIfNeeded)
     }
 
     #if DEBUG
@@ -2771,12 +2647,8 @@ final class StreamReceiver: ObservableObject {
         let unexpectedDelta = deltaMs.map { !(10...40).contains($0) } ?? false
         audioDiagnosticLogCounter += 1
         guard unexpectedDelta || audioDiagnosticLogCounter % 100 == 0 else { return }
-        var queuedMs = 0.0
-        if let anchor = audioAnchor {
-            let audioDelaySeconds = Double(AVSyncOffset.audioDelayMs(for: avSyncOffsetMs)) / 1000.0
-            let target = anchor.hostTime + (receiverCaptureMs - anchor.captureMs) / 1000.0 + audioDelaySeconds
-            queuedMs = (target - CACurrentMediaTime()) * 1000
-        }
+        let queuedMs = audioPresenter.debugQueuedMs(
+            receiverCaptureMs: receiverCaptureMs, avSyncOffsetMs: avSyncOffsetMs) ?? 0
         // Latency characterization (GOAL "LATENCY" — measurement only, not
         // tuning): `captureToArrivalMs` is capture→"this packet is being
         // processed right now" (encode + transport + demux), computed on
@@ -2790,7 +2662,7 @@ final class StreamReceiver: ObservableObject {
         let captureToArrivalMs = Date().timeIntervalSince1970 * 1000 - receiverCaptureMs
         let captureToPlayoutMs = captureToArrivalMs + queuedMs
         let deltaText = deltaMs.map { String(format: "%.1f", $0) } ?? "-"
-        Log.info("audioTrace: seq=\(sequence) capMs=\(Int(receiverCaptureMs)) deltaMs=\(deltaText) durMs=\(durationMs) bytes=\(byteCount) queuedMs=\(Int(queuedMs)) captureToArrivalMs=\(Int(captureToArrivalMs)) captureToPlayoutMs=\(Int(captureToPlayoutMs)) enqueued=\(audioEnqueueCount)\(unexpectedDelta ? " ⚠️ unexpected delta" : "")")
+        Log.info("audioTrace: seq=\(sequence) capMs=\(Int(receiverCaptureMs)) deltaMs=\(deltaText) durMs=\(durationMs) bytes=\(byteCount) queuedMs=\(Int(queuedMs)) captureToArrivalMs=\(Int(captureToArrivalMs)) captureToPlayoutMs=\(Int(captureToPlayoutMs)) enqueued=\(audioPresenter.debugEnqueueCount)\(unexpectedDelta ? " ⚠️ unexpected delta" : "")")
     }
 
     /// Anomaly-only (GOAL section 7 "WIRE"): a gap or repeat in the sender's
@@ -2890,18 +2762,9 @@ final class StreamReceiver: ObservableObject {
         #endif
     }
 
-    #if DEBUG
-    /// Anomaly-only (GOAL section 7 "RECEIVER"): the renderer's playout
-    /// schedule must be monotonic — a packet scheduled to play before the
-    /// previous one means an anchor/offset computation went backwards,
-    /// which would sound like a stutter/glitch right at that instant.
-    private func checkNonMonotonicTarget(_ target: CFTimeInterval) {
-        defer { lastAudioTarget = target }
-        if let lastAudioTarget, target < lastAudioTarget {
-            Log.info("audioTrace: ⚠️ non-monotonic audio playout target \(target) < previous \(lastAudioTarget)")
-        }
-    }
-    #endif
+    // RC-3 Stage E2: the non-monotonic-playout-target anomaly check moved
+    // to `ReceiverAudioPresenter.checkNonMonotonicTarget` together with the
+    // `target` computation it inspects.
 
     // C3: `buildFormatDescription`/`buildHEVCFormatDescription` and the
     // first half of what was `enqueueFrame` (AVCC framing through

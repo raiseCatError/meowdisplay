@@ -200,6 +200,7 @@ targets:
       - Shared/ReceiverFramePipeline.swift
       - Shared/ReceiverVideoDecoder.swift
       - Shared/ReceiverVideoPresenter.swift
+      - Shared/ReceiverAudioPresenter.swift
       - Shared/PCMPlaybackEngine.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift
