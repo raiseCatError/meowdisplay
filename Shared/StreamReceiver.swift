@@ -313,11 +313,17 @@ final class StreamReceiver: ObservableObject {
     /// continuously chasing an instantaneous, noisy measurement.
     private var lastVideoLatencySeconds: Double?
     private var lastVideoLatencyUpdatedAtWallMs: Double = 0
-    /// Bumped by `resetStreamState` (new connection) and `resync()`.
-    /// Captured by each negative-offset delayed video presentation
-    /// closure so stale work from a superseded generation can never
-    /// touch a newer session's decoder/display layer — see `enqueueFrame`.
-    private var videoGeneration: UInt64 = 0
+    /// RC-3 Stage D: the AUTHORITATIVE presentation generation now lives on
+    /// `presenter` (`ReceiverVideoPresenter.videoGeneration`) — this is a
+    /// `queue`-confined SHADOW, incremented in lockstep at the exact same
+    /// call sites (`resetStreamState`, `resync()`), immediately before the
+    /// matching `presenter.enqueueAdvanceGeneration()`. It exists only so
+    /// `presentDecodedSample`'s hot path can snapshot "the generation this
+    /// frame belongs to" with a synchronous, zero-hop read — see
+    /// `ReceiverVideoPresenter`'s file header, "Stale-generation safety".
+    /// Never read back to make a presentation decision; the actual gate is
+    /// `presenter`'s own copy, checked inside its ordered command pump.
+    private var presentationGeneration: UInt64 = 0
     /// Which codec the currently-active `audioFormatDescription`/renderer
     /// chain was built for. A config frame for the OTHER codec means the
     /// sender started a new audio generation (Audio Off→On rebuild or
@@ -1021,7 +1027,7 @@ final class StreamReceiver: ObservableObject {
             self.framePipeline.syncState.setRenderingPaused(paused)
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
-                self.displayLayer.flush()
+                self.presenter.enqueueFlush()
                 if self.sendTargetBox.current()?.connection.state == .ready {
                     self.sendControl(["type": "kf"])
                 }
@@ -1661,15 +1667,19 @@ final class StreamReceiver: ObservableObject {
         // match. `flushAndRemoveImage()`, unlike plain `flush()`, also
         // retires the currently-DISPLAYED image, so the previous session's
         // last frame can't linger on screen through the gap before the new
-        // session's first IDR decodes.
-        displayLayer.flushAndRemoveImage()
+        // session's first IDR decodes. Stage D: ordered through `presenter`
+        // instead of touching `displayLayer` directly.
+        presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
         decodeWindow.removeAll(keepingCapacity: true)
         photonWindow.removeAll(keepingCapacity: true)
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
-        // negative offset from the superseded connection).
-        videoGeneration &+= 1
+        // negative offset from the superseded connection). Shadow bump
+        // first, then the ordered command — see `presentationGeneration`'s
+        // doc comment.
+        presentationGeneration &+= 1
+        presenter.enqueueAdvanceGeneration()
         resetAudioPlayback()
     }
 
@@ -2004,7 +2014,7 @@ final class StreamReceiver: ObservableObject {
     /// clears its own `formatDesc`/SPS/PPS/VPS there — this method now only
     /// owns the display/decoder (C4/D) half of the reset.
     private func resetDecoderForVideoStateChange() {
-        displayLayer.flushAndRemoveImage()
+        presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
     }
 
@@ -2485,10 +2495,11 @@ final class StreamReceiver: ObservableObject {
     /// baseline term changes.
     func resync() {
         queue.async {
-            self.videoGeneration &+= 1
+            self.presentationGeneration &+= 1
+            self.presenter.enqueueAdvanceGeneration()
             self.resetAudioPlayback(keepingFormat: true)
             #if DEBUG
-            Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(self.videoGeneration)")
+            Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(self.presentationGeneration)")
             #endif
         }
     }
@@ -3110,34 +3121,23 @@ final class StreamReceiver: ObservableObject {
             lastVideoLatencySeconds = (nowMs - captureMs) / 1000.0
             lastVideoLatencyUpdatedAtWallMs = nowMs
         }
-        let scheduledVideoGeneration = videoGeneration
+        // Stage D: `presenter` (`ReceiverVideoPresenter`) is the sole
+        // authoritative owner of `displayLayer` and the actual presentation
+        // generation from here on — this closure only decides host POLICY
+        // (Metal-vs-direct routing) and snapshots `presentationGeneration`,
+        // the zero-hop shadow, before handing off. See `ReceiverVideoPresenter`'s
+        // file header for why a snapshot taken here (rather than re-read at
+        // presentation time) is still stale-safe.
+        let scheduledVideoGeneration = presentationGeneration
+        let viaMetalPath = useMetalPath && onDecodedFrame != nil
         let present = { [weak self] in
-            guard let self, self.videoGeneration == scheduledVideoGeneration else { return }
-            if self.useMetalPath, self.onDecodedFrame != nil {
-                #if DEBUG
-                self.debugFramesToDecoderWindow += 1
-                #endif
-                self.videoDecoder.enqueueDecode(FrameMediaBox(sample), captureMs: captureMs)
-            } else {
-                // Display immediately: low latency, no PTS scheduling.
-                if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-                   CFArrayGetCount(attachments) > 0 {
-                    let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-                    CFDictionarySetValue(dict,
-                        Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                        Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-                }
-
-                if self.displayLayer.status == .failed {
-                    Log.info("display layer failed (\(String(describing: self.displayLayer.error))) — flushing")
-                    self.decodeFlushes += 1
-                    self.displayLayer.flush()
-                }
-                self.displayLayer.enqueue(sample)
-                #if DEBUG
-                self.debugFramesPresentedWindow += 1
-                #endif
-            }
+            guard let self else { return }
+            #if DEBUG
+            if viaMetalPath { self.debugFramesToDecoderWindow += 1 }
+            #endif
+            self.presenter.enqueuePresentSample(
+                FrameMediaBox(sample), generation: scheduledVideoGeneration,
+                viaMetalPath: viaMetalPath, captureMs: captureMs)
         }
         // A/V Sync: negative offset delays video by holding this specific,
         // already-decoded-or-decodable frame — a genuine per-frame
@@ -3557,11 +3557,45 @@ final class StreamReceiver: ObservableObject {
     private lazy var videoDecoder = ReceiverVideoDecoder(outputEffects: makeVideoDecoderOutputEffects())
 
     /// The narrow output surface `videoDecoder` calls out to — see
-    /// `ReceiverVideoDecoder.OutputEffects`. Each closure hops onto `queue`
-    /// before touching queue-confined state, exactly like
-    /// `makeFramePipelineOutputEffects()`.
+    /// `ReceiverVideoDecoder.OutputEffects`. `decodedFrameReady` now routes
+    /// through `presenter` (Stage D) instead of `queue`-hopping straight to
+    /// `onDecodedFrame` — see that effect's own doc comment.
     private func makeVideoDecoderOutputEffects() -> ReceiverVideoDecoder.OutputEffects {
         .init(
+            decodedFrameReady: { [weak self] box, generation, captureMs in
+                self?.presenter.enqueuePresentDecoded(box, generation: generation, captureMs: captureMs)
+            },
+            decodeDurationMs: { [weak self] ms in
+                self?.queue.async { self?.decodeWindow.append(ms) }
+            },
+            requestKeyframe: { [weak self] in
+                self?.queue.async { self?.requestKeyframeIfNeeded() }
+            })
+    }
+
+    /// RC-3 Stage D: the sole authoritative owner of `displayLayer`
+    /// enqueue/flush/flushAndRemoveImage and the presentation generation —
+    /// see its file header. `lazy` for the same reason as `videoDecoder`
+    /// above: `makeVideoPresenterOutputEffects()` captures `self` weakly,
+    /// and actual use starts well after `init`. The STORED PROPERTY here
+    /// is a plain (non-isolated) reference to a `@MainActor`-isolated
+    /// type — exactly like holding a reference to any other class; only
+    /// `presenter`'s own isolated methods require `MainActor` (the SDK
+    /// requires it — see that file's header), and every entry point this
+    /// class actually calls (`enqueuePresentSample`/`enqueueFlush`/etc) is
+    /// `nonisolated`, so this stays freely accessible from `queue`.
+    private lazy var presenter = ReceiverVideoPresenter(
+        displayLayer: displayLayer, outputEffects: makeVideoPresenterOutputEffects())
+
+    /// The narrow output surface `presenter` calls out to — see
+    /// `ReceiverVideoPresenter.OutputEffects`. Each closure hops onto
+    /// `queue` before touching queue-confined state, exactly like
+    /// `makeVideoDecoderOutputEffects()`.
+    private func makeVideoPresenterOutputEffects() -> ReceiverVideoPresenter.OutputEffects {
+        .init(
+            decodeViaVideoDecoder: { [weak self] box, generation, captureMs in
+                self?.videoDecoder.enqueueDecode(box, generation: generation, captureMs: captureMs)
+            },
             decodedFrameReady: { [weak self] box, captureMs in
                 self?.queue.async { guard let self else { return }
                     #if DEBUG
@@ -3570,11 +3604,13 @@ final class StreamReceiver: ObservableObject {
                     self.onDecodedFrame?(box.value, captureMs)
                 }
             },
-            decodeDurationMs: { [weak self] ms in
-                self?.queue.async { self?.decodeWindow.append(ms) }
+            decodeFlushIncurred: { [weak self] in
+                self?.queue.async { self?.decodeFlushes += 1 }
             },
-            requestKeyframe: { [weak self] in
-                self?.queue.async { self?.requestKeyframeIfNeeded() }
+            debugFramePresented: { [weak self] in
+                #if DEBUG
+                self?.queue.async { self?.debugFramesPresentedWindow += 1 }
+                #endif
             })
     }
 
@@ -3666,8 +3702,10 @@ final class StreamReceiver: ObservableObject {
                     // displayed frame — see `handleAnnexB`'s old inline
                     // comment (now `ReceiverFramePipeline.handleAnnexB`)
                     // for why this must happen before any sample built
-                    // from the new format description is presented.
-                    self.displayLayer.flushAndRemoveImage()
+                    // from the new format description is presented. Stage D:
+                    // ordered through `presenter` instead of touching
+                    // `displayLayer` directly.
+                    self.presenter.enqueueFlushAndRemoveImage()
                     #if DEBUG
                     // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
                     // decode generation — re-arm the decoded-frame luma probe.

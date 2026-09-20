@@ -42,7 +42,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
     private func makeDecoder() -> (ReceiverVideoDecoder, Recorder) {
         let recorder = Recorder()
         let effects = ReceiverVideoDecoder.OutputEffects(
-            decodedFrameReady: { _, _ in recorder.recordDecodedFrame() },
+            decodedFrameReady: { _, _, _ in recorder.recordDecodedFrame() },
             decodeDurationMs: { ms in recorder.recordDuration(ms) },
             requestKeyframe: { recorder.recordKeyframeRequest() })
         return (ReceiverVideoDecoder(outputEffects: effects), recorder)
@@ -121,7 +121,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         let formatDesc = makeFormatDescription()
         let sample = makeSampleBuffer(formatDescription: formatDesc, nalu: idr)
 
-        decoder.enqueueDecode(FrameMediaBox(sample), captureMs: 123)
+        decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: 123)
         await waitFor { recorder.decodedFrameCount > 0 || recorder.keyframeRequests > 0 }
 
         // A hand-written single-macroblock fixture may or may not be a
@@ -148,7 +148,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         let garbage = Data([0x65] + Array(repeating: 0xFF, count: 64))
         let sample = makeSampleBuffer(formatDescription: formatDesc, nalu: garbage)
 
-        decoder.enqueueDecode(FrameMediaBox(sample), captureMs: nil)
+        decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: nil)
         await waitFor { recorder.keyframeRequests > 0 || recorder.decodedFrameCount > 0 }
 
         XCTAssertGreaterThan(recorder.keyframeRequests, 0,
@@ -163,7 +163,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         let formatDesc = makeFormatDescription()
         let sample = makeSampleBuffer(formatDescription: formatDesc, nalu: idr)
 
-        decoder.enqueueDecode(FrameMediaBox(sample), captureMs: nil)
+        decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: nil)
         await waitFor { recorder.decodedFrameCount > 0 || recorder.keyframeRequests > 0 }
 
         // Reset must not leave the actor in a state where a fresh decode
@@ -176,7 +176,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         decoder.enqueueReset()
 
         let sample2 = makeSampleBuffer(formatDescription: formatDesc, nalu: idr)
-        decoder.enqueueDecode(FrameMediaBox(sample2), captureMs: nil)
+        decoder.enqueueDecode(FrameMediaBox(sample2), generation: 0, captureMs: nil)
         await waitFor {
             recorder.decodedFrameCount + recorder.keyframeRequests > 1
         }
@@ -192,7 +192,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
 
         for _ in 0..<3 {
             let sample = makeSampleBuffer(formatDescription: formatDesc, nalu: idr)
-            decoder.enqueueDecode(FrameMediaBox(sample), captureMs: nil)
+            decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: nil)
         }
         await waitFor { recorder.decodedFrameCount + recorder.keyframeRequests >= 3 }
 
@@ -222,7 +222,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         let lock = NSLock()
         var observedOrder: [Double] = []
         await decoder.setDebugSubmissionObserver { command in
-            guard case .decode(_, let captureMs) = command, let captureMs else { return }
+            guard case .decode(_, _, let captureMs) = command, let captureMs else { return }
             lock.lock(); observedOrder.append(captureMs); lock.unlock()
         }
 
@@ -235,7 +235,7 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         // `nonisolated` call has no such gap to race through).
         for tag in 1...5 {
             let sample = makeSampleBuffer(formatDescription: formatDesc, nalu: idr)
-            decoder.enqueueDecode(FrameMediaBox(sample), captureMs: Double(tag))
+            decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: Double(tag))
         }
 
         await waitFor { lock.lock(); defer { lock.unlock() }; return observedOrder.count == 5 }

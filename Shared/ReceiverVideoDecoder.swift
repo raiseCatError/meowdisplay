@@ -16,6 +16,16 @@
 // touching a decoder at all), so it deliberately stays host-side rather
 // than migrating in here — see the STOP CONDITIONS note in the C4 report.
 //
+// RC-3 Stage D update: `videoGeneration` now lives on `ReceiverVideoPresenter`
+// (see its file header), still host-side policy, not this actor's. Its
+// value at the moment a frame is submitted is threaded through opaquely as
+// `generation` on `enqueueDecode`/`Command.decode`/`decodedFrameReady` —
+// this actor never reads or compares it, only carries it — so the
+// presenter can discard a decode whose output arrives after a later
+// resync/reset superseded it, closing the pre-existing "stale VT callback"
+// gap the C4 review flagged without this actor gaining any generation
+// concept of its own.
+//
 // Input boundary: `ReceiverFramePipeline` already emits presentation-ready
 // `CMSampleBuffer`s, boxed the same way it hands them to the host
 // (`FrameMediaBox`, reused here rather than inventing a second wrapper).
@@ -69,7 +79,7 @@ actor ReceiverVideoDecoder {
     /// `debugSubmissionObserver` (DEBUG-only, test-only) needs to name this
     /// type from `ReceiverVideoDecoderTests`, in a different file.
     enum Command: Sendable {
-        case decode(FrameMediaBox<CMSampleBuffer>, captureMs: Double?)
+        case decode(FrameMediaBox<CMSampleBuffer>, generation: UInt64, captureMs: Double?)
         case reset
         case noteFormatDescriptionChanged
         #if DEBUG
@@ -84,9 +94,17 @@ actor ReceiverVideoDecoder {
     /// queue-confined state, exactly like `ReceiverFramePipeline.
     /// OutputEffects`.
     struct OutputEffects: Sendable {
-        /// A frame decoded successfully — the Metal renderer path's sink
-        /// (`StreamReceiver.onDecodedFrame`).
-        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ captureMs: Double?) -> Void
+        /// A frame decoded successfully — the Metal renderer path's sink,
+        /// now routed through `ReceiverVideoPresenter` (Stage D) rather
+        /// than directly to `StreamReceiver.onDecodedFrame`. `generation`
+        /// is the presentation generation captured at the SAME point
+        /// `StreamReceiver.presentDecodedSample` captured it for the
+        /// direct-display path — threaded verbatim through `enqueueDecode`
+        /// and this actor's `decode`, opaque to this actor the whole way,
+        /// so the presenter can discard a decode that completes after a
+        /// resync/reset superseded it. Closes the pre-existing "stale VT
+        /// callback" gap the C4 review flagged (see this file's header).
+        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// One decode's wall-clock duration, ms — feeds `StreamReceiver`'s
         /// own `decodeWindow` telemetry ring exactly as before.
         var decodeDurationMs: @Sendable (Double) -> Void
@@ -153,8 +171,8 @@ actor ReceiverVideoDecoder {
             debugSubmissionObserver?(command)
             #endif
             switch command {
-            case .decode(let box, let captureMs):
-                decode(box, captureMs: captureMs)
+            case .decode(let box, let generation, let captureMs):
+                decode(box, generation: generation, captureMs: captureMs)
             case .reset:
                 reset()
             case .noteFormatDescriptionChanged:
@@ -173,8 +191,8 @@ actor ReceiverVideoDecoder {
     /// path's sole entry point — `StreamReceiver.presentDecodedSample`
     /// calls this directly from its own `queue`-confined `present` closure,
     /// never wrapped in a `Task`.
-    nonisolated func enqueueDecode(_ box: FrameMediaBox<CMSampleBuffer>, captureMs: Double?) {
-        commandContinuation.yield(.decode(box, captureMs: captureMs))
+    nonisolated func enqueueDecode(_ box: FrameMediaBox<CMSampleBuffer>, generation: UInt64, captureMs: Double?) {
+        commandContinuation.yield(.decode(box, generation: generation, captureMs: captureMs))
     }
 
     /// Enqueues a full session invalidation — video-state-off, codec
@@ -273,7 +291,7 @@ actor ReceiverVideoDecoder {
     /// relied on it either) — it only ever calls back out through
     /// `Sendable` `outputEffects` closures, never touches actor state
     /// directly, and captures no unmanaged reference to this actor.
-    private func decode(_ box: FrameMediaBox<CMSampleBuffer>, captureMs: Double?) {
+    private func decode(_ box: FrameMediaBox<CMSampleBuffer>, generation: UInt64, captureMs: Double?) {
         let sample = box.value
         guard let formatDesc = CMSampleBufferGetFormatDescription(sample) else { return }
         ensureSession(formatDescription: formatDesc)
@@ -285,7 +303,7 @@ actor ReceiverVideoDecoder {
         ) { [weak self] status, _, imageBuffer, _, _ in
             if status == noErr, let imageBuffer {
                 effects.decodeDurationMs(Date().timeIntervalSince(t0) * 1000)
-                effects.decodedFrameReady(FrameMediaBox(imageBuffer), captureMs)
+                effects.decodedFrameReady(FrameMediaBox(imageBuffer), generation, captureMs)
             } else {
                 Task { await self?.recordDecodeFailure(status: status, fromCallback: true) }
                 effects.requestKeyframe()
