@@ -6,6 +6,7 @@ import Sparkle
 /// `canCheckForUpdates` so the button disables itself while a check is
 /// already running (or the updater isn't ready). Shared by the sender and
 /// the receiver app.
+@MainActor
 final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false
 

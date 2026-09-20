@@ -769,8 +769,8 @@ final class StreamReceiver: ObservableObject {
                 Log.info("pairDebug: onPending peerID=\(pending.peerID)")
                 self?.beginExplicitPairing(peerID: pending.peerID)
             }
+            self.displayLayer.videoGravity = .resizeAspect
         }
-        displayLayer.videoGravity = .resizeAspect
     }
 
     func start() {
