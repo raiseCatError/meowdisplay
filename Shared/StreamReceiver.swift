@@ -1374,6 +1374,12 @@ final class StreamReceiver: ObservableObject {
             Log.info("reconnectDebug: superseded oldGeneration=\(supersededGeneration)"
                      + " newGeneration=\(sessionState.generation)")
         }
+        // RC-3 SendTarget checkpoint: install synchronously, right here on
+        // `queue`, as soon as the replacement and its generation are both
+        // committed — the same instant `connection` itself becomes this new
+        // value, matching today's un-gated (no `.ready` check) implicit-send
+        // behavior exactly, with no publication lag (see `SendTargetBox`).
+        sendTargetBox.install(SendTarget(connection: conn, generation: sessionState.generation))
         // The race is decided: rival candidates die here.
         for pending in pendingConnections where pending !== conn { pending.cancel() }
         pendingConnections.removeAll()
@@ -1918,18 +1924,18 @@ final class StreamReceiver: ObservableObject {
         guard displayState == .running else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
-        sendControl(msg)
+        sendUIControl(msg)
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
     @MainActor func sendScroll(dx: Double, dy: Double) {
         guard displayState == .running else { return }
-        sendControl(["type": "scroll", "dx": dx, "dy": dy])
+        sendUIControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
     /// Send a semantic gesture without changing the meaning of touch/scroll input.
-    func sendGesture(name: String) {
-        sendControl(["type": "gesture", "name": name])
+    @MainActor func sendGesture(name: String) {
+        sendUIControl(["type": "gesture", "name": name])
     }
 
     /// M7 pointer/click messages (pv 5). Callers MUST check
@@ -1940,14 +1946,14 @@ final class StreamReceiver: ObservableObject {
     /// button implied.
     @MainActor func sendPointerMove(x: Double, y: Double) {
         guard displayState == .running else { return }
-        sendControl(["type": "pointer", "action": "move", "x": x, "y": y])
+        sendUIControl(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
     /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
     /// `scroll`), no button implied.
     @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
         guard displayState == .running else { return }
-        sendControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
+        sendUIControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
     }
 
     /// Presses `button` down at the Mac's current cursor position with the
@@ -1955,7 +1961,7 @@ final class StreamReceiver: ObservableObject {
     /// `NSEvent.clickCount`/`CGEventClickState`).
     @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
-        sendControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
+        sendUIControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Releases `button`. Every `down` a receiver sends MUST be followed by
@@ -1964,7 +1970,7 @@ final class StreamReceiver: ObservableObject {
     /// contract).
     @MainActor func sendPointerUp(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
-        sendControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
+        sendUIControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
@@ -1982,12 +1988,12 @@ final class StreamReceiver: ObservableObject {
             "rotation": 0,   // TODO: UIKit rollAngle once Pencil Pro is available
         ]
         if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
-        sendControl(msg)
+        sendUIControl(msg)
     }
 
     @MainActor func sendProximity(entering: Bool, x: Double, y: Double) {
         guard displayState == .running else { return }
-        sendControl(["type": "proximity", "entering": entering, "x": x, "y": y])
+        sendUIControl(["type": "proximity", "entering": entering, "x": x, "y": y])
     }
 
     /// Committed Unicode text from the native software/hardware keyboard
@@ -1995,7 +2001,7 @@ final class StreamReceiver: ObservableObject {
     /// only finished text (see `RemoteKeyboardInputView`).
     @MainActor func sendKeyboardText(_ text: String) {
         guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
-        sendControl(["type": "keyboard", "action": "text", "text": text])
+        sendUIControl(["type": "keyboard", "action": "text", "text": text])
     }
 
     /// An atomic special key from the software keyboard (e.g. Return,
@@ -2011,20 +2017,20 @@ final class StreamReceiver: ObservableObject {
             Log.info("keyboardDebug: specialPress sent usage=\(usage)")
         }
         #endif
-        sendControl(["type": "keyboard", "action": "press", "usage": usage,
+        sendUIControl(["type": "keyboard", "action": "press", "usage": usage,
                      "modifiers": modifiers])
     }
 
     @MainActor func sendModifier(_ modifier: ControlModifier, down: Bool) {
         guard displayState == .running,
               macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
-        sendControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
+        sendUIControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
                      "modifier": modifier.rawValue])
     }
 
     @MainActor func sendCancelActiveInput() {
         guard macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
-        sendControl(["type": "keyboard", "action": "cancel"])
+        sendUIControl(["type": "keyboard", "action": "cancel"])
     }
 
     /// `true`: requests control of THIS session — never an assignment, the
@@ -2037,12 +2043,12 @@ final class StreamReceiver: ObservableObject {
     /// while disconnected.
     @MainActor func requestAllowInput(_ allowed: Bool) {
         guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
-        sendControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
+        sendUIControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
     }
 
     @MainActor func requestVideoEnabled(_ enabled: Bool) {
         guard connected, macSupportsVideoControl else { return }
-        sendControl(["type": WireMessage.videoRequest, "enabled": enabled])
+        sendUIControl(["type": WireMessage.videoRequest, "enabled": enabled])
     }
 
     /// Requests a Mac-side streaming profile over the existing authenticated
@@ -2051,7 +2057,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestStreamingProfile(_ profile: StreamingProfile,
                                  customFrameRate: CustomFrameRateSelection = .auto) {
         guard connected else { return }
-        sendControl(["type": WireMessage.streamingProfileRequest,
+        sendUIControl(["type": WireMessage.streamingProfileRequest,
                      "profile": profile.rawValue,
                      "customFrameRate": customFrameRate.rawValue])
     }
@@ -2061,7 +2067,7 @@ final class StreamReceiver: ObservableObject {
     /// reports the accepted priority back through `streamingPriorityState`.
     @MainActor func requestStreamingPriority(_ priority: StreamingPriority) {
         guard connected else { return }
-        sendControl(["type": WireMessage.streamingPriorityRequest,
+        sendUIControl(["type": WireMessage.streamingPriorityRequest,
                      "priority": priority.rawValue])
     }
 
@@ -2075,7 +2081,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestAudioEnabled(_ enabled: Bool) {
         audioPreferred = enabled
         guard connected, macSupportsAudio else { return }
-        sendControl(["type": WireMessage.audioRequest, "enabled": enabled])
+        sendUIControl(["type": WireMessage.audioRequest, "enabled": enabled])
     }
 
     /// Seeds the preference to resend on connect/reconnect without sending
@@ -2097,7 +2103,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestPromoteInteractiveWake() {
         guard connected else { return }
         Log.info("wakeDebug: promoteInteractiveWake request sent")
-        sendControl(["type": WireMessage.promoteInteractiveWake])
+        sendUIControl(["type": WireMessage.promoteInteractiveWake])
     }
 
     @MainActor func sendNativeAppGesture(kind: NativeAppGestureKind,
@@ -2105,7 +2111,7 @@ final class StreamReceiver: ObservableObject {
                               delta: Double) {
         guard displayState == .running,
               macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion else { return }
-        sendControl(["type": WireMessage.nativeAppGesture,
+        sendUIControl(["type": WireMessage.nativeAppGesture,
                      "kind": kind.rawValue,
                      "phase": phase.rawValue,
                      "delta": delta])
@@ -2148,7 +2154,7 @@ final class StreamReceiver: ObservableObject {
         pendingDisplayMode = displayModeRequestState.pendingMode
         controlResetGeneration &+= 1
         sendCancelActiveInput()
-        sendControl(["type": WireMessage.displayModeRequest, "mode": mode.rawValue])
+        sendUIControl(["type": WireMessage.displayModeRequest, "mode": mode.rawValue])
         // A mode switch rebuilds the Mac's session, so the confirmation
         // legitimately arrives after a reconnect — the pending flag must
         // survive that. It must never survive a Mac that simply never
@@ -2212,7 +2218,7 @@ final class StreamReceiver: ObservableObject {
         if let uuid, !knownUUIDs.contains(uuid) { return }
         var dict: [String: Any] = ["type": WireMessage.mirrorDisplayRequest]
         if let uuid { dict["selectedUUID"] = uuid }
-        sendControl(dict)
+        sendUIControl(dict)
     }
 
     /// Deliberate session teardown (stop/sleep/close): the Mac's mode is no
@@ -2255,7 +2261,7 @@ final class StreamReceiver: ObservableObject {
         pendingExtendShape = extendShapeRequestState.pending
         var dict = preference.wireFields
         dict["type"] = WireMessage.extendShapeRequest
-        sendControl(dict)
+        sendUIControl(dict)
         let generation = extendShapeRequestState.pendingGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.displayModeRequestTimeout) { [weak self] in
             self?.expirePendingExtendShape(generation: generation)
@@ -2300,7 +2306,7 @@ final class StreamReceiver: ObservableObject {
         pendingMaxFPS = maxFPSRequestState.pending
         var dict = preference.wireFields
         dict["type"] = WireMessage.maxFPSRequest
-        sendControl(dict)
+        sendUIControl(dict)
         let generation = maxFPSRequestState.pendingGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.displayModeRequestTimeout) { [weak self] in
             self?.expirePendingMaxFPS(generation: generation)
@@ -2339,13 +2345,13 @@ final class StreamReceiver: ObservableObject {
     /// raw UIKit flags.
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String]) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
+        sendUIControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
     }
 
     /// The matching release for `sendKeyboardDown`.
     @MainActor func sendKeyboardUp(usage: Int, modifiers: [String]) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
+        sendUIControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
@@ -2362,6 +2368,23 @@ final class StreamReceiver: ObservableObject {
             if let error { Log.info("control send error: \(error)") }
             completion?()
         })
+    }
+
+    /// RC-3 SendTarget checkpoint: the entry point for the `@MainActor`
+    /// input/request surface (touch, pointer, keyboard, modifiers, gestures,
+    /// and the `request*` preference methods). Reads `sendTargetBox`
+    /// synchronously — always instantaneously current, no publication lag —
+    /// instead of letting `sendControl` fall through to the
+    /// background-queue-confined `connection` field, so this call site no
+    /// longer has any dependency on `connection`'s eventual actor ownership
+    /// (C1). `sendControl` itself is unchanged and still serves its
+    /// background-queue-confined callers (liveness ping, decoder-reset
+    /// keyframe requests, the periodic stats report) via the original
+    /// `connection` fallback — those callers run on `queue`, not the main
+    /// actor, and are out of scope for this checkpoint.
+    @MainActor
+    private func sendUIControl(_ message: [String: Any]) {
+        sendControl(message, on: sendTargetBox.current()?.connection)
     }
 
     // MARK: - Socket read + length-prefixed deframing
@@ -4041,6 +4064,84 @@ final class StreamReceiver: ObservableObject {
         DispatchQueue.main.async { update() }
     }
 
+    /// RC-3 SendTarget checkpoint: preparation for the C1 connection/session
+    /// actor. `NWConnection` is natively `Sendable` in this project's SDK
+    /// (verified directly against the toolchain under
+    /// `-strict-concurrency=complete`), so this is a plain `Sendable` value,
+    /// not an `@unchecked` one. It is a read-only, generation-tagged capability
+    /// for best-effort outbound control sends — never a second authoritative
+    /// owner: nothing reads this to cancel, replace, or adopt a connection,
+    /// and nothing here participates in inbound generation/staleness
+    /// decisions (those stay entirely in `adopt`/`setConnected`, the sole
+    /// writers, below).
+    struct SendTarget: Sendable {
+        let connection: NWConnection
+        let generation: Int
+    }
+
+    /// A synchronous, lock-protected holder for the current `SendTarget`.
+    ///
+    /// An earlier version of this checkpoint mirrored `SendTarget` into an
+    /// `@MainActor` property, installed/cleared via `publishToUI`'s
+    /// `DispatchQueue.main.async` hop from `adopt`/`setConnected` (both still
+    /// `queue`-confined today). That hop is asynchronous, so the mirror could
+    /// briefly hold a stale-but-non-nil target after a fresh `adopt()` — and
+    /// because `sendUIControl` passed it as an *explicit* `on:` argument,
+    /// `sendControl`'s `conn ?? connection` fallback could never see past a
+    /// stale-non-nil value to the real, already-current `connection`. That is
+    /// a real change in connection-selection semantics versus today, not a
+    /// bounded/benign one, so it was wrong to accept.
+    ///
+    /// The fix is to stop treating this as something that needs an
+    /// actor-style mirror at all: a `SendTarget` is a tiny `Sendable` value
+    /// behind a lock, and `NSLock` lets `adopt`/`setConnected` (today) and
+    /// the eventual actor (C1) install/clear it **synchronously, from
+    /// whatever thread they run on** — no `@MainActor` hop, no lag, no
+    /// staleness window at all, and no `Task` on the read side either.
+    ///
+    /// No `Sendable` conformance is declared, and none is needed:
+    /// `OpenSidecarMacReceiver`'s macOS 12 deployment floor rules out
+    /// `OSAllocatedUnfairLock` (macOS 13+) and `Mutex` (`Synchronization`,
+    /// macOS 15+), so a checked concurrency-safe lock isn't available here —
+    /// but this box is never sent across an isolation boundary as a value
+    /// (it's a plain stored property on `StreamReceiver`, reached only via
+    /// `self.sendTargetBox.method()`), so the compiler never asks it to
+    /// prove `Sendable` in the first place. Its actual thread-safety comes
+    /// entirely from the lock, verified by construction: `target` is a
+    /// private `var` never touched outside `lock`/`unlock`, and the type
+    /// exposes exactly three synchronized operations and nothing else — it
+    /// cannot be used to bypass isolation for anything but this one
+    /// send-only capability.
+    final class SendTargetBox {
+        private let lock = NSLock()
+        private var target: SendTarget?
+
+        /// Installs `newTarget` unless a newer generation is already held —
+        /// monotonic so an out-of-order call (e.g. two rapid replacements)
+        /// can never regress a newer target back to a superseded one.
+        func install(_ newTarget: SendTarget) {
+            lock.lock(); defer { lock.unlock() }
+            guard newTarget.generation >= (target?.generation ?? Int.min) else { return }
+            target = newTarget
+        }
+
+        /// Clears the held target only if it still belongs to `generation` —
+        /// a late clear for a superseded generation must never remove a
+        /// newer target that has already replaced it.
+        func clear(forGeneration generation: Int) {
+            lock.lock(); defer { lock.unlock() }
+            guard target?.generation == generation else { return }
+            target = nil
+        }
+
+        func current() -> SendTarget? {
+            lock.lock(); defer { lock.unlock() }
+            return target
+        }
+    }
+
+    private let sendTargetBox = SendTargetBox()
+
     /// The `displayState` mirror and its callback always change together —
     /// duplicated verbatim at three call sites before this consolidation.
     private func publishDisplayState(_ state: DisplayState) {
@@ -4096,6 +4197,13 @@ final class StreamReceiver: ObservableObject {
         }
         if !value {
             let oldGeneration = sessionState.generation
+            // RC-3 SendTarget checkpoint: `setConnected` is the single funnel
+            // for every "connection went away" path (explicit disconnect,
+            // watchdog drop, peer close, receive error/EOF) — clearing here,
+            // synchronously, covers all of them uniformly. Guarded by
+            // generation so a clear racing a newer adopt() can never remove
+            // a target that has already superseded this one.
+            sendTargetBox.clear(forGeneration: oldGeneration)
             transport = "—"
             // A peer that already told us the two apps are incompatible must
             // not be retried; every other loss is transport-shaped.
