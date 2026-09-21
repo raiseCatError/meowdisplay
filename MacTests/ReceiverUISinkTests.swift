@@ -53,6 +53,21 @@ final class ReceiverUISinkTests: XCTestCase {
         XCTAssertEqual(firstReceiver.status, "first", "must not still be writing into the old target")
     }
 
+    func testPublishAuthenticatedPeerIDWritesTargetField() {
+        let receiver = makeReceiver()
+        let sink = ReceiverUISink()
+        sink.target = receiver
+        sink.publishAuthenticatedPeerID("peer-123")
+        XCTAssertEqual(receiver.authenticatedPeerID, "peer-123")
+        sink.publishAuthenticatedPeerID(nil)
+        XCTAssertNil(receiver.authenticatedPeerID)
+    }
+
+    func testPublishAuthenticatedPeerIDIsNoOpWithNoTargetAssigned() {
+        let sink = ReceiverUISink()
+        sink.publishAuthenticatedPeerID("ignored")
+    }
+
     /// Lifetime review: `ReceiverUISink` must hold `target` weakly — it must
     /// never be the reason a `StreamReceiver` stays alive.
     func testTargetIsHeldWeakly() {

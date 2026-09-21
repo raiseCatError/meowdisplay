@@ -72,4 +72,16 @@ final class ReceiverUISink: Sendable {
     func publishVideoSize(_ size: CGSize) {
         target?.videoSize = size
     }
+
+    /// Mirrors the UI-publish half of the former
+    /// `onConnectionReadyHostWork` — the one boundary crossing that method
+    /// needed `self` for, now that its other work (`reconnectContext`,
+    /// `framePipeline.syncState`, `transportState`) runs through directly
+    /// captured owners in `makePipelineHostEffects()`. UI-only: writes only
+    /// the already-`@MainActor` `authenticatedPeerID` field via the
+    /// existing `private(set)` setter, no read-back, no policy, no
+    /// reconnect/network behavior.
+    func publishAuthenticatedPeerID(_ peerID: String?) {
+        target?.applyAuthenticatedPeerIDUpdate(peerID)
+    }
 }

@@ -1382,15 +1382,26 @@ final class StreamReceiver: ObservableObject {
     /// between `pipeline` marking `conn` `.ready` and adoption's own reset
     /// would otherwise see an arbitrarily stale timestamp for a connection
     /// that just proved itself.
-    private func onConnectionReadyHostWork(_ conn: NWConnection) {
+    ///
+    /// Receiver Swift6-E1: static, taking every owner explicitly, so
+    /// `makePipelineHostEffects()`'s `onConnectionReady` closure below can
+    /// call it without capturing `self` — same shape as `updateTransport(for:
+    /// path:transportState:)` above. `syncState`/`transportState`/
+    /// `reconnectContext`/`uiSink` are the same stable, directly-captured
+    /// owners already used elsewhere in that closure builder.
+    private static func onConnectionReadyHostWork(
+        _ conn: NWConnection, reconnectContext: ReconnectContext,
+        syncState: FramePipelineSyncState, transportState: ReceiverTransportState,
+        uiSink: ReceiverUISink
+    ) {
         reconnectContext.update { $0.manualConnectPeerID = nil }
-        framePipeline.syncState.recordDataReceived(Date())
+        syncState.recordDataReceived(Date())
         if let path = conn.currentPath {
-            updateTransport(for: conn, path: path)
+            updateTransport(for: conn, path: path, transportState: transportState)
         }
-        let resolvedPeerID = Self.resolveAuthenticatedPeerID(from: conn)
+        let resolvedPeerID = resolveAuthenticatedPeerID(from: conn)
         reconnectContext.update { $0.authenticatedPeerIDHint = resolvedPeerID }
-        publishToUI { self.authenticatedPeerID = resolvedPeerID }
+        DispatchQueue.main.async { uiSink.publishAuthenticatedPeerID(resolvedPeerID) }
     }
 
     /// The address-watch liveness timer's host-only work — see
@@ -3592,6 +3603,15 @@ final class StreamReceiver: ObservableObject {
         // `pipeline`'s own init).
         let queue = self.queue
         let sendTargetBox = self.sendTargetBox
+        // Receiver Swift6-E1: `reconnectContext`/`uiSink` captured directly
+        // instead of `self` — both already stable owners captured this way
+        // elsewhere in this file (`makePipelineUIEffects()`'s
+        // `reconnectContext`, `makePipelineHostEffects()`'s own `syncState`/
+        // `transportState` above). `onConnectionReadyHostWork` is now a
+        // static helper taking these plus `syncState`/`transportState`
+        // explicitly, so the closure below needs no `self` at all.
+        let reconnectContext = self.reconnectContext
+        let uiSink = self.uiSink
         return .init(
             clearTransport: {
                 transportState.clear()
@@ -3609,8 +3629,12 @@ final class StreamReceiver: ObservableObject {
             beginAdoption: { [weak self] conn, generation in
                 self?.queue.async { self?.beginAdoptionHostWork(conn, generation: generation) }
             },
-            onConnectionReady: { [weak self] conn in
-                self?.queue.async { self?.onConnectionReadyHostWork(conn) }
+            onConnectionReady: { conn in
+                queue.async {
+                    Self.onConnectionReadyHostWork(
+                        conn, reconnectContext: reconnectContext, syncState: syncState,
+                        transportState: transportState, uiSink: uiSink)
+                }
             },
             sendHello: { [weak self] conn in
                 self?.queue.async { self?.sendHello(on: conn) }
@@ -3741,6 +3765,14 @@ final class StreamReceiver: ObservableObject {
     /// reachable from `ReceiverUISink`.
     @MainActor func applyUISessionSnapshot(_ snapshot: ReceiverSessionState) {
         session = snapshot
+    }
+
+    /// The `authenticatedPeerID` UI-publish half of the former
+    /// `onConnectionReadyHostWork` — see `ReceiverUISink.
+    /// publishAuthenticatedPeerID`, its sole caller. Same single-assignment,
+    /// `private(set)`-admitting shape as `applyUISessionSnapshot` above.
+    @MainActor func applyAuthenticatedPeerIDUpdate(_ peerID: String?) {
+        authenticatedPeerID = peerID
     }
 
     /// The `UIEffects.applyConnectedUIMirror` half of the former
