@@ -1044,6 +1044,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let fpsResult = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh)
         guard fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
+        needsKeyframe = true
         let config = SCStreamConfiguration()
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fpsResult.fps * 2))
         Task {
