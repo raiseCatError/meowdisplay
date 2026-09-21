@@ -3592,6 +3592,17 @@ final class StreamReceiver: ObservableObject {
         // instance, same enqueue point, same `Task` creation point as before.
         let queue = queue
         let pipeline = pipeline
+        // D1: `codecConfigurationChanged` is a pure pass-through — presenter
+        // flush, DEBUG decoder notification, then a UI publish — with no
+        // coordinator logic of its own, so it captures its stable owners
+        // directly instead of `self`. `presenter` is force-created at the
+        // tail of `init` (before this factory's caller ever runs) and never
+        // reassigned afterward — see `presenter`'s own doc comment — so
+        // evaluating it here is safe and does not re-enter the
+        // decoder/presenter construction cycle B2.2 guards against.
+        let presenter = presenter
+        let videoDecoderRef = videoDecoderRef
+        let uiSink = uiSink
         return .init(
             controlMessage: { [weak self] data in
                 self?.queue.async { self?.handleVideoChannelJSON(data) }
@@ -3599,8 +3610,8 @@ final class StreamReceiver: ObservableObject {
             audioPayload: { [weak self] data in
                 self?.queue.async { self?.handleAudioMediaFrame(data) }
             },
-            codecConfigurationChanged: { [weak self] box, videoSize in
-                self?.queue.async { guard let self else { return }
+            codecConfigurationChanged: { box, videoSize in
+                queue.async {
                     // Retires the previous session's/format's currently-
                     // displayed frame — see `handleAnnexB`'s old inline
                     // comment (now `ReceiverFramePipeline.handleAnnexB`)
@@ -3608,14 +3619,20 @@ final class StreamReceiver: ObservableObject {
                     // from the new format description is presented. Stage D:
                     // ordered through `presenter` instead of touching
                     // `displayLayer` directly.
-                    self.presenter.enqueueFlushAndRemoveImage()
+                    presenter.enqueueFlushAndRemoveImage()
                     #if DEBUG
                     // BLACK-VIDEO forensics: a fresh SPS/PPS means a new
                     // decode generation — re-arm the decoded-frame luma probe.
-                    self.videoDecoder.enqueueFormatDescriptionChanged()
+                    // Resolved through `videoDecoderRef` (not `self.
+                    // videoDecoder` directly) — same seam B2.2 established
+                    // for cross-owner decoder access.
+                    videoDecoderRef.get()?.enqueueFormatDescriptionChanged()
                     #endif
-                    self.publishToUI { self.videoSize = videoSize }
-                    self.setStatus("Receiving \(Int(videoSize.width))×\(Int(videoSize.height))")
+                    let statusText = "Receiving \(Int(videoSize.width))×\(Int(videoSize.height))"
+                    DispatchQueue.main.async {
+                        uiSink.publishVideoSize(videoSize)
+                        uiSink.publishStatus(statusText)
+                    }
                 }
             },
             presentationFrame: { [weak self] box, captureMs, sendMs in

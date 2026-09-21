@@ -63,4 +63,13 @@ final class ReceiverUISink: Sendable {
     func publishConnectedUIMirror(_ value: Bool) {
         target?.applyConnectedUIMirrorFields(value)
     }
+
+    /// Mirrors the `videoSize` publish half of `StreamReceiver`'s
+    /// `codecConfigurationChanged` output effect — the other single boundary
+    /// crossing this sink exists for, alongside `publishStatus` (used for
+    /// the accompanying "Receiving WxH" text). UI-only: writes only the
+    /// already-`@MainActor` `videoSize` field, no read-back, no policy.
+    func publishVideoSize(_ size: CGSize) {
+        target?.videoSize = size
+    }
 }
