@@ -65,6 +65,34 @@ enum PeerUpdateSignal: Equatable {
     case updateMac(message: String)                      // sender's pv is below our floor
 }
 
+/// Lock-protected home for `transport`, the display-only route label
+/// ("USB"/"AWDL"/"LAN"/"—") shown in the status text and mirrored into
+/// `PerfStats`. Every writer (`updateTransport`'s path classification,
+/// `clearTransport`'s reset to "—") only ever replaces the whole value —
+/// there is no compound invariant across writes, so a plain last-write-wins
+/// lock is sufficient and no ordering between writers is required. Same
+/// idiom as `FramePipelineSyncState` (`ReceiverFramePipeline.swift`): an
+/// `NSLock`-protected value, never an unsynchronized `@Sendable` getter
+/// closure reading another isolation domain's state directly.
+final class ReceiverTransportState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = "—"
+
+    func set(_ newValue: String) {
+        lock.lock(); defer { lock.unlock() }
+        value = newValue
+    }
+
+    func clear() {
+        set("—")
+    }
+
+    func get() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -481,7 +509,16 @@ final class StreamReceiver: ObservableObject {
     private var encodeWindow: [Double] = []     // capture→socket on the Mac, ms
     private var e2eRing: [Double] = []          // per-frame, for the overlay graph
     private var statsReportCounter = 0
-    private var transport = "—"
+    // B2.3: storage moved to `transportState` (a narrow, lock-protected
+    // owner — see its doc comment) so the `clearTransport` host effect
+    // below can write it without capturing `self`. This computed property
+    // keeps every other read/write site (`updateTransport`, the stats
+    // snapshot, `setStatusConnected`) unchanged.
+    private var transport: String {
+        get { transportState.get() }
+        set { transportState.set(newValue) }
+    }
+    private let transportState = ReceiverTransportState()
     private var macDrops = 0
     private var macEncDrops = 0
     private var macNetDrops = 0
@@ -3464,9 +3501,15 @@ final class StreamReceiver: ObservableObject {
     /// touching it.
     private func makePipelineHostEffects() -> ReceiverPipelineActor.HostControlEffects {
         let syncState = framePipelineSyncState
+        // B2.3: both captured as plain Sendable values, no `self`/queue hop
+        // needed — `transportState` is its own lock-protected owner, and
+        // `advertisesAddresses` (`deviceKind == "Mac"`) never changes after
+        // `init` since `deviceKind` is a `let`.
+        let transportState = self.transportState
+        let advertises = advertisesAddresses
         return .init(
-            clearTransport: { [weak self] in
-                self?.queue.async { self?.transport = "—" }
+            clearTransport: {
+                transportState.clear()
             },
             ensureTLSListening: { [weak self] in
                 self?.queue.async { self?.ensureTLSListening() }
@@ -3477,7 +3520,7 @@ final class StreamReceiver: ObservableObject {
             getReceiveLiveness: {
                 syncState.snapshot()
             },
-            advertisesAddresses: { [weak self] in self?.advertisesAddresses ?? false },
+            advertisesAddresses: { advertises },
             beginAdoption: { [weak self] conn, generation in
                 self?.queue.async { self?.beginAdoptionHostWork(conn, generation: generation) }
             },
