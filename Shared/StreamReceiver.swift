@@ -3485,6 +3485,12 @@ final class StreamReceiver: ObservableObject {
         // ordered after that write, exactly as before.
         let queue = self.queue
         let transportState = self.transportState
+        // Receiver Swift6-C2: same `reconnectContext` instance already
+        // captured directly (not through `self`) by `pipeline`'s own init
+        // and by `makePipelineHostEffects()` — its own lock keeps `update`
+        // safe to call from any thread, so `applyConnectedUIMirror` below
+        // needs no queue hop to touch it.
+        let reconnectContext = self.reconnectContext
         return .init(
             // Receiver Swift6-B1: both publish through `uiSink`, a Sendable
             // @MainActor proxy — see its file header — instead of capturing
@@ -3504,7 +3510,21 @@ final class StreamReceiver: ObservableObject {
                     DispatchQueue.main.async { sink.publishStatus(text) }
                 }
             },
-            applyConnectedUIMirror: { [weak self] value in self?.applyConnectedUIMirror(value) })
+            // Receiver Swift6-C2: split at the ownership boundary the
+            // original `applyConnectedUIMirror` blurred — the
+            // `reconnectContext` clear is host state with its own existing
+            // Sendable owner (already captured directly above, in
+            // `makePipelineHostEffects`), so it runs here with no queue hop
+            // and no `self`, synchronously before the UI mirror publish,
+            // exactly as the original ordering required. The UI-mirror
+            // fields stay behind `sink`, same as `publishSessionSnapshot`/
+            // `setStatus` above.
+            applyConnectedUIMirror: { value in
+                if !value {
+                    reconnectContext.update { $0.authenticatedPeerIDHint = nil }
+                }
+                DispatchQueue.main.async { sink.publishConnectedUIMirror(value) }
+            })
     }
 
     /// The transitional host-control callbacks `pipeline` calls out to for
@@ -3651,45 +3671,42 @@ final class StreamReceiver: ObservableObject {
     /// `setConnected` — the UI-mirror-only side effects, unrelated to
     /// session/generation ownership, which stays inside `pipeline`
     /// (`ReceiverPipelineActor.setConnected`) — see `ReceiverSessionLossReason`.
-    private func applyConnectedUIMirror(_ value: Bool) {
+    ///
+    /// Receiver Swift6-C2: this is now reached only through `ReceiverUISink.
+    /// publishConnectedUIMirror(_:)` (same one-way, immutable-payload-in,
+    /// `@MainActor`-only shape as `applyUISessionSnapshot`), already on
+    /// `MainActor` by the time it runs — the `reconnectContext` host-state
+    /// clear that used to open this method now happens directly in
+    /// `makePipelineUIEffects()`'s closure, before this is ever called, so
+    /// the original clear-before-publish ordering is unchanged.
+    @MainActor func applyConnectedUIMirrorFields(_ value: Bool) {
+        connected = value
         if !value {
-            // Synchronous, not deferred into the `publishToUI` hop below —
-            // `pipeline` already captured the old hint for `recoveryPeerID`
-            // purposes before calling this, so clearing it here promptly
-            // (rather than only after a MainActor round trip) keeps a
-            // subsequent `armReconnect` from ever seeing a stale hint tied
-            // to a session that has already ended.
-            reconnectContext.update { $0.authenticatedPeerIDHint = nil }
-        }
-        publishToUI {
-            self.connected = value
-            if !value {
-                self.authenticatedPeerID = nil
-                self.macProtocolVersion = WireProtocol.assumedWhenAbsent
-                self.videoEnabled = true
-                // The mode is only ever known from a live Mac. A request
-                // already in flight is deliberately kept: switching modes
-                // rebuilds the Mac's session, so the drop is part of the
-                // transition and the reply arrives on the next one.
-                self.confirmedDisplayMode = nil
-                // Same reasoning as confirmedDisplayMode: stale inventory/
-                // selection from a dead session must not linger as if it
-                // were still current — a fresh mirrorDisplayState arrives on
-                // the next hello.
-                self.mirrorDisplayState = nil
-                // Same reasoning again: the Mac's active shape is only ever
-                // known from a live Mac; a fresh extendShapeState arrives on
-                // the next hello.
-                self.confirmedExtendShape = nil
-                // Same reasoning again: only ever known from a live Mac.
-                self.confirmedMaxFPS = nil
-                self.lastMaxFPSState = nil
-                // The offer belonged to a specific attempt on a specific
-                // connection — any disconnect (deliberate or not) ends it;
-                // a fresh one arrives on the Mac's own next attempt, if any.
-                self.mirrorUnavailable = false
-                self.mirrorRejectedWhileExtending = false
-            }
+            self.authenticatedPeerID = nil
+            self.macProtocolVersion = WireProtocol.assumedWhenAbsent
+            self.videoEnabled = true
+            // The mode is only ever known from a live Mac. A request
+            // already in flight is deliberately kept: switching modes
+            // rebuilds the Mac's session, so the drop is part of the
+            // transition and the reply arrives on the next one.
+            self.confirmedDisplayMode = nil
+            // Same reasoning as confirmedDisplayMode: stale inventory/
+            // selection from a dead session must not linger as if it
+            // were still current — a fresh mirrorDisplayState arrives on
+            // the next hello.
+            self.mirrorDisplayState = nil
+            // Same reasoning again: the Mac's active shape is only ever
+            // known from a live Mac; a fresh extendShapeState arrives on
+            // the next hello.
+            self.confirmedExtendShape = nil
+            // Same reasoning again: only ever known from a live Mac.
+            self.confirmedMaxFPS = nil
+            self.lastMaxFPSState = nil
+            // The offer belonged to a specific attempt on a specific
+            // connection — any disconnect (deliberate or not) ends it;
+            // a fresh one arrives on the Mac's own next attempt, if any.
+            self.mirrorUnavailable = false
+            self.mirrorRejectedWhileExtending = false
         }
     }
 }

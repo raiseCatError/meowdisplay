@@ -54,4 +54,13 @@ final class ReceiverUISink: Sendable {
     func publishSessionSnapshot(_ snapshot: ReceiverSessionState) {
         target?.applyUISessionSnapshot(snapshot)
     }
+
+    /// Mirrors `StreamReceiver.applyConnectedUIMirror(_:)` for the same
+    /// single boundary crossing (`UIEffects.applyConnectedUIMirror`) — the
+    /// UI-mirror-only fields that reset when a connection drops, distinct
+    /// from the `reconnectContext` host-state clear that stays on the
+    /// pipeline side of that boundary.
+    func publishConnectedUIMirror(_ value: Bool) {
+        target?.applyConnectedUIMirrorFields(value)
+    }
 }
