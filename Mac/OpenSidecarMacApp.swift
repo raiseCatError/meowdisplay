@@ -36,6 +36,7 @@ struct OpenSidecarMacApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // Sparkle's standard updater. `startingUpdater: true` boots the updater
     // immediately so scheduled background checks (SUEnableAutomaticChecks)
