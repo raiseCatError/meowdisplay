@@ -90,8 +90,21 @@ import Foundation
 import AVFoundation
 import CoreMedia
 
+// Receiver Swift6-B2.2: `@unchecked Sendable` so `StreamReceiver` can hand a
+// direct (non-`self`) reference to this instance into `ReceiverVideoDecoder`'s
+// `decodedFrameReady` effect (see that actor's file, and the construction
+// order note in `StreamReceiver.init`), replacing a deferred `[weak self]`
+// lookup through `StreamReceiver` that Swift 6 rejects (`StreamReceiver`
+// itself is not `Sendable`). This is not a blanket escape hatch: every
+// public entry point (`enqueue*`) is already `nonisolated` and thread-safe
+// by construction (see the file header's "Ordering" and "MainActor"
+// sections) — the ONLY mutable state, `videoGeneration`, is written and read
+// exclusively from this class's own `runCommandPump`/`presentSample`/
+// `presentDecoded`, never from a capturing closure directly, so no new
+// unsynchronized access is introduced by allowing this type to cross an
+// isolation boundary as a plain reference.
 @MainActor
-final class ReceiverVideoPresenter {
+final class ReceiverVideoPresenter: @unchecked Sendable {
 
     /// One ordered unit of work — see the file header's Ordering section.
     /// `Sendable` so `nonisolated` callers can hand it to the stream

@@ -720,6 +720,21 @@ final class StreamReceiver: ObservableObject {
         // only fires on a subsequent change, never for this stored
         // property's own initial value.
         reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
+        // Receiver Swift6-B2.2: force `presenter` then `videoDecoder` into
+        // existence NOW, in this deterministic order, rather than leaving
+        // them to whichever of the two happens to be touched first at
+        // runtime (unprovable — e.g. release builds skip the DEBUG-only
+        // `videoDecoder.enqueueProbeDecodedLuma` call in
+        // `presentDecodedSample` that would otherwise happen to touch
+        // `videoDecoder` before `presenter` on every frame). `self` is
+        // fully initialized at this point (every non-lazy stored property
+        // above is already set), so it's legal for `makePresenter()`/
+        // `makeVideoDecoder()` to capture `self` weakly for their
+        // unrelated coordinator hops (`onDecodedFrame`/
+        // `requestKeyframeIfNeeded`) — see their own doc comments for why
+        // the cross-owner (sibling) references no longer need to.
+        _ = presenter
+        _ = videoDecoder
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.uiSink.target = self
@@ -2983,7 +2998,7 @@ final class StreamReceiver: ObservableObject {
     // `ReceiverVideoDecoder` — see its file header. This class now only
     // decides WHETHER to route a frame through it (`present`, above) and
     // wires its `OutputEffects` back onto `queue` — see
-    // `makeVideoDecoderOutputEffects` and `videoDecoder` below.
+    // `makeVideoDecoder` and `videoDecoder` below.
 
     private var lastKeyframeRequest = Date.distantPast
     private func requestKeyframeIfNeeded() {
@@ -3272,20 +3287,76 @@ final class StreamReceiver: ObservableObject {
     private lazy var framePipeline = ReceiverFramePipeline(
         outputEffects: makeFramePipelineOutputEffects(), syncState: framePipelineSyncState)
 
-    /// C4: the sole authoritative owner of the VideoToolbox decode domain
-    /// (Metal renderer path) — see its file header. `lazy` for the same
-    /// reason as `framePipeline` above.
-    private lazy var videoDecoder = ReceiverVideoDecoder(outputEffects: makeVideoDecoderOutputEffects())
+    /// Receiver Swift6-B2.2: the exactly-once, thread-safe binding that lets
+    /// `presenter`'s `decodeViaVideoDecoder` effect (constructed BEFORE
+    /// `videoDecoder` exists — `presenter` is force-constructed first in
+    /// `init`, see the tail of `init` below) reach the decoder without
+    /// capturing `self` (`StreamReceiver`, not `Sendable`). Bound exactly
+    /// once, by `makeVideoDecoder()`, immediately after `videoDecoder` is
+    /// constructed and before either owner's pump can process any command
+    /// (nothing enqueues one until `start()`/network activity, both well
+    /// after `init` returns). `@unchecked Sendable`: the only mutable state
+    /// is `decoder`, guarded by `lock`, written exactly once by `bind`
+    /// (which asserts it was never written before) and only ever read
+    /// through the same lock thereafter — no other mutable reference
+    /// escapes.
+    private final class VideoDecoderRef: @unchecked Sendable {
+        private let lock = NSLock()
+        private var decoder: ReceiverVideoDecoder?
 
-    /// The narrow output surface `videoDecoder` calls out to — see
-    /// `ReceiverVideoDecoder.OutputEffects`. `decodedFrameReady` now routes
-    /// through `presenter` (Stage D) instead of `queue`-hopping straight to
-    /// `onDecodedFrame` — see that effect's own doc comment.
-    private func makeVideoDecoderOutputEffects() -> ReceiverVideoDecoder.OutputEffects {
+        func bind(_ decoder: ReceiverVideoDecoder) {
+            lock.lock(); defer { lock.unlock() }
+            precondition(self.decoder == nil, "VideoDecoderRef bound twice")
+            self.decoder = decoder
+        }
+
+        func get() -> ReceiverVideoDecoder? {
+            lock.lock(); defer { lock.unlock() }
+            return decoder
+        }
+    }
+
+    /// Plain eager stored property (no `self` dependency at all — unlike
+    /// `videoDecoder`/`presenter` themselves) so both owners' factories can
+    /// close over it directly. See `VideoDecoderRef` above.
+    private let videoDecoderRef = VideoDecoderRef()
+
+    /// C4: the sole authoritative owner of the VideoToolbox decode domain
+    /// (Metal renderer path) — see its file header. `lazy`, same as before
+    /// B2.2 — Swift's two-phase init forbids capturing `self` (even
+    /// weakly, even for the unrelated `requestKeyframe` coordinator hop
+    /// below) in a closure built inside `init` before every stored
+    /// property (including this one) has a value, so this still can't be a
+    /// plain eagerly-assigned `let` constructed inline in `init`. What
+    /// changed under B2.2 is ordering and sibling access, not laziness
+    /// itself: `init` now force-touches `presenter` then `videoDecoder`, in
+    /// that order, at its tail — AFTER every non-lazy stored property is
+    /// set, so `self` is already fully initialized at that point and the
+    /// existing self-capturing coordinator hops remain legal. Neither
+    /// owner is ever reassigned or recreated afterward (only reset
+    /// internally) — see `presenter` below for the full stability
+    /// argument.
+    private lazy var videoDecoder: ReceiverVideoDecoder = makeVideoDecoder()
+
+    private func makeVideoDecoder() -> ReceiverVideoDecoder {
         let telemetry = videoTelemetry
-        return .init(
-            decodedFrameReady: { [weak self] box, generation, captureMs in
-                self?.presenter.enqueuePresentDecoded(box, generation: generation, captureMs: captureMs)
+        // `presenter` direct + WEAK: `self` is fully initialized by the
+        // time this runs (forced at the tail of `init`, after `presenter`
+        // itself is force-touched first), so capturing `presenter` here
+        // needs no deferred box — unlike the reverse direction, `presenter`
+        // already exists. WEAK (not the strong default) because
+        // `presenter`'s own effects (below) hold `videoDecoderRef`, which
+        // will hold this decoder strongly the moment `bind` runs a few
+        // lines down — a strong capture here too would close a
+        // decoder<->presenter reference cycle that neither `self`
+        // releasing `videoDecoder` nor `self` releasing `presenter` could
+        // break. `self.videoDecoder`/`self.presenter` (this class's own two
+        // independent strong references) are what actually keep both alive
+        // for exactly as long as this instance lives.
+        let presenter = self.presenter
+        let decoder = ReceiverVideoDecoder(outputEffects: .init(
+            decodedFrameReady: { [weak presenter] box, generation, captureMs in
+                presenter?.enqueuePresentDecoded(box, generation: generation, captureMs: captureMs)
             },
             // Receiver Swift6-B1: `telemetry` (`ReceiverVideoTelemetry`) is a
             // Sendable value captured on its own — no `self`, no queue hop,
@@ -3295,52 +3366,59 @@ final class StreamReceiver: ObservableObject {
             },
             requestKeyframe: { [weak self] in
                 self?.queue.async { self?.requestKeyframeIfNeeded() }
-            })
+            }))
+        // Exactly once, immediately after construction, strictly before
+        // `init` returns — no command can have reached either owner's pump
+        // yet (nothing enqueues one until `start()`/network activity).
+        videoDecoderRef.bind(decoder)
+        return decoder
     }
 
     /// RC-3 Stage D: the sole authoritative owner of `displayLayer`
     /// enqueue/flush/flushAndRemoveImage and the presentation generation —
-    /// see its file header. `lazy` for the same reason as `videoDecoder`
-    /// above: `makeVideoPresenterOutputEffects()` captures `self` weakly,
-    /// and actual use starts well after `init`. The STORED PROPERTY here
-    /// is a plain (non-isolated) reference to a `@MainActor`-isolated
-    /// type — exactly like holding a reference to any other class; only
-    /// `presenter`'s own isolated methods require `MainActor` (the SDK
-    /// requires it — see that file's header), and every entry point this
-    /// class actually calls (`enqueuePresentSample`/`enqueueFlush`/etc) is
-    /// `nonisolated`, so this stays freely accessible from `queue`.
-    private lazy var presenter = ReceiverVideoPresenter(
-        displayLayer: displayLayer, outputEffects: makeVideoPresenterOutputEffects())
+    /// see its file header. `lazy` — see `videoDecoder` above for why (the
+    /// same two-phase-init constraint applies here too, since this
+    /// property's own factory needs `self` for `decodedFrameReady`'s
+    /// `onDecodedFrame` queue-hop). Force-touched FIRST at the tail of
+    /// `init` (before `videoDecoder`): its `decodeViaVideoDecoder` effect
+    /// only ever resolves the decoder through `videoDecoderRef` (never
+    /// `self.videoDecoder` directly), so it needs no decoder to exist yet.
+    /// Neither this nor `videoDecoder` is ever reassigned or recreated
+    /// after construction — both are reset via `enqueueReset`/
+    /// `enqueueFlushAndRemoveImage`/`enqueueAdvanceGeneration` instead,
+    /// which is why an exactly-once mutual binding (rather than
+    /// coordinator self-capture re-resolved per call) is sound here.
+    private lazy var presenter: ReceiverVideoPresenter = makePresenter()
 
-    /// The narrow output surface `presenter` calls out to — see
-    /// `ReceiverVideoPresenter.OutputEffects`. Each closure hops onto
-    /// `queue` before touching queue-confined state, exactly like
-    /// `makeVideoDecoderOutputEffects()`.
-    private func makeVideoPresenterOutputEffects() -> ReceiverVideoPresenter.OutputEffects {
+    private func makePresenter() -> ReceiverVideoPresenter {
         let telemetry = videoTelemetry
-        return .init(
-            decodeViaVideoDecoder: { [weak self] box, generation, captureMs in
-                self?.videoDecoder.enqueueDecode(box, generation: generation, captureMs: captureMs)
-            },
-            decodedFrameReady: { [weak self] box, captureMs in
-                self?.queue.async { guard let self else { return }
+        let decoderRef = videoDecoderRef
+        return ReceiverVideoPresenter(
+            displayLayer: displayLayer,
+            outputEffects: .init(
+                decodeViaVideoDecoder: { box, generation, captureMs in
+                    decoderRef.get()?.enqueueDecode(box, generation: generation, captureMs: captureMs)
+                },
+                decodedFrameReady: { [weak self] box, captureMs in
+                    self?.queue.async { guard let self else { return }
+                        #if DEBUG
+                        self.debugFramesDecodedWindow += 1
+                        #endif
+                        self.onDecodedFrame?(box.value, captureMs)
+                    }
+                },
+                // Receiver Swift6-B1: both effects below now capture only
+                // `telemetry` — a Sendable value, no `self`, no queue hop.
+                // Per-frame (flush) / per-window (debug presented) hot
+                // path.
+                decodeFlushIncurred: {
+                    telemetry.incrementFlushCount()
+                },
+                debugFramePresented: {
                     #if DEBUG
-                    self.debugFramesDecodedWindow += 1
+                    telemetry.incrementDebugPresentedCount()
                     #endif
-                    self.onDecodedFrame?(box.value, captureMs)
-                }
-            },
-            // Receiver Swift6-B1: both effects below now capture only
-            // `telemetry` — a Sendable value, no `self`, no queue hop. Per-
-            // frame (flush) / per-window (debug presented) hot path.
-            decodeFlushIncurred: {
-                telemetry.incrementFlushCount()
-            },
-            debugFramePresented: {
-                #if DEBUG
-                telemetry.incrementDebugPresentedCount()
-                #endif
-            })
+                }))
     }
 
     /// C1: the sole authoritative owner of `connection`/`pendingConnections`/
