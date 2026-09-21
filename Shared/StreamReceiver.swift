@@ -288,6 +288,190 @@ final class AVSyncPreference: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole authoritative owner of the currently installed TLS
+/// media listener's identity — nothing more. It holds no listener policy, no
+/// TrustStore/TLSConfigurator material, and constructs no `NWListener.Service`;
+/// those stay with `startTLSListener`/`ReceiverAdvertisementState`. Same
+/// `NSLock`-protected, `@unchecked Sendable` idiom as `ReceiverTransportState`
+/// above: a plain reference swap under the lock, no callback (`cancel()`
+/// included) ever invoked while held — `cancelCurrent()` takes the reference
+/// out from under the lock first, then cancels after releasing it, matching
+/// this file's existing "take under lock, release, then call the framework"
+/// convention.
+final class TLSListenerState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: NWListener?
+
+    func hasCurrent() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return current != nil
+    }
+
+    func currentListener() -> NWListener? {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
+
+    func install(_ listener: NWListener) {
+        lock.lock(); defer { lock.unlock() }
+        current = listener
+    }
+
+    /// Exact `===` identity check — no generation token, matching the
+    /// original `self.tlsListener === listener` guards verbatim.
+    func isCurrent(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return current === listener
+    }
+
+    /// Clears the stored reference only if it is still exactly `listener` —
+    /// a stale `.failed` callback for an already-superseded listener must
+    /// never clear the newer one. Returns whether it matched/cleared.
+    @discardableResult
+    func clearIfCurrent(_ listener: NWListener) -> Bool {
+        lock.lock()
+        let matched = current === listener
+        if matched { current = nil }
+        lock.unlock()
+        return matched
+    }
+
+    func cancelCurrent() {
+        lock.lock()
+        let listener = current
+        current = nil
+        lock.unlock()
+        listener?.cancel()
+    }
+}
+
+/// Lock-protected sole authoritative store for `mediaSuppressedForPairing` —
+/// whether the TLS media listener must refuse new connections because
+/// explicit pairing is in progress. Reads happen on connection admission
+/// (once per incoming TLS accept, not per frame) and writes only when
+/// pairing starts/finishes, so contention is negligible; same `NSLock`-
+/// protected, `@unchecked Sendable` idiom as `ReceiverTransportState` above.
+final class PairingSuppressionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var suppressed = false
+
+    func isSuppressed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return suppressed
+    }
+
+    func setSuppressed(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        suppressed = value
+    }
+}
+
+/// Lock-protected sole authoritative store for the receiver's Bonjour
+/// advertisement domain: `serviceName` and the one-shot receiver-originated
+/// Connect token (`connectRequestToken`). Also builds the two advertised
+/// `NWListener.Service` values (media `_opensidecar._tcp` and pairing
+/// `_opendisplay-pair._tcp`) from that state plus the caller-supplied wire
+/// identity, so neither service's exact TXT-record shape has to be
+/// reconstructed anywhere else. Same `NSLock`-protected, `@unchecked
+/// Sendable` idiom as `ReceiverTransportState` above — no callback is ever
+/// invoked while the lock is held.
+final class ReceiverAdvertisementState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var serviceName: String
+    private var connectRequestToken: String?
+
+    init(serviceName: String) {
+        self.serviceName = serviceName
+    }
+
+    func currentServiceName() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return serviceName
+    }
+
+    /// Matches `setServiceName`'s exact write: overwrite only when the
+    /// resolved name actually differs. Returns whether it changed.
+    @discardableResult
+    func setServiceName(_ name: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard name != serviceName else { return false }
+        serviceName = name
+        return true
+    }
+
+    /// Publishes a fresh token, replacing/invalidating any previous one.
+    @discardableResult
+    func beginConnectRequest() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let token = UUID().uuidString
+        connectRequestToken = token
+        return token
+    }
+
+    /// Clears the token only if it is still exactly `token` — a stale expiry
+    /// for a superseded token must never clear a newer one. Returns whether
+    /// it matched/cleared.
+    @discardableResult
+    func clearConnectRequestIfCurrent(_ token: String) -> Bool {
+        lock.lock()
+        let matched = connectRequestToken == token
+        if matched { connectRequestToken = nil }
+        lock.unlock()
+        return matched
+    }
+
+    func mediaService(installID: String, protocolVersion: Int) -> NWListener.Service {
+        lock.lock()
+        let name = serviceName
+        let token = connectRequestToken
+        lock.unlock()
+        var txt = NWTXTRecord()
+        txt["id"] = installID
+        txt["pv"] = String(protocolVersion)   // issue #132
+        if let token { txt["cr"] = token }
+        return NWListener.Service(name: name, type: "_opensidecar._tcp",
+                                  domain: nil, txtRecord: txt)
+    }
+
+    func pairingService(installID: String, protocolVersion: Int, pairingProtocolVersion: Int) -> NWListener.Service {
+        lock.lock()
+        let name = serviceName
+        lock.unlock()
+        var txt = NWTXTRecord()
+        txt["id"] = installID
+        txt["pv"] = String(protocolVersion)
+        // Unauthenticated pairing-protocol-version hint, additive and
+        // separate from `pv` (the media wire version) — early UX only, see
+        // `WireProtocol.pairingVersion`'s doc comment.
+        txt["pp"] = String(pairingProtocolVersion)
+        return NWListener.Service(name: name, type: "_opendisplay-pair._tcp",
+                                  domain: nil, txtRecord: txt)
+    }
+}
+
+/// Lock-protected box holding the lazily-constructed `pipeline` actor
+/// reference, installed once `pipeline`'s own `lazy var` initializer runs.
+/// Exists solely so `makePipelineHostEffects()`'s `ensureTLSListening`
+/// closure can reach the actor at call time without capturing `self` — a
+/// direct `self.pipeline` read there would both reintroduce a
+/// `StreamReceiver` capture and re-enter `pipeline`'s own lazy
+/// initialization (which itself calls `makePipelineHostEffects()`). Same
+/// `NSLock`-protected, `@unchecked Sendable` idiom as `SendTargetBox` below.
+final class ReceiverPipelineActorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ReceiverPipelineActor?
+
+    func install(_ actor: ReceiverPipelineActor) {
+        lock.lock(); defer { lock.unlock() }
+        value = actor
+    }
+
+    func current() -> ReceiverPipelineActor? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -608,7 +792,7 @@ final class StreamReceiver: ObservableObject {
     }
     #endif
 
-    private var tlsListener: NWListener?
+    private let tlsListenerState = TLSListenerState()
     private var pairingListener: NWListener?
     // Receiver-originated Connect (see connectDebug): a short-lived token
     // published in the `_opensidecar._tcp` TXT record. The Mac already
@@ -617,12 +801,11 @@ final class StreamReceiver: ObservableObject {
     // opening a new one. It carries no authority of its own — the Mac only
     // acts on it for an already-trusted/pinned peer, and the resulting
     // connection still runs the full pinned-TLS + hello handshake.
-    private var connectRequestToken: String?
     private var connectRequestClearWorkItem: DispatchWorkItem?
     private var pendingDisconnectFinish: (() -> Void)?
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
-    private var mediaSuppressedForPairing = false
+    private let pairingSuppressionState = PairingSuppressionState()
     @MainActor @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
     private var macPairingBrowser: NWBrowser?
     /// Bumped only after a pairing (any transport) truly finalized: both
@@ -804,7 +987,18 @@ final class StreamReceiver: ObservableObject {
     // needs an entitlement Apple gates behind approval and personal teams
     // can't get), so this is user-editable in Settings. The USB picker gets
     // the real name host-side via lockdownd regardless.
-    var serviceName = "MeowDisplay"
+    /// Thin compatibility accessor over `advertisementState` (sole storage
+    /// authority) — a direct assignment (as `MacReceiver`/`OpenSidecarPhoneApp`
+    /// startup do, before any listener exists) writes straight through with
+    /// no republish side effect, exactly matching the old plain stored
+    /// property's behavior; `setServiceName(_:)` below is the only path that
+    /// also re-publishes a live listener.
+    var serviceName: String {
+        get { advertisementState.currentServiceName() }
+        set { advertisementState.setServiceName(newValue) }
+    }
+    private let advertisementState = ReceiverAdvertisementState(serviceName: "MeowDisplay")
+    private let pipelineBox = ReceiverPipelineActorBox()
 
     // Platform identity, injected at init so this file stays UI-framework-free.
     /// "iPhone" / "iPad" / "Mac" — announced in the hello (the sender names
@@ -844,24 +1038,13 @@ final class StreamReceiver: ObservableObject {
     }()
 
     private var advertisedService: NWListener.Service {
-        var txt = NWTXTRecord()
-        txt["id"] = Self.installID
-        txt["pv"] = String(advertisedProtocolVersion)   // issue #132
-        if let connectRequestToken { txt["cr"] = connectRequestToken }
-        return NWListener.Service(name: serviceName, type: "_opensidecar._tcp",
-                                  domain: nil, txtRecord: txt)
+        advertisementState.mediaService(installID: Self.installID, protocolVersion: advertisedProtocolVersion)
     }
 
     private var advertisedPairingService: NWListener.Service {
-        var txt = NWTXTRecord()
-        txt["id"] = Self.installID
-        txt["pv"] = String(advertisedProtocolVersion)
-        // Unauthenticated pairing-protocol-version hint, additive and
-        // separate from `pv` (the media wire version) — early UX only, see
-        // `WireProtocol.pairingVersion`'s doc comment.
-        txt["pp"] = String(WireProtocol.pairingVersion)
-        return NWListener.Service(name: serviceName, type: "_opendisplay-pair._tcp",
-                                  domain: nil, txtRecord: txt)
+        advertisementState.pairingService(
+            installID: Self.installID, protocolVersion: advertisedProtocolVersion,
+            pairingProtocolVersion: WireProtocol.pairingVersion)
     }
 
     /// Update the advertised name and re-publish if already listening.
@@ -869,10 +1052,9 @@ final class StreamReceiver: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolved = trimmed.isEmpty ? fallbackServiceName : trimmed
         queue.async {
-            guard resolved != self.serviceName else { return }
-            self.serviceName = resolved
-            if self.tlsListener != nil {
-                self.tlsListener?.service = self.advertisedService
+            guard self.advertisementState.setServiceName(resolved) else { return }
+            if let tlsListener = self.tlsListenerState.currentListener() {
+                tlsListener.service = self.advertisedService
                 self.pairingListener?.service = self.advertisedPairingService
                 Log.info("re-advertising as \"\(resolved)\"")
             }
@@ -986,7 +1168,11 @@ final class StreamReceiver: ObservableObject {
     func start() {
         queue.async {
             TrustStore.shared.refreshSnapshot()
-            self.startTLSListener()
+            Self.startTLSListener(
+                queue: self.queue, tlsListenerState: self.tlsListenerState,
+                pairingSuppressionState: self.pairingSuppressionState,
+                advertisementState: self.advertisementState, pipeline: self.pipeline,
+                installID: Self.installID, advertisedProtocolVersion: self.advertisedProtocolVersion)
             self.startPairingListener()
             self.startMacPairingBrowser()
         }
@@ -1161,14 +1347,14 @@ final class StreamReceiver: ObservableObject {
     private func beginExplicitPairing(peerID: String?) {
         Log.info("pairDebug: explicit pairing started peerID=\(peerID ?? "unknown")")
         queue.async {
-            self.mediaSuppressedForPairing = true
+            self.pairingSuppressionState.setSuppressed(true)
             Task { await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
 
     private func finishExplicitPairing(success: Bool) {
         queue.async {
-            self.mediaSuppressedForPairing = false
+            self.pairingSuppressionState.setSuppressed(false)
             Log.info("pairDebug: pairing finished success=\(success)")
         }
     }
@@ -1211,9 +1397,12 @@ final class StreamReceiver: ObservableObject {
     /// never fires again and the session gets stuck oscillating in/out of
     /// Reconnecting).
     private func ensureTLSListening() {
-        guard tlsListener == nil else { return }
+        guard !tlsListenerState.hasCurrent() else { return }
         Log.info("reconnectDebug: retryScheduled TLS listener rearm")
-        startTLSListener()
+        Self.startTLSListener(
+            queue: queue, tlsListenerState: tlsListenerState,
+            pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+            pipeline: pipeline, installID: Self.installID, advertisedProtocolVersion: advertisedProtocolVersion)
     }
 
     /// iOS lifecycle seam. Backgrounding parks an in-flight recovery run
@@ -1344,7 +1533,7 @@ final class StreamReceiver: ObservableObject {
             let finish = { [weak self] in
                 guard let self, !finished else { return }
                 finished = true
-                self.tlsListener?.cancel(); self.tlsListener = nil
+                self.tlsListenerState.cancelCurrent()
                 self.pairingListener?.cancel(); self.pairingListener = nil
                 self.reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
@@ -1381,8 +1570,26 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    private func startTLSListener() {
-        guard tlsListener == nil, let identity = TrustStore.shared.ownIdentity(),
+    /// Static, self-free TLS media listener construction/rearm (Receiver
+    /// Swift6-TLS): captures no `StreamReceiver` — only the stable owners
+    /// (`TLSListenerState`/`PairingSuppressionState`/`ReceiverAdvertisementState`),
+    /// the `pipeline` actor reference, `queue`, and plain wire-identity
+    /// values, so its `newConnectionHandler`/`stateUpdateHandler`/retry
+    /// closures below carry the same zero-`StreamReceiver` capture graph.
+    /// Trust material stays live and self-free via `TrustStore.shared`/
+    /// `TLSConfigurator` (both already self-free singletons/statics) — in
+    /// particular `pinnedSPKIs` stays a live closure calling
+    /// `TrustStore.shared.allPinnedPeerSPKIs()` at handshake time, never a
+    /// snapshotted array, so a pin added mid-session is honored without a
+    /// listener rebuild. The `guard !hasCurrent()` and `install(_:)` below
+    /// happen synchronously with no `await`/`Task`/queue hop between them,
+    /// so two overlapping calls on `queue` can never install two listeners.
+    private static func startTLSListener(
+        queue: DispatchQueue, tlsListenerState: TLSListenerState,
+        pairingSuppressionState: PairingSuppressionState, advertisementState: ReceiverAdvertisementState,
+        pipeline: ReceiverPipelineActor, installID: String, advertisedProtocolVersion: Int
+    ) {
+        guard !tlsListenerState.hasCurrent(), let identity = TrustStore.shared.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
                 pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
@@ -1398,11 +1605,12 @@ final class StreamReceiver: ObservableObject {
             params.serviceClass = .interactiveVideo
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!)
-            tlsListener = listener
-            listener.service = advertisedService
-            listener.newConnectionHandler = { [weak self, weak listener] connection in
-                guard let self, self.tlsListener === listener else { connection.cancel(); return }
-                guard !self.mediaSuppressedForPairing else {
+            tlsListenerState.install(listener)
+            listener.service = advertisementState.mediaService(
+                installID: installID, protocolVersion: advertisedProtocolVersion)
+            listener.newConnectionHandler = { [weak listener] connection in
+                guard let listener, tlsListenerState.isCurrent(listener) else { connection.cancel(); return }
+                guard !pairingSuppressionState.isSuppressed() else {
                     Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
                     connection.cancel()
                     return
@@ -1419,22 +1627,28 @@ final class StreamReceiver: ObservableObject {
                 // (`ReceiverPipelineActor.handleIncomingConnection`), which
                 // owns `connection`/`pendingConnections` and reads/writes
                 // them coherently.
-                Task { await self.pipeline.handleIncomingConnection(connection) }
+                Task { await pipeline.handleIncomingConnection(connection) }
             }
-            listener.stateUpdateHandler = { [weak self, weak listener] state in
+            listener.stateUpdateHandler = { [weak listener] state in
                 switch state {
                 case .ready:
                     Log.info("reconnectDebug: listenerReady TLS port=\(WireCrypto.tlsPort)")
                 case .failed(let error):
                     Log.info("secure listener failed: \(error)")
-                    guard let self, self.tlsListener === listener else { return }
-                    self.tlsListener = nil
+                    guard let listener, tlsListenerState.clearIfCurrent(listener) else { return }
                     // Fixed short backoff: mirrors the plaintext listener's
                     // retry cadence and avoids a busy loop if the port stays
                     // unavailable for a moment (e.g. right after a sleep/wake
-                    // teardown/rebind race).
-                    self.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
-                        self?.startTLSListener()
+                    // teardown/rebind race). If another listener is already
+                    // installed by the time this fires, `hasCurrent()` inside
+                    // the recursive call below no-ops it — no duplicate
+                    // listener.
+                    queue.asyncAfter(deadline: .now() + 1) {
+                        startTLSListener(
+                            queue: queue, tlsListenerState: tlsListenerState,
+                            pairingSuppressionState: pairingSuppressionState,
+                            advertisementState: advertisementState, pipeline: pipeline,
+                            installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
                     }
                 default: break
                 }
@@ -1453,8 +1667,12 @@ final class StreamReceiver: ObservableObject {
     private func scheduleTLSListenerRefresh() {
         queue.async { [weak self] in
             guard let self else { return }
-            self.tlsListener?.cancel(); self.tlsListener = nil
-            self.startTLSListener()
+            self.tlsListenerState.cancelCurrent()
+            Self.startTLSListener(
+                queue: self.queue, tlsListenerState: self.tlsListenerState,
+                pairingSuppressionState: self.pairingSuppressionState,
+                advertisementState: self.advertisementState, pipeline: self.pipeline,
+                installID: Self.installID, advertisedProtocolVersion: self.advertisedProtocolVersion)
         }
     }
 
@@ -3379,14 +3597,12 @@ final class StreamReceiver: ObservableObject {
     /// clears it after a short window so a stale token can't re-trigger a
     /// connect on a later, unrelated browse update.
     private func signalConnectRequest() {
-        let token = UUID().uuidString
-        connectRequestToken = token
+        let token = advertisementState.beginConnectRequest()
         connectRequestClearWorkItem?.cancel()
-        if let tlsListener { tlsListener.service = advertisedService }
+        if let tlsListener = tlsListenerState.currentListener() { tlsListener.service = advertisedService }
         let clear = DispatchWorkItem { [weak self] in
-            guard let self, self.connectRequestToken == token else { return }
-            self.connectRequestToken = nil
-            if let tlsListener = self.tlsListener { tlsListener.service = self.advertisedService }
+            guard let self, self.advertisementState.clearConnectRequestIfCurrent(token) else { return }
+            if let tlsListener = self.tlsListenerState.currentListener() { tlsListener.service = self.advertisedService }
         }
         connectRequestClearWorkItem = clear
         queue.asyncAfter(deadline: .now() + 8.0, execute: clear)
@@ -3768,10 +3984,18 @@ final class StreamReceiver: ObservableObject {
     /// purely so `makePipelineUIEffects()`/`makePipelineHostEffects()` can
     /// capture `self` weakly — actual use starts from `start()`, well after
     /// `init` completes.
-    private lazy var pipeline = ReceiverPipelineActor(
-        queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
-        uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects(),
-        framePipeline: framePipeline)
+    private lazy var pipeline: ReceiverPipelineActor = {
+        let actor = ReceiverPipelineActor(
+            queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
+            uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects(),
+            framePipeline: framePipeline)
+        // `pipelineBox` lets `makePipelineHostEffects()`'s `ensureTLSListening`
+        // closure reach this actor at call time with zero `StreamReceiver`
+        // capture — see `ReceiverPipelineActorBox`'s doc comment for why a
+        // direct `self.pipeline` read there is not an option.
+        pipelineBox.install(actor)
+        return actor
+    }()
 
     /// The permanent facade/UI-mirror outputs `pipeline` calls out to — see
     /// `ReceiverPipelineActor.UIEffects`. Each closure captures `self`
@@ -3874,12 +4098,28 @@ final class StreamReceiver: ObservableObject {
         let maxEncodeHigh = self.maxEncodeHigh
         let maxFPS = self.maxFPS
         let advertisedProtocolVersion = self.advertisedProtocolVersion
+        // Site 6 (Receiver Swift6-TLS): the stable owners `ensureTLSListening`
+        // below needs to call `Self.startTLSListener` with zero `StreamReceiver`
+        // capture — `pipelineBox` stands in for `self.pipeline` (see its doc
+        // comment for why a direct read isn't safe here).
+        let tlsListenerState = self.tlsListenerState
+        let pairingSuppressionState = self.pairingSuppressionState
+        let advertisementState = self.advertisementState
+        let pipelineBox = self.pipelineBox
+        let installID = Self.installID
         return .init(
             clearTransport: {
                 transportState.clear()
             },
-            ensureTLSListening: { [weak self] in
-                self?.queue.async { self?.ensureTLSListening() }
+            ensureTLSListening: {
+                queue.async {
+                    guard let pipeline = pipelineBox.current(), !tlsListenerState.hasCurrent() else { return }
+                    Log.info("reconnectDebug: retryScheduled TLS listener rearm")
+                    Self.startTLSListener(
+                        queue: queue, tlsListenerState: tlsListenerState,
+                        pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+                        pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
+                }
             },
             requestRemoteConnect: { [weak self] peerID in
                 self?.queue.async { self?.requestRemoteConnect(peerID: peerID) }
