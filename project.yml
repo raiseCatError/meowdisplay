@@ -165,6 +165,7 @@ targets:
       - Mac/CaptureLifecycle.swift
       - Mac/TransportSafety.swift
       - Mac/MacSenderPipelineState.swift
+      - Mac/MacSenderStatusSink.swift
       - Mac/AutoConnectPolicy.swift
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift

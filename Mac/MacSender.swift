@@ -173,32 +173,63 @@ enum SenderTransport {
 @available(macOS 14.0, *)
 final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
-    // Status surfaced to the UI (updated on main thread).
-    @MainActor var onStatus: ((String) -> Void)?
-    @MainActor var onStats: ((Int, Double) -> Void)?   // framesSent, mbps
+    // Status/lifecycle callbacks live on `statusSink` (see
+    // MacSenderStatusSink.swift) — a small @MainActor Sendable type that
+    // owns them so publishing a status hop doesn't need to capture
+    // non-Sendable `MacSender` into a `@Sendable` closure. These computed
+    // properties preserve the previous `sender.onStatus = { ... }`-shaped
+    // API for callers.
+    let statusSink = MacSenderStatusSink()
+
+    @MainActor var onStatus: ((String) -> Void)? {
+        get { statusSink.onStatus }
+        set { statusSink.onStatus = newValue }
+    }
+    @MainActor var onStats: ((Int, Double) -> Void)? {   // framesSent, mbps
+        get { statusSink.onStats }
+        set { statusSink.onStats = newValue }
+    }
     // Refreshed on the same ~1s cadence as onStats: this session's current
     // video/audio activity and capture geometry, for the canonical runtime
     // projection (Overview / Active Display / menu bar all read from the
     // one place this feeds — DeviceSession — rather than re-deriving it).
     @MainActor var onMediaState: ((_ videoActive: Bool, _ audioActive: Bool,
-                                   _ width: Int, _ height: Int, _ fps: Int) -> Void)?
-    @MainActor var onCaptureLifecycleChanged: ((CaptureLifecyclePhase) -> Void)?
+                                   _ width: Int, _ height: Int, _ fps: Int) -> Void)? {
+        get { statusSink.onMediaState }
+        set { statusSink.onMediaState = newValue }
+    }
+    @MainActor var onCaptureLifecycleChanged: ((CaptureLifecyclePhase) -> Void)? {
+        get { statusSink.onCaptureLifecycleChanged }
+        set { statusSink.onCaptureLifecycleChanged = newValue }
+    }
     // Fired when a previously connected device stays gone past the grace
     // period — the controller ends the session (capture, virtual display,
     // recording indicator all torn down) instead of dialing forever or
     // silently coming back over a different transport.
-    @MainActor var onDisconnected: (() -> Void)?
+    @MainActor var onDisconnected: (() -> Void)? {
+        get { statusSink.onDisconnected }
+        set { statusSink.onDisconnected = newValue }
+    }
     // Fired when the receiver announces its device locked. The controller
     // ends this session — an invisible display strands the cursor — and
     // starts a fresh one that waits for the wake.
-    @MainActor var onPeerSleeping: (() -> Void)?
+    @MainActor var onPeerSleeping: (() -> Void)? {
+        get { statusSink.onPeerSleeping }
+        set { statusSink.onPeerSleeping = newValue }
+    }
     // Fired when the receiver announces the app is quitting: deliberate,
     // so the controller ends the session without arming a reconnect.
-    @MainActor var onPeerClosed: (() -> Void)?
+    @MainActor var onPeerClosed: (() -> Void)? {
+        get { statusSink.onPeerClosed }
+        set { statusSink.onPeerClosed = newValue }
+    }
     // Fired when an established connection's actual Network.framework path
     // changes. Nil while disconnected; the UI never infers a route from the
     // requested target.
-    @MainActor var onTransportPath: ((ConnectionRoute?) -> Void)?
+    @MainActor var onTransportPath: ((ConnectionRoute?) -> Void)? {
+        get { statusSink.onTransportPath }
+        set { statusSink.onTransportPath = newValue }
+    }
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
@@ -212,7 +243,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
     // the stop instead of fighting it.
-    @MainActor var onCaptureStoppedByUser: (() -> Void)?
+    @MainActor var onCaptureStoppedByUser: (() -> Void)? {
+        get { statusSink.onCaptureStoppedByUser }
+        set { statusSink.onCaptureStoppedByUser = newValue }
+    }
     // Fired when the device's display identity had to be abandoned (macOS
     // saved hostile state for it — see setupExtend) and a bumped identity
     // came online instead: carries the validated TOTAL offset from the
@@ -849,7 +883,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let current = captureLifecycle.phase
         captureLifecycleLock.unlock()
         guard previous != current else { return accepted }
-        Task { @MainActor in self.onCaptureLifecycleChanged?(current) }
+        let sink = statusSink
+        Task { @MainActor in sink.publishCaptureLifecycleChanged(current) }
         return accepted
     }
 
@@ -1347,7 +1382,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let text = self.awaitingWake
                     ? "\(self.endpointName) is asleep — reconnects when it wakes…"
                     : "Waiting for the device to connect…"
-                Task { await self.status(text) }
+                let sink = self.statusSink
+                Task { @MainActor in sink.publishStatus(text) }
             }
             try await setupExtend(ready.info, sessionGeneration: ready.generation)
 
@@ -2368,7 +2404,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         Task { await self.audioCaptureEncoder.reset() }
                     }
                     _ = self.updateCaptureState { $0.pauseCompleted() }
-                    Task { await self.status("Display paused") }
+                    let sink = self.statusSink
+                    Task { @MainActor in sink.publishStatus("Display paused") }
                 }
             }
         }
@@ -2404,7 +2441,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // callback's `videoEnabled` guard is what actually stops
             // encoding/sending, not stream teardown.
             if desiredAudioEnabled, stream != nil {
-                Task { await self.status("Video off — controls remain connected") }
+                let sink = statusSink
+                Task { @MainActor in sink.publishStatus("Video off — controls remain connected") }
                 return
             }
             let activeStream = stream
@@ -2415,7 +2453,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     Log.info("video off capture stop failed domain=\(nsError.domain) code=\(nsError.code)")
                 }
             }
-            Task { await self.status("Video off — controls remain connected") }
+            let sink = statusSink
+            Task { @MainActor in sink.publishStatus("Video off — controls remain connected") }
             return
         }
 
@@ -2539,7 +2578,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.disconnectedSince = Date()
             self.invalidateApplicationSession(reason: "transportSwitch")
             self.currentPathDirectLink = false   // the new transport re-classifies
-            Task { @MainActor in self.onTransportPath?(nil) }
+            let sink = self.statusSink
+            Task { @MainActor in sink.publishTransportPath(nil) }
             self.dialGeneration += 1   // a dial still in flight must not adopt
             self.activeUSBBridge?.cancel()
             self.activeUSBBridge = nil
@@ -2562,7 +2602,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !goneReported, !stopped else { return }
         goneReported = true
         Log.info(reason)
-        Task { @MainActor in self.onDisconnected?() }
+        let sink = statusSink
+        Task { @MainActor in sink.publishDisconnected() }
     }
 
     /// A live connection just died (must be called on `queue`). On the
@@ -2625,7 +2666,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
             + " route=\(route.rawValue) direct=\(currentPathDirectLink)")
         currentRoute = route
-        Task { @MainActor in self.onTransportPath?(route) }
+        let sink = statusSink
+        Task { @MainActor in sink.publishTransportPath(route) }
     }
 
     /// Arms/extends the bounded 60s post-wake stabilization for ANY
@@ -2759,14 +2801,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // The system UI's Stop Extending is a user disconnect, not a fault.
         if let scError = error as? SCStreamError, scError.code == .userStopped,
            consoleIsInteractive {
-            Task { @MainActor in self.onCaptureStoppedByUser?() }
+            let sink = statusSink
+            Task { @MainActor in sink.publishCaptureStoppedByUser() }
             return
         }
         guard !stopped,
               updateCaptureState({ $0.unexpectedStop() }) else { return }
         Log.info("unexpected SCStream stop mode=\(mode.rawValue) domain=\(nsError.domain) "
             + "code=\(nsError.code): \(error.localizedDescription)")
-        Task { await status("Capture stopped: \(error.localizedDescription)") }
+        let stopSink = statusSink
+        let stopText = "Capture stopped: \(error.localizedDescription)"
+        Task { @MainActor in stopSink.publishStatus(stopText) }
         // An unplanned stop is exactly the kind of drop a held keyboard key
         // (or mouse/Pencil contact) must not survive — the recovery window
         // that follows has no live session for it to belong to.
@@ -3035,13 +3080,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let shouldRetry = captureRecoveryBudget.recordFailure()
         guard shouldRetry else {
+            let recoverySink = statusSink
             if captureStateSnapshot().phase == .resuming {
                 _ = updateCaptureState { $0.resumeFailed() }
-                Task { await status("Resume failed — try again") }
+                Task { @MainActor in recoverySink.publishStatus("Resume failed — try again") }
                 return
             }
             _ = updateCaptureState { $0.recoveryFailed() }
-            Task { await status("Capture could not be restarted") }
+            Task { @MainActor in recoverySink.publishStatus("Capture could not be restarted") }
             reportGone("capture recovery failed \(captureRecoveryBudget.failedAttempts)x — ending session")
             return
         }
@@ -3611,7 +3657,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             identity: tls.identity,
             pinnedSPKIs: { [tls.pinnedPeerSPKI] },
             isListener: false, queue: queue) else {
-            Task { await self.status("Secure connection unavailable") }
+            let sink = statusSink
+            Task { @MainActor in sink.publishStatus("Secure connection unavailable") }
             return
         }
         let params = NWParameters(tls: tlsOptions, tcp: options)
@@ -3667,7 +3714,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let text = self.awaitingWake
                     ? "\(self.endpointName) is asleep — reconnects when it wakes…"
                     : "Waiting for receiver at \(self.endpointName)…"
-                Task { await self.status(text) }
+                let sink = self.statusSink
+                Task { @MainActor in sink.publishStatus(text) }
                 self.scheduleReconnect()
             case .cancelled:
                 self.invalidateApplicationSession(reason: "connectionCancelled")
@@ -3767,7 +3815,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         Log.info("usb dial failed: \(error)")
                         hint = "USB connection failed: \(error.localizedDescription)"
                     }
-                    Task { await self.status(hint) }
+                    let sink = self.statusSink
+                    Task { @MainActor in sink.publishStatus(hint) }
                     self.scheduleReconnect()
                 }
             }
@@ -3796,7 +3845,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } else {
                 disconnectedSince = Date()
                 Log.info("connectDebug: lost peer=\(endpointName) reason=transportDropped")
-                Task { await status("Connection lost — retrying for \(Int(disconnectGraceSeconds))s…") }
+                let sink = statusSink
+                let text = "Connection lost — retrying for \(Int(disconnectGraceSeconds))s…"
+                Task { @MainActor in sink.publishStatus(text) }
             }
         }
         Log.info("connectDebug: automaticRetry peer=\(endpointName)")
@@ -3805,7 +3856,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // an ordinary reconnecting session now. A stale direct-link flag here
         // would let the first dial hiccup end the session via linkDied.
         currentPathDirectLink = false
-        Task { @MainActor in self.onTransportPath?(nil) }
+        let transportPathSink = statusSink
+        Task { @MainActor in transportPathSink.publishTransportPath(nil) }
         dialGeneration += 1   // a USB dial still in flight must not adopt
         activeUSBBridge?.cancel()
         activeUSBBridge = nil
@@ -3878,7 +3930,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     Log.info("watchdog: nothing from the phone for >5s — reconnecting")
                     // Can't tell a backgrounded receiver from a brief stall here
                     // (both go silent while redials still succeed) — hedge.
-                    Task { await self.status("\(self.endpointName) is silent — keeping the display (app in background or brief stall)") }
+                    let sink = self.statusSink
+                    let text = "\(self.endpointName) is silent — keeping the display (app in background or brief stall)"
+                    Task { @MainActor in sink.publishStatus(text) }
                     self.scheduleReconnect()
                 }
             }
@@ -4236,7 +4290,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // is authenticated" for every route — arm the same bounded
                 // stabilization window Remote previously got alone.
                 armSessionStabilizationIfNeeded(generation: generation)
-                Task { await self.status("Connected") }
+                let sink = self.statusSink
+                Task { @MainActor in sink.publishStatus("Connected") }
                 let previous = lastHello
                 lastHello = info
                 // Receiver-enforced max FPS (PART 3): load this peer's own
@@ -4588,12 +4643,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // display down (returning the cursor to a visible screen) and
             // starts a wake-waiting replacement session.
             Log.info("receiver went to sleep — ending session, reconnect armed for wake")
-            Task { @MainActor in self.onPeerSleeping?() }
+            let sleepingSink = statusSink
+            Task { @MainActor in sleepingSink.publishPeerSleeping() }
         case WireMessage.closing:
             // The app on the device is quitting for real — end the session
             // without the silence grace and without waiting for a wake.
             Log.info("receiver app closed — ending session")
-            Task { @MainActor in self.onPeerClosed?() }
+            let closedSink = statusSink
+            Task { @MainActor in closedSink.publishPeerClosed() }
         default:
             // Unknown types are a normal consequence of the additive wire
             // protocol: a newer peer can send messages this build predates.
@@ -5443,9 +5500,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let width = self.capturePixelsWide
                 let height = self.capturePixelsHigh
                 let fps = self.captureTargetFPS
+                let statsSink = self.statusSink
                 Task { @MainActor in
-                    self.onStats?(frames, mbps)
-                    self.onMediaState?(videoActive, audioActive, width, height, fps)
+                    statsSink.publishStats(frames: frames, mbps: mbps)
+                    statsSink.publishMediaState(videoActive: videoActive, audioActive: audioActive,
+                                                 width: width, height: height, fps: fps)
                 }
                 #if DEBUG
                 let vtWindow = self.pipelineState.drainDebugVTWindow()
@@ -5475,7 +5534,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Helpers
 
     private func status(_ text: String) async {
-        await MainActor.run { onStatus?(text) }
+        let sink = statusSink
+        await MainActor.run { sink.publishStatus(text) }
     }
 
     /// Invalidate the retired ScreenCaptureKit/VideoToolbox callbacks before
