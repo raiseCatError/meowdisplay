@@ -93,6 +93,96 @@ final class ReceiverTransportState: @unchecked Sendable {
     }
 }
 
+/// Lock-protected home for the Hello-owned, queue-confined mirror state:
+/// the 11 `announced*` UI/receiver-control preference fields non-Mac hello
+/// payloads report (`sendHello`), plus `lastAdvertisedAddrs`, the dedup
+/// memory `checkAddressChangeAndSendHello` compares against. Receiver
+/// Swift6-Hello-1: introduces this owner only — `StreamReceiver`'s own
+/// `announced*`/`lastAdvertisedAddrs` stored properties remain untouched
+/// and authoritative, and `sendHello`/`checkAddressChangeAndSendHello` are
+/// not modified; nothing here is wired into production yet (Hello-2+).
+/// Deliberately excludes `avSyncOffsetMs` (audio-timing domain) and the
+/// device-geometry fields (`devicePixelsWide`/`devicePixelsHigh`/
+/// `deviceScale`, mutated outside `queue` from `setPanel`/`setNativePanel`/
+/// `setOrientation`) — neither is Hello-owned mirror state in the sense
+/// this type covers. Same `NSLock`-protected, `@unchecked Sendable` idiom
+/// as `ReceiverTransportState` above and `FramePipelineSyncState`
+/// (`ReceiverFramePipeline.swift`): a plain last-write-wins lock, no
+/// mutable reference ever escapes it, no callback is ever invoked while
+/// held. `internal` (not `private`), matching `KeyframeThrottle`'s
+/// precedent below, solely so `ReceiverHelloStateTests` can exercise it
+/// directly.
+final class ReceiverHelloState: @unchecked Sendable {
+    /// Immutable, cheap-to-copy snapshot of just the announced preference
+    /// fields — no geometry, no audio, no address state. Field types/
+    /// defaults mirror `StreamReceiver`'s `announced*` stored properties
+    /// exactly (`Shared/StreamReceiver.swift`, near line 239).
+    struct Snapshot: Equatable, Sendable {
+        var trayEnabled = true
+        var keyboardButtonEnabled = true
+        var functionTrayEnabled = true
+        var inputMode = PointerInputMode.direct
+        var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
+        var hapticsEnabled = true
+        var avoidNotch = true
+        var pinchTarget = ReceiverGestureTarget.viewport
+        var rotateTarget = ReceiverGestureTarget.viewport
+        var snapRotation = true
+        var appGestureCommands = AppGestureCommands.defaults
+    }
+
+    private let lock = NSLock()
+    private var current = Snapshot()
+    private var lastAdvertisedAddrs: [String] = []
+
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
+
+    /// Matches `setReceiverUIPreferencesForHello`'s pair — tray/keyboard
+    /// are updated together, never separately.
+    func updateTrayAndKeyboard(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        current.trayEnabled = trayEnabled
+        current.keyboardButtonEnabled = keyboardButtonEnabled
+    }
+
+    /// Matches `announceReceiverPreferences`'s pair — every field it
+    /// reports together, minus `avSyncOffsetMs` (excluded, see type doc).
+    func updatePreferences(
+        functionTrayEnabled: Bool, inputMode: PointerInputMode, trackpadSensitivity: Double,
+        hapticsEnabled: Bool, avoidNotch: Bool, pinchTarget: ReceiverGestureTarget,
+        rotateTarget: ReceiverGestureTarget, snapRotation: Bool, appGestureCommands: AppGestureCommands
+    ) {
+        lock.lock(); defer { lock.unlock() }
+        current.functionTrayEnabled = functionTrayEnabled
+        current.inputMode = inputMode
+        current.trackpadSensitivity = trackpadSensitivity
+        current.hapticsEnabled = hapticsEnabled
+        current.avoidNotch = avoidNotch
+        current.pinchTarget = pinchTarget
+        current.rotateTarget = rotateTarget
+        current.snapRotation = snapRotation
+        current.appGestureCommands = appGestureCommands
+    }
+
+    /// Matches `checkAddressChangeAndSendHello`'s exact comparison: a plain
+    /// order-sensitive `[String]` `!=`, no sorting/normalization.
+    func addressesChanged(_ addrs: [String]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return addrs != lastAdvertisedAddrs
+    }
+
+    /// Matches `sendHello`'s exact write: unconditional overwrite at the
+    /// end regardless of send success (the pre-existing no-rollback-on-
+    /// failure gap is preserved, not fixed), including the empty-list case.
+    func recordAdvertisedAddresses(_ addrs: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        lastAdvertisedAddrs = addrs
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
