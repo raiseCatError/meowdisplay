@@ -292,7 +292,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     @MainActor var onTrustFailure: ((String) -> Void)?
 
     private var stream: SCStream?
-    private var encoder: VTCompressionSession?
+    /// Sole owner of the `VTCompressionSession` — creation, configuration,
+    /// submission, invalidation and session identity. See
+    /// MacSenderVideoEncoder.swift for the confinement invariant that makes
+    /// it safe to reach from `queue`, from this class's nonisolated `async`
+    /// methods, from `stop()` on the main thread, and from VideoToolbox's own
+    /// output thread. `needsKeyframe` deliberately stays here (streaming/
+    /// recovery policy, not encoder mechanism) and is passed in per
+    /// submission as an immutable force-keyframe decision.
+    private let videoEncoder = MacSenderVideoEncoder()
     /// Gates actual encode admission to the authoritative effective FPS —
     /// `minimumFrameInterval`/`ExpectedFrameRate` alone are requests/hints,
     /// not proof VideoToolbox receives no more than that rate (see
@@ -334,10 +342,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `SenderController.restartAll`).
     private let codecPreference: CodecPreference
     /// The codec `setupEncoder` last actually configured the compression
-    /// session for — read by `annexB(from:)` to pick H.264 vs HEVC
-    /// parameter-set extraction (never re-derived from NAL bytes, per the
-    /// milestone's "no ambiguous heuristics" rule) and by
-    /// `sendStreamCodecState` to report the confirmed codec.
+    /// session for — `queue`-confined REPORTING state, read by
+    /// `sendStreamCodecState` to report the confirmed codec and by the
+    /// "encoder ready" log line.
+    ///
+    /// Parameter-set extraction deliberately does NOT read this: `annexB`
+    /// runs on VideoToolbox's output thread and is handed the codec of the
+    /// session that actually produced its sample (still never re-derived
+    /// from NAL bytes, per the milestone's "no ambiguous heuristics" rule).
+    /// Reading `activeCodec` there was both an unsynchronized cross-thread
+    /// read and wrong for output from a session that has since been replaced.
     private var activeCodec: StreamCodec = .h264
     private var activeCodecReason: String = CodecSelectionPolicy.Reason.explicitPreference.rawValue
     /// Cached once per process: whether this Mac has a real, usable
@@ -1292,8 +1306,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let oldStream = self.stream
             self.stream = nil
             self.invalidateCapturePipeline(discardingLastFrame: true)
-            if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
-            self.encoder = nil
+            self.videoEncoder.invalidate()
             let continueTransition = {
                 self.queue.async {
                     self.mode = .mirror
@@ -1803,8 +1816,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             invalidateCapturePipeline(discardingLastFrame: true)
             if let stream { try? await stream.stopCapture() }
             stream = nil
-            if let encoder { VTCompressionSessionInvalidate(encoder) }
-            encoder = nil
+            videoEncoder.invalidate()
             needsKeyframe = true
             do {
                 var resized = false
@@ -2140,8 +2152,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         invalidateCapturePipeline(discardingLastFrame: true)
         let generation = captureGenerationNow
-        if let encoder { VTCompressionSessionInvalidate(encoder) }
-        encoder = nil
+        videoEncoder.invalidate()
         if videoEnabled {
             try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
         }
@@ -2266,8 +2277,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self?.activeUSBBridge?.cancel()
             self?.activeUSBBridge = nil
         }
-        if let encoder { VTCompressionSessionInvalidate(encoder) }
-        encoder = nil
+        videoEncoder.invalidate()
         virtualDisplay = nil   // releasing it removes the display
         cancelDropReplayTimer()
         queue.async { [weak self] in
@@ -2391,8 +2401,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     guard self.captureStateSnapshot().phase == .pausing else { return }
                     if stoppedCapture {
                         if self.stream === activeStream { self.stream = nil }
-                        if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
-                        self.encoder = nil
+                        self.videoEncoder.invalidate()
                         // Pause stops both media (SESSION BEHAVIOR): the
                         // stream is gone either way, so audio is not
                         // capturing — resumeDisplay's resumeCapture() always
@@ -2433,8 +2442,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 _ = updateCaptureState { $0.captureStarted() }
             }
             invalidateCapturePipeline(discardingLastFrame: true)
-            if let encoder { VTCompressionSessionInvalidate(encoder) }
-            encoder = nil
+            videoEncoder.invalidate()
             needsKeyframe = true
             // Video Off does not mean Audio Off (SESSION BEHAVIOR): if audio
             // still wants this SCStream, keep it running — the didOutput
@@ -2526,8 +2534,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if stream === existing { stream = nil }
         }
-        if let encoder { VTCompressionSessionInvalidate(encoder) }
-        encoder = nil
+        videoEncoder.invalidate()
         needsKeyframe = true
         do {
             switch mode {
@@ -4687,23 +4694,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Encoder setup
 
-    /// Create the compression session into `encoder`, optionally requiring an
-    /// encoder that supports low-latency rate control, for the given codec.
-    private func createCompressionSession(width: Int, height: Int, lowLatency: Bool, codec: StreamCodec) -> OSStatus {
-        let spec: CFDictionary? = lowLatency
-            ? [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary
-            : nil
-        return VTCompressionSessionCreate(
-            allocator: nil,
-            width: Int32(width), height: Int32(height),
-            codecType: codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
-            encoderSpecification: spec,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &encoder
-        )
+    /// Create (and fully configure) the compression session inside
+    /// `videoEncoder`, optionally requiring an encoder that supports
+    /// low-latency rate control, for the given codec. Every attempt replaces
+    /// whatever session was installed before, invalidating it deterministically
+    /// — including the three reconfiguration paths (live FPS change, Video
+    /// On, encoder-failure-streak recovery) that previously overwrote the
+    /// session reference without ever invalidating the session it retired.
+    private func createCompressionSession(width: Int, height: Int, fps: Int,
+                                          lowLatency: Bool, codec: StreamCodec) -> OSStatus {
+        videoEncoder.create(MacSenderVideoEncoder.Configuration(
+            width: width, height: height, fps: fps,
+            bitrate: quality.bitrate, codec: codec, lowLatency: lowLatency))
     }
 
     /// Decides the codec for the NEXT `setupEncoder` call, per
@@ -4754,18 +4756,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // prevents. Measured on Apple silicon at a paced 60fps: 5.3ms mean
         // submit→emit without the spec vs 6.1ms with it, 1 frame held either
         // way. (Overfeeding it at ~320fps does queue ~8 frames, hence the cap.)
-        var status = createCompressionSession(width: width, height: height, lowLatency: lowLatency, codec: codec)
+        var status = createCompressionSession(width: width, height: height, fps: fps, lowLatency: lowLatency, codec: codec)
         var usedFallback = false
-        if encoder == nil, lowLatency {
+        if !videoEncoder.isActive, lowLatency {
             Log.info("VTCompressionSessionCreate failed with low-latency rate control (status \(status)) — retrying without an encoder specification")
-            status = createCompressionSession(width: width, height: height, lowLatency: false, codec: codec)
+            status = createCompressionSession(width: width, height: height, fps: fps, lowLatency: false, codec: codec)
             usedFallback = true
         }
         // Runtime HEVC failure despite advertised/probed capability: recover
         // safely to H.264 rather than throwing and killing the session. This
         // is the ONLY codec fallback that happens post-decision — every
         // other case is decided up front by `CodecSelectionPolicy`.
-        if encoder == nil, codec == .hevc {
+        if !videoEncoder.isActive, codec == .hevc {
             let safeFPS = EncoderCapability.codecSafeFPS(width: width, height: height)
             Log.info("HEVC encoder creation failed at runtime (status \(status)) despite advertised capability — "
                 + "falling back to H.264" + (fps > safeFPS ? " at its safe FPS (\(fps) -> \(safeFPS))" : ""))
@@ -4778,13 +4780,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // create inherits the same size*fps product that just failed
             // for a different codec.
             fps = min(fps, safeFPS)
-            status = createCompressionSession(width: width, height: height, lowLatency: lowLatency, codec: codec)
-            if encoder == nil, lowLatency {
-                status = createCompressionSession(width: width, height: height, lowLatency: false, codec: codec)
+            status = createCompressionSession(width: width, height: height, fps: fps, lowLatency: lowLatency, codec: codec)
+            if !videoEncoder.isActive, lowLatency {
+                status = createCompressionSession(width: width, height: height, fps: fps, lowLatency: false, codec: codec)
                 usedFallback = true
             }
         }
-        guard let encoder else {
+        guard videoEncoder.isActive else {
             // Returning here used to leave the session "connected, all green"
             // with a dead encoder and a black receiver. Throw so the failure
             // reaches the UI as a red "Failed:" status.
@@ -4794,22 +4796,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     "This Mac's video encoder could not be started (VideoToolbox error \(status))"
             ])
         }
+        // Reporting state only (`sendStreamCodecState`, the log line below):
+        // `queue`-confined, and no longer read from the VideoToolbox output
+        // thread — that thread now gets the codec of the session that
+        // actually produced each frame, straight from `videoEncoder`.
         activeCodec = codec
         activeCodecReason = reason
-        // Low-latency settings: real-time, no B-frames, periodic keyframes.
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel,
-            value: codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
-        // No periodic IDRs: each one is a bitrate spike → transmit-time hiccup.
-        // TCP never loses data, and we force a keyframe on reconnect/drop.
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 3600 as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: quality.bitrate as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
-        VTCompressionSessionPrepareToEncodeFrames(encoder)
         // Every path that sets a new encode rate goes through here (initial
         // start, resize, live FPS change, encoder-failure recovery) — the
         // single choke point to resync frame ADMISSION to match, so
@@ -5009,22 +5001,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64) {
-        guard generation == captureGenerationNow, let encoder else { return }
+        guard generation == captureGenerationNow, videoEncoder.isActive else { return }
         pipelineState.incrementPendingEncodes()
         let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
-        var frameProperties: CFDictionary?
-        if needsKeyframe {
-            frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary
-            needsKeyframe = false
-        }
-        let submitStatus = VTCompressionSessionEncodeFrame(
-            encoder,
-            imageBuffer: pixelBuffer,
-            presentationTimeStamp: pts,
-            duration: .invalid,
-            frameProperties: frameProperties,
-            infoFlagsOut: nil
-        ) { [weak self] status, _, buffer in
+        // Latched here, on `queue`, and handed to the encoder as an immutable
+        // per-submission decision: `needsKeyframe` is streaming/recovery
+        // POLICY (reconnect, codec/FPS change, capture restart, recovery, an
+        // explicit phone "kf" request), not encoder mechanism, so it stays
+        // owned by this class.
+        let forceKeyframe = needsKeyframe
+        if forceKeyframe { needsKeyframe = false }
+        let submitStatus = videoEncoder.submit(
+            pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
+        ) { [weak self] status, buffer, sessionCodec in
             guard let self else { return }
             defer { self.pipelineState.decrementPendingEncodes() }
             guard status == noErr, let buffer else {
@@ -5066,7 +5055,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     + "bytes=\(CMSampleBufferGetTotalSampleSize(buffer)) keyframe=\(self.isKeyframe(buffer))")
             }
             #endif
-            guard let data = self.annexB(from: buffer) else { return }
+            // STALE OUTPUT. `sessionCodec` is nil once the compression
+            // session that encoded this frame has been retired — which can
+            // happen without `captureGeneration` moving at all, because the
+            // live-FPS-change, Video-On and encoder-failure-streak recovery
+            // paths all recreate the session in place. Such a frame belongs
+            // to a dead reference chain, and packaging it would use the NEW
+            // session's codec to read the OLD session's parameter sets
+            // (`CodecSelectionPolicy` can flip H.264/HEVC on an FPS change
+            // alone). It is a genuine encode success — counted above — but
+            // it must never be published as if the current session made it.
+            guard let sessionCodec else { return }
+            guard let data = self.annexB(from: buffer, codec: sessionCodec) else { return }
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
@@ -5235,7 +5235,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     #endif
 
-    private func annexB(from sample: CMSampleBuffer) -> Data? {
+    /// `codec` is the codec the compression session that produced `sample`
+    /// was configured for — passed in rather than read from `activeCodec`,
+    /// which is `queue`-confined while this runs on VideoToolbox's output
+    /// thread, and which by then may already describe a newer session.
+    private func annexB(from sample: CMSampleBuffer, codec: StreamCodec) -> Data? {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
         var len = 0, total = 0
         var ptr: UnsafeMutablePointer<Int8>?
@@ -5248,8 +5252,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // format description): SPS/PPS for H.264, VPS/SPS/PPS for HEVC.
         // Deliberately codec-specific APIs, not shared logic — HEVC's
         // parameter sets are a different count and a different NAL-type
-        // space (32/33/34) than H.264's (7/8), and `activeCodec` is the
-        // authoritative, non-heuristic source of which one this sample is.
+        // space (32/33/34) than H.264's (7/8), and the SUBMITTING session's
+        // codec is the authoritative, non-heuristic source of which one this
+        // sample is.
         if isKeyframe(sample), let fmt = CMSampleBufferGetFormatDescription(sample) {
             // CoreMedia reports the ACTUAL parameter-set count on
             // `parameterSetCountOut` from the very same call used to fetch
@@ -5262,7 +5267,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             var probePtr: UnsafePointer<UInt8>?
             var probeLen = 0
             var reportedCount = 0
-            let probeStatus: OSStatus = activeCodec == .hevc
+            let probeStatus: OSStatus = codec == .hevc
                 ? CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
                     fmt, parameterSetIndex: 0, parameterSetPointerOut: &probePtr,
                     parameterSetSizeOut: &probeLen, parameterSetCountOut: &reportedCount, nalUnitHeaderLengthOut: nil)
@@ -5270,12 +5275,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     fmt, parameterSetIndex: 0, parameterSetPointerOut: &probePtr,
                     parameterSetSizeOut: &probeLen, parameterSetCountOut: &reportedCount, nalUnitHeaderLengthOut: nil)
             let parameterSetCount = (probeStatus == noErr && reportedCount > 0)
-                ? reportedCount : (activeCodec == .hevc ? 3 : 2)   // HEVC: VPS,SPS,PPS. H.264: SPS,PPS.
+                ? reportedCount : (codec == .hevc ? 3 : 2)   // HEVC: VPS,SPS,PPS. H.264: SPS,PPS.
             for i in 0..<parameterSetCount {
                 var psPtr: UnsafePointer<UInt8>?
                 var psLen = 0
                 let status: OSStatus
-                if activeCodec == .hevc {
+                if codec == .hevc {
                     status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
                         fmt, parameterSetIndex: i,
                         parameterSetPointerOut: &psPtr,
