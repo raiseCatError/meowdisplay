@@ -3550,7 +3550,15 @@ final class StreamReceiver: ObservableObject {
     /// `queue` before touching any `queue`-confined state, exactly like
     /// `makePipelineHostEffects()` above.
     private func makeFramePipelineOutputEffects() -> ReceiverFramePipeline.OutputEffects {
-        .init(
+        // B2.4-B: `connectionFailed`/`connectionClosedByPeer` capture `queue`
+        // and `pipeline` directly instead of `self` — both are Sendable
+        // (`DispatchQueue` is `@unchecked Sendable`, `ReceiverPipelineActor`
+        // is an actor) and `pipeline`'s identity is stable for the lifetime
+        // of `StreamReceiver` (`lazy var`, never reassigned). Same queue
+        // instance, same enqueue point, same `Task` creation point as before.
+        let queue = queue
+        let pipeline = pipeline
+        return .init(
             controlMessage: { [weak self] data in
                 self?.queue.async { self?.handleVideoChannelJSON(data) }
             },
@@ -3579,21 +3587,21 @@ final class StreamReceiver: ObservableObject {
             presentationFrame: { [weak self] box, captureMs, sendMs in
                 self?.queue.async { self?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
             },
-            connectionFailed: { [weak self] error in
-                self?.queue.async { guard let self else { return }
+            connectionFailed: { error in
+                queue.async {
                     // FORENSIC FIX (media-death-with-input-still-working):
                     // see the original `processReceivedData`'s doc comment
                     // this replaces — any receive error is this
                     // connection's own health, not a per-call fluke, and
                     // must mark the session down exactly like EOF.
                     Log.info("receive error: \(error)")
-                    Task { await self.pipeline.setConnected(false) }
+                    Task { await pipeline.setConnected(false) }
                 }
             },
-            connectionClosedByPeer: { [weak self] in
-                self?.queue.async { guard let self else { return }
+            connectionClosedByPeer: {
+                queue.async {
                     Log.info("peer closed connection")
-                    Task { await self.pipeline.setConnected(false) }
+                    Task { await pipeline.setConnected(false) }
                 }
             })
     }
