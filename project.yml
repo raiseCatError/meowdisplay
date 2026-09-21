@@ -205,6 +205,19 @@ targets:
       - Shared/ReceiverVideoPresenter.swift
       - Shared/ReceiverAudioPresenter.swift
       - Shared/PCMPlaybackEngine.swift
+      # Receiver Swift6-B1: StreamReceiver itself, plus the full dependency
+      # closure `ReceiverUISinkTests` needs to construct a real one
+      # (StreamReceiver.init touches all of these).
+      - Shared/StreamReceiver.swift
+      - Shared/ReceiverVideoTelemetry.swift
+      - Shared/ReceiverUISink.swift
+      - Shared/ReceiverPipelineActor.swift
+      - Shared/ReceiverAudioDecoder.swift
+      - Shared/TrustStore.swift
+      - Shared/TLSConfigurator.swift
+      - Shared/PairingNetwork.swift
+      - Shared/LocalOwnerAuthenticator.swift
+      - Shared/AppStore.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
@@ -226,6 +239,14 @@ targets:
       - Shared/CodecCapability.swift
       - Shared/ReceiverMaxFPS.swift
       - Shared/FrameRateLimiter.swift
+    dependencies:
+      # Receiver Swift6-B1: TrustStore.swift (added above for
+      # ReceiverUISinkTests' real StreamReceiver) needs the same
+      # certificate/ASN.1 packages `OpenSidecarMac` links.
+      - package: SwiftCertificates
+        product: X509
+      - package: SwiftASN1
+        product: SwiftASN1
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight

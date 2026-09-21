@@ -106,7 +106,8 @@ actor ReceiverVideoDecoder {
         /// callback" gap the C4 review flagged (see this file's header).
         var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// One decode's wall-clock duration, ms — feeds `StreamReceiver`'s
-        /// own `decodeWindow` telemetry ring exactly as before.
+        /// own `ReceiverVideoTelemetry` decode-duration ring exactly as
+        /// before (Receiver Swift6-B1 moved the ring's storage there).
         var decodeDurationMs: @Sendable (Double) -> Void
         /// Decode failed (submission or output callback) — joined mid-GOP,
         /// or a genuinely corrupt frame. `StreamReceiver.

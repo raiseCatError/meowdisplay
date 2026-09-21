@@ -200,6 +200,12 @@ final class StreamReceiver: ObservableObject {
     // the two apps are version-incompatible, so the flag only reclassifies
     // the eventual loss and never touches the live session).
 
+    /// Receiver Swift6-B1: the MainActor publication proxy `pipeline`'s
+    /// `@Sendable` `UIEffects` closures publish `status`/`session` through,
+    /// instead of capturing `self` — see `ReceiverUISink`'s file header.
+    /// `target` is wired weakly in `init` below.
+    private let uiSink = ReceiverUISink()
+
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
     private var announcedTrayEnabled = true
@@ -491,7 +497,8 @@ final class StreamReceiver: ObservableObject {
     private var debugFramesReceivedWindow = 0    // complete AnnexB frames off the wire
     private var debugFramesToDecoderWindow = 0   // submitted to VTDecompressionSession
     private var debugFramesDecodedWindow = 0     // decode succeeded
-    private var debugFramesPresentedWindow = 0   // handed to the display layer
+    // Receiver Swift6-B1: the "handed to the display layer" counter moved
+    // into `videoTelemetry` (`presentedWindowCount`) — see that file.
     private var debugArrivalIntervals: [Double] = []
     private var debugLastArrivalAt: Date?
     #endif
@@ -519,7 +526,11 @@ final class StreamReceiver: ObservableObject {
     // `ReceiverVideoDecoder` below — this remains only the telemetry ring
     // its `decodeDurationMs` effect feeds, and the app-facing sink.
     var onDecodedFrame: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)?
-    private var decodeWindow: [Double] = []
+    /// Receiver Swift6-B1: decode-duration samples + the cumulative flush
+    /// count moved into this narrow lock-backed owner — see its file
+    /// header. Never captured directly by a `@Sendable` closure that also
+    /// needs `self`; those closures capture this `let` value on its own.
+    private let videoTelemetry = ReceiverVideoTelemetry()
     private var photonWindow: [Double] = []
     private var loggedDisplayPath = false
     // Default OFF: A/B measurement showed the system video layer reaches
@@ -710,6 +721,7 @@ final class StreamReceiver: ObservableObject {
         reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.uiSink.target = self
             self.pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
             self.pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
             self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
@@ -1621,7 +1633,7 @@ final class StreamReceiver: ObservableObject {
         // method still owns directly.
         lastFrameAt = nil
         frameIntervals.removeAll()
-        decodeFlushes = 0
+        videoTelemetry.reset()
         // A new session replaces the old one wholesale here (`adopt`) — a
         // different sender, or the same one after a full reconnect, may
         // never send a geometry this old frame's dimensions even loosely
@@ -1632,7 +1644,6 @@ final class StreamReceiver: ObservableObject {
         // instead of touching `displayLayer` directly.
         presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
-        decodeWindow.removeAll(keepingCapacity: true)
         photonWindow.removeAll(keepingCapacity: true)
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
@@ -2886,7 +2897,7 @@ final class StreamReceiver: ObservableObject {
             stats.stalls = stallsThisWindow
             stats.cursorPerSec = Int(Double(cursorUpdatesThisWindow) / elapsed)
             stats.cursorLost = cursorLostThisWindow
-            stats.decodeFlushes = decodeFlushes
+            stats.decodeFlushes = videoTelemetry.currentFlushCount()
             stats.e2eP50 = percentile(e2eWindow, 0.5)
             stats.e2eP95 = percentile(e2eWindow, 0.95)
             stats.encodeP50 = percentile(encodeWindow, 0.5)
@@ -2900,7 +2911,7 @@ final class StreamReceiver: ObservableObject {
             stats.inputP50 = macInputP50
             stats.inputP95 = macInputP95
             stats.capFps = macCapFps
-            stats.decodeP50 = percentile(decodeWindow, 0.5)
+            stats.decodeP50 = percentile(videoTelemetry.snapshotDecodeDurationsMs(), 0.5)
             stats.photonP50 = percentile(photonWindow, 0.5)
             stats.photonP95 = percentile(photonWindow, 0.95)
             framesThisWindow = 0
@@ -2916,14 +2927,16 @@ final class StreamReceiver: ObservableObject {
             let arrivalP95 = arrivalSorted.isEmpty ? 0 :
                 arrivalSorted[min(arrivalSorted.count - 1, Int(Double(arrivalSorted.count) * 0.95))]
             let arrivalMax = arrivalSorted.last ?? 0
+            // Receiver Swift6-B1: atomic read-then-reset from `videoTelemetry`
+            // — see `drainDebugPresentedCount()`'s doc comment.
+            let debugPresentedWindow = videoTelemetry.drainDebugPresentedCount()
             Log.info("receiverPipeline: recv=\(debugFramesReceivedWindow) toDecoder=\(debugFramesToDecoderWindow) "
-                + "decoded=\(debugFramesDecodedWindow) presented=\(debugFramesPresentedWindow) "
+                + "decoded=\(debugFramesDecodedWindow) presented=\(debugPresentedWindow) "
                 + "arrivalMs(p50=\(String(format: "%.1f", arrivalP50)) p95=\(String(format: "%.1f", arrivalP95)) max=\(String(format: "%.1f", arrivalMax))) "
                 + "fps=\(fps) stalls=\(stats.stalls)")
             debugFramesReceivedWindow = 0
             debugFramesToDecoderWindow = 0
             debugFramesDecodedWindow = 0
-            debugFramesPresentedWindow = 0
             #endif
 
             // Every 5s, report the aggregate to the Mac so its log holds the
@@ -2952,7 +2965,7 @@ final class StreamReceiver: ObservableObject {
                 ])
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
-                decodeWindow.removeAll(keepingCapacity: true)
+                videoTelemetry.clearDecodeDurationWindow()
                 photonWindow.removeAll(keepingCapacity: true)
             }
 
@@ -3258,12 +3271,16 @@ final class StreamReceiver: ObservableObject {
     /// through `presenter` (Stage D) instead of `queue`-hopping straight to
     /// `onDecodedFrame` — see that effect's own doc comment.
     private func makeVideoDecoderOutputEffects() -> ReceiverVideoDecoder.OutputEffects {
-        .init(
+        let telemetry = videoTelemetry
+        return .init(
             decodedFrameReady: { [weak self] box, generation, captureMs in
                 self?.presenter.enqueuePresentDecoded(box, generation: generation, captureMs: captureMs)
             },
-            decodeDurationMs: { [weak self] ms in
-                self?.queue.async { self?.decodeWindow.append(ms) }
+            // Receiver Swift6-B1: `telemetry` (`ReceiverVideoTelemetry`) is a
+            // Sendable value captured on its own — no `self`, no queue hop,
+            // just the lock-protected append. Per-frame hot path.
+            decodeDurationMs: { ms in
+                telemetry.recordDecodeDuration(ms)
             },
             requestKeyframe: { [weak self] in
                 self?.queue.async { self?.requestKeyframeIfNeeded() }
@@ -3289,7 +3306,8 @@ final class StreamReceiver: ObservableObject {
     /// `queue` before touching queue-confined state, exactly like
     /// `makeVideoDecoderOutputEffects()`.
     private func makeVideoPresenterOutputEffects() -> ReceiverVideoPresenter.OutputEffects {
-        .init(
+        let telemetry = videoTelemetry
+        return .init(
             decodeViaVideoDecoder: { [weak self] box, generation, captureMs in
                 self?.videoDecoder.enqueueDecode(box, generation: generation, captureMs: captureMs)
             },
@@ -3301,12 +3319,15 @@ final class StreamReceiver: ObservableObject {
                     self.onDecodedFrame?(box.value, captureMs)
                 }
             },
-            decodeFlushIncurred: { [weak self] in
-                self?.queue.async { self?.decodeFlushes += 1 }
+            // Receiver Swift6-B1: both effects below now capture only
+            // `telemetry` — a Sendable value, no `self`, no queue hop. Per-
+            // frame (flush) / per-window (debug presented) hot path.
+            decodeFlushIncurred: {
+                telemetry.incrementFlushCount()
             },
-            debugFramePresented: { [weak self] in
+            debugFramePresented: {
                 #if DEBUG
-                self?.queue.async { self?.debugFramesPresentedWindow += 1 }
+                telemetry.incrementDebugPresentedCount()
                 #endif
             })
     }
@@ -3325,9 +3346,19 @@ final class StreamReceiver: ObservableObject {
     /// `ReceiverPipelineActor.UIEffects`. Each closure captures `self`
     /// weakly and its only job is producing a UI update.
     private func makePipelineUIEffects() -> ReceiverPipelineActor.UIEffects {
-        .init(
-            publishSessionSnapshot: { [weak self] snapshot in self?.publishSessionSnapshot(snapshot) },
-            setStatus: { [weak self] text in self?.setStatus(text) },
+        let sink = uiSink
+        return .init(
+            // Receiver Swift6-B1: both publish through `uiSink`, a Sendable
+            // @MainActor proxy — see its file header — instead of capturing
+            // `self` to call `StreamReceiver`'s own `publishSessionSnapshot`/
+            // `setStatus`. Same `DispatchQueue.main.async` ordering as the
+            // `publishToUI` hop those methods use internally.
+            publishSessionSnapshot: { snapshot in
+                DispatchQueue.main.async { sink.publishSessionSnapshot(snapshot) }
+            },
+            setStatus: { text in
+                DispatchQueue.main.async { sink.publishStatus(text) }
+            },
             setStatusConnected: { [weak self] in
                 self?.queue.async { guard let self else { return }
                     self.setStatus("Connected · \(self.transport)")
@@ -3450,6 +3481,15 @@ final class StreamReceiver: ObservableObject {
     /// same point they always did; this only names the hop.
     private func publishSessionSnapshot(_ snapshot: ReceiverSessionState) {
         publishToUI { self.session = snapshot }
+    }
+
+    /// Receiver Swift6-B1: `session`'s only external mutator — `ReceiverUISink`
+    /// (a different type, so `private(set)` alone doesn't admit it) calls
+    /// this instead of writing `session` directly across that boundary.
+    /// Same single assignment `publishSessionSnapshot` above does, just
+    /// reachable from `ReceiverUISink`.
+    @MainActor func applyUISessionSnapshot(_ snapshot: ReceiverSessionState) {
+        session = snapshot
     }
 
     /// The `UIEffects.applyConnectedUIMirror` half of the former

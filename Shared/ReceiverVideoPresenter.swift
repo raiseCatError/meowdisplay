@@ -118,12 +118,13 @@ final class ReceiverVideoPresenter {
         /// the app-facing sink (`StreamReceiver.onDecodedFrame`).
         var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ captureMs: Double?) -> Void
         /// `displayLayer.status == .failed` was observed and flushed —
-        /// feeds `StreamReceiver`'s `decodeFlushes` telemetry exactly as
-        /// before.
+        /// feeds `ReceiverVideoTelemetry`'s flush-count telemetry exactly
+        /// as before (Receiver Swift6-B1 moved that counter's storage
+        /// there).
         var decodeFlushIncurred: @Sendable () -> Void
         /// A sample buffer actually reached `displayLayer.enqueue` on the
         /// direct-display path (not merely routed there) — feeds
-        /// `StreamReceiver`'s DEBUG-only `debugFramesPresentedWindow`
+        /// `ReceiverVideoTelemetry`'s DEBUG-only presented-window
         /// telemetry. Present unconditionally (unlike that counter itself)
         /// purely so this struct's initializer never needs `#if DEBUG`
         /// inside its argument list; `StreamReceiver` wires it to a no-op
