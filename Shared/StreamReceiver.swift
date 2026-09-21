@@ -3473,6 +3473,18 @@ final class StreamReceiver: ObservableObject {
     /// weakly and its only job is producing a UI update.
     private func makePipelineUIEffects() -> ReceiverPipelineActor.UIEffects {
         let sink = uiSink
+        // Receiver Swift6-C1: `queue`/`transportState` captured directly
+        // instead of `self` — both are Sendable (`DispatchQueue` is
+        // `@unchecked Sendable`, `transportState` is its own lock-protected
+        // owner, same as `makePipelineHostEffects()`'s `transportState`
+        // capture). The `queue.async` hop is preserved (not just dropped for
+        // a direct read) because `hostEffects.onPathUpdate` — called
+        // synchronously just before this in `ReceiverPipelineActor.
+        // handlePathUpdate` — enqueues its own `transport`-writing work onto
+        // the same `queue` first; staying on `queue` keeps this read
+        // ordered after that write, exactly as before.
+        let queue = self.queue
+        let transportState = self.transportState
         return .init(
             // Receiver Swift6-B1: both publish through `uiSink`, a Sendable
             // @MainActor proxy — see its file header — instead of capturing
@@ -3485,9 +3497,11 @@ final class StreamReceiver: ObservableObject {
             setStatus: { text in
                 DispatchQueue.main.async { sink.publishStatus(text) }
             },
-            setStatusConnected: { [weak self] in
-                self?.queue.async { guard let self else { return }
-                    self.setStatus("Connected · \(self.transport)")
+            setStatusConnected: {
+                queue.async {
+                    let text = "Connected · \(transportState.get())"
+                    Log.info("status: \(text)")
+                    DispatchQueue.main.async { sink.publishStatus(text) }
                 }
             },
             applyConnectedUIMirror: { [weak self] value in self?.applyConnectedUIMirror(value) })
