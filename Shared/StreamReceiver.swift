@@ -460,7 +460,8 @@ final class StreamReceiver: ObservableObject {
     // a `Date`. Nothing here holds a writable shadow of any of this; the
     // one synchronous cross-actor read the watchdog still needs
     // (`makePipelineHostEffects`'s `getReceiveLiveness`) goes through
-    // `framePipeline.syncState.snapshot()`, never a local copy.
+    // `framePipelineSyncState.snapshot()` — the same instance `framePipeline`
+    // holds as its own `syncState` — never a local copy.
 
     private var framesThisWindow = 0
     private var fpsWindowStart = Date()
@@ -3254,12 +3255,22 @@ final class StreamReceiver: ObservableObject {
     /// see `ReceiverPipelineActor.ReconnectContext`.
     private let reconnectContext = ReconnectContext()
 
+    /// Swift6-B2.1: the lock-backed generation/liveness snapshot shared
+    /// with `framePipeline` below — held here directly, eagerly (not via
+    /// the lazy actor), so `makePipelineHostEffects()`'s
+    /// `getReceiveLiveness` can capture this Sendable owner on its own
+    /// instead of a weak `self` reaching through `framePipeline` only to
+    /// get to this same object. `framePipeline` is handed this exact
+    /// instance below — there is no second, duplicated sync-state.
+    private let framePipelineSyncState = FramePipelineSyncState()
+
     /// C3: the sole authoritative owner of the high-frequency receive/
     /// frame-assembly cluster (`buffer`/SPS/PPS/VPS/`formatDesc`/the active
     /// receive generation) — see its file header. `lazy` for the same
     /// reason as `pipeline` below: `makeFramePipelineOutputEffects()`
     /// captures `self` weakly, and actual use starts well after `init`.
-    private lazy var framePipeline = ReceiverFramePipeline(outputEffects: makeFramePipelineOutputEffects())
+    private lazy var framePipeline = ReceiverFramePipeline(
+        outputEffects: makeFramePipelineOutputEffects(), syncState: framePipelineSyncState)
 
     /// C4: the sole authoritative owner of the VideoToolbox decode domain
     /// (Metal renderer path) — see its file header. `lazy` for the same
@@ -3374,7 +3385,8 @@ final class StreamReceiver: ObservableObject {
     /// touches `queue`-confined state hops onto `queue` itself before
     /// touching it.
     private func makePipelineHostEffects() -> ReceiverPipelineActor.HostControlEffects {
-        .init(
+        let syncState = framePipelineSyncState
+        return .init(
             clearTransport: { [weak self] in
                 self?.queue.async { self?.transport = "—" }
             },
@@ -3384,8 +3396,8 @@ final class StreamReceiver: ObservableObject {
             requestRemoteConnect: { [weak self] peerID in
                 self?.queue.async { self?.requestRemoteConnect(peerID: peerID) }
             },
-            getReceiveLiveness: { [weak self] in
-                self?.framePipeline.syncState.snapshot() ?? (generation: -1, lastDataReceived: .distantPast)
+            getReceiveLiveness: {
+                syncState.snapshot()
             },
             advertisesAddresses: { [weak self] in self?.advertisesAddresses ?? false },
             beginAdoption: { [weak self] conn, generation in

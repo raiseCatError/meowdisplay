@@ -175,11 +175,18 @@ actor ReceiverFramePipeline {
 
     // MARK: - Dependencies
 
-    nonisolated let syncState = FramePipelineSyncState()
+    /// Injected rather than self-constructed so `StreamReceiver` can hold
+    /// the SAME instance directly — see `StreamReceiver.
+    /// framePipelineSyncState` — letting `makePipelineHostEffects()`'s
+    /// `getReceiveLiveness` capture this Sendable owner on its own instead
+    /// of reaching through the lazily-constructed actor. Defaults to a
+    /// fresh instance for call sites (tests) that don't need to share it.
+    nonisolated let syncState: FramePipelineSyncState
     nonisolated let outputEffects: OutputEffects
 
-    init(outputEffects: OutputEffects) {
+    init(outputEffects: OutputEffects, syncState: FramePipelineSyncState = FramePipelineSyncState()) {
         self.outputEffects = outputEffects
+        self.syncState = syncState
     }
 
     // MARK: - Reset / adoption seam
