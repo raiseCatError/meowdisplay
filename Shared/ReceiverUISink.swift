@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// Receiver Swift6-B1: the MainActor-facing publication proxy for the
 /// narrow subset of `StreamReceiver`'s own UI-facing state that a
@@ -83,5 +84,16 @@ final class ReceiverUISink: Sendable {
     /// reconnect/network behavior.
     func publishAuthenticatedPeerID(_ peerID: String?) {
         target?.applyAuthenticatedPeerIDUpdate(peerID)
+    }
+
+    /// The UI-publish half of `startMacPairingBrowser`'s
+    /// `browseResultsChangedHandler` — discovery results are UI-facing
+    /// state (see `StreamReceiver.discoveredMacs`'s doc), so this is the
+    /// same one-way, immutable-payload-in, `@MainActor`-only shape as
+    /// `publishVideoSize` above, reached from the browser callback's
+    /// existing `DispatchQueue.main.async` hop instead of a `weak self`
+    /// capture.
+    func publishDiscoveredMacs(_ results: [NWBrowser.Result]) {
+        target?.applyDiscoveredMacsUpdate(results)
     }
 }

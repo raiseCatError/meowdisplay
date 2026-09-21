@@ -1519,9 +1519,11 @@ final class StreamReceiver: ObservableObject {
         parameters.includePeerToPeer = true
         let browser = NWBrowser(for: .bonjourWithTXTRecord(
             type: "_opendisplay-mac-pair._tcp", domain: nil), using: parameters)
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
+        let uiSink = uiSink
+        browser.browseResultsChangedHandler = { results, _ in
+            let discovered = Array(results)
             DispatchQueue.main.async {
-                self?.discoveredMacs = Array(results)
+                uiSink.publishDiscoveredMacs(discovered)
                 #if DEBUG
                 Log.info("Mac pairing browser changed: results=\(results.count)")
                 for result in results {
@@ -4047,6 +4049,14 @@ final class StreamReceiver: ObservableObject {
     /// `private(set)`-admitting shape as `applyUISessionSnapshot` above.
     @MainActor func applyAuthenticatedPeerIDUpdate(_ peerID: String?) {
         authenticatedPeerID = peerID
+    }
+
+    /// `discoveredMacs`'s only external mutator — see `ReceiverUISink.
+    /// publishDiscoveredMacs`, its sole caller. Same single-assignment,
+    /// `private(set)`-admitting shape as `applyAuthenticatedPeerIDUpdate`
+    /// above.
+    @MainActor func applyDiscoveredMacsUpdate(_ results: [NWBrowser.Result]) {
+        discoveredMacs = results
     }
 
     /// The `UIEffects.applyConnectedUIMirror` half of the former
