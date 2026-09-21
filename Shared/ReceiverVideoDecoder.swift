@@ -111,7 +111,7 @@ actor ReceiverVideoDecoder {
         var decodeDurationMs: @Sendable (Double) -> Void
         /// Decode failed (submission or output callback) — joined mid-GOP,
         /// or a genuinely corrupt frame. `StreamReceiver.
-        /// requestKeyframeIfNeeded` already rate-limits actually sending
+        /// KeyframeThrottle` already rate-limits actually sending
         /// one; this actor only ever signals the need, never sends control
         /// traffic itself (never touches `SendTarget`).
         var requestKeyframe: @Sendable () -> Void

@@ -768,8 +768,9 @@ final class StreamReceiver: ObservableObject {
         // above is already set), so it's legal for `makePresenter()`/
         // `makeVideoDecoder()` to capture `self` weakly for their
         // unrelated coordinator hops (`onDecodedFrame`/
-        // `requestKeyframeIfNeeded`) — see their own doc comments for why
-        // the cross-owner (sibling) references no longer need to.
+        // `onDecodedFrame`) — see their own doc comments for why the
+        // cross-owner (sibling) references no longer need to. (`requestKeyframe`
+        // itself no longer captures `self` at all — see `KeyframeThrottle`.)
         _ = presenter
         _ = videoDecoder
         Task { @MainActor [weak self] in
@@ -3053,13 +3054,30 @@ final class StreamReceiver: ObservableObject {
     // wires its `OutputEffects` back onto `queue` — see
     // `makeVideoDecoder` and `videoDecoder` below.
 
-    private var lastKeyframeRequest = Date.distantPast
-    private func requestKeyframeIfNeeded() {
-        guard Date().timeIntervalSince(lastKeyframeRequest) > 1 else { return }
-        lastKeyframeRequest = Date()
-        Log.info("requesting keyframe (decoder needs sync)")
-        sendControl(["type": "kf"])
+    /// Receiver Swift6-B2.4-E2a: the sole authoritative owner of the
+    /// keyframe-request throttle timestamp — narrow lock-backed, exactly
+    /// like `SendTargetBox` above, so `makeVideoDecoder()`'s `requestKeyframe`
+    /// effect can capture it directly instead of `self`. `@unchecked
+    /// Sendable`: `lastRequest` is a private `var` touched only inside
+    /// `lock`/`unlock`, `shouldSend` is the single exposed operation, its
+    /// check-and-update happens as one atomic critical section, and no
+    /// mutable reference ever escapes. `internal` (not `private`), unlike
+    /// its siblings here, solely so `KeyframeThrottleTests` can exercise its
+    /// check-and-update math directly with injected `Date`s — no wall-clock
+    /// sleeps.
+    final class KeyframeThrottle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastRequest: Date = .distantPast
+
+        func shouldSend(now: Date, minimumInterval: TimeInterval) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard now.timeIntervalSince(lastRequest) > minimumInterval else { return false }
+            lastRequest = now
+            return true
+        }
     }
+
+    private let keyframeThrottle = KeyframeThrottle()
 
     private func percentile(_ values: [Double], _ p: Double) -> Double {
         guard !values.isEmpty else { return 0 }
@@ -3407,6 +3425,12 @@ final class StreamReceiver: ObservableObject {
         // independent strong references) are what actually keep both alive
         // for exactly as long as this instance lives.
         let presenter = self.presenter
+        // Receiver Swift6-B2.4-E2a: `queue`/`keyframeThrottle`/`sendTargetBox`
+        // captured directly instead of `self` — same style as `sendPing` in
+        // `makePipelineHostEffects()` below.
+        let queue = self.queue
+        let keyframeThrottle = self.keyframeThrottle
+        let sendTargetBox = self.sendTargetBox
         let decoder = ReceiverVideoDecoder(outputEffects: .init(
             decodedFrameReady: { [weak presenter] box, generation, captureMs in
                 presenter?.enqueuePresentDecoded(box, generation: generation, captureMs: captureMs)
@@ -3417,8 +3441,13 @@ final class StreamReceiver: ObservableObject {
             decodeDurationMs: { ms in
                 telemetry.recordDecodeDuration(ms)
             },
-            requestKeyframe: { [weak self] in
-                self?.queue.async { self?.requestKeyframeIfNeeded() }
+            requestKeyframe: {
+                queue.async {
+                    let now = Date()
+                    guard keyframeThrottle.shouldSend(now: now, minimumInterval: 1.0) else { return }
+                    Log.info("requesting keyframe (decoder needs sync)")
+                    Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                }
             }))
         // Exactly once, immediately after construction, strictly before
         // `init` returns — no command can have reached either owner's pump
