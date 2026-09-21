@@ -68,6 +68,22 @@ final class ReceiverUISinkTests: XCTestCase {
         sink.publishAuthenticatedPeerID("ignored")
     }
 
+    func testPublishPairingSucceededIncrementsTargetCount() {
+        let receiver = makeReceiver()
+        let sink = ReceiverUISink()
+        sink.target = receiver
+        XCTAssertEqual(receiver.pairingSuccessCount, 0)
+        sink.publishPairingSucceeded()
+        XCTAssertEqual(receiver.pairingSuccessCount, 1)
+        sink.publishPairingSucceeded()
+        XCTAssertEqual(receiver.pairingSuccessCount, 2)
+    }
+
+    func testPublishPairingSucceededIsNoOpWithNoTargetAssigned() {
+        let sink = ReceiverUISink()
+        sink.publishPairingSucceeded()
+    }
+
     /// Lifetime review: `ReceiverUISink` must hold `target` weakly — it must
     /// never be the reason a `StreamReceiver` stays alive.
     func testTargetIsHeldWeakly() {

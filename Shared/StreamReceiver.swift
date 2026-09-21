@@ -345,6 +345,48 @@ final class TLSListenerState: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole authoritative owner of the currently installed
+/// pairing listener's identity — nothing more. Same shape as
+/// `TLSListenerState` above (a plain reference swap under the lock, `===`
+/// identity checks, no callback ever invoked while held, external framework
+/// cancellation happens after releasing the lock); it holds no pairing
+/// protocol state, no `PairingPromptModel`, and no `TrustStore` material —
+/// those stay with `startPairingListener`/`pairingPrompt`.
+final class PairingListenerState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: NWListener?
+
+    func hasCurrent() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return current != nil
+    }
+
+    func install(_ listener: NWListener) {
+        lock.lock(); defer { lock.unlock() }
+        current = listener
+    }
+
+    /// Exact `===` identity check — matches the original
+    /// `self.pairingListener === listener` guard verbatim.
+    func isCurrent(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return current === listener
+    }
+
+    func currentListener() -> NWListener? {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
+
+    func cancelCurrent() {
+        lock.lock()
+        let listener = current
+        current = nil
+        lock.unlock()
+        listener?.cancel()
+    }
+}
+
 /// Lock-protected sole authoritative store for `mediaSuppressedForPairing` —
 /// whether the TLS media listener must refuse new connections because
 /// explicit pairing is in progress. Reads happen on connection admission
@@ -793,7 +835,7 @@ final class StreamReceiver: ObservableObject {
     #endif
 
     private let tlsListenerState = TLSListenerState()
-    private var pairingListener: NWListener?
+    private let pairingListenerState = PairingListenerState()
     // Receiver-originated Connect (see connectDebug): a short-lived token
     // published in the `_opensidecar._tcp` TXT record. The Mac already
     // browses that service continuously (it's how "Paired · Nearby" is
@@ -1055,7 +1097,7 @@ final class StreamReceiver: ObservableObject {
             guard self.advertisementState.setServiceName(resolved) else { return }
             if let tlsListener = self.tlsListenerState.currentListener() {
                 tlsListener.service = self.advertisedService
-                self.pairingListener?.service = self.advertisedPairingService
+                self.pairingListenerState.currentListener()?.service = self.advertisedPairingService
                 Log.info("re-advertising as \"\(resolved)\"")
             }
         }
@@ -1353,8 +1395,20 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func finishExplicitPairing(success: Bool) {
+        Self.finishExplicitPairing(queue: queue, pairingSuppressionState: pairingSuppressionState, success: success)
+    }
+
+    /// Static, self-free twin of the instance method above (Receiver
+    /// Swift6-Pairing-Listener) — the pairing listener's `newConnectionHandler`/
+    /// nested `Task` calls this directly instead of a bound `self?.
+    /// finishExplicitPairing` closure, so that closure graph carries zero
+    /// `StreamReceiver` capture. Exact same body; the instance method above
+    /// delegates here so every other call site's behavior is unchanged.
+    private static func finishExplicitPairing(
+        queue: DispatchQueue, pairingSuppressionState: PairingSuppressionState, success: Bool
+    ) {
         queue.async {
-            self.pairingSuppressionState.setSuppressed(false)
+            pairingSuppressionState.setSuppressed(false)
             Log.info("pairDebug: pairing finished success=\(success)")
         }
     }
@@ -1534,7 +1588,7 @@ final class StreamReceiver: ObservableObject {
                 guard let self, !finished else { return }
                 finished = true
                 self.tlsListenerState.cancelCurrent()
-                self.pairingListener?.cancel(); self.pairingListener = nil
+                self.pairingListenerState.cancelCurrent()
                 self.reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it cannot
@@ -1665,49 +1719,84 @@ final class StreamReceiver: ObservableObject {
     /// site) so the pairing-listener's completion `Task` can trigger it
     /// without itself capturing `self` into a second escaping closure.
     private func scheduleTLSListenerRefresh() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.tlsListenerState.cancelCurrent()
-            Self.startTLSListener(
-                queue: self.queue, tlsListenerState: self.tlsListenerState,
-                pairingSuppressionState: self.pairingSuppressionState,
-                advertisementState: self.advertisementState, pipeline: self.pipeline,
-                installID: Self.installID, advertisedProtocolVersion: self.advertisedProtocolVersion)
+        Self.scheduleTLSListenerRefresh(
+            queue: queue, tlsListenerState: tlsListenerState,
+            pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+            pipeline: pipeline, installID: Self.installID, advertisedProtocolVersion: advertisedProtocolVersion)
+    }
+
+    /// Static, self-free twin of the instance method above (Receiver
+    /// Swift6-Pairing-Listener), same delegation shape as the
+    /// `finishExplicitPairing` pair — the pairing listener's success `Task`
+    /// calls this directly with the stable owners it already captured for
+    /// `startTLSListener`, so it never needs `self.pipeline`/`self`.
+    private static func scheduleTLSListenerRefresh(
+        queue: DispatchQueue, tlsListenerState: TLSListenerState,
+        pairingSuppressionState: PairingSuppressionState, advertisementState: ReceiverAdvertisementState,
+        pipeline: ReceiverPipelineActor, installID: String, advertisedProtocolVersion: Int
+    ) {
+        queue.async {
+            tlsListenerState.cancelCurrent()
+            startTLSListener(
+                queue: queue, tlsListenerState: tlsListenerState,
+                pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+                pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
         }
     }
 
+    /// Receiver Swift6-Pairing-Listener: the pairing listener's
+    /// `newConnectionHandler`/nested `Task` capture only stable owners
+    /// (`PairingListenerState`, `ReceiverAdvertisementState`, the stable
+    /// `let pairingPrompt`, `uiSink`, `queue`, `PairingSuppressionState`,
+    /// `TLSListenerState`, `pipeline`, immutable `installID`/protocol
+    /// version) — never `self`/a bound `StreamReceiver` method — same
+    /// "capture directly instead of `self`" idiom as `startTLSListener`.
     private func startPairingListener() {
-        guard pairingListener == nil else { return }
+        guard !pairingListenerState.hasCurrent() else { return }
+        let pairingListenerState = self.pairingListenerState
+        let advertisementState = self.advertisementState
+        let prompt = self.pairingPrompt
+        let uiSink = self.uiSink
+        let queue = self.queue
+        let tlsListenerState = self.tlsListenerState
+        let pairingSuppressionState = self.pairingSuppressionState
+        let pipeline = self.pipeline
+        let installID = Self.installID
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
         do {
             let params = NWParameters.tcp
             params.includePeerToPeer = true
             params.allowLocalEndpointReuse = true
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.pairingPort)!)
-            pairingListener = listener
+            pairingListenerState.install(listener)
             listener.service = advertisedPairingService
             #if DEBUG
             Log.info("pairing listener starting: type=_opendisplay-pair._tcp port=\(WireCrypto.pairingPort) id=\(Self.installID) peerToPeer=true")
             #endif
-            listener.newConnectionHandler = { [weak self, weak listener] connection in
-                guard let self, self.pairingListener === listener else { connection.cancel(); return }
-                let localName = self.serviceName
-                let prompt = self.pairingPrompt
-                Task { [weak self] in
+            listener.newConnectionHandler = { [weak listener] connection in
+                guard let listener, pairingListenerState.isCurrent(listener) else { connection.cancel(); return }
+                let localName = advertisementState.currentServiceName()
+                Task {
                     defer { connection.cancel() }
                     do {
                         let paired = try await PairingNetwork.runResponder(
-                            connection: connection, localID: Self.installID,
+                            connection: connection, localID: installID,
                             localName: localName, prompt: prompt, allowIdentityChange: false)
                         await prompt.finish("Paired with \(paired.peerName)")
-                        await self?.notePairingSucceeded()
-                        self?.finishExplicitPairing(success: true)
-                        self?.scheduleTLSListenerRefresh()
+                        await uiSink.publishPairingSucceeded()
+                        Self.finishExplicitPairing(
+                            queue: queue, pairingSuppressionState: pairingSuppressionState, success: true)
+                        Self.scheduleTLSListenerRefresh(
+                            queue: queue, tlsListenerState: tlsListenerState,
+                            pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+                            pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
                     } catch {
                         await prompt.finish(error.localizedDescription)
                         let promptStillPending = await MainActor.run { prompt.pending != nil }
                         if !promptStillPending {
-                            self?.finishExplicitPairing(success: false)
+                            Self.finishExplicitPairing(
+                                queue: queue, pairingSuppressionState: pairingSuppressionState, success: false)
                         } else {
                             Log.info("pairDebug: duplicate responder ended without disturbing pending confirmation")
                         }
@@ -4306,6 +4395,15 @@ final class StreamReceiver: ObservableObject {
     /// above.
     @MainActor func applyDiscoveredMacsUpdate(_ results: [NWBrowser.Result]) {
         discoveredMacs = results
+    }
+
+    /// `pairingSuccessCount`'s external-boundary mutator for the pairing
+    /// listener's `newConnectionHandler`/nested `Task` — see `ReceiverUISink.
+    /// publishPairingSucceeded`, its sole caller. Exact same +1 as
+    /// `notePairingSucceeded()`, which other call sites (`pairWithMac`,
+    /// `pairWithRemoteHost`) keep calling directly, untouched by this.
+    @MainActor func applyPairingSucceededUpdate() {
+        pairingSuccessCount += 1
     }
 
     /// The `UIEffects.applyConnectedUIMirror` half of the former

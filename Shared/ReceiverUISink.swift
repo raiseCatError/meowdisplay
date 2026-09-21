@@ -96,4 +96,14 @@ final class ReceiverUISink: Sendable {
     func publishDiscoveredMacs(_ results: [NWBrowser.Result]) {
         target?.applyDiscoveredMacsUpdate(results)
     }
+
+    /// Mirrors `StreamReceiver.notePairingSucceeded()` for the pairing
+    /// listener's `newConnectionHandler`/nested `Task` (Receiver
+    /// Swift6-Pairing-Listener) — the one boundary crossing that closure
+    /// graph needed `self` for. UI-only: bumps the already-`@MainActor`
+    /// `pairingSuccessCount` via the existing `private(set)` setter, no
+    /// read-back, no policy.
+    func publishPairingSucceeded() {
+        target?.applyPairingSucceededUpdate()
+    }
 }
