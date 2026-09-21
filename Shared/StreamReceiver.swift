@@ -1404,6 +1404,14 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func updateTransport(for conn: NWConnection, path: NWPath) {
+        Self.updateTransport(for: conn, path: path, transportState: transportState)
+    }
+
+    /// Static so `onPathUpdate`'s host-effect closure can call it with a
+    /// directly-captured `transportState` instead of `self` — this is the
+    /// only state the original instance method touched (see the call-site
+    /// comment in `makePipelineHostEffects()`).
+    private static func updateTransport(for conn: NWConnection, path: NWPath, transportState: ReceiverTransportState) {
         let peer = String(describing: path.remoteEndpoint ?? conn.endpoint)
         let isLoopbackPeer = peer.hasPrefix("127.0.0.1") || peer.hasPrefix("::1")
             || peer.hasPrefix("localhost") || peer.hasPrefix("[::1]")
@@ -1411,7 +1419,7 @@ final class StreamReceiver: ObservableObject {
             isUSB: path.usesInterfaceType(.loopback) || isLoopbackPeer,
             interfaceNames: path.availableInterfaces.map(\.name),
             remoteEndpointDescription: peer)
-        transport = route.rawValue
+        transportState.set(route.rawValue)
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
         Log.info("connection path from \(peer): \(names) route=\(route.rawValue)")
     }
@@ -2267,6 +2275,14 @@ final class StreamReceiver: ObservableObject {
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
                              completion: (() -> Void)? = nil) {
+        Self.sendControl(message, on: conn, sendTargetBox: sendTargetBox, completion: completion)
+    }
+
+    /// Static so `sendPing`'s host-effect closure (E1a) can call it with a
+    /// directly-captured `sendTargetBox` instead of `self` — this is the
+    /// only state the instance method touched beyond its parameters.
+    private static func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
+                                     sendTargetBox: SendTargetBox, completion: (() -> Void)? = nil) {
         // C1: `connection` moved into `pipeline`; every background-queue-
         // confined caller that used to fall through to it (liveness ping,
         // decoder-reset keyframe requests, the periodic stats report) now
@@ -3541,6 +3557,12 @@ final class StreamReceiver: ObservableObject {
         // `init` since `deviceKind` is a `let`.
         let transportState = self.transportState
         let advertises = advertisesAddresses
+        // Receiver Swift6-B2.4-E1a: `queue`/`sendTargetBox` captured
+        // directly instead of `self` — both already stable owners captured
+        // this way elsewhere in this file (`makePipelineUIEffects()`,
+        // `pipeline`'s own init).
+        let queue = self.queue
+        let sendTargetBox = self.sendTargetBox
         return .init(
             clearTransport: {
                 transportState.clear()
@@ -3564,12 +3586,20 @@ final class StreamReceiver: ObservableObject {
             sendHello: { [weak self] conn in
                 self?.queue.async { self?.sendHello(on: conn) }
             },
-            onPathUpdate: { [weak self] conn, path in
-                self?.queue.async { self?.updateTransport(for: conn, path: path) }
+            onPathUpdate: { conn, path in
+                queue.async {
+                    Self.updateTransport(for: conn, path: path, transportState: transportState)
+                }
             },
-            sendPing: { [weak self] in
-                self?.queue.async { guard let self else { return }
-                    self.sendControl(["type": "ping", "t": self.nowMs])
+            // E1a: sends the ping frame through the static `sendControl`
+            // (see its definition above), capturing `sendTargetBox`
+            // directly instead of `self` — a bound `self.sendControl`
+            // would still capture `self`. `nowMs` is a pure `Date()` read,
+            // no `self` state.
+            sendPing: {
+                queue.async {
+                    Self.sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000],
+                                      sendTargetBox: sendTargetBox)
                 }
             },
             checkAddressChangeAndSendHello: { [weak self] conn in
