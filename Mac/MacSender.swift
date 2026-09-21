@@ -1707,7 +1707,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // the hop itself, not just before it — and once more right
                 // after, before this candidate is ever assigned.
                 guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
-                created = try await MainActor.run { () -> VirtualDisplay? in
+                try await MainActor.run {
                     guard !self.isExtendSetupStale(ownerGeneration: ownerGeneration) else {
                         throw CancellationError()
                     }
@@ -1726,7 +1726,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // suggests some macOS versions key the hostile state on
                     // the product, not the serial — bumping both escapes
                     // either keying.
-                    return VirtualDisplay(name: displayName,
+                    created = VirtualDisplay(name: displayName,
                                           pointsWide: pointsWide, pointsHigh: pointsHigh,
                                           sizeInMillimeters: mm,
                                           serialNum: serial &+ totalOffset,
