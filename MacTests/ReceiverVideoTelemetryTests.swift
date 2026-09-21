@@ -71,6 +71,25 @@ final class ReceiverVideoTelemetryTests: XCTestCase {
         // inline "log it, then zero it" window reset.
         XCTAssertEqual(telemetry.drainDebugPresentedCount(), 0)
     }
+
+    func testDrainDebugDecodedCountIsAtomicReadThenReset() {
+        let telemetry = ReceiverVideoTelemetry()
+        telemetry.incrementDebugDecodedCount()
+        telemetry.incrementDebugDecodedCount()
+        XCTAssertEqual(telemetry.drainDebugDecodedCount(), 2)
+        XCTAssertEqual(telemetry.drainDebugDecodedCount(), 0)
+    }
+
+    /// The decoded and presented counters are independent — draining one
+    /// must not disturb the other.
+    func testDecodedAndPresentedCountsAreIndependent() {
+        let telemetry = ReceiverVideoTelemetry()
+        telemetry.incrementDebugDecodedCount()
+        telemetry.incrementDebugPresentedCount()
+        telemetry.incrementDebugPresentedCount()
+        XCTAssertEqual(telemetry.drainDebugDecodedCount(), 1)
+        XCTAssertEqual(telemetry.drainDebugPresentedCount(), 2)
+    }
     #endif
 
     /// Deterministic concurrent stress test: many threads incrementing the

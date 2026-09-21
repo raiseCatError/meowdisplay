@@ -42,6 +42,14 @@ final class ReceiverVideoTelemetry: @unchecked Sendable {
     /// `StreamReceiver.debugFramesPresentedWindow`, feeding only the
     /// `receiverPipeline:` DEBUG log line.
     private var presentedWindowCount = 0
+
+    /// Frames whose decode succeeded this ~1s debug window — mirrors the
+    /// old `StreamReceiver.debugFramesDecodedWindow`, feeding only the
+    /// `receiverPipeline:` DEBUG log line. Incremented from
+    /// `makePresenter()`'s `decodedFrameReady` effect, which needed a
+    /// `self`-free owner for this counter to drop its `StreamReceiver`
+    /// capture — see `ReceiverDecodedFrameSink`'s file header.
+    private var decodedWindowCount = 0
     #endif
 
     // MARK: - Hot-path writers (per decoded/presented frame)
@@ -68,6 +76,13 @@ final class ReceiverVideoTelemetry: @unchecked Sendable {
     func incrementDebugPresentedCount() {
         lock.lock(); defer { lock.unlock() }
         presentedWindowCount += 1
+    }
+
+    /// One frame's decode succeeded. Called from `makePresenter()`'s
+    /// `decodedFrameReady` effect.
+    func incrementDebugDecodedCount() {
+        lock.lock(); defer { lock.unlock() }
+        decodedWindowCount += 1
     }
     #endif
 
@@ -108,6 +123,15 @@ final class ReceiverVideoTelemetry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let value = presentedWindowCount
         presentedWindowCount = 0
+        return value
+    }
+
+    /// Atomic read-then-reset of the debug decoded-frame count, same shape
+    /// as `drainDebugPresentedCount()` above.
+    func drainDebugDecodedCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let value = decodedWindowCount
+        decodedWindowCount = 0
         return value
     }
     #endif

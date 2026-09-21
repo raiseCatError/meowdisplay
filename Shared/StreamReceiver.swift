@@ -288,6 +288,33 @@ final class AVSyncPreference: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole storage authority for `StreamReceiver.onDecodedFrame`
+/// — the app-facing "hand me decoded BGRA buffers" sink, live-reassigned
+/// (and nil'd) by `iOS/OpenSidecarPhoneApp.swift` for the lifetime of the
+/// receiver. This exists only so `makePresenter()`'s `decodedFrameReady`
+/// effect can read the CURRENT callback per frame without capturing `self`
+/// — capturing the callback's value at presenter-construction time would be
+/// wrong, since the app reassigns it after the presenter already exists (see
+/// requirement B/C in the header this type was introduced for). Same
+/// `NSLock`-protected, `@unchecked Sendable` idiom as `AVSyncPreference`
+/// above: `get()` copies the callback under the lock and returns it, so the
+/// caller invokes it AFTER releasing the lock — no callback is ever invoked
+/// while `lock` is held.
+final class ReceiverDecodedFrameSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)?
+
+    func get() -> ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        return callback
+    }
+
+    func set(_ callback: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)?) {
+        lock.lock(); defer { lock.unlock() }
+        self.callback = callback
+    }
+}
+
 /// Lock-protected sole authoritative owner of the currently installed TLS
 /// media listener's identity — nothing more. It holds no listener policy, no
 /// TrustStore/TLSConfigurator material, and constructs no `NWListener.Service`;
@@ -960,9 +987,12 @@ final class StreamReceiver: ObservableObject {
     // counter it sits beside, so this follows that convention.
     private var debugFramesReceivedWindow = 0    // complete AnnexB frames off the wire
     private var debugFramesToDecoderWindow = 0   // submitted to VTDecompressionSession
-    private var debugFramesDecodedWindow = 0     // decode succeeded
     // Receiver Swift6-B1: the "handed to the display layer" counter moved
     // into `videoTelemetry` (`presentedWindowCount`) — see that file.
+    // Receiver Swift6: the "decode succeeded" counter (formerly
+    // `debugFramesDecodedWindow`) moved into `videoTelemetry`
+    // (`decodedWindowCount`) too — `decodedFrameReady`'s effect needed a
+    // `self`-free owner to drop its `StreamReceiver` capture.
     private var debugArrivalIntervals: [Double] = []
     private var debugLastArrivalAt: Date?
     #endif
@@ -989,7 +1019,17 @@ final class StreamReceiver: ObservableObject {
     // The decode itself (session, generation, DEBUG luma probe) is C4:
     // `ReceiverVideoDecoder` below — this remains only the telemetry ring
     // its `decodeDurationMs` effect feeds, and the app-facing sink.
-    var onDecodedFrame: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)?
+    /// Receiver Swift6: storage delegates to `decodedFrameSink`
+    /// (`ReceiverDecodedFrameSink`, see its file header) — a lock-protected
+    /// owner `makePresenter()`'s `decodedFrameReady` effect can read the
+    /// live value from without capturing `self`. This computed property is
+    /// the entire compatibility surface: external callers (`onDecodedFrame
+    /// = ...` / `= nil` in `iOS/OpenSidecarPhoneApp.swift`) are unchanged.
+    var onDecodedFrame: ((_ pixelBuffer: CVPixelBuffer, _ captureMs: Double?) -> Void)? {
+        get { decodedFrameSink.get() }
+        set { decodedFrameSink.set(newValue) }
+    }
+    private let decodedFrameSink = ReceiverDecodedFrameSink()
     /// Receiver Swift6-B1: decode-duration samples + the cumulative flush
     /// count moved into this narrow lock-backed owner — see its file
     /// header. Never captured directly by a `@Sendable` closure that also
@@ -3567,13 +3607,15 @@ final class StreamReceiver: ObservableObject {
             // Receiver Swift6-B1: atomic read-then-reset from `videoTelemetry`
             // — see `drainDebugPresentedCount()`'s doc comment.
             let debugPresentedWindow = videoTelemetry.drainDebugPresentedCount()
+            // Receiver Swift6: same atomic read-then-reset, now covering the
+            // decoded-frame count too — see `drainDebugDecodedCount()`.
+            let debugDecodedWindow = videoTelemetry.drainDebugDecodedCount()
             Log.info("receiverPipeline: recv=\(debugFramesReceivedWindow) toDecoder=\(debugFramesToDecoderWindow) "
-                + "decoded=\(debugFramesDecodedWindow) presented=\(debugPresentedWindow) "
+                + "decoded=\(debugDecodedWindow) presented=\(debugPresentedWindow) "
                 + "arrivalMs(p50=\(String(format: "%.1f", arrivalP50)) p95=\(String(format: "%.1f", arrivalP95)) max=\(String(format: "%.1f", arrivalMax))) "
                 + "fps=\(fps) stalls=\(stats.stalls)")
             debugFramesReceivedWindow = 0
             debugFramesToDecoderWindow = 0
-            debugFramesDecodedWindow = 0
             #endif
 
             // Every 5s, report the aggregate to the Mac so its log holds the
@@ -4049,18 +4091,26 @@ final class StreamReceiver: ObservableObject {
     private func makePresenter() -> ReceiverVideoPresenter {
         let telemetry = videoTelemetry
         let decoderRef = videoDecoderRef
+        // Receiver Swift6: captured directly instead of `self` — same style
+        // as `telemetry`/`decoderRef` above. `decodedFrameSink` is the sole
+        // storage authority behind the `onDecodedFrame` computed property
+        // (see its file header); reading it per-invocation, INSIDE the
+        // queue hop below, keeps live-reassignment semantics identical to
+        // the old `self.onDecodedFrame?(...)` read.
+        let queue = self.queue
+        let decodedFrameSink = self.decodedFrameSink
         return ReceiverVideoPresenter(
             displayLayer: displayLayer,
             outputEffects: .init(
                 decodeViaVideoDecoder: { box, generation, captureMs in
                     decoderRef.get()?.enqueueDecode(box, generation: generation, captureMs: captureMs)
                 },
-                decodedFrameReady: { [weak self] box, captureMs in
-                    self?.queue.async { guard let self else { return }
+                decodedFrameReady: { box, captureMs in
+                    queue.async {
                         #if DEBUG
-                        self.debugFramesDecodedWindow += 1
+                        telemetry.incrementDebugDecodedCount()
                         #endif
-                        self.onDecodedFrame?(box.value, captureMs)
+                        decodedFrameSink.get()?(box.value, captureMs)
                     }
                 },
                 // Receiver Swift6-B1: both effects below now capture only
