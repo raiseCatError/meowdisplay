@@ -130,3 +130,76 @@ final class ReceiverHelloStateTests: XCTestCase {
         XCTAssertTrue(finalSnapshot.trayEnabled == true || finalSnapshot.trayEnabled == false)
     }
 }
+
+/// Receiver Swift6-Hello-2: covers the migration that made `helloState`
+/// (`ReceiverHelloState`) the sole authoritative store for the 11 announced
+/// Hello preference mirrors formerly held as `StreamReceiver`'s own
+/// `announced*` stored properties (removed by this change) — exercised
+/// purely through `StreamReceiver`'s own public writer API
+/// (`setReceiverUIPreferencesForHello`/`announceReceiverPreferences`), the
+/// same seam production UI code uses, plus the `helloState` test-only
+/// accessor (`internal`, not `private`, precisely so this can read the
+/// result without reaching into `sendHello`'s network send path).
+import AVFoundation
+
+@MainActor
+final class StreamReceiverHelloStateMigrationTests: XCTestCase {
+
+    private func makeReceiver() -> StreamReceiver {
+        StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
+                        deviceKind: "Test", fallbackServiceName: "Test")
+    }
+
+    /// (1) Defaults produce the same announced values the old
+    /// `StreamReceiver`-stored-property implementation defaulted to.
+    func testFreshReceiverHelloStateMatchesOldDefaults() {
+        let receiver = makeReceiver()
+        let snapshot = receiver.helloState.snapshot()
+        XCTAssertEqual(snapshot.trayEnabled, true)
+        XCTAssertEqual(snapshot.keyboardButtonEnabled, true)
+        XCTAssertEqual(snapshot.functionTrayEnabled, true)
+        XCTAssertEqual(snapshot.inputMode, .direct)
+        XCTAssertEqual(snapshot.trackpadSensitivity, PointerGestureConfig.defaultTrackpadSensitivity)
+        XCTAssertEqual(snapshot.hapticsEnabled, true)
+        XCTAssertEqual(snapshot.avoidNotch, true)
+        XCTAssertEqual(snapshot.pinchTarget, .viewport)
+        XCTAssertEqual(snapshot.rotateTarget, .viewport)
+        XCTAssertEqual(snapshot.snapRotation, true)
+        XCTAssertEqual(snapshot.appGestureCommands, AppGestureCommands.defaults)
+    }
+
+    /// (2) `setReceiverUIPreferencesForHello` — production's tray/keyboard
+    /// writer — changes the next `helloState` snapshot, and only that pair.
+    func testSetReceiverUIPreferencesForHelloUpdatesHelloState() {
+        let receiver = makeReceiver()
+        let expectation = expectation(description: "queue hop completes")
+        receiver.setReceiverUIPreferencesForHello(trayEnabled: false, keyboardButtonEnabled: false)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 1)
+        let snapshot = receiver.helloState.snapshot()
+        XCTAssertEqual(snapshot.trayEnabled, false)
+        XCTAssertEqual(snapshot.keyboardButtonEnabled, false)
+        XCTAssertEqual(snapshot.functionTrayEnabled, true) // untouched
+    }
+
+    /// (2) `announceReceiverPreferences` — production's writer for the
+    /// other 9 fields — changes the next `helloState` snapshot coherently.
+    func testAnnounceReceiverPreferencesUpdatesHelloState() {
+        let receiver = makeReceiver()
+        var prefs = ReceiverControlPreferences()
+        prefs.hapticsEnabled = false
+        prefs.inputMode = .trackpad
+        prefs.trackpadSensitivity = 3.0
+        let expectation = expectation(description: "queue hop completes")
+        receiver.announceReceiverPreferences(prefs)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 1)
+        let snapshot = receiver.helloState.snapshot()
+        XCTAssertEqual(snapshot.hapticsEnabled, false)
+        XCTAssertEqual(snapshot.inputMode, .trackpad)
+        XCTAssertEqual(snapshot.trackpadSensitivity, 3.0)
+        // Tray/keyboard belong to the other writer and stay at their
+        // defaults here — no duplicate/cross-writer source of truth.
+        XCTAssertEqual(snapshot.trayEnabled, true)
+    }
+}

@@ -326,21 +326,18 @@ final class StreamReceiver: ObservableObject {
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
-    private var announcedTrayEnabled = true
-    private var announcedKeyboardButtonEnabled = true
-    // The rest of the receiver-controls report — see `announceReceiverPreferences`/
-    // `sendHello`. Same "resend on every hello, receiver stays authoritative"
-    // pattern as tray/keyboard above, just for the fields a connected Mac's
-    // per-device Settings detail also wants live visibility into.
-    private var announcedFunctionTrayEnabled = true
-    private var announcedInputMode = PointerInputMode.direct
-    private var announcedTrackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
-    private var announcedHapticsEnabled = true
-    private var announcedAvoidNotch = true
-    private var announcedPinchTarget = ReceiverGestureTarget.viewport
-    private var announcedRotateTarget = ReceiverGestureTarget.viewport
-    private var announcedSnapRotation = true
-    private var announcedAppGestureCommands = AppGestureCommands.defaults
+    // Receiver Swift6-Hello-2: the 11 announced Hello preference mirrors
+    // formerly stored here (tray/keyboard/functionTray/inputMode/
+    // trackpadSensitivity/haptics/avoidNotch/pinchTarget/rotateTarget/
+    // snapRotation/appGestureCommands) now live solely in `helloState`
+    // (`ReceiverHelloState`, added in the prior commit) — see its type doc.
+    // `helloState` is the sole authoritative store; `sendHello` reads its
+    // snapshot instead of `self`. `internal` (not `private`), matching
+    // `ReceiverHelloState` itself and `KeyframeThrottle`'s precedent, solely
+    // so tests can verify the writer/reader migration end to end through
+    // `StreamReceiver`'s own public API without reaching into `sendHello`'s
+    // network send path.
+    let helloState = ReceiverHelloState()
 
     /// This session's confirmed input-consent state — pushed on connect and
     /// whenever it changes on the Mac (master toggle, a Mac-owner prompt
@@ -790,8 +787,8 @@ final class StreamReceiver: ObservableObject {
 
     func setReceiverUIPreferencesForHello(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
         queue.async {
-            self.announcedTrayEnabled = trayEnabled
-            self.announcedKeyboardButtonEnabled = keyboardButtonEnabled
+            self.helloState.updateTrayAndKeyboard(
+                trayEnabled: trayEnabled, keyboardButtonEnabled: keyboardButtonEnabled)
             if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
                 self.sendHello(on: connection)
             }
@@ -805,15 +802,16 @@ final class StreamReceiver: ObservableObject {
     /// preference change so Mac visibility never lags what's actually set.
     func announceReceiverPreferences(_ preferences: ReceiverControlPreferences) {
         queue.async {
-            self.announcedFunctionTrayEnabled = preferences.functionTrayEnabled
-            self.announcedInputMode = preferences.inputMode
-            self.announcedTrackpadSensitivity = preferences.trackpadSensitivity
-            self.announcedHapticsEnabled = preferences.hapticsEnabled
-            self.announcedAvoidNotch = preferences.avoidNotch
-            self.announcedPinchTarget = preferences.pinchTarget
-            self.announcedRotateTarget = preferences.rotateTarget
-            self.announcedSnapRotation = preferences.snapRotation
-            self.announcedAppGestureCommands = preferences.appGestureCommands
+            self.helloState.updatePreferences(
+                functionTrayEnabled: preferences.functionTrayEnabled,
+                inputMode: preferences.inputMode,
+                trackpadSensitivity: preferences.trackpadSensitivity,
+                hapticsEnabled: preferences.hapticsEnabled,
+                avoidNotch: preferences.avoidNotch,
+                pinchTarget: preferences.pinchTarget,
+                rotateTarget: preferences.rotateTarget,
+                snapRotation: preferences.snapRotation,
+                appGestureCommands: preferences.appGestureCommands)
             self.avSyncOffsetMs = AVSyncOffset.clamped(preferences.avSyncOffsetMs)
             if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
                 self.sendHello(on: connection)
@@ -1838,23 +1836,27 @@ final class StreamReceiver: ObservableObject {
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
         ]
         if deviceKind != "Mac" {
-            hello["trayEnabled"] = announcedTrayEnabled
-            hello["keyboardButtonEnabled"] = announcedKeyboardButtonEnabled
+            // Receiver Swift6-Hello-2: the 11 announced preference mirrors
+            // now come from `helloState`'s snapshot — the sole authoritative
+            // store — instead of `self`'s own stored properties.
+            let prefs = helloState.snapshot()
+            hello["trayEnabled"] = prefs.trayEnabled
+            hello["keyboardButtonEnabled"] = prefs.keyboardButtonEnabled
             // Read visibility for the connected Mac's per-device Settings
             // detail (PRODUCT: per-device receiver settings) — the receiver
             // stays the authoritative store for all of these; this only
             // reports the current value, exactly like tray/keyboard above.
-            hello["functionTrayEnabled"] = announcedFunctionTrayEnabled
-            hello["inputMode"] = announcedInputMode.rawValue
-            hello["trackpadSensitivity"] = announcedTrackpadSensitivity
-            hello["hapticsEnabled"] = announcedHapticsEnabled
-            hello["avoidNotch"] = announcedAvoidNotch
-            hello["pinchTarget"] = announcedPinchTarget.rawValue
-            hello["rotateTarget"] = announcedRotateTarget.rawValue
-            hello["snapRotation"] = announcedSnapRotation
+            hello["functionTrayEnabled"] = prefs.functionTrayEnabled
+            hello["inputMode"] = prefs.inputMode.rawValue
+            hello["trackpadSensitivity"] = prefs.trackpadSensitivity
+            hello["hapticsEnabled"] = prefs.hapticsEnabled
+            hello["avoidNotch"] = prefs.avoidNotch
+            hello["pinchTarget"] = prefs.pinchTarget.rawValue
+            hello["rotateTarget"] = prefs.rotateTarget.rawValue
+            hello["snapRotation"] = prefs.snapRotation
             // Reuses `AppGestureCommands`'s own `Codable` conformance rather
             // than a hand-written field list — see `ReceiverUIPreferenceUpdate`.
-            if let data = try? JSONEncoder().encode(announcedAppGestureCommands),
+            if let data = try? JSONEncoder().encode(prefs.appGestureCommands),
                let obj = try? JSONSerialization.jsonObject(with: data) {
                 hello["appGestureCommands"] = obj
             }
