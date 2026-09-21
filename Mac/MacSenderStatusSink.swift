@@ -53,6 +53,27 @@ final class MacSenderStatusSink: Sendable {
     // the session — teardown plus auto-connect opt-out — so the app honors
     // the stop instead of fighting it.
     var onCaptureStoppedByUser: (() -> Void)?
+    // Fires whenever this peer's Extend shape preference changes — from a
+    // receiver's `extendShapeRequest` or from `requestExtendShape` (the
+    // Mac's own per-device Settings control). Unlike Mirror/mode/streaming
+    // profile, Extend shape is genuinely per-peer, so `MacSender` applies
+    // and persists it directly rather than bubbling up to
+    // `SenderController`; this callback only lets the UI mirror the current
+    // value onto `DeviceSession` for display.
+    var onExtendShapeChanged: ((ExtendDisplayShapePreference) -> Void)?
+    var onMaxFPSChanged: ((ReceiverMaxFPSPreference) -> Void)?
+    /// Fires whenever this session's own ephemeral input grant changes —
+    /// purely so `DeviceSession` can mirror it for display
+    /// (`ReceiverDeviceDetailView`'s "Current session" row). The
+    /// authoritative bit lives in `sessionInputGrant`, not here.
+    var onSessionInputGrantChanged: ((Bool) -> Void)?
+    // Fired when the device's display identity had to be abandoned (macOS
+    // saved hostile state for it — see setupExtend) and a bumped identity
+    // came online instead: carries the validated TOTAL offset from the
+    // device's base identity, for the controller to store as-is. Absolute,
+    // not a delta — repeated bumps in one session must not accumulate into
+    // an offset nothing ever validated.
+    var onDisplayIdentityBumped: ((UInt32) -> Void)?
 
     // `nonisolated` so `MacSender`'s own (non-MainActor) init can create one
     // without an `await` — safe because it only assigns the optionals to
@@ -93,5 +114,21 @@ final class MacSenderStatusSink: Sendable {
 
     func publishCaptureStoppedByUser() {
         onCaptureStoppedByUser?()
+    }
+
+    func publishExtendShapeChanged(_ preference: ExtendDisplayShapePreference) {
+        onExtendShapeChanged?(preference)
+    }
+
+    func publishMaxFPSChanged(_ preference: ReceiverMaxFPSPreference) {
+        onMaxFPSChanged?(preference)
+    }
+
+    func publishSessionInputGrantChanged(_ granted: Bool) {
+        onSessionInputGrantChanged?(granted)
+    }
+
+    func publishDisplayIdentityBumped(_ totalOffset: UInt32) {
+        onDisplayIdentityBumped?(totalOffset)
     }
 }

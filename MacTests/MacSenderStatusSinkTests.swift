@@ -100,4 +100,39 @@ final class MacSenderStatusSinkTests: XCTestCase {
         XCTAssertEqual(firstCalls, 0)
         XCTAssertEqual(secondCalls, 1)
     }
+
+    func testPublishExtendShapeChangedForwardsPreference() {
+        let sink = MacSenderStatusSink()
+        var got: ExtendDisplayShapePreference?
+        sink.onExtendShapeChanged = { got = $0 }
+        let preference = ExtendDisplayShapePreference(shape: .r16x9, useFullDisplay: true)
+        sink.publishExtendShapeChanged(preference)
+        XCTAssertEqual(got, preference)
+    }
+
+    func testPublishMaxFPSChangedForwardsPreference() {
+        let sink = MacSenderStatusSink()
+        var got: ReceiverMaxFPSPreference?
+        sink.onMaxFPSChanged = { got = $0 }
+        let preference = ReceiverMaxFPSPreference(enabled: true, maxFPS: 30)
+        sink.publishMaxFPSChanged(preference)
+        XCTAssertEqual(got, preference)
+    }
+
+    func testPublishSessionInputGrantChangedForwardsBothValues() {
+        let sink = MacSenderStatusSink()
+        var got: [Bool] = []
+        sink.onSessionInputGrantChanged = { got.append($0) }
+        sink.publishSessionInputGrantChanged(true)
+        sink.publishSessionInputGrantChanged(false)
+        XCTAssertEqual(got, [true, false])
+    }
+
+    func testPublishDisplayIdentityBumpedForwardsOffset() {
+        let sink = MacSenderStatusSink()
+        var got: UInt32?
+        sink.onDisplayIdentityBumped = { got = $0 }
+        sink.publishDisplayIdentityBumped(42)
+        XCTAssertEqual(got, 42)
+    }
 }

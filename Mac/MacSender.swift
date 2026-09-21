@@ -253,7 +253,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // device's base identity, for the controller to store as-is. Absolute,
     // not a delta — repeated bumps in one session must not accumulate into
     // an offset nothing ever validated.
-    @MainActor var onDisplayIdentityBumped: ((UInt32) -> Void)?
+    @MainActor var onDisplayIdentityBumped: ((UInt32) -> Void)? {
+        get { statusSink.onDisplayIdentityBumped }
+        set { statusSink.onDisplayIdentityBumped = newValue }
+    }
     /// Receiver requests are handed to SenderController, which owns the
     /// existing authoritative session-rebuild mode-switch path.
     @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
@@ -270,7 +273,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// purely so `DeviceSession` can mirror it for display
     /// (`ReceiverDeviceDetailView`'s "Current session" row). The
     /// authoritative bit lives in `sessionInputGrant`, not here.
-    @MainActor var onSessionInputGrantChanged: ((Bool) -> Void)?
+    @MainActor var onSessionInputGrantChanged: ((Bool) -> Void)? {
+        get { statusSink.onSessionInputGrantChanged }
+        set { statusSink.onSessionInputGrantChanged = newValue }
+    }
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
@@ -286,8 +292,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// and persists it directly rather than bubbling up to
     /// `SenderController`; the callback only lets the UI mirror the current
     /// value onto `DeviceSession` for display.
-    @MainActor var onExtendShapeChanged: ((ExtendDisplayShapePreference) -> Void)?
-    @MainActor var onMaxFPSChanged: ((ReceiverMaxFPSPreference) -> Void)?
+    @MainActor var onExtendShapeChanged: ((ExtendDisplayShapePreference) -> Void)? {
+        get { statusSink.onExtendShapeChanged }
+        set { statusSink.onExtendShapeChanged = newValue }
+    }
+    @MainActor var onMaxFPSChanged: ((ReceiverMaxFPSPreference) -> Void)? {
+        get { statusSink.onMaxFPSChanged }
+        set { statusSink.onMaxFPSChanged = newValue }
+    }
     /// Pinned TLS failures are terminal trust failures, never packet-loss retries.
     @MainActor var onTrustFailure: ((String) -> Void)?
 
@@ -965,7 +977,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         extendShapePreference = preference
         if let peerID = info.id { ExtendDisplayShapeStore.save(preference, peerID: peerID) }
-        Task { @MainActor in self.onExtendShapeChanged?(preference) }
+        let sink = self.statusSink
+        Task { @MainActor in sink.publishExtendShapeChanged(preference) }
         guard mode == .extend, virtualDisplay != nil else {
             sendExtendShapeState()
             return
@@ -1026,7 +1039,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         receiverMaxFPSPreference = preference
         if let peerID = info.id { ReceiverMaxFPSStore.save(preference, peerID: peerID) }
-        Task { @MainActor in self.onMaxFPSChanged?(preference) }
+        let sink = self.statusSink
+        Task { @MainActor in sink.publishMaxFPSChanged(preference) }
         applyEffectiveFPSChange()
         sendMaxFPSState()
     }
@@ -1116,7 +1130,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self else { return }
             self.sessionInputGrant.set(true)
             self.sendAllowInputState(state: .allowed)
-            Task { @MainActor in self.onSessionInputGrantChanged?(true) }
+            let sink = self.statusSink
+            Task { @MainActor in sink.publishSessionInputGrantChanged(true) }
         }
     }
 
@@ -1136,7 +1151,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.sendJSONObject(["type": WireMessage.inputReset])
             }
             self.sendAllowInputState(state: state)
-            if wasGranted { Task { @MainActor in self.onSessionInputGrantChanged?(false) } }
+            if wasGranted {
+                let sink = self.statusSink
+                Task { @MainActor in sink.publishSessionInputGrantChanged(false) }
+            }
         }
     }
 
@@ -1599,7 +1617,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
             extendShapePreference = stored
         }
-        Task { @MainActor in self.onExtendShapeChanged?(self.extendShapePreference) }
+        let sink = self.statusSink
+        let extendShapePreference = self.extendShapePreference
+        Task { @MainActor in sink.publishExtendShapeChanged(extendShapePreference) }
         let physicalAspect = Double(info.pixelsWide) / Double(info.pixelsHigh)
         let resolvedAspect = extendShapePreference.resolvedAspect(receiverPhysicalAspect: physicalAspect)
         // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
@@ -1745,7 +1765,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     Log.info("display identity +\(totalOffset) came online — the previous one is "
                         + "poisoned by saved system state; persisting the offset")
                     baseIdentityOffset = totalOffset   // rebuilds skip the dead probe
-                    Task { @MainActor in self.onDisplayIdentityBumped?(totalOffset) }
+                    let sink = self.statusSink
+                    Task { @MainActor in sink.publishDisplayIdentityBumped(totalOffset) }
                 }
                 break identities
             } catch is CancellationError {
@@ -4309,7 +4330,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if previous == nil, let peerID = info.id,
                    let stored = ReceiverMaxFPSStore.load(peerID: peerID) {
                     receiverMaxFPSPreference = stored
-                    Task { @MainActor in self.onMaxFPSChanged?(stored) }
+                    let sink = self.statusSink
+                    Task { @MainActor in sink.publishMaxFPSChanged(stored) }
                 }
                 // A fresh dial classifies before the hello names the device —
                 // now that it has, decide again (see the comment on the func).
