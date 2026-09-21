@@ -3648,6 +3648,15 @@ final class StreamReceiver: ObservableObject {
     /// sends host/port information the Mac is expected to trust — it only
     /// dials a locally-persisted hint the user configured themselves.
     func requestRemoteConnect(peerID: String) {
+        Self.requestRemoteConnect(peerID: peerID, queue: queue)
+    }
+
+    // Receiver Swift6-RC1: self-free helper — `requestRemoteConnect` only
+    // ever consumes already-established trust/endpoint data (`TrustStore`,
+    // `RemoteEndpointStore`) and never mutates `StreamReceiver` state, so it
+    // needs no `self` capture, matching the "static helper + stable owner"
+    // idiom used by `startTLSListener` above.
+    private static func requestRemoteConnect(peerID: String, queue: DispatchQueue) {
         guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
               let port = NWEndpoint.Port(rawValue: hint.port),
               let pin = TrustStore.shared.pin(peerID: peerID),
@@ -4121,8 +4130,8 @@ final class StreamReceiver: ObservableObject {
                         pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
                 }
             },
-            requestRemoteConnect: { [weak self] peerID in
-                self?.queue.async { self?.requestRemoteConnect(peerID: peerID) }
+            requestRemoteConnect: { peerID in
+                queue.async { Self.requestRemoteConnect(peerID: peerID, queue: queue) }
             },
             getReceiveLiveness: {
                 syncState.snapshot()
