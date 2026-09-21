@@ -183,6 +183,73 @@ final class ReceiverHelloState: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole authoritative store for the receiver-panel geometry
+/// `StreamReceiver` announces in every "hello" (`sendHello`):
+/// `devicePixelsWide`/`devicePixelsHigh`/`deviceScale`. These three fields
+/// used to be plain unsynchronized `StreamReceiver` stored properties,
+/// written on the MainActor from `setNativePanel`/`setPanel`/
+/// `setOrientation` (which routes through `setPanel`) while `sendHello` can
+/// also fire from the receiver pipeline/address-watch path — so a reader
+/// could in principle observe a torn width/height/scale triple mid-write.
+/// This owner makes each write and each read atomic under one `NSLock`, the
+/// same idiom as `ReceiverHelloState` above and `FramePipelineSyncState`
+/// (`ReceiverFramePipeline.swift`): a plain last-write-wins lock, no mutable
+/// reference ever escapes it, no callback/send/serialization is ever
+/// invoked while held, and no nested lock acquisition. `@unchecked Sendable`
+/// is justified solely because the lock fully protects all mutable state.
+/// `internal` (not `private`), matching `ReceiverHelloState`'s precedent,
+/// solely so tests can exercise it directly.
+final class ReceiverDisplayGeometryState: @unchecked Sendable {
+    /// Immutable, cheap-to-copy snapshot of the three geometry fields.
+    /// Defaults mirror the old `StreamReceiver` stored-property defaults
+    /// exactly (0 / 0 / 2).
+    struct Snapshot: Sendable, Hashable {
+        var pixelsWide = 0
+        var pixelsHigh = 0
+        var scale: Double = 2
+    }
+
+    private let lock = NSLock()
+    private var current = Snapshot()
+
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
+
+    /// Matches `setNativePanel`'s exact contract: scale updates on every
+    /// call, but width/height only seed once — the first call after
+    /// dimensions are still at their unset default (0) — and are never
+    /// overwritten by a later native-panel report.
+    @discardableResult
+    func seedNativePanelIfUnset(pixelsWide w: Int, pixelsHigh h: Int, scale: Double) -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        current.scale = scale
+        if current.pixelsWide == 0 {
+            current.pixelsWide = w
+            current.pixelsHigh = h
+        }
+        return current
+    }
+
+    /// Matches `setPanel`'s exact contract: scale always updates; width/
+    /// height only update when both are positive and at least one actually
+    /// differs from the current value. Returns the resulting snapshot along
+    /// with whether the dimensions changed, so the caller can preserve
+    /// `setPanel`'s change-gated log/sendHello behavior without a separate
+    /// read of the fields it just wrote.
+    func update(pixelsWide w: Int, pixelsHigh h: Int, scale: Double) -> (snapshot: Snapshot, dimensionsChanged: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        current.scale = scale
+        guard w > 0, h > 0, w != current.pixelsWide || h != current.pixelsHigh else {
+            return (current, false)
+        }
+        current.pixelsWide = w
+        current.pixelsHigh = h
+        return (current, true)
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -338,6 +405,12 @@ final class StreamReceiver: ObservableObject {
     // `StreamReceiver`'s own public API without reaching into `sendHello`'s
     // network send path.
     let helloState = ReceiverHelloState()
+
+    /// Sole authoritative store for the announced panel geometry — see
+    /// `ReceiverDisplayGeometryState`'s type doc above. Stable identity,
+    /// never replaced; `internal` for the same test-access reason as
+    /// `helloState`.
+    let displayGeometryState = ReceiverDisplayGeometryState()
 
     /// This session's confirmed input-consent state — pushed on connect and
     /// whenever it changes on the Mac (master toggle, a Mac-owner prompt
@@ -685,9 +758,6 @@ final class StreamReceiver: ObservableObject {
     /// rebuilds the virtual display as a portrait/landscape monitor.
     private var nativeLong = 0
     private var nativeShort = 0
-    private(set) var devicePixelsWide = 0
-    private(set) var devicePixelsHigh = 0
-    var deviceScale: Double = 2
     // Name advertised over Bonjour for the Mac's WiFi picker. iOS 16+ returns
     // a generic "iPhone" from UIDevice.current.name (the user-assigned name
     // needs an entitlement Apple gates behind approval and personal teams
@@ -771,18 +841,15 @@ final class StreamReceiver: ObservableObject {
     func setNativePanel(long: Int, short: Int, scale: Double) {
         nativeLong = long
         nativeShort = short
-        deviceScale = scale
-        if devicePixelsWide == 0 {   // default landscape until the view reports
-            devicePixelsWide = long
-            devicePixelsHigh = short
-        }
+        // default landscape until the view reports; seeds only if unset.
+        displayGeometryState.seedNativePanelIfUnset(pixelsWide: long, pixelsHigh: short, scale: scale)
     }
 
     func setOrientation(portrait: Bool) {
         guard nativeLong > 0 else { return }
         setPanel(pixelsWide: portrait ? nativeShort : nativeLong,
                  pixelsHigh: portrait ? nativeLong : nativeShort,
-                 scale: deviceScale)
+                 scale: displayGeometryState.snapshot().scale)
     }
 
     func setReceiverUIPreferencesForHello(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
@@ -824,10 +891,8 @@ final class StreamReceiver: ObservableObject {
     /// display-mode changes) — a live connection re-sends hello so the sender
     /// rebuilds the virtual display for the new dimensions.
     func setPanel(pixelsWide w: Int, pixelsHigh h: Int, scale: Double) {
-        deviceScale = scale
-        guard w > 0, h > 0, w != devicePixelsWide || h != devicePixelsHigh else { return }
-        devicePixelsWide = w
-        devicePixelsHigh = h
+        let result = displayGeometryState.update(pixelsWide: w, pixelsHigh: h, scale: scale)
+        guard result.dimensionsChanged else { return }
         Log.info("panel changed -> \(w)x\(h) @\(scale)x")
         if let connection = sendTargetBox.current()?.connection { sendHello(on: connection) }
     }
@@ -1825,11 +1890,15 @@ final class StreamReceiver: ObservableObject {
     private var advertisedProtocolVersion: Int { WireProtocol.version }
 
     private func sendHello(on conn: NWConnection) {
+        // Receiver Swift6-Geometry-1: one atomic snapshot instead of three
+        // separate unsynchronized field reads — see
+        // `ReceiverDisplayGeometryState`'s type doc.
+        let geometry = displayGeometryState.snapshot()
         var hello: [String: Any] = [
             "type": "hello",
-            "pixelsWide": devicePixelsWide,
-            "pixelsHigh": devicePixelsHigh,
-            "scale": deviceScale,
+            "pixelsWide": geometry.pixelsWide,
+            "pixelsHigh": geometry.pixelsHigh,
+            "scale": geometry.scale,
             "device": deviceKind,
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
