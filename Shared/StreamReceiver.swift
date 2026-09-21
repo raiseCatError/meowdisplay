@@ -250,6 +250,44 @@ final class ReceiverDisplayGeometryState: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole authoritative store for the receiver-local manual A/V
+/// sync offset (`avSyncOffsetMs`), the user's MANUAL adjustment term only —
+/// see `StreamReceiver`'s (now-removed) `avSyncOffsetMs` doc comment for why
+/// this is a separate domain from `establishAudioAnchor`'s automatic
+/// baseline correction, and from `ClockSyncState`'s network clock estimator
+/// (`offsetSamples`/`clockOffsetMs`/`lastRttMs`), which this type does not
+/// touch. Written from `announceReceiverPreferences`; read from `sendHello`,
+/// `scheduleAudioPacket`, `scheduleDecodedAudio`, `logAudioTimingDiagnostic`,
+/// and `presentDecodedSample`'s video-delay calculation — every one of those
+/// call sites runs on `StreamReceiver.queue`, so in practice this is
+/// write-once-read-many from a single serial queue with no real contention.
+/// `@unchecked Sendable` via a plain `NSLock`, same idiom as
+/// `ReceiverHelloState`/`ReceiverDisplayGeometryState` above: a queue-
+/// confinement-only (lock-free) design was considered, but this type has no
+/// practical way to assert/enforce that invariant at its call sites (unlike
+/// an actor or a `dispatchPrecondition`-backed check), so per STOP-condition
+/// guidance this uses the same proven lock instead of an undocumented bare
+/// `Sendable` claim. The lock is uncontended in practice (single writer
+/// queue, no callback ever invoked while held) so its cost on the per-frame
+/// `presentDecodedSample` read is a single uncontended `NSLock` acquisition
+/// — no `Task`, no actor hop, no queue hop, no allocation.
+final class AVSyncPreference: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func get() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    /// Matches `announceReceiverPreferences`'s exact write: clamp then
+    /// overwrite unconditionally.
+    func set(_ milliseconds: Int) {
+        lock.lock(); defer { lock.unlock() }
+        value = AVSyncOffset.clamped(milliseconds)
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -475,8 +513,10 @@ final class StreamReceiver: ObservableObject {
     /// `establishAudioAnchor` folds in a separate, automatic one-shot
     /// baseline correction (see `lastVideoLatencySeconds`); the two are
     /// never conflated so "Reset" (manual only) and "Resync" (automatic
-    /// only) each touch exactly what they claim to.
-    private var avSyncOffsetMs = 0
+    /// only) each touch exactly what they claim to. Sole authority is
+    /// `avSyncPreference` (`AVSyncPreference`, see its type doc above) — no
+    /// mirrored copy lives here.
+    let avSyncPreference = AVSyncPreference()
 
     /// RC-3 Stage E2: the capture-timeline -> host-time anchor mapping now
     /// lives on `audioPresenter` (`ReceiverAudioPresenter`'s `MediaAnchor`)
@@ -606,8 +646,9 @@ final class StreamReceiver: ObservableObject {
     // handling that used to live here.
     // What the last hello advertised, to notice a cable appearing
     // mid-session: plugging one creates new interfaces, and a sender can
-    // only probe addresses it has been told about.
-    private var lastAdvertisedAddrs: [String] = []
+    // only probe addresses it has been told about. Sole authority is
+    // `helloState` (`ReceiverHelloState.addressesChanged`/
+    // `recordAdvertisedAddresses`) — no mirrored copy lives here.
     // The cable upgrade (PROTOCOL.md 6.4) is Mac-to-Mac: only Mac
     // receivers put addrs in their hello — see sendHello for why phones
     // must not.
@@ -879,7 +920,7 @@ final class StreamReceiver: ObservableObject {
                 rotateTarget: preferences.rotateTarget,
                 snapRotation: preferences.snapRotation,
                 appGestureCommands: preferences.appGestureCommands)
-            self.avSyncOffsetMs = AVSyncOffset.clamped(preferences.avSyncOffsetMs)
+            self.avSyncPreference.set(preferences.avSyncOffsetMs)
             if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
                 self.sendHello(on: connection)
             }
@@ -1559,13 +1600,28 @@ final class StreamReceiver: ObservableObject {
 
     /// The address-watch liveness timer's host-only work — see
     /// `ReceiverPipelineActor.addrWatchTick`, which only checks readiness.
-    private func checkAddressChangeAndSendHello(_ conn: NWConnection) {
-        let now = Self.reachableAddresses()
-        guard now != lastAdvertisedAddrs else { return }
+    /// Static, self-free (Receiver Swift6-Hello-Final): captures no
+    /// `StreamReceiver` state directly — `helloState` is the sole address-
+    /// dedup authority (`ReceiverHelloState.addressesChanged`), and the
+    /// resend goes through the static `sendHello` below. Same comparison
+    /// semantics as before: `Self.reachableAddresses()` recomputed fresh,
+    /// compared order-sensitively against the last advertised list.
+    private static func checkAddressChangeAndSendHello(
+        _ conn: NWConnection, helloState: ReceiverHelloState,
+        displayGeometryState: ReceiverDisplayGeometryState, avSyncPreference: AVSyncPreference,
+        sendTargetBox: SendTargetBox, deviceKind: String, maxEncodeWide: Int?, maxEncodeHigh: Int?,
+        maxFPS: Int?, advertisedProtocolVersion: Int, advertisesAddresses: Bool
+    ) {
+        let now = reachableAddresses()
+        guard helloState.addressesChanged(now) else { return }
         // A cable was plugged (or pulled) mid-session: tell the sender,
         // it re-probes on the fresh list (PROTOCOL.md 6.4).
         Log.info("reachable addresses changed — re-sending hello")
-        sendHello(on: conn)
+        sendHello(
+            on: conn, helloState: helloState, displayGeometryState: displayGeometryState,
+            avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox, deviceKind: deviceKind,
+            maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh, maxFPS: maxFPS,
+            advertisedProtocolVersion: advertisedProtocolVersion, advertisesAddresses: advertisesAddresses)
     }
 
     private func updateTransport(for conn: NWConnection, path: NWPath) {
@@ -1889,7 +1945,33 @@ final class StreamReceiver: ObservableObject {
     /// negotiated from `hello.codecs`, never from `pv` (pv 19).
     private var advertisedProtocolVersion: Int { WireProtocol.version }
 
+    /// Thin instance wrapper for ordinary (non-`HostEffects`) call sites —
+    /// `setReceiverUIPreferencesForHello`, `announceReceiverPreferences`,
+    /// `setPanel` — which are plain instance methods, not `@Sendable`
+    /// closures, so referencing `self` here is not the Swift 6 problem the
+    /// static helper below exists to solve.
     private func sendHello(on conn: NWConnection) {
+        Self.sendHello(
+            on: conn, helloState: helloState, displayGeometryState: displayGeometryState,
+            avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox, deviceKind: deviceKind,
+            maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh, maxFPS: maxFPS,
+            advertisedProtocolVersion: advertisedProtocolVersion, advertisesAddresses: advertisesAddresses)
+    }
+
+    /// Static, self-free (Receiver Swift6-Hello-Final): builds and sends the
+    /// exact same "hello" payload the old instance method did, from
+    /// explicit owners instead of `self` — so the `@Sendable` `HostEffects`
+    /// closure (`makePipelineHostEffects()`'s `sendHello`) can call it
+    /// directly without capturing a `StreamReceiver`. `conn` mirrors the old
+    /// method's implicit `sendControl`-via-`sendTargetBox` fallback (`nil`
+    /// falls through to the current send target, exactly like
+    /// `Self.sendControl`).
+    private static func sendHello(
+        on conn: NWConnection?, helloState: ReceiverHelloState,
+        displayGeometryState: ReceiverDisplayGeometryState, avSyncPreference: AVSyncPreference,
+        sendTargetBox: SendTargetBox, deviceKind: String, maxEncodeWide: Int?, maxEncodeHigh: Int?,
+        maxFPS: Int?, advertisedProtocolVersion: Int, advertisesAddresses: Bool
+    ) {
         // Receiver Swift6-Geometry-1: one atomic snapshot instead of three
         // separate unsynchronized field reads — see
         // `ReceiverDisplayGeometryState`'s type doc.
@@ -1933,7 +2015,7 @@ final class StreamReceiver: ObservableObject {
             // receiver can judge its own speaker/headphone latency), but
             // reported so Streaming/device detail can show the real value
             // instead of a fake always-zero placeholder.
-            hello["avSyncOffsetMs"] = avSyncOffsetMs
+            hello["avSyncOffsetMs"] = avSyncPreference.get()
         }
         // Additive capability: only offered while the UDP listener is bound,
         // so a sender never dials a port nobody answers on.
@@ -1964,10 +2046,14 @@ final class StreamReceiver: ObservableObject {
         // false "upgrade" onto a bridged-LAN path that still crosses the
         // phone's radio — and then have the session classified as a cable
         // whose loss must end it instead of reconnecting.
-        let addrs = advertisesAddresses ? Self.reachableAddresses() : []
+        let addrs = advertisesAddresses ? reachableAddresses() : []
         if !addrs.isEmpty { hello["addrs"] = addrs }
-        lastAdvertisedAddrs = addrs
-        sendControl(hello, on: conn)
+        // Sole address-dedup authority is `helloState`
+        // (`ReceiverHelloState.recordAdvertisedAddresses`) — matches its
+        // exact contract: unconditional overwrite regardless of send
+        // success, including the empty-list case (see that method's doc).
+        helloState.recordAdvertisedAddresses(addrs)
+        sendControl(hello, on: conn, sendTargetBox: sendTargetBox)
         Log.info("hello sent")
     }
 
@@ -2807,7 +2893,7 @@ final class StreamReceiver: ObservableObject {
             if receiverAACLocalDecodeEnabled { audioDecoder.analyze(decoded) }
             #endif
             let receiverCaptureMs = Double(packet.capturedAtMs) - clockOffsetMs
-            pcmPlaybackEngine.enqueue(decoded, captureMs: receiverCaptureMs, avSyncOffsetMs: avSyncOffsetMs)
+            pcmPlaybackEngine.enqueue(decoded, captureMs: receiverCaptureMs, avSyncOffsetMs: avSyncPreference.get())
             #if DEBUG
             // GOAL requirement 7: baseline latency/queue instrumentation,
             // not tuning — same periodic cadence as the AAC integrity log.
@@ -2875,7 +2961,7 @@ final class StreamReceiver: ObservableObject {
         guard let audioFormatDescription else { return }
         guard let clockOffsetMs else { return }   // clock sync not settled yet (first ~2s) — drop
         let timing = ReceiverAudioPresenter.AudioTimingSnapshot(
-            clockOffsetMs: clockOffsetMs, avSyncOffsetMs: avSyncOffsetMs,
+            clockOffsetMs: clockOffsetMs, avSyncOffsetMs: avSyncPreference.get(),
             lastVideoLatencySeconds: lastVideoLatencySeconds,
             lastVideoLatencyUpdatedAtWallMs: lastVideoLatencyUpdatedAtWallMs, nowMs: nowMs)
         audioPresenter.scheduleDecodedAudio(
@@ -2901,7 +2987,7 @@ final class StreamReceiver: ObservableObject {
         audioDiagnosticLogCounter += 1
         guard unexpectedDelta || audioDiagnosticLogCounter % 100 == 0 else { return }
         let queuedMs = audioPresenter.debugQueuedMs(
-            receiverCaptureMs: receiverCaptureMs, avSyncOffsetMs: avSyncOffsetMs) ?? 0
+            receiverCaptureMs: receiverCaptureMs, avSyncOffsetMs: avSyncPreference.get()) ?? 0
         // Latency characterization (GOAL "LATENCY" — measurement only, not
         // tuning): `captureToArrivalMs` is capture→"this packet is being
         // processed right now" (encode + transport + demux), computed on
@@ -3093,7 +3179,7 @@ final class StreamReceiver: ObservableObject {
         // already-decoded-or-decodable frame — a genuine per-frame
         // presentation delay, not a sleep on the network/decode path. The
         // delay is constant across frames, so arrival order is preserved.
-        let videoDelayMs = AVSyncOffset.videoDelayMs(for: avSyncOffsetMs)
+        let videoDelayMs = AVSyncOffset.videoDelayMs(for: avSyncPreference.get())
         if videoDelayMs > 0 {
             queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: present)
         } else {
@@ -3773,6 +3859,19 @@ final class StreamReceiver: ObservableObject {
         // explicitly, so the closure below needs no `self` at all.
         let reconnectContext = self.reconnectContext
         let uiSink = self.uiSink
+        // Receiver Swift6-Hello-Final: the remaining stable owners
+        // `sendHello`/`checkAddressChangeAndSendHello` need to call the
+        // static, self-free helpers below with no `StreamReceiver` capture
+        // at all — same "captured directly instead of `self`" idiom as
+        // every owner above.
+        let helloState = self.helloState
+        let displayGeometryState = self.displayGeometryState
+        let avSyncPreference = self.avSyncPreference
+        let deviceKind = self.deviceKind
+        let maxEncodeWide = self.maxEncodeWide
+        let maxEncodeHigh = self.maxEncodeHigh
+        let maxFPS = self.maxFPS
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
         return .init(
             clearTransport: {
                 transportState.clear()
@@ -3797,8 +3896,15 @@ final class StreamReceiver: ObservableObject {
                         transportState: transportState, uiSink: uiSink)
                 }
             },
-            sendHello: { [weak self] conn in
-                self?.queue.async { self?.sendHello(on: conn) }
+            sendHello: { conn in
+                queue.async {
+                    Self.sendHello(
+                        on: conn, helloState: helloState, displayGeometryState: displayGeometryState,
+                        avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox,
+                        deviceKind: deviceKind, maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh,
+                        maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
+                        advertisesAddresses: advertises)
+                }
             },
             onPathUpdate: { conn, path in
                 queue.async {
@@ -3816,8 +3922,15 @@ final class StreamReceiver: ObservableObject {
                                       sendTargetBox: sendTargetBox)
                 }
             },
-            checkAddressChangeAndSendHello: { [weak self] conn in
-                self?.queue.async { self?.checkAddressChangeAndSendHello(conn) }
+            checkAddressChangeAndSendHello: { conn in
+                queue.async {
+                    Self.checkAddressChangeAndSendHello(
+                        conn, helloState: helloState, displayGeometryState: displayGeometryState,
+                        avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox,
+                        deviceKind: deviceKind, maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh,
+                        maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
+                        advertisesAddresses: advertises)
+                }
             })
     }
 

@@ -202,4 +202,33 @@ final class StreamReceiverHelloStateMigrationTests: XCTestCase {
         // defaults here — no duplicate/cross-writer source of truth.
         XCTAssertEqual(snapshot.trayEnabled, true)
     }
+
+    /// Receiver Swift6-Hello-Final: `announceReceiverPreferences` also
+    /// writes `avSyncPreference` (`AVSyncPreference`, a separate audio-
+    /// timing-domain owner — see its type doc) — clamped and applied
+    /// alongside the `helloState` preference fields, in the same queue hop.
+    func testAnnounceReceiverPreferencesUpdatesAVSyncPreference() {
+        let receiver = makeReceiver()
+        var prefs = ReceiverControlPreferences()
+        prefs.avSyncOffsetMs = 400
+        let expectation = expectation(description: "queue hop completes")
+        receiver.announceReceiverPreferences(prefs)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(receiver.avSyncPreference.get(), 400)
+    }
+
+    /// (4) Address-changed / unchanged dedup, exercised through `helloState`
+    /// directly — the sole authority `checkAddressChangeAndSendHello`'s
+    /// static rewrite now consults, matching the semantics the top-level
+    /// `ReceiverHelloStateTests` cases above already cover for the type
+    /// itself (order-sensitive `!=`, unconditional overwrite, empty-list
+    /// handling).
+    func testHelloStateIsSoleAddressDedupAuthorityForReceiver() {
+        let receiver = makeReceiver()
+        XCTAssertFalse(receiver.helloState.addressesChanged([]))
+        XCTAssertTrue(receiver.helloState.addressesChanged(["10.0.0.1"]))
+        receiver.helloState.recordAdvertisedAddresses(["10.0.0.1"])
+        XCTAssertFalse(receiver.helloState.addressesChanged(["10.0.0.1"]))
+    }
 }
