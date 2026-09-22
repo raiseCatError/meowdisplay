@@ -20,8 +20,13 @@ final class PlaintextMediaRemovalTests: XCTestCase {
 
     func testSenderCannotRepresentOrDialPlaintext() throws {
         let sender = try source("Mac/MacSender.swift")
-        XCTAssertTrue(sender.contains("case tcp(NWEndpoint, tls: TLSSessionConfig)"))
+        // `SenderTransport`/`TLSSessionConfig` moved to their own file (MT-C1
+        // Phase 1) so `MacSenderTransportController` and its unit tests can
+        // see them without depending on all of MacSender.swift.
+        let transport = try source("Mac/SenderTransport.swift")
+        XCTAssertTrue(transport.contains("case tcp(NWEndpoint, tls: TLSSessionConfig)"))
         XCTAssertFalse(sender.contains("tls: nil"))
+        XCTAssertFalse(transport.contains("tls: nil"))
         XCTAssertFalse(sender.contains("allowsPlaintext"))
         XCTAssertFalse(sender.contains("port: 9000"))
     }

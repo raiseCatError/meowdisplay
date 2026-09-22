@@ -167,6 +167,8 @@ targets:
       - Mac/MacSenderPipelineState.swift
       - Mac/MacSenderStatusSink.swift
       - Mac/MacSenderVideoEncoder.swift
+      - Mac/SenderTransport.swift
+      - Mac/MacSenderTransportController.swift
       - Mac/AutoConnectPolicy.swift
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
