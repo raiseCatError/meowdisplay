@@ -1392,7 +1392,8 @@ final class StreamReceiver: ObservableObject {
 
     func forgetPeer(_ peerID: String) {
         TrustStore.shared.forget(peerID: peerID)
-        publishToUI { self.lastForgottenPeerID = peerID }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
@@ -2059,11 +2060,8 @@ final class StreamReceiver: ObservableObject {
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
-        publishToUI {
-            self.cursorState = (0.5, 0.5, false)
-            self.cursorSprite = nil
-            self.onCursor?(0.5, 0.5, false)
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishCursorReset() }
     }
 
     /// The host-only half of the former `onReady` closure: everything except
@@ -2178,6 +2176,11 @@ final class StreamReceiver: ObservableObject {
     private func handleVideoChannelJSON(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
+        // Captured once, locally: every `uiSink.publish*` call below crosses
+        // to `@MainActor` via `DispatchQueue.main.async`, and must reach the
+        // Sendable `uiSink` value directly rather than through `self.uiSink`
+        // (which would re-capture non-Sendable `StreamReceiver`).
+        let uiSink = self.uiSink
         switch type {
         case "pong":
             guard let t1 = obj["t"] as? Double, let mt = obj["mt"] as? Double else { return }
@@ -2224,10 +2227,7 @@ final class StreamReceiver: ObservableObject {
             #if DEBUG
             Log.info("cursorTrace: cursorImg received bytes=\(png.count) nw=\(nw) nh=\(nh) anchor=\(anchor)")
             #endif
-            publishToUI {
-                self.cursorSprite = (image, anchor, normSize)
-                self.onCursorImage?(image, anchor, normSize)
-            }
+            DispatchQueue.main.async { uiSink.publishCursorSprite(image: image, anchor: anchor, normSize: normSize) }
         case "displayState":
             guard let state = DisplayState.decode(messageType: type,
                                                   value: obj["state"] as? String) else { return }
@@ -2244,54 +2244,39 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.displayModeState:
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
-            publishToUI { self.applyConfirmedDisplayMode(mode) }
+            DispatchQueue.main.async { uiSink.publishConfirmedDisplayMode(mode) }
         case WireMessage.mirrorUnavailable:
-            publishToUI {
-                if self.confirmedDisplayMode == .extend {
-                    // Already extending — the user doesn't need the "Use
-                    // Extend?" offer (they're already using Extend); this
-                    // is a receiver-originated Mirror request the Mac
-                    // authoritatively rejected (see
-                    // `SenderController.requestMode`). Just explain why.
-                    self.mirrorRejectedWhileExtending = true
-                } else {
-                    // Fresh Mirror session startup, headless — the normal
-                    // pv17 "Use Extend?" offer.
-                    self.mirrorUnavailable = true
-                }
-            }
+            // Whichever offer applies (Mirror-unavailable vs. already-
+            // extending-rejected) is decided from `confirmedDisplayMode`
+            // once on `@MainActor` — see `applyMirrorAvailabilitySignal`.
+            DispatchQueue.main.async { uiSink.publishMirrorAvailabilitySignal() }
         case WireMessage.mirrorDisplayState:
             guard let update = MirrorDisplayStateUpdate(message: obj) else { return }
-            publishToUI { self.mirrorDisplayState = update }
+            DispatchQueue.main.async { uiSink.publishMirrorDisplayState(update) }
         case WireMessage.extendShapeState:
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
-            publishToUI { self.applyConfirmedExtendShape(preference) }
+            DispatchQueue.main.async { uiSink.publishConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
             guard let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
-            publishToUI { self.streamingProfile = profile }
+            DispatchQueue.main.async { uiSink.publishStreamingProfile(profile) }
         case WireMessage.streamingPriorityState:
             guard let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
-            publishToUI { self.streamingPriority = priority }
+            DispatchQueue.main.async { uiSink.publishStreamingPriority(priority) }
         case WireMessage.maxFPSState:
             guard let update = MaxFPSStateUpdate(message: obj) else { return }
-            publishToUI { self.applyConfirmedMaxFPS(update) }
+            DispatchQueue.main.async { uiSink.publishConfirmedMaxFPS(update) }
         case WireMessage.welcome:
             // The Mac identified itself (issue #132). If it speaks a protocol
             // older than we support, it's the Mac that needs updating — and an
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
-            publishToUI {
-                self.macProtocolVersion = macPV
-                if macPV < WireProtocol.videoControlWireVersion {
-                    self.videoEnabled = true
-                }
-            }
+            DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
             if macPV < WireProtocol.minSupportedPeer {
                 reconnectContext.update { $0.peerIsIncompatible = true }
                 let msg = "The MeowDisplay app on your Mac is too old for this \(deviceKind) app. Update MeowDisplay on your Mac to reconnect."
-                publishToUI { self.peerSignal = .updateMac(message: msg) }
+                DispatchQueue.main.async { uiSink.publishPeerSignal(.updateMac(message: msg)) }
             }
             // Reassert this receiver's audio preference on every welcome —
             // covers first connect, reconnect, and transport migration in
@@ -2301,7 +2286,7 @@ final class StreamReceiver: ObservableObject {
             if macPV >= WireProtocol.audioWireVersion {
                 sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferredBox.get()])
             } else {
-                publishToUI { self.audioEnabled = false }
+                DispatchQueue.main.async { uiSink.publishAudioEnabled(false) }
             }
         case WireMessage.closing:
             // The Mac explicitly ended this session. Do not treat it as a transport failure.
@@ -2328,7 +2313,7 @@ final class StreamReceiver: ObservableObject {
                 text = "Failed: \(obj["code"] as? Int ?? -1)"
             }
             Log.info("wakeDebug: promoteInteractiveWake result=\(text)")
-            publishToUI { self.promoteInteractiveWakeResult = text }
+            DispatchQueue.main.async { uiSink.publishPromoteInteractiveWakeResult(text) }
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             // Retrying cannot fix that, so the eventual loss is terminal.
@@ -2336,12 +2321,12 @@ final class StreamReceiver: ObservableObject {
             let message = obj["message"] as? String
                 ?? "Update MeowDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
-            publishToUI { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
+            DispatchQueue.main.async { uiSink.publishPeerSignal(.updateReceiver(message: message, storeURL: store)) }
         case WireMessage.receiverUI:
             guard let update = ReceiverUIPreferenceUpdate(message: obj) else { return }
-            publishToUI { self.onReceiverUIPreferences?(update) }
+            DispatchQueue.main.async { uiSink.publishReceiverUIPreferences(update) }
         case WireMessage.inputReset:
-            publishToUI { self.inputResetGeneration &+= 1 }
+            DispatchQueue.main.async { uiSink.publishInputResetBump() }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -2349,7 +2334,7 @@ final class StreamReceiver: ObservableObject {
             // understands. See `SessionInputWireState`.
             let state = (obj["state"] as? String).flatMap(SessionInputWireState.init(rawValue:))
                 ?? (allowed ? .allowed : .off)
-            publishToUI { self.onAllowInputStateChange?(state) }
+            DispatchQueue.main.async { uiSink.publishAllowInputStateChange(state) }
         case WireMessage.videoState:
             guard let update = VideoStateUpdate(message: obj) else { return }
             let changed = update.enabled != receivedVideoEnabled
@@ -2357,16 +2342,11 @@ final class StreamReceiver: ObservableObject {
             if changed || !update.enabled {
                 resetDecoderForVideoStateChange()
             }
-            publishToUI {
-                if let width = update.width, let height = update.height {
-                    self.videoSize = CGSize(width: width, height: height)
-                }
-                self.videoEnabled = update.enabled
-            }
+            DispatchQueue.main.async { uiSink.publishVideoState(width: update.width, height: update.height, enabled: update.enabled) }
         case WireMessage.audioState:
             guard let update = AudioStateUpdate(message: obj) else { return }
             if !update.enabled { resetAudioPlayback() }
-            publishToUI { self.audioEnabled = update.enabled }
+            DispatchQueue.main.async { uiSink.publishAudioEnabled(update.enabled) }
         case WireMessage.streamCodecState:
             guard let update = StreamCodecStateUpdate(message: obj) else { return }
             if update.codec != receivedStreamCodec {
@@ -2374,7 +2354,7 @@ final class StreamReceiver: ObservableObject {
                 resetDecoderForCodecChange()
             }
             Log.info("effective codec: \(update.codec.wireValue) reason: \(update.reason)")
-            publishToUI { self.activeStreamCodec = update.codec }
+            DispatchQueue.main.async { uiSink.publishActiveStreamCodec(update.codec) }
         default:
             break
         }
@@ -2398,10 +2378,8 @@ final class StreamReceiver: ObservableObject {
         #if DEBUG
         logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
         #endif
-        publishToUI {
-            self.cursorState = (x, y, visible)
-            self.onCursor?(x, y, visible)
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishCursorPosition(x: x, y: y, visible: visible) }
     }
 
     private func resetStreamState() {
@@ -2872,7 +2850,8 @@ final class StreamReceiver: ObservableObject {
     /// action (`disconnect()`). Trust, pairing, the Remote endpoint, and
     /// Wake metadata all remain; only this attempt ends.
     func declineMirrorUnavailableOffer() {
-        publishToUI { self.mirrorUnavailable = false }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishMirrorUnavailableClear() }
         disconnect()
     }
 
@@ -2880,7 +2859,8 @@ final class StreamReceiver: ObservableObject {
     /// physical display" state — no wire message, purely local UI state
     /// (unlike the offer, there is nothing to accept/decline here).
     func dismissMirrorRejection() {
-        publishToUI { self.mirrorRejectedWhileExtending = false }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishMirrorRejectionClear() }
     }
 
     /// Asks the connected Mac to change its Mirror capture source. The Mac
@@ -2902,16 +2882,12 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown (stop/sleep/close): the Mac's mode is no
     /// longer known and any in-flight request dies with the session.
     func resetDisplayModeState() {
-        publishToUI {
-            self.displayModeRequestState.reset()
-            self.confirmedDisplayMode = nil
-            self.pendingDisplayMode = nil
-            self.mirrorRejectedWhileExtending = false
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishDisplayModeStateReset() }
     }
 
     @MainActor
-    private func applyConfirmedDisplayMode(_ mode: ReceiverDisplayMode) {
+    func applyConfirmedDisplayMode(_ mode: ReceiverDisplayMode) {
         let shouldConfirmWithHaptic = displayModeRequestState.confirm(mode)
         confirmedDisplayMode = displayModeRequestState.confirmedMode
         pendingDisplayMode = displayModeRequestState.pendingMode
@@ -2957,15 +2933,12 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown: the Mac's active shape is no longer
     /// known and any in-flight request dies with the session.
     func resetExtendShapeState() {
-        publishToUI {
-            self.extendShapeRequestState.reset()
-            self.confirmedExtendShape = nil
-            self.pendingExtendShape = nil
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishExtendShapeStateReset() }
     }
 
     @MainActor
-    private func applyConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
+    func applyConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
         _ = extendShapeRequestState.confirm(preference)
         confirmedExtendShape = extendShapeRequestState.confirmed
         pendingExtendShape = extendShapeRequestState.pending
@@ -3002,16 +2975,12 @@ final class StreamReceiver: ObservableObject {
     /// Deliberate session teardown: the Mac's active max-FPS state is no
     /// longer known and any in-flight request dies with the session.
     func resetMaxFPSState() {
-        publishToUI {
-            self.maxFPSRequestState.reset()
-            self.confirmedMaxFPS = nil
-            self.pendingMaxFPS = nil
-            self.lastMaxFPSState = nil
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishMaxFPSStateReset() }
     }
 
     @MainActor
-    private func applyConfirmedMaxFPS(_ update: MaxFPSStateUpdate) {
+    func applyConfirmedMaxFPS(_ update: MaxFPSStateUpdate) {
         _ = maxFPSRequestState.confirm(update.preference)
         confirmedMaxFPS = maxFPSRequestState.confirmed
         pendingMaxFPS = maxFPSRequestState.pending
@@ -3799,10 +3768,8 @@ final class StreamReceiver: ObservableObject {
                 photonWindow.removeAll(keepingCapacity: true)
             }
 
-            publishToUI {
-                self.fps = fps
-                self.perf = stats
-            }
+            let uiSink = self.uiSink
+            DispatchQueue.main.async { uiSink.publishPerf(fps: fps, perf: stats) }
         }
     }
 
@@ -4000,8 +3967,8 @@ final class StreamReceiver: ObservableObject {
     // MARK: - Helpers
 
     private func setStatus(_ text: String) {
-        Log.info("status: \(text)")
-        publishToUI { self.status = text }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishStatus(text) }
     }
 
     /// `@MainActor` counterpart of `disconnect(_:)`/`closeSession(...)`'s
@@ -4013,8 +3980,9 @@ final class StreamReceiver: ObservableObject {
     /// non-Sendable `StreamReceiver` in a `@Sendable` closure. Note that
     /// `resetDisplayModeState()`/`resetExtendShapeState()`/
     /// `resetMaxFPSState()`/`setStatus()`/`publishDisplayState()` all route
-    /// through `publishToUI`, i.e. `DispatchQueue.main.async`, even when
-    /// already running on the main actor here — so awaiting this method
+    /// through `uiSink`, i.e. `DispatchQueue.main.async` inside `ReceiverUISink`'s
+    /// `@MainActor` methods, even when already running on the main actor
+    /// here — so awaiting this method
     /// only guarantees those five updates have been *scheduled* from the
     /// main-actor boundary, not that their `@Published` mutations have
     /// actually applied by the time the `await` returns.
@@ -4025,16 +3993,6 @@ final class StreamReceiver: ObservableObject {
         resetMaxFPSState()
         setStatus(status)
         publishDisplayState(.running)
-    }
-
-    // RC-3 Stage A: a single, explicit seam for crossing from the receiver's
-    // background `queue` into the `@Published` UI mirror. This replaces
-    // scattered `DispatchQueue.main.async` call sites with one named boundary
-    // so a later stage can give it real `@MainActor` isolation without having
-    // to rediscover every crossing point. Purely organizational: behavior,
-    // ordering, and timing are unchanged (still a plain `.main.async` hop).
-    private func publishToUI(_ update: @MainActor @escaping () -> Void) {
-        DispatchQueue.main.async { update() }
     }
 
     /// RC-3 SendTarget checkpoint: preparation for the C1 connection/session
@@ -4602,10 +4560,8 @@ final class StreamReceiver: ObservableObject {
     /// The `displayState` mirror and its callback always change together —
     /// duplicated verbatim at three call sites before this consolidation.
     private func publishDisplayState(_ state: DisplayState) {
-        publishToUI {
-            self.displayState = state
-            self.onDisplayStateChange?(state)
-        }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishDisplayState(state) }
     }
 
     /// The `session` mirror snapshot — called by `pipeline`
@@ -4614,7 +4570,8 @@ final class StreamReceiver: ObservableObject {
     /// before this consolidation. Callers still capture the snapshot at the
     /// same point they always did; this only names the hop.
     private func publishSessionSnapshot(_ snapshot: ReceiverSessionState) {
-        publishToUI { self.session = snapshot }
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishSessionSnapshot(snapshot) }
     }
 
     /// Receiver Swift6-B1: `session`'s only external mutator — `ReceiverUISink`
@@ -4692,5 +4649,137 @@ final class StreamReceiver: ObservableObject {
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
         }
+    }
+
+    // MARK: - Cluster A: `ReceiverUISink` apply methods
+    //
+    // Each of these is the `@MainActor` mutation half of a former
+    // `publishToUI { self... }` call site — reached only through the
+    // matching `ReceiverUISink.publish*` method above, never called
+    // directly from queue-isolated code. Same one-way, no-read-back,
+    // no-policy shape as `applyUISessionSnapshot`/`applyConnectedUIMirrorFields`.
+
+    @MainActor func applyLastForgottenPeerIDUpdate(_ peerID: String) {
+        lastForgottenPeerID = peerID
+    }
+
+    @MainActor func applyCursorReset() {
+        cursorState = (0.5, 0.5, false)
+        cursorSprite = nil
+        onCursor?(0.5, 0.5, false)
+    }
+
+    @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
+        cursorState = (x, y, visible)
+        onCursor?(x, y, visible)
+    }
+
+    @MainActor func applyCursorSpriteUpdate(image: CGImage, anchor: CGPoint, normSize: CGSize) {
+        cursorSprite = (image, anchor, normSize)
+        onCursorImage?(image, anchor, normSize)
+    }
+
+    /// The Mirror-unavailable/rejected offer split: whichever applies is
+    /// decided from `confirmedDisplayMode`, already-`@MainActor` state by
+    /// the time this runs — same decision `handleVideoChannelJSON`'s
+    /// `mirrorUnavailable` case made inline before this boundary existed.
+    @MainActor func applyMirrorAvailabilitySignal() {
+        if confirmedDisplayMode == .extend {
+            mirrorRejectedWhileExtending = true
+        } else {
+            mirrorUnavailable = true
+        }
+    }
+
+    @MainActor func applyMirrorDisplayStateUpdate(_ update: MirrorDisplayStateUpdate) {
+        mirrorDisplayState = update
+    }
+
+    @MainActor func applyStreamingProfileUpdate(_ profile: StreamingProfile) {
+        streamingProfile = profile
+    }
+
+    @MainActor func applyStreamingPriorityUpdate(_ priority: StreamingPriority) {
+        streamingPriority = priority
+    }
+
+    @MainActor func applyMacProtocolVersionUpdate(_ macPV: Int) {
+        macProtocolVersion = macPV
+        if macPV < WireProtocol.videoControlWireVersion {
+            videoEnabled = true
+        }
+    }
+
+    @MainActor func applyPeerSignalUpdate(_ signal: PeerUpdateSignal) {
+        peerSignal = signal
+    }
+
+    @MainActor func applyAudioEnabledUpdate(_ enabled: Bool) {
+        audioEnabled = enabled
+    }
+
+    @MainActor func applyPromoteInteractiveWakeResultUpdate(_ text: String) {
+        promoteInteractiveWakeResult = text
+    }
+
+    @MainActor func applyReceiverUIPreferencesUpdate(_ update: ReceiverUIPreferenceUpdate) {
+        onReceiverUIPreferences?(update)
+    }
+
+    @MainActor func applyInputResetBump() {
+        inputResetGeneration &+= 1
+    }
+
+    @MainActor func applyAllowInputStateChangeUpdate(_ state: SessionInputWireState) {
+        onAllowInputStateChange?(state)
+    }
+
+    @MainActor func applyVideoStateUpdate(width: Int?, height: Int?, enabled: Bool) {
+        if let width, let height {
+            videoSize = CGSize(width: width, height: height)
+        }
+        videoEnabled = enabled
+    }
+
+    @MainActor func applyActiveStreamCodecUpdate(_ codec: StreamCodec) {
+        activeStreamCodec = codec
+    }
+
+    @MainActor func applyMirrorUnavailableClear() {
+        mirrorUnavailable = false
+    }
+
+    @MainActor func applyMirrorRejectionClear() {
+        mirrorRejectedWhileExtending = false
+    }
+
+    @MainActor func applyDisplayModeStateReset() {
+        displayModeRequestState.reset()
+        confirmedDisplayMode = nil
+        pendingDisplayMode = nil
+        mirrorRejectedWhileExtending = false
+    }
+
+    @MainActor func applyExtendShapeStateReset() {
+        extendShapeRequestState.reset()
+        confirmedExtendShape = nil
+        pendingExtendShape = nil
+    }
+
+    @MainActor func applyMaxFPSStateReset() {
+        maxFPSRequestState.reset()
+        confirmedMaxFPS = nil
+        pendingMaxFPS = nil
+        lastMaxFPSState = nil
+    }
+
+    @MainActor func applyPerfUpdate(fps: Int, perf: PerfStats) {
+        self.fps = fps
+        self.perf = perf
+    }
+
+    @MainActor func applyDisplayStateUpdate(_ state: DisplayState) {
+        displayState = state
+        onDisplayStateChange?(state)
     }
 }

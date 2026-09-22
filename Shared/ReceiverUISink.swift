@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CoreGraphics
 
 /// Receiver Swift6-B1: the MainActor-facing publication proxy for the
 /// narrow subset of `StreamReceiver`'s own UI-facing state that a
@@ -120,5 +121,120 @@ final class ReceiverUISink: Sendable {
     /// nested in a `Task`.
     func publishTeardownUIReset(status: String) {
         target?.applyTeardownUIReset(status: status)
+    }
+
+    // MARK: - Cluster A: handleVideoChannelJSON / queue-side UI mirrors
+    //
+    // Everything below replaces a `publishToUI { self... }` call site that
+    // used to capture non-Sendable `StreamReceiver` directly. Each method
+    // takes only Sendable payloads and forwards to a matching `apply*`
+    // method on `StreamReceiver`, mirroring the shape of the methods above.
+
+    func publishLastForgottenPeerID(_ peerID: String) {
+        target?.applyLastForgottenPeerIDUpdate(peerID)
+    }
+
+    func publishCursorReset() {
+        target?.applyCursorReset()
+    }
+
+    func publishCursorPosition(x: Double, y: Double, visible: Bool) {
+        target?.applyCursorPositionUpdate(x: x, y: y, visible: visible)
+    }
+
+    func publishCursorSprite(image: CGImage, anchor: CGPoint, normSize: CGSize) {
+        target?.applyCursorSpriteUpdate(image: image, anchor: anchor, normSize: normSize)
+    }
+
+    func publishConfirmedDisplayMode(_ mode: ReceiverDisplayMode) {
+        target?.applyConfirmedDisplayMode(mode)
+    }
+
+    func publishMirrorAvailabilitySignal() {
+        target?.applyMirrorAvailabilitySignal()
+    }
+
+    func publishMirrorDisplayState(_ update: MirrorDisplayStateUpdate) {
+        target?.applyMirrorDisplayStateUpdate(update)
+    }
+
+    func publishConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
+        target?.applyConfirmedExtendShape(preference)
+    }
+
+    func publishStreamingProfile(_ profile: StreamingProfile) {
+        target?.applyStreamingProfileUpdate(profile)
+    }
+
+    func publishStreamingPriority(_ priority: StreamingPriority) {
+        target?.applyStreamingPriorityUpdate(priority)
+    }
+
+    func publishConfirmedMaxFPS(_ update: MaxFPSStateUpdate) {
+        target?.applyConfirmedMaxFPS(update)
+    }
+
+    func publishMacProtocolVersion(_ macPV: Int) {
+        target?.applyMacProtocolVersionUpdate(macPV)
+    }
+
+    func publishPeerSignal(_ signal: PeerUpdateSignal) {
+        target?.applyPeerSignalUpdate(signal)
+    }
+
+    func publishAudioEnabled(_ enabled: Bool) {
+        target?.applyAudioEnabledUpdate(enabled)
+    }
+
+    func publishPromoteInteractiveWakeResult(_ text: String) {
+        target?.applyPromoteInteractiveWakeResultUpdate(text)
+    }
+
+    func publishReceiverUIPreferences(_ update: ReceiverUIPreferenceUpdate) {
+        target?.applyReceiverUIPreferencesUpdate(update)
+    }
+
+    func publishInputResetBump() {
+        target?.applyInputResetBump()
+    }
+
+    func publishAllowInputStateChange(_ state: SessionInputWireState) {
+        target?.applyAllowInputStateChangeUpdate(state)
+    }
+
+    func publishVideoState(width: Int?, height: Int?, enabled: Bool) {
+        target?.applyVideoStateUpdate(width: width, height: height, enabled: enabled)
+    }
+
+    func publishActiveStreamCodec(_ codec: StreamCodec) {
+        target?.applyActiveStreamCodecUpdate(codec)
+    }
+
+    func publishMirrorUnavailableClear() {
+        target?.applyMirrorUnavailableClear()
+    }
+
+    func publishMirrorRejectionClear() {
+        target?.applyMirrorRejectionClear()
+    }
+
+    func publishDisplayModeStateReset() {
+        target?.applyDisplayModeStateReset()
+    }
+
+    func publishExtendShapeStateReset() {
+        target?.applyExtendShapeStateReset()
+    }
+
+    func publishMaxFPSStateReset() {
+        target?.applyMaxFPSStateReset()
+    }
+
+    func publishPerf(fps: Int, perf: PerfStats) {
+        target?.applyPerfUpdate(fps: fps, perf: perf)
+    }
+
+    func publishDisplayState(_ state: DisplayState) {
+        target?.applyDisplayStateUpdate(state)
     }
 }
