@@ -1688,19 +1688,34 @@ final class StreamReceiver: ObservableObject {
     /// Pause/resume the video sink around a background linger. Resuming
     /// flushes the layer and asks the Mac for a keyframe so the picture
     /// re-syncs immediately (the Mac replays a static screen as IDR too).
+    ///
+    /// Receiver Swift6: `framePipelineSyncState`/`presenter`/`sendTargetBox`
+    /// are already-Sendable owners captured directly (`framePipelineSyncState`
+    /// is the exact instance `framePipeline.syncState` exposes — see
+    /// `ReceiverFramePipeline.init`); only `renderingPaused` itself is raw
+    /// queue-confined `StreamReceiver` storage, so it alone goes through
+    /// `selfBox`. Unlike the old strong-`self` capture, this now no-ops if
+    /// the receiver has already been torn down by the time the queue hop
+    /// runs — acceptable here: an already-deallocated receiver has no
+    /// `presenter`/connection left to flush or signal.
     func setRenderingPaused(_ paused: Bool) {
+        let queue = self.queue
+        let selfBox = self.selfBox
+        let framePipelineSyncState = self.framePipelineSyncState
+        let presenter = self.presenter
+        let sendTargetBox = self.sendTargetBox
         queue.async {
-            guard paused != self.renderingPaused else { return }
-            self.renderingPaused = paused
+            guard let receiver = selfBox.currentOnQueue(), paused != receiver.renderingPaused else { return }
+            receiver.renderingPaused = paused
             // C3: mirrored synchronously for `framePipeline`, which checks
             // this before building a sample buffer — see
             // `FramePipelineSyncState`.
-            self.framePipeline.syncState.setRenderingPaused(paused)
+            framePipelineSyncState.setRenderingPaused(paused)
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
-                self.presenter.enqueueFlush()
-                if self.sendTargetBox.current()?.connection.state == .ready {
-                    self.sendControl(["type": "kf"])
+                presenter.enqueueFlush()
+                if sendTargetBox.current()?.connection.state == .ready {
+                    Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
                 }
             }
         }
