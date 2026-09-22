@@ -4,17 +4,58 @@ import XCTest
 /// The authenticator is injected, so no LocalAuthentication hardware is involved.
 @MainActor
 final class OwnerAuthTests: XCTestCase {
-    private final class FakeAuthenticator: OwnerAuthenticating {
-        private(set) var requests = 0
-        private(set) var reasons: [String] = []
-        private(set) var invalidated = 0
+    /// Every mutable field lives here, behind `lock`, so `FakeAuthenticator`
+    /// itself can be a plain (non-`@MainActor`) `Sendable` conformer to
+    /// `OwnerAuthenticating` — matching how `LocalOwnerAuthenticator` protects
+    /// its own mutable state. The lock is never held across `await`.
+    private final class FakeAuthenticatorState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _requests = 0
+        private var _reasons: [String] = []
+        private var _invalidated = 0
         private var continuation: CheckedContinuation<OwnerAuthResult, Never>?
-        func authenticate(reason: String) async -> OwnerAuthResult {
-            requests += 1; reasons.append(reason)
-            return await withCheckedContinuation { continuation = $0 }
+
+        var requests: Int { lock.lock(); defer { lock.unlock() }; return _requests }
+        var reasons: [String] { lock.lock(); defer { lock.unlock() }; return _reasons }
+        var invalidated: Int { lock.lock(); defer { lock.unlock() }; return _invalidated }
+
+        func beginAuthenticate(reason: String) {
+            lock.lock(); defer { lock.unlock() }
+            _requests += 1
+            _reasons.append(reason)
         }
-        func invalidate() { invalidated += 1 }
-        func finish(_ result: OwnerAuthResult) { continuation?.resume(returning: result); continuation = nil }
+
+        func setContinuation(_ new: CheckedContinuation<OwnerAuthResult, Never>) {
+            lock.lock(); defer { lock.unlock() }
+            continuation = new
+        }
+
+        func recordInvalidate() {
+            lock.lock(); defer { lock.unlock() }
+            _invalidated += 1
+        }
+
+        func finish(_ result: OwnerAuthResult) {
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            lock.unlock()
+            pending?.resume(returning: result)
+        }
+    }
+
+    private final class FakeAuthenticator: OwnerAuthenticating, Sendable {
+        private let state = FakeAuthenticatorState()
+        var requests: Int { state.requests }
+        var reasons: [String] { state.reasons }
+        var invalidated: Int { state.invalidated }
+
+        func authenticate(reason: String) async -> OwnerAuthResult {
+            state.beginAuthenticate(reason: reason)
+            return await withCheckedContinuation { state.setContinuation($0) }
+        }
+        func invalidate() { state.recordInvalidate() }
+        func finish(_ result: OwnerAuthResult) { state.finish(result) }
     }
 
     private func pending(_ classification: PairingClassification, id: String = "peer-a") -> PendingPairing {

@@ -433,7 +433,7 @@ enum PairingStage: Equatable {
 /// LocalAuthentication directly.
 enum OwnerAuthResult: Equatable { case success, cancelled, failed }
 
-protocol OwnerAuthenticating: AnyObject {
+protocol OwnerAuthenticating: AnyObject, Sendable {
     func authenticate(reason: String) async -> OwnerAuthResult
     /// Dismiss any authentication UI still on screen (attempt ended).
     func invalidate()
