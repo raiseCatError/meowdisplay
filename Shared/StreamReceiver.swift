@@ -1316,6 +1316,7 @@ final class StreamReceiver: ObservableObject {
         if let connection = sendTargetBox.current()?.connection { sendHello(on: connection) }
     }
 
+    @MainActor
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
          maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil) {
@@ -1346,20 +1347,17 @@ final class StreamReceiver: ObservableObject {
         _ = presenter
         _ = videoDecoder
         selfBox.install(self)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.uiSink.target = self
-            self.pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
-            self.pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
-            self.pairingObservation = self.pairingPrompt.objectWillChange.sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            self.pairingPrompt.onPending = { [weak self] pending in
-                Log.info("pairDebug: onPending peerID=\(pending.peerID)")
-                self?.beginExplicitPairing(peerID: pending.peerID)
-            }
-            self.displayLayer.videoGravity = .resizeAspect
+        uiSink.target = self
+        pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
+        pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
+        pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
+        pairingPrompt.onPending = { [weak self] pending in
+            Log.info("pairDebug: onPending peerID=\(pending.peerID)")
+            self?.beginExplicitPairing(peerID: pending.peerID)
+        }
+        displayLayer.videoGravity = .resizeAspect
     }
 
     func start() {
@@ -1373,6 +1371,7 @@ final class StreamReceiver: ObservableObject {
             self.startPairingListener()
             self.startMacPairingBrowser()
         }
+        let pipeline = self.pipeline
         Task { await pipeline.armLivenessTimers() }
     }
 
@@ -1382,6 +1381,7 @@ final class StreamReceiver: ObservableObject {
     /// app calls this when the user leaves receiver mode or quits; the
     /// instance is discarded afterwards (start() re-arms if it isn't).
     func stop(completion: (@Sendable () -> Void)? = nil) {
+        let pipeline = self.pipeline
         Task { await pipeline.teardownForStop() }
         queue.async {
             self.macPairingBrowser?.cancel(); self.macPairingBrowser = nil
@@ -1397,13 +1397,15 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
-            Task { await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
+            let pipeline = self.pipeline
+            Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
 
     @MainActor
     func notePairingSucceeded() { pairingSuccessCount += 1 }
 
+    @MainActor
     func pairWithMac(_ result: NWBrowser.Result) {
         let expectedPeerID: String? = if case .bonjour(let txt) = result.metadata {
             txt["id"]
@@ -1412,7 +1414,7 @@ final class StreamReceiver: ObservableObject {
         }
         beginExplicitPairing(peerID: expectedPeerID)
         let connection = NWConnection(to: result.endpoint, using: .tcp)
-        Task {
+        Task { @MainActor in
             defer { connection.cancel() }
             do {
                 let paired = try await PairingNetwork.runInitiator(
@@ -1546,7 +1548,8 @@ final class StreamReceiver: ObservableObject {
         Log.info("pairDebug: explicit pairing started peerID=\(peerID ?? "unknown")")
         queue.async {
             self.pairingSuppressionState.setSuppressed(true)
-            Task { await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
+            let pipeline = self.pipeline
+            Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
 
@@ -1620,6 +1623,7 @@ final class StreamReceiver: ObservableObject {
     /// there would land us in Connection Lost for no reason); foregrounding
     /// resumes it from where it stopped.
     func setAppActive(_ active: Bool) {
+        let pipeline = self.pipeline
         Task {
             if active {
                 await pipeline.resumeReconnectIfNeeded()
@@ -1693,6 +1697,7 @@ final class StreamReceiver: ObservableObject {
         let pipeline = self.pipeline
         let uiSink = self.uiSink
         let pendingDisconnectFinishBox = self.pendingDisconnectFinishBox
+        let selfBox = self.selfBox
         queue.async {
             let finishedOnce = OnceGuard()
             // Self-free by construction (Receiver Swift6-Teardown): every
@@ -1739,8 +1744,8 @@ final class StreamReceiver: ObservableObject {
                     // reference right after kicking teardown off), the
                     // audio reset and `completion` are skipped, but
                     // everything above them still runs regardless.
-                    queue.async { [weak self] in
-                        guard let self else { return }
+                    queue.async {
+                        guard let self = selfBox.currentOnQueue() else { return }
                         self.resetAudioPlayback()
                         completion?()
                     }
@@ -1771,6 +1776,7 @@ final class StreamReceiver: ObservableObject {
         let uiSink = self.uiSink
         let tlsListenerState = self.tlsListenerState
         let pairingListenerState = self.pairingListenerState
+        let selfBox = self.selfBox
         queue.async {
             let finishedOnce = OnceGuard()
             // Self-free for the same reason as `disconnect()`'s `finish` —
@@ -1792,8 +1798,8 @@ final class StreamReceiver: ObservableObject {
                     // FORGET DEVICE / app quit: queued audio dies with the
                     // session. Same `self`/`weak self` reasoning as
                     // `disconnect()` — see its comment.
-                    queue.async { [weak self] in
-                        guard let self else { return }
+                    queue.async {
+                        guard let self = selfBox.currentOnQueue() else { return }
                         self.resetAudioPlayback()
                         completion?()
                     }
@@ -2181,6 +2187,10 @@ final class StreamReceiver: ObservableObject {
         // Sendable `uiSink` value directly rather than through `self.uiSink`
         // (which would re-capture non-Sendable `StreamReceiver`).
         let uiSink = self.uiSink
+        // Captured once, locally, for the same reason as `uiSink` above —
+        // the `Task { await pipeline... }` sites below must reach the
+        // Sendable pipeline actor directly rather than through `self.pipeline`.
+        let pipeline = self.pipeline
         switch type {
         case "pong":
             guard let t1 = obj["t"] as? Double, let mt = obj["mt"] as? Double else { return }
@@ -3835,9 +3845,14 @@ final class StreamReceiver: ObservableObject {
             Log.info("connectDebug: receiverConnectRequest peer=local")
             self.pendingDisconnectFinishBox.callIfPresent()
             self.reconnectContext.update { $0.peerIsIncompatible = false }
+            let pipeline = self.pipeline
+            let queue = self.queue
+            let selfBox = self.selfBox
             Task {
-                await self.pipeline.requestManualReconnectTransition()
-                self.signalConnectRequest()
+                await pipeline.requestManualReconnectTransition()
+                queue.async {
+                    selfBox.currentOnQueue()?.signalConnectRequest()
+                }
             }
         }
     }
@@ -3939,23 +3954,31 @@ final class StreamReceiver: ObservableObject {
     func reconnectNow() {
         queue.async {
             self.pendingDisconnectFinishBox.callIfPresent()
+            let pipeline = self.pipeline
+            let queue = self.queue
+            let selfBox = self.selfBox
+            let reconnectContext = self.reconnectContext
             Task {
-                let phase = await self.pipeline.currentPhase
+                let phase = await pipeline.currentPhase
                 if phase == .peerDisconnected {
                     // Fresh explicit intent after the Mac ended the session:
                     // the same single path Home → Connect uses.
                     Log.info("connectDebug: peerDisconnected reconnect -> requestConnect")
-                    self.requestConnect()
+                    queue.async {
+                        selfBox.currentOnQueue()?.requestConnect()
+                    }
                     return
                 }
                 guard phase == .reconnectFailed || phase == .disconnected else { return }
                 Log.info("manual reconnect requested")
-                self.reconnectContext.update { $0.peerIsIncompatible = false }
-                await self.pipeline.requestManualReconnectTransition()
+                reconnectContext.update { $0.peerIsIncompatible = false }
+                await pipeline.requestManualReconnectTransition()
                 // If the listener is healthy, `armReconnect` (fired reactively)
                 // won't rebuild it. A manual retry is explicitly a user asking
                 // to un-stick a broken state, so force a rebind.
-                self.ensureTLSListening()
+                queue.async {
+                    selfBox.currentOnQueue()?.ensureTLSListening()
+                }
             }
         }
     }

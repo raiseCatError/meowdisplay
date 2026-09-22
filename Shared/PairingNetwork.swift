@@ -67,7 +67,7 @@ enum PairingNetwork {
     static func runInitiator(connection: NWConnection, localID: String, localName: String,
                              prompt: PairingPromptModel, expectedPeerID: String? = nil,
                              allowIdentityChange: Bool = false,
-                             isCurrent: @escaping () -> Bool = { true },
+                             isCurrent: @escaping @Sendable () -> Bool = { true },
                              remoteHost: String? = nil, attemptToken: UUID = UUID(),
                              onHandshakeReached: (@Sendable () -> Void)? = nil) async throws -> PendingPairing {
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
@@ -119,7 +119,7 @@ enum PairingNetwork {
     static func runResponder(connection: NWConnection, localID: String, localName: String,
                              prompt: PairingPromptModel,
                              allowIdentityChange: Bool = false,
-                             isCurrent: @escaping () -> Bool = { true },
+                             isCurrent: @escaping @Sendable () -> Bool = { true },
                              attemptToken: UUID = UUID(),
                              throttle: PairingCommitThrottleGate = .shared) async throws -> PendingPairing {
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
