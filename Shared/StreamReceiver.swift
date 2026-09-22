@@ -3311,12 +3311,16 @@ final class StreamReceiver: ObservableObject {
     /// The user's manual A/V Sync value is untouched — only the automatic
     /// baseline term changes.
     func resync() {
+        let queue = self.queue
+        let selfBox = self.selfBox
+        let presenter = self.presenter
         queue.async {
-            self.presentationGeneration &+= 1
-            self.presenter.enqueueAdvanceGeneration()
-            self.resetAudioPlayback(keepingFormat: true)
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            receiver.presentationGeneration &+= 1
+            presenter.enqueueAdvanceGeneration()
+            receiver.resetAudioPlayback(keepingFormat: true)
             #if DEBUG
-            Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(self.presentationGeneration)")
+            Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(receiver.presentationGeneration)")
             #endif
         }
     }
