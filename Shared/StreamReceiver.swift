@@ -4331,14 +4331,18 @@ final class StreamReceiver: ObservableObject {
     /// `queue` before touching any `queue`-confined state, exactly like
     /// `makePipelineHostEffects()` above.
     private func makeFramePipelineOutputEffects() -> ReceiverFramePipeline.OutputEffects {
-        // B2.4-B: `connectionFailed`/`connectionClosedByPeer` capture `queue`
-        // and `pipeline` directly instead of `self` — both are Sendable
-        // (`DispatchQueue` is `@unchecked Sendable`, `ReceiverPipelineActor`
-        // is an actor) and `pipeline`'s identity is stable for the lifetime
-        // of `StreamReceiver` (`lazy var`, never reassigned). Same queue
-        // instance, same enqueue point, same `Task` creation point as before.
+        // B2.4-B / CR1 fix: `connectionFailed`/`connectionClosedByPeer`
+        // capture `queue` and `pipelineBox` instead of `self` or `pipeline`
+        // directly. A direct `self.pipeline` read here would re-enter
+        // `pipeline`'s own lazy initializer (which calls this factory to
+        // build `framePipeline`'s outputEffects BEFORE `pipeline` is
+        // constructed) — unbounded recursion until the stack overflows.
+        // `pipelineBox` is installed once `pipeline`'s initializer finishes,
+        // exactly the same seam `makePipelineHostEffects()`'s
+        // `ensureTLSListening` already uses for the identical reason — see
+        // `ReceiverPipelineActorBox`'s doc comment.
         let queue = queue
-        let pipeline = pipeline
+        let pipelineBox = self.pipelineBox
         // D1: `codecConfigurationChanged` is a pure pass-through — presenter
         // flush, DEBUG decoder notification, then a UI publish — with no
         // coordinator logic of its own, so it captures its stable owners
@@ -4393,12 +4397,14 @@ final class StreamReceiver: ObservableObject {
                     // connection's own health, not a per-call fluke, and
                     // must mark the session down exactly like EOF.
                     Log.info("receive error: \(error)")
+                    guard let pipeline = pipelineBox.current() else { return }
                     Task { await pipeline.setConnected(false) }
                 }
             },
             connectionClosedByPeer: {
                 queue.async {
                     Log.info("peer closed connection")
+                    guard let pipeline = pipelineBox.current() else { return }
                     Task { await pipeline.setConnected(false) }
                 }
             })
