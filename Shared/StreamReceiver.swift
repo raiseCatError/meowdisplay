@@ -3013,15 +3013,21 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
-                             completion: (() -> Void)? = nil) {
+                             completion: (@Sendable () -> Void)? = nil) {
         Self.sendControl(message, on: conn, sendTargetBox: sendTargetBox, completion: completion)
     }
 
     /// Static so `sendPing`'s host-effect closure (E1a) can call it with a
     /// directly-captured `sendTargetBox` instead of `self` — this is the
     /// only state the instance method touched beyond its parameters.
+    ///
+    /// `completion` is `@Sendable`: its only two callers (`disconnect`'s and
+    /// `closeSession`'s `finish` legs) pass `{ queue.async { finish() } }`,
+    /// where `queue` is a `DispatchQueue` and `finish` is already declared
+    /// `@Sendable () -> Void` — both genuinely safe to cross into
+    /// `NWConnection.send`'s `@Sendable` completion context.
     private static func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
-                                     sendTargetBox: SendTargetBox, completion: (() -> Void)? = nil) {
+                                     sendTargetBox: SendTargetBox, completion: (@Sendable () -> Void)? = nil) {
         // C1: `connection` moved into `pipeline`; every background-queue-
         // confined caller that used to fall through to it (liveness ping,
         // decoder-reset keyframe requests, the periodic stats report) now
