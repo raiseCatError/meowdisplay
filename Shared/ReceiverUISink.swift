@@ -106,4 +106,19 @@ final class ReceiverUISink: Sendable {
     func publishPairingSucceeded() {
         target?.applyPairingSucceededUpdate()
     }
+
+    /// The combined UI-reset half of `StreamReceiver.disconnect(_:)`/
+    /// `closeSession(...)`'s teardown completion — display mode, extend
+    /// shape, max FPS, status, and `displayState`/`onDisplayStateChange` all
+    /// reset together, once `pipeline.disconnectCurrentConnection` has been
+    /// awaited. Bundled as one boundary crossing (rather than one method
+    /// per mirror) because both call sites always fire this exact group
+    /// together, differing only in `status`; this replaces the `self`
+    /// capture the group previously needed to reach `resetDisplayModeState`/
+    /// `resetExtendShapeState`/`resetMaxFPSState`/`setStatus`/
+    /// `publishDisplayState` from inside a `queue.async` continuation
+    /// nested in a `Task`.
+    func publishTeardownUIReset(status: String) {
+        target?.applyTeardownUIReset(status: status)
+    }
 }

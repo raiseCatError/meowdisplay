@@ -146,7 +146,7 @@ final class ReceiverController: ObservableObject {
     /// Leave receiver mode. `completion` fires once "closing" has gone out
     /// to a live sender (or a second has passed) — the quit path waits on it
     /// so the sender ends its session instead of retrying a dead peer.
-    func stop(completion: (() -> Void)? = nil) {
+    func stop(completion: (@Sendable () -> Void)? = nil) {
         guard let receiver else { completion?(); return }
         cancellables.removeAll()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }

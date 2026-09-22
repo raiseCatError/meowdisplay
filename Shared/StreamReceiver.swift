@@ -895,7 +895,56 @@ final class StreamReceiver: ObservableObject {
     // acts on it for an already-trusted/pinned peer, and the resulting
     // connection still runs the full pinned-TLS + hello handshake.
     private var connectRequestClearWorkItem: DispatchWorkItem?
-    private var pendingDisconnectFinish: (() -> Void)?
+    /// Narrow, lock-backed owner for `disconnect()`'s in-flight `finish`
+    /// closure — same `NSLock`-protected `@unchecked Sendable` idiom as
+    /// `TLSListenerState`/`SendTargetBox` above. Exists so `finish` can be a
+    /// genuinely `@Sendable () -> Void` (it is stored here, invoked from
+    /// `requestConnect()`/`reconnectNow()`, and passed to both
+    /// `NWConnection.send`'s completion and `queue.asyncAfter`) without
+    /// capturing non-Sendable `StreamReceiver` merely to reach the property
+    /// that used to hold it.
+    final class PendingDisconnectFinishBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: (@Sendable () -> Void)?
+
+        func set(_ finish: (@Sendable () -> Void)?) {
+            lock.lock(); defer { lock.unlock() }
+            value = finish
+        }
+
+        func clear() { set(nil) }
+
+        func callIfPresent() {
+            lock.lock()
+            let finish = value
+            lock.unlock()
+            finish?()
+        }
+    }
+    private let pendingDisconnectFinishBox = PendingDisconnectFinishBox()
+
+    /// Fire-once guard for `disconnect()`/`closeSession(...)`'s `finish`
+    /// closure — replaces a plain captured `var finished = false`, which
+    /// compiles under `finish`'s previous implicit (non-`@Sendable`) type
+    /// but is rejected once `finish` is declared `@Sendable`: `finish` is
+    /// invoked from the network completion queue, the `queue.asyncAfter`
+    /// timer, and (for the no-live-connection path) `queue` itself, so the
+    /// compiler cannot prove those calls are mutually exclusive even though
+    /// `queue`'s own serialization makes them so in practice. Same
+    /// `NSLock`-protected `@unchecked Sendable` idiom as the boxes above.
+    final class OnceGuard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+
+        /// Returns `true` exactly once — for the call that should run the
+        /// guarded effect — and `false` for every call after.
+        func fireOnce() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if fired { return false }
+            fired = true
+            return true
+        }
+    }
     let pairingPrompt = PairingPromptModel()
     private var pairingObservation: AnyCancellable?
     private let pairingSuppressionState = PairingSuppressionState()
@@ -1290,7 +1339,7 @@ final class StreamReceiver: ObservableObject {
     /// connection and the listener, and silence the liveness timers. The Mac
     /// app calls this when the user leaves receiver mode or quits; the
     /// instance is discarded afterwards (start() re-arms if it isn't).
-    func stop(completion: (() -> Void)? = nil) {
+    func stop(completion: (@Sendable () -> Void)? = nil) {
         Task { await pipeline.teardownForStop() }
         queue.async {
             self.macPairingBrowser?.cancel(); self.macPairingBrowser = nil
@@ -1570,7 +1619,7 @@ final class StreamReceiver: ObservableObject {
     /// accept connections, or the Mac's wake retries would rebuild the
     /// display before anyone can see it. ensureListening() re-arms
     /// everything when the scene becomes active again.
-    func enterSleep(completion: (() -> Void)? = nil) {
+    func enterSleep(completion: (@Sendable () -> Void)? = nil) {
         closeSession(announcing: WireMessage.sleeping,
                      status: "Asleep — resumes on wake", completion: completion)
     }
@@ -1578,7 +1627,7 @@ final class StreamReceiver: ObservableObject {
     /// The app is being terminated (user swiped it away). Same close, but
     /// announced as "closing": quitting the app is deliberate, so the Mac
     /// ends the session without waiting around for a wake.
-    func shutDown(completion: (() -> Void)? = nil) {
+    func shutDown(completion: (@Sendable () -> Void)? = nil) {
         closeSession(announcing: WireMessage.closing,
                      status: "Closed", completion: completion)
     }
@@ -1594,14 +1643,28 @@ final class StreamReceiver: ObservableObject {
     /// peer (`onPeerClosed` -> `autoConnectPolicy.suppress` in
     /// OpenSidecarMacApp.swift), so no protocol or Mac-side change was
     /// needed for that half of the contract.
-    func disconnect(completion: (() -> Void)? = nil) {
+    func disconnect(completion: (@Sendable () -> Void)? = nil) {
+        let queue = self.queue
+        let sendTargetBox = self.sendTargetBox
+        let reconnectContext = self.reconnectContext
+        let pipeline = self.pipeline
+        let uiSink = self.uiSink
+        let pendingDisconnectFinishBox = self.pendingDisconnectFinishBox
         queue.async {
-            var finished = false
-            let finish = { [weak self] in
-                guard let self, !finished else { return }
-                finished = true
-                self.pendingDisconnectFinish = nil
-                self.reconnectContext.update { $0.manualConnectPeerID = nil }
+            let finishedOnce = OnceGuard()
+            // Self-free by construction (Receiver Swift6-Teardown): every
+            // owner `finish` touches — `pendingDisconnectFinishBox`,
+            // `reconnectContext`, `pipeline`, `uiSink`, `queue`,
+            // `finishedOnce` — is a narrow, already-`Sendable` owner
+            // captured above, so `finish` itself can be a genuinely
+            // `@Sendable () -> Void` without capturing non-Sendable
+            // `StreamReceiver`. It is stored into `pendingDisconnectFinishBox`
+            // and passed to both `NWConnection.send`'s completion and
+            // `queue.asyncAfter`, both of which require exactly that.
+            let finish: @Sendable () -> Void = {
+                guard finishedOnce.fireOnce() else { return }
+                pendingDisconnectFinishBox.clear()
+                reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it
                 // cannot resurrect the session afterwards. A subsequent
@@ -1610,50 +1673,70 @@ final class StreamReceiver: ObservableObject {
                 //
                 // C1 review fix: `await` the actor's own teardown (which
                 // sets its own status, e.g. "Waiting for Mac") BEFORE
-                // setting "Disconnected" below, hopping back onto `queue`
-                // for the rest of this closure's queue-confined work. An
-                // un-awaited `Task` here previously let the actor's status
-                // write land AFTER this one, sometimes overwriting
-                // "Disconnected" with a stale interruption label.
+                // setting "Disconnected" below. Both the UI reset
+                // (`uiSink.publishTeardownUIReset`, MainActor-hopped) and
+                // the queue-confined audio reset below are only reached
+                // after this `await` completes, so the ordering the C1 fix
+                // established — actor teardown status first, "Disconnected"
+                // after — is unchanged.
                 Task {
-                    await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
-                    self.queue.async {
-                        self.resetDisplayModeState()
-                        self.resetExtendShapeState()
-                        self.resetMaxFPSState()
+                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    await uiSink.publishTeardownUIReset(status: "Disconnected")
+                    // `resetAudioPlayback()` still needs `self` — it mutates
+                    // `audioFormatDescription`/`audioCodecKind` and calls
+                    // `deactivateAudioSessionIfNeeded()` directly on the
+                    // instance, state this narrow teardown pass does not
+                    // relocate into an owner of its own (see the review
+                    // notes on `StreamReceiver.disconnect`). Unlike before,
+                    // the pipeline/reconnect/UI teardown above no longer
+                    // depends on the receiver staying alive — only this
+                    // final `weak self` leg does. If the receiver has
+                    // already been deallocated by this point (e.g.
+                    // `ReceiverController.stop()` drops its last strong
+                    // reference right after kicking teardown off), the
+                    // audio reset and `completion` are skipped, but
+                    // everything above them still runs regardless.
+                    queue.async { [weak self] in
+                        guard let self else { return }
                         self.resetAudioPlayback()
-                        self.setStatus("Disconnected")
-                        self.publishDisplayState(.running)
                         completion?()
                     }
                 }
             }
-            self.pendingDisconnectFinish = finish
-            guard let conn = self.sendTargetBox.current()?.connection, conn.state == .ready else {
+            pendingDisconnectFinishBox.set(finish)
+            guard let conn = sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
                 return
             }
             Log.info("disconnecting — announcing closing to the Mac")
-            self.sendControl(["type": WireMessage.closing], on: conn) {
-                self.queue.async { finish() }
+            StreamReceiver.sendControl(["type": WireMessage.closing], on: conn, sendTargetBox: sendTargetBox) {
+                queue.async { finish() }
             }
             // The send completion may never fire on a dying link — don't
             // let that keep this session looking connected after going dark.
-            self.queue.asyncAfter(deadline: .now() + 1) { finish() }
+            queue.asyncAfter(deadline: .now() + 1) { finish() }
         }
     }
 
     private func closeSession(announcing type: String, status: String,
-                              completion: (() -> Void)?) {
+                              completion: (@Sendable () -> Void)?) {
+        let queue = self.queue
+        let sendTargetBox = self.sendTargetBox
+        let reconnectContext = self.reconnectContext
+        let pipeline = self.pipeline
+        let uiSink = self.uiSink
+        let tlsListenerState = self.tlsListenerState
+        let pairingListenerState = self.pairingListenerState
         queue.async {
-            var finished = false
-            let finish = { [weak self] in
-                guard let self, !finished else { return }
-                finished = true
-                self.tlsListenerState.cancelCurrent()
-                self.pairingListenerState.cancelCurrent()
-                self.reconnectContext.update { $0.manualConnectPeerID = nil }
+            let finishedOnce = OnceGuard()
+            // Self-free for the same reason as `disconnect()`'s `finish` —
+            // see its comment.
+            let finish: @Sendable () -> Void = {
+                guard finishedOnce.fireOnce() else { return }
+                tlsListenerState.cancelCurrent()
+                pairingListenerState.cancelCurrent()
+                reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
                 // and any retry already scheduled is invalidated so it cannot
                 // resurrect the session afterwards.
@@ -1661,30 +1744,30 @@ final class StreamReceiver: ObservableObject {
                 // C1 review fix: same status-order fix as `disconnect()` —
                 // await the actor's teardown before writing `status` here.
                 Task {
-                    await self.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
-                    self.queue.async {
-                        self.resetDisplayModeState()
-                        self.resetExtendShapeState()
-                        self.resetMaxFPSState()
-                        self.resetAudioPlayback()   // FORGET DEVICE / app quit: queued audio dies with the session
-                        self.setStatus(status)
-                        self.publishDisplayState(.running)
+                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    await uiSink.publishTeardownUIReset(status: status)
+                    // FORGET DEVICE / app quit: queued audio dies with the
+                    // session. Same `self`/`weak self` reasoning as
+                    // `disconnect()` — see its comment.
+                    queue.async { [weak self] in
+                        guard let self else { return }
+                        self.resetAudioPlayback()
                         completion?()
                     }
                 }
             }
-            guard let conn = self.sendTargetBox.current()?.connection, conn.state == .ready else {
+            guard let conn = sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("closing session (\(type)) — no live connection")
                 finish()
                 return
             }
             Log.info("closing session — announcing \(type) to the Mac")
-            self.sendControl(["type": type], on: conn) {
-                self.queue.async { finish() }
+            StreamReceiver.sendControl(["type": type], on: conn, sendTargetBox: sendTargetBox) {
+                queue.async { finish() }
             }
             // The send completion may never fire on a dying link — don't
             // let that keep us accepting connections after going dark.
-            self.queue.asyncAfter(deadline: .now() + 1) { finish() }
+            queue.asyncAfter(deadline: .now() + 1) { finish() }
         }
     }
 
@@ -3741,7 +3824,7 @@ final class StreamReceiver: ObservableObject {
     func requestConnect() {
         queue.async {
             Log.info("connectDebug: receiverConnectRequest peer=local")
-            self.pendingDisconnectFinish?()
+            self.pendingDisconnectFinishBox.callIfPresent()
             self.reconnectContext.update { $0.peerIsIncompatible = false }
             Task {
                 await self.pipeline.requestManualReconnectTransition()
@@ -3846,7 +3929,7 @@ final class StreamReceiver: ObservableObject {
 
     func reconnectNow() {
         queue.async {
-            self.pendingDisconnectFinish?()
+            self.pendingDisconnectFinishBox.callIfPresent()
             Task {
                 let phase = await self.pipeline.currentPhase
                 if phase == .peerDisconnected {
@@ -3877,6 +3960,29 @@ final class StreamReceiver: ObservableObject {
     private func setStatus(_ text: String) {
         Log.info("status: \(text)")
         publishToUI { self.status = text }
+    }
+
+    /// `@MainActor` counterpart of `disconnect(_:)`/`closeSession(...)`'s
+    /// teardown-completion UI reset, reached via `ReceiverUISink.
+    /// publishTeardownUIReset(status:)` instead of the `queue`-confined
+    /// `self.resetDisplayModeState()`/etc. sequence those methods used to
+    /// call directly from inside a `Task`'s `queue.async` continuation —
+    /// same effects, same order, just reached without capturing
+    /// non-Sendable `StreamReceiver` in a `@Sendable` closure. Note that
+    /// `resetDisplayModeState()`/`resetExtendShapeState()`/
+    /// `resetMaxFPSState()`/`setStatus()`/`publishDisplayState()` all route
+    /// through `publishToUI`, i.e. `DispatchQueue.main.async`, even when
+    /// already running on the main actor here — so awaiting this method
+    /// only guarantees those five updates have been *scheduled* from the
+    /// main-actor boundary, not that their `@Published` mutations have
+    /// actually applied by the time the `await` returns.
+    @MainActor
+    func applyTeardownUIReset(status: String) {
+        resetDisplayModeState()
+        resetExtendShapeState()
+        resetMaxFPSState()
+        setStatus(status)
+        publishDisplayState(.running)
     }
 
     // RC-3 Stage A: a single, explicit seam for crossing from the receiver's
