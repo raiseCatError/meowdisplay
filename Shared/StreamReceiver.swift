@@ -1611,8 +1611,10 @@ final class StreamReceiver: ObservableObject {
     /// returns to the foreground (iOS may have torn it down while suspended,
     /// or enterSleep deliberately took it down on lock).
     func ensureListening() {
+        let queue = self.queue
+        let selfBox = self.selfBox
         queue.async {
-            self.ensureTLSListening()
+            selfBox.currentOnQueue()?.ensureTLSListening()
         }
     }
 
@@ -3904,7 +3906,11 @@ final class StreamReceiver: ObservableObject {
     /// easily outlast that, so the coordinator calls this on a bounded
     /// cadence while a wake attempt is active.
     func refreshConnectRequest() {
-        queue.async { self.signalConnectRequest() }
+        let queue = self.queue
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.signalConnectRequest()
+        }
     }
 
     /// Unified primary Connect for one specific paired Mac: rearms the
