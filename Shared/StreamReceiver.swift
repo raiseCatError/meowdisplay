@@ -3739,13 +3739,17 @@ final class StreamReceiver: ObservableObject {
         // presentation time) is still stale-safe.
         let scheduledVideoGeneration = presentationGeneration
         let viaMetalPath = useMetalPath && onDecodedFrame != nil
-        let present = { [weak self] in
-            guard let self else { return }
-            #if DEBUG
-            if viaMetalPath { self.debugFramesToDecoderWindow += 1 }
-            #endif
-            self.presenter.enqueuePresentSample(
-                FrameMediaBox(sample), generation: scheduledVideoGeneration,
+        #if DEBUG
+        if viaMetalPath { debugFramesToDecoderWindow += 1 }
+        #endif
+        // Hoisted so `present` captures only already-Sendable values
+        // (`presenter` is `@unchecked Sendable`; `sampleBox` boxes the
+        // otherwise non-Sendable `CMSampleBuffer`) instead of `self`.
+        let presenter = self.presenter
+        let sampleBox = FrameMediaBox(sample)
+        let present: @Sendable () -> Void = {
+            presenter.enqueuePresentSample(
+                sampleBox, generation: scheduledVideoGeneration,
                 viaMetalPath: viaMetalPath, captureMs: captureMs)
         }
         // A/V Sync: negative offset delays video by holding this specific,
