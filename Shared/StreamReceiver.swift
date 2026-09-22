@@ -1397,17 +1397,23 @@ final class StreamReceiver: ObservableObject {
     }
 
     func start() {
+        let queue = self.queue
+        let tlsListenerState = self.tlsListenerState
+        let pairingSuppressionState = self.pairingSuppressionState
+        let advertisementState = self.advertisementState
+        let pipeline = self.pipeline
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
+        let selfBox = self.selfBox
         queue.async {
             TrustStore.shared.refreshSnapshot()
             Self.startTLSListener(
-                queue: self.queue, tlsListenerState: self.tlsListenerState,
-                pairingSuppressionState: self.pairingSuppressionState,
-                advertisementState: self.advertisementState, pipeline: self.pipeline,
-                installID: Self.installID, advertisedProtocolVersion: self.advertisedProtocolVersion)
-            self.startPairingListener()
-            self.startMacPairingBrowser()
+                queue: queue, tlsListenerState: tlsListenerState,
+                pairingSuppressionState: pairingSuppressionState,
+                advertisementState: advertisementState, pipeline: pipeline,
+                installID: Self.installID, advertisedProtocolVersion: advertisedProtocolVersion)
+            selfBox.currentOnQueue()?.startPairingListener()
+            selfBox.currentOnQueue()?.startMacPairingBrowser()
         }
-        let pipeline = self.pipeline
         Task { await pipeline.armLivenessTimers() }
     }
 
@@ -1419,8 +1425,10 @@ final class StreamReceiver: ObservableObject {
     func stop(completion: (@Sendable () -> Void)? = nil) {
         let pipeline = self.pipeline
         Task { await pipeline.teardownForStop() }
+        let selfBox = self.selfBox
         queue.async {
-            self.macPairingBrowser?.cancel(); self.macPairingBrowser = nil
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            receiver.macPairingBrowser?.cancel(); receiver.macPairingBrowser = nil
         }
         closeSession(announcing: WireMessage.closing, status: "Stopped",
                      completion: completion)
