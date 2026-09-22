@@ -17,6 +17,7 @@ import Sparkle
 // and hands out File > New; the panel here is one fixed-size window built
 // like the sender's control window (NSHostingView in an NSWindow).
 @main
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static func main() {
         let app = NSApplication.shared

@@ -425,7 +425,7 @@ final class ReceiverVideoView: NSView {
 // what acts as a monitor — blank it there. The streamed sender cursor
 // (cursorLayer) is the pointer that matters. File-scope so both the video
 // view and the overlay above it use the same cursor.
-private let blankCursor: NSCursor = {
+@MainActor private let blankCursor: NSCursor = {
     let size = NSSize(width: 1, height: 1)
     let image = NSImage(size: size)
     image.lockFocus()
