@@ -518,6 +518,30 @@ final class ReceiverAdvertisementState: @unchecked Sendable {
     }
 }
 
+/// Lock-protected sole owner of the user's last-requested audio preference
+/// (`requestAudioEnabled`/`primeAudioPreference`). Previously a plain
+/// `private var` on `StreamReceiver` mutated via `queue.async { [weak self]
+/// in self?.audioPreferred = enabled }` from `@MainActor` call sites — under
+/// strict concurrency that capture of non-Sendable `StreamReceiver` in the
+/// `@Sendable` `DispatchQueue.async` closure is what's diagnosed. The value
+/// itself has no ordering dependency on anything else `queue`-confined (it
+/// is only ever read back verbatim into an outgoing `audioRequest`), so a
+/// lock-protected box is a faithful, minimal replacement: same last-write-
+/// wins semantics, no `self` capture required to update it.
+final class AudioPreferenceBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set(_ newValue: Bool) {
+        lock.lock(); value = newValue; lock.unlock()
+    }
+
+    func get() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
 /// Lock-protected box holding the lazily-constructed `pipeline` actor
 /// reference, installed once `pipeline`'s own `lazy var` initializer runs.
 /// Exists solely so `makePipelineHostEffects()`'s `ensureTLSListening`
@@ -747,7 +771,7 @@ final class StreamReceiver: ObservableObject {
     /// What this receiver last asked for — resent on every `welcome` so it
     /// survives reconnection and transport migration without the user
     /// re-enabling it (SESSION BEHAVIOR).
-    private var audioPreferred = false
+    private let audioPreferredBox = AudioPreferenceBox()
     /// RC-3 Stage E2: the renderer/synchronizer/anchor scheduling domain
     /// moved to `ReceiverAudioPresenter` — see its file header. Owned here,
     /// constructed with `queue` for its DEBUG KVO callback's re-hop.
@@ -2150,7 +2174,7 @@ final class StreamReceiver: ObservableObject {
             // fall out of sync (SESSION BEHAVIOR: migration must not reset
             // the user's Audio preference).
             if macPV >= WireProtocol.audioWireVersion {
-                sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferred])
+                sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferredBox.get()])
             } else {
                 publishToUI { self.audioEnabled = false }
             }
@@ -2609,7 +2633,8 @@ final class StreamReceiver: ObservableObject {
     /// because each one re-derives the request from this single value
     /// rather than replaying anything queued.
     @MainActor func requestAudioEnabled(_ enabled: Bool) {
-        queue.async { [weak self] in self?.audioPreferred = enabled }
+        let box = audioPreferredBox
+        queue.async { box.set(enabled) }
         guard connected, macSupportsAudio else { return }
         sendUIControl(["type": WireMessage.audioRequest, "enabled": enabled])
     }
@@ -2619,7 +2644,8 @@ final class StreamReceiver: ObservableObject {
     /// before there is a connection). Use `requestAudioEnabled` for a live
     /// user toggle.
     func primeAudioPreference(_ enabled: Bool) {
-        queue.async { [weak self] in self?.audioPreferred = enabled }
+        let box = audioPreferredBox
+        queue.async { box.set(enabled) }
     }
 
     /// Asks the connected Mac to call IOPMAssertionDeclareUserActivity, over
