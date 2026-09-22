@@ -1287,8 +1287,18 @@ final class StreamReceiver: ObservableObject {
     /// Settings detail reports — called alongside it on every local
     /// preference change so Mac visibility never lags what's actually set.
     func announceReceiverPreferences(_ preferences: ReceiverControlPreferences) {
+        let helloState = self.helloState
+        let avSyncPreference = self.avSyncPreference
+        let sendTargetBox = self.sendTargetBox
+        let displayGeometryState = self.displayGeometryState
+        let deviceKind = self.deviceKind
+        let maxEncodeWide = self.maxEncodeWide
+        let maxEncodeHigh = self.maxEncodeHigh
+        let maxFPS = self.maxFPS
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
+        let advertisesAddresses = self.advertisesAddresses
         queue.async {
-            self.helloState.updatePreferences(
+            helloState.updatePreferences(
                 functionTrayEnabled: preferences.functionTrayEnabled,
                 inputMode: preferences.inputMode,
                 trackpadSensitivity: preferences.trackpadSensitivity,
@@ -1298,9 +1308,13 @@ final class StreamReceiver: ObservableObject {
                 rotateTarget: preferences.rotateTarget,
                 snapRotation: preferences.snapRotation,
                 appGestureCommands: preferences.appGestureCommands)
-            self.avSyncPreference.set(preferences.avSyncOffsetMs)
-            if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
-                self.sendHello(on: connection)
+            avSyncPreference.set(preferences.avSyncOffsetMs)
+            if let connection = sendTargetBox.current()?.connection, connection.state == .ready {
+                Self.sendHello(
+                    on: connection, helloState: helloState, displayGeometryState: displayGeometryState,
+                    avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox, deviceKind: deviceKind,
+                    maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh, maxFPS: maxFPS,
+                    advertisedProtocolVersion: advertisedProtocolVersion, advertisesAddresses: advertisesAddresses)
             }
         }
     }
@@ -1394,10 +1408,10 @@ final class StreamReceiver: ObservableObject {
         TrustStore.shared.forget(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
+        let pipeline = self.pipeline
         queue.async {
             // A live TLS session may have authenticated before the pin was
             // removed. End it immediately so forgetting takes effect now.
-            let pipeline = self.pipeline
             Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
@@ -1546,9 +1560,10 @@ final class StreamReceiver: ObservableObject {
 
     private func beginExplicitPairing(peerID: String?) {
         Log.info("pairDebug: explicit pairing started peerID=\(peerID ?? "unknown")")
+        let pairingSuppressionState = self.pairingSuppressionState
+        let pipeline = self.pipeline
         queue.async {
-            self.pairingSuppressionState.setSuppressed(true)
-            let pipeline = self.pipeline
+            pairingSuppressionState.setSuppressed(true)
             Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
         }
     }
@@ -3848,13 +3863,15 @@ final class StreamReceiver: ObservableObject {
     /// Mac already browses; see `signalConnectRequest` and the Mac-side
     /// `receiverConnectRequest` handling in OpenSidecarMacApp.
     func requestConnect() {
+        let pendingDisconnectFinishBox = self.pendingDisconnectFinishBox
+        let reconnectContext = self.reconnectContext
+        let pipeline = self.pipeline
+        let queue = self.queue
+        let selfBox = self.selfBox
         queue.async {
             Log.info("connectDebug: receiverConnectRequest peer=local")
-            self.pendingDisconnectFinishBox.callIfPresent()
-            self.reconnectContext.update { $0.peerIsIncompatible = false }
-            let pipeline = self.pipeline
-            let queue = self.queue
-            let selfBox = self.selfBox
+            pendingDisconnectFinishBox.callIfPresent()
+            reconnectContext.update { $0.peerIsIncompatible = false }
             Task {
                 await pipeline.requestManualReconnectTransition()
                 queue.async {
@@ -3959,12 +3976,13 @@ final class StreamReceiver: ObservableObject {
     }
 
     func reconnectNow() {
+        let pendingDisconnectFinishBox = self.pendingDisconnectFinishBox
+        let pipeline = self.pipeline
+        let queue = self.queue
+        let selfBox = self.selfBox
+        let reconnectContext = self.reconnectContext
         queue.async {
-            self.pendingDisconnectFinishBox.callIfPresent()
-            let pipeline = self.pipeline
-            let queue = self.queue
-            let selfBox = self.selfBox
-            let reconnectContext = self.reconnectContext
+            pendingDisconnectFinishBox.callIfPresent()
             Task {
                 let phase = await pipeline.currentPhase
                 if phase == .peerDisconnected {
