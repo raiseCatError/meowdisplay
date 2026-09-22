@@ -565,6 +565,39 @@ final class ReceiverPipelineActorBox: @unchecked Sendable {
     }
 }
 
+/// Lock-protected box holding a weak `StreamReceiver` reference — the same
+/// seam `ReceiverPipelineActorBox` gives `pipeline` above, but for `self`
+/// itself. `makeFramePipelineOutputEffects()`'s `@Sendable` output closures
+/// (`beginAdoption`, `controlMessage`, `audioPayload`, `presentationFrame`)
+/// need to reach back into queue-confined `StreamReceiver` instance methods
+/// at call time without capturing the non-Sendable `StreamReceiver` itself —
+/// capturing `self` (even `weak`) in one of those closures is a hard Swift 6
+/// error. `install(_:)` runs once `self` is fully initialized (see `init`),
+/// mirroring `pipelineBox.install`'s "install once constructed" pattern.
+///
+/// The lock protects only the weak-reference slot itself — it does NOT make
+/// `StreamReceiver` thread-safe. `currentOnQueue()` must only be called from
+/// code already executing on the receiver's `queue` (`receiver.video`); every
+/// call site resolves it from inside a `queue.async { ... }` block before
+/// touching any `queue`-confined state, exactly like the `weak self` capture
+/// it replaces.
+final class StreamReceiverSelfBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var value: StreamReceiver?
+
+    func install(_ receiver: StreamReceiver) {
+        lock.lock(); defer { lock.unlock() }
+        value = receiver
+    }
+
+    /// Must only be called from code already running on `receiver.video` —
+    /// see this type's doc comment.
+    func currentOnQueue() -> StreamReceiver? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -689,7 +722,14 @@ final class StreamReceiver: ObservableObject {
             if autoReconnectEnabled {
                 Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
             } else {
-                Task { [weak self] in await self?.pipeline.cancelAutomaticRecoveryIfNeeded() }
+                // Reads `pipeline` through `pipelineBox` rather than
+                // `self.pipeline` directly — a `Task { [weak self] in ... }`
+                // here would capture the non-Sendable `StreamReceiver` in a
+                // `@Sendable` closure, and if `pipeline` were never started
+                // there is no automatic recovery to cancel anyway, so a nil
+                // box read is a correct no-op.
+                let pipelineBox = pipelineBox
+                Task { await pipelineBox.current()?.cancelAutomaticRecoveryIfNeeded() }
             }
         }
     }
@@ -1154,6 +1194,7 @@ final class StreamReceiver: ObservableObject {
     }
     private let advertisementState = ReceiverAdvertisementState(serviceName: "MeowDisplay")
     private let pipelineBox = ReceiverPipelineActorBox()
+    private let selfBox = StreamReceiverSelfBox()
 
     // Platform identity, injected at init so this file stays UI-framework-free.
     /// "iPhone" / "iPad" / "Mac" — announced in the hello (the sender names
@@ -1304,6 +1345,7 @@ final class StreamReceiver: ObservableObject {
         // itself no longer captures `self` at all — see `KeyframeThrottle`.)
         _ = presenter
         _ = videoDecoder
+        selfBox.install(self)
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.uiSink.target = self
@@ -4386,6 +4428,10 @@ final class StreamReceiver: ObservableObject {
         let pairingSuppressionState = self.pairingSuppressionState
         let advertisementState = self.advertisementState
         let pipelineBox = self.pipelineBox
+        // `selfBox` lets `beginAdoption` below reach `beginAdoptionHostWork`
+        // at call time with zero `StreamReceiver` capture — see
+        // `StreamReceiverSelfBox`'s doc comment.
+        let selfBox = self.selfBox
         let installID = Self.installID
         return .init(
             clearTransport: {
@@ -4408,8 +4454,8 @@ final class StreamReceiver: ObservableObject {
                 syncState.snapshot()
             },
             advertisesAddresses: { advertises },
-            beginAdoption: { [weak self] conn, generation in
-                self?.queue.async { self?.beginAdoptionHostWork(conn, generation: generation) }
+            beginAdoption: { conn, generation in
+                queue.async { selfBox.currentOnQueue()?.beginAdoptionHostWork(conn, generation: generation) }
             },
             onConnectionReady: { conn in
                 queue.async {
@@ -4459,8 +4505,12 @@ final class StreamReceiver: ObservableObject {
     /// The narrow, purpose-built output surface `framePipeline` calls out
     /// to for everything downstream of its presentation-ready
     /// `CMSampleBuffer` boundary — see `ReceiverFramePipeline.
-    /// OutputEffects`. Each closure captures `self` weakly and hops onto
-    /// `queue` before touching any `queue`-confined state, exactly like
+    /// OutputEffects`. Each closure captures stable `Sendable` references
+    /// (`queue`, `selfBox`, etc.) instead of `self`, hops onto `queue`, and
+    /// only then resolves the weak receiver via `selfBox.currentOnQueue()`
+    /// before touching any `queue`-confined state — see
+    /// `StreamReceiverSelfBox`'s doc comment for why a direct `self`
+    /// capture isn't legal here. Otherwise the same shape as
     /// `makePipelineHostEffects()` above.
     private func makeFramePipelineOutputEffects() -> ReceiverFramePipeline.OutputEffects {
         // B2.4-B / CR1 fix: `connectionFailed`/`connectionClosedByPeer`
@@ -4475,6 +4525,13 @@ final class StreamReceiver: ObservableObject {
         // `ReceiverPipelineActorBox`'s doc comment.
         let queue = queue
         let pipelineBox = self.pipelineBox
+        // `selfBox` lets `controlMessage`/`audioPayload`/`presentationFrame`
+        // below reach their handlers at call time with zero `StreamReceiver`
+        // capture — see `StreamReceiverSelfBox`'s doc comment. `self` is
+        // already fully initialized by the time this factory can run (it is
+        // only reachable through `framePipeline`, itself built after
+        // `selfBox.install(self)` in `init`), so `selfBox.currentOnQueue()` is safe.
+        let selfBox = self.selfBox
         // D1: `codecConfigurationChanged` is a pure pass-through — presenter
         // flush, DEBUG decoder notification, then a UI publish — with no
         // coordinator logic of its own, so it captures its stable owners
@@ -4487,11 +4544,11 @@ final class StreamReceiver: ObservableObject {
         let videoDecoderRef = videoDecoderRef
         let uiSink = uiSink
         return .init(
-            controlMessage: { [weak self] data in
-                self?.queue.async { self?.handleVideoChannelJSON(data) }
+            controlMessage: { data in
+                queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
             },
-            audioPayload: { [weak self] data in
-                self?.queue.async { self?.handleAudioMediaFrame(data) }
+            audioPayload: { data in
+                queue.async { selfBox.currentOnQueue()?.handleAudioMediaFrame(data) }
             },
             codecConfigurationChanged: { box, videoSize in
                 queue.async {
@@ -4518,8 +4575,8 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             },
-            presentationFrame: { [weak self] box, captureMs, sendMs in
-                self?.queue.async { self?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
+            presentationFrame: { box, captureMs, sendMs in
+                queue.async { selfBox.currentOnQueue()?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
             },
             connectionFailed: { error in
                 queue.async {
