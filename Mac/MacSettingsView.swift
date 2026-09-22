@@ -593,41 +593,46 @@ struct ToolbarQuickActions: View {
     }
 
     var body: some View {
-        if session.canPauseOrResume, phase == .connected || phase == .paused {
-            Button {
-                if session.isPaused {
-                    session.sender.resumeDisplay()
-                } else {
-                    session.sender.pauseDisplay()
+        HStack(spacing: 0) {
+            if session.canPauseOrResume, phase == .connected || phase == .paused {
+                Button {
+                    if session.isPaused {
+                        session.sender.resumeDisplay()
+                    } else {
+                        session.sender.pauseDisplay()
+                    }
+                } label: {
+                    Image(systemName: session.isPaused ? "play.fill" : "pause.fill")
                 }
+                .buttonStyle(.plain)
+                .help(session.isPaused ? "Resume streaming" : "Pause streaming")
+                .accessibilityLabel(session.isPaused ? "Resume" : "Pause")
+                .padding(.horizontal, 6)
+            }
+            if phase == .reconnecting || phase == .lost {
+                Button {
+                    if session.failed {
+                        controller.retry(session)
+                    } else {
+                        session.sender.forceReconnect()
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Reconnect")
+                .accessibilityLabel("Reconnect")
+                .padding(.horizontal, 6)
+            }
+            Button(role: .destructive) {
+                controller.disconnect(session)
             } label: {
-                Image(systemName: session.isPaused ? "play.fill" : "pause.fill")
+                Image(systemName: "xmark.circle")
             }
             .buttonStyle(.plain)
-            .help(session.isPaused ? "Resume streaming" : "Pause streaming")
-            .accessibilityLabel(session.isPaused ? "Resume" : "Pause")
+            .help("Disconnect")
+            .accessibilityLabel("Disconnect")
+            .padding(.horizontal, 6)
         }
-        if phase == .reconnecting || phase == .lost {
-            Button {
-                if session.failed {
-                    controller.retry(session)
-                } else {
-                    session.sender.forceReconnect()
-                }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .help("Reconnect")
-            .accessibilityLabel("Reconnect")
-        }
-        Button(role: .destructive) {
-            controller.disconnect(session)
-        } label: {
-            Image(systemName: "xmark.circle")
-        }
-        .buttonStyle(.plain)
-        .help("Disconnect")
-        .accessibilityLabel("Disconnect")
     }
 }
