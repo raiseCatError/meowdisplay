@@ -1421,11 +1421,11 @@ final class StreamReceiver: ObservableObject {
                     connection: connection, localID: Self.installID,
                     localName: serviceName, prompt: pairingPrompt,
                     expectedPeerID: expectedPeerID, allowIdentityChange: false)
-                await pairingPrompt.finish("Paired with \(paired.peerName)")
-                await notePairingSucceeded()
+                pairingPrompt.finish("Paired with \(paired.peerName)")
+                notePairingSucceeded()
                 finishExplicitPairing(success: true)
             } catch {
-                await pairingPrompt.finish(error.localizedDescription)
+                pairingPrompt.finish(error.localizedDescription)
                 let promptStillPending = await MainActor.run { pairingPrompt.pending != nil }
                 if !promptStillPending {
                     finishExplicitPairing(success: false)
@@ -2574,7 +2574,8 @@ final class StreamReceiver: ObservableObject {
                 : socklen_t(MemoryLayout<sockaddr_in6>.size)
             guard getnameinfo(sa, len, &host, socklen_t(host.count),
                               nil, 0, NI_NUMERICHOST) == 0 else { continue }
-            var addr = String(cString: host)
+            let hostLength = host.firstIndex(of: 0) ?? host.count
+            var addr = String(decoding: host[..<hostLength].map(UInt8.init(bitPattern:)), as: UTF8.self)
             // getnameinfo appends %scope to link-local IPv6 — strip it, the
             // receiver-side zone id is meaningless to the sender.
             if let percent = addr.firstIndex(of: "%") { addr = String(addr[..<percent]) }
