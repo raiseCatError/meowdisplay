@@ -1247,11 +1247,19 @@ final class StreamReceiver: ObservableObject {
     func setServiceName(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolved = trimmed.isEmpty ? fallbackServiceName : trimmed
+        let advertisementState = self.advertisementState
+        let tlsListenerState = self.tlsListenerState
+        let pairingListenerState = self.pairingListenerState
+        let installID = Self.installID
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
         queue.async {
-            guard self.advertisementState.setServiceName(resolved) else { return }
-            if let tlsListener = self.tlsListenerState.currentListener() {
-                tlsListener.service = self.advertisedService
-                self.pairingListenerState.currentListener()?.service = self.advertisedPairingService
+            guard advertisementState.setServiceName(resolved) else { return }
+            if let tlsListener = tlsListenerState.currentListener() {
+                tlsListener.service = advertisementState.mediaService(
+                    installID: installID, protocolVersion: advertisedProtocolVersion)
+                pairingListenerState.currentListener()?.service = advertisementState.pairingService(
+                    installID: installID, protocolVersion: advertisedProtocolVersion,
+                    pairingProtocolVersion: WireProtocol.pairingVersion)
                 Log.info("re-advertising as \"\(resolved)\"")
             }
         }
@@ -1272,11 +1280,25 @@ final class StreamReceiver: ObservableObject {
     }
 
     func setReceiverUIPreferencesForHello(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
+        let helloState = self.helloState
+        let sendTargetBox = self.sendTargetBox
+        let displayGeometryState = self.displayGeometryState
+        let avSyncPreference = self.avSyncPreference
+        let deviceKind = self.deviceKind
+        let maxEncodeWide = self.maxEncodeWide
+        let maxEncodeHigh = self.maxEncodeHigh
+        let maxFPS = self.maxFPS
+        let advertisedProtocolVersion = self.advertisedProtocolVersion
+        let advertisesAddresses = self.advertisesAddresses
         queue.async {
-            self.helloState.updateTrayAndKeyboard(
+            helloState.updateTrayAndKeyboard(
                 trayEnabled: trayEnabled, keyboardButtonEnabled: keyboardButtonEnabled)
-            if let connection = self.sendTargetBox.current()?.connection, connection.state == .ready {
-                self.sendHello(on: connection)
+            if let connection = sendTargetBox.current()?.connection, connection.state == .ready {
+                Self.sendHello(
+                    on: connection, helloState: helloState, displayGeometryState: displayGeometryState,
+                    avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox, deviceKind: deviceKind,
+                    maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh, maxFPS: maxFPS,
+                    advertisedProtocolVersion: advertisedProtocolVersion, advertisesAddresses: advertisesAddresses)
             }
         }
     }
