@@ -171,10 +171,12 @@ final class ReceiverAudioPresenter: @unchecked Sendable {
         // network/framing symptom. Anchor-only recovery — NEVER escalated
         // to a full `reset()` — so a transient renderer error re-anchors
         // on the next packet instead of tearing down/rebuilding the chain.
-        audioErrorObservation = renderer.observe(\.error, options: [.new]) { [weak self] _, change in
+        audioErrorObservation = renderer.observe(\.error, options: [.new]) { [weak self, queue] _, change in
             guard let error = change.newValue ?? nil else { return }
             Log.info("audioTrace: ⚠️ audio renderer reported error: \(error)")
-            self?.queue.async { self?.clearAnchorOnly() }
+            queue.async { [weak self] in
+                self?.clearAnchorOnly()
+            }
         }
         #endif
     }
