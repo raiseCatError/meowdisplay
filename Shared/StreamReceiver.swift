@@ -1069,7 +1069,22 @@ final class StreamReceiver: ObservableObject {
     // Clock sync (NTP-style): offset = macClock − phoneClock, taken from the
     // ping/pong sample with the lowest RTT (least asymmetric).
     private var offsetSamples: [(rtt: Double, offset: Double)] = []
-    private var clockOffsetMs: Double?
+    /// Receiver Swift6: narrow, lock-free owner for `clockOffsetMs` and
+    /// `photonWindow` — the two pieces of state `recordPresented`'s
+    /// `@Sendable` closure needs without capturing `self` (the non-Sendable
+    /// `StreamReceiver`), so the closure captures this stable `let` value
+    /// directly instead (same pattern as `videoTelemetry`/`pipeline`/
+    /// `uiSink` above).
+    ///
+    /// Plain vars, no lock: this changes nothing about either field's
+    /// existing thread-safety profile, it only gives them a Sendable-safe
+    /// home. `clockOffsetMs` is written only from `queue` (the "pong"
+    /// handler) but read from both `queue` and `@MainActor`
+    /// (`sendTouch`/`sendPencil`) with no hop today — an existing benign
+    /// race on a value that only nudges a few times a session; moving its
+    /// storage here does not add or remove that race. `photonWindow` is
+    /// exclusively `queue`-confined on every side (append/snapshot/reset).
+    private let presentationTiming = ReceiverPresentationTimingState()
     private var lastRttMs = 0.0
     private var e2eWindow: [Double] = []        // capture→display, ms
     private var encodeWindow: [Double] = []     // capture→socket on the Mac, ms
@@ -1148,7 +1163,6 @@ final class StreamReceiver: ObservableObject {
     /// header. Never captured directly by a `@Sendable` closure that also
     /// needs `self`; those closures capture this `let` value on its own.
     private let videoTelemetry = ReceiverVideoTelemetry()
-    private var photonWindow: [Double] = []
     private var loggedDisplayPath = false
     // Default OFF: A/B measurement showed the system video layer reaches
     // glass faster than our CAMetalLayer path (iOS gives AVSBDL a dedicated
@@ -1160,11 +1174,18 @@ final class StreamReceiver: ObservableObject {
     func recordPresented(presentedTime: CFTimeInterval, captureMs: Double?) {
         guard let captureMs, presentedTime > 0 else { return }
         let presentedWallMs = nowMs - (CACurrentMediaTime() - presentedTime) * 1000
+        // Captured once, locally, for the same reason as `uiSink`/`pipeline`
+        // elsewhere in this file: the closure below must reach the Sendable
+        // `presentationTiming` directly rather than through `self.
+        // presentationTiming` (which would re-capture non-Sendable
+        // `StreamReceiver`). `clockOffsetMs` is still read only when this
+        // block actually executes on `queue`, not here at call time.
+        let presentationTiming = self.presentationTiming
         queue.async {
-            guard let offset = self.clockOffsetMs else { return }
+            guard let offset = presentationTiming.clockOffsetMs else { return }
             let photon = (presentedWallMs + offset) - captureMs
             if photon > -50, photon < 5000 {
-                self.photonWindow.append(max(photon, 0))
+                presentationTiming.appendPhoton(max(photon, 0))
             }
         }
     }
@@ -2263,7 +2284,7 @@ final class StreamReceiver: ObservableObject {
             offsetSamples.append((rtt, offset))
             if offsetSamples.count > 15 { offsetSamples.removeFirst() }
             if let best = offsetSamples.min(by: { $0.rtt < $1.rtt }) {
-                clockOffsetMs = best.offset
+                presentationTiming.clockOffsetMs = best.offset
             }
             lastRttMs = rtt
         case "ping":
@@ -2474,7 +2495,7 @@ final class StreamReceiver: ObservableObject {
         // instead of touching `displayLayer` directly.
         presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
-        photonWindow.removeAll(keepingCapacity: true)
+        presentationTiming.resetPhotonWindow()
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
         // negative offset from the superseded connection). Shadow bump
@@ -2653,7 +2674,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func sendTouch(phase: String, x: Double, y: Double) {
         guard displayState == .running else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
-        if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
+        if let offset = presentationTiming.clockOffsetMs { msg["t"] = nowMs + offset }
         sendUIControl(msg)
     }
 
@@ -2717,7 +2738,7 @@ final class StreamReceiver: ObservableObject {
             "altitude": altitude,
             "rotation": 0,   // TODO: UIKit rollAngle once Pencil Pro is available
         ]
-        if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
+        if let offset = presentationTiming.clockOffsetMs { msg["t"] = nowMs + offset }
         sendUIControl(msg)
     }
 
@@ -3436,7 +3457,7 @@ final class StreamReceiver: ObservableObject {
             // diagnostics validated (`ReceiverAudioDecoder.decode`), then
             // hand the PCM straight to `PCMPlaybackEngine` — the legacy
             // compressed-`CMSampleBuffer` path below is not touched at all.
-            guard let audioFormatDescription, let clockOffsetMs else { return }
+            guard let audioFormatDescription, let clockOffsetMs = presentationTiming.clockOffsetMs else { return }
             guard let decoded = audioDecoder.decode(packet.payload, formatDescription: audioFormatDescription) else {
                 Log.info("audioTrace: ⚠️ PCM engine: decode failed, dropping packet seq=\(packet.sequence)")
                 return
@@ -3511,7 +3532,7 @@ final class StreamReceiver: ObservableObject {
         sampleSizeEntryCount: Int, sampleSizes: () -> [Int]
     ) {
         guard let audioFormatDescription else { return }
-        guard let clockOffsetMs else { return }   // clock sync not settled yet (first ~2s) — drop
+        guard let clockOffsetMs = presentationTiming.clockOffsetMs else { return }   // clock sync not settled yet (first ~2s) — drop
         let timing = ReceiverAudioPresenter.AudioTimingSnapshot(
             clockOffsetMs: clockOffsetMs, avSyncOffsetMs: avSyncPreference.get(),
             lastVideoLatencySeconds: lastVideoLatencySeconds,
@@ -3531,7 +3552,7 @@ final class StreamReceiver: ObservableObject {
     /// jitter, since capture-time deltas are computed from the sender's own
     /// PTS and are unaffected by network timing.
     private func logAudioTimingDiagnostic(sequence: UInt32, capturedAtMs: Int64, durationMs: UInt32, byteCount: Int) {
-        guard let clockOffsetMs else { return }
+        guard let clockOffsetMs = presentationTiming.clockOffsetMs else { return }
         let receiverCaptureMs = Double(capturedAtMs) - clockOffsetMs
         defer { lastAudioDiagnosticCaptureMs = receiverCaptureMs }
         let deltaMs = lastAudioDiagnosticCaptureMs.map { receiverCaptureMs - $0 }
@@ -3752,7 +3773,7 @@ final class StreamReceiver: ObservableObject {
         // onto the Mac's via the ping/pong offset.
         if let captureMs, let sendMs {
             encodeWindow.append(sendMs - captureMs)
-            if let offset = clockOffsetMs {
+            if let offset = presentationTiming.clockOffsetMs {
                 let e2e = (nowMs + offset) - captureMs
                 if e2e > -50, e2e < 5000 {
                     e2eWindow.append(e2e)
@@ -3792,8 +3813,9 @@ final class StreamReceiver: ObservableObject {
             stats.inputP95 = macInputP95
             stats.capFps = macCapFps
             stats.decodeP50 = percentile(videoTelemetry.snapshotDecodeDurationsMs(), 0.5)
-            stats.photonP50 = percentile(photonWindow, 0.5)
-            stats.photonP95 = percentile(photonWindow, 0.95)
+            let photonSamples = presentationTiming.snapshotPhotonWindow()
+            stats.photonP50 = percentile(photonSamples, 0.5)
+            stats.photonP95 = percentile(photonSamples, 0.95)
             framesThisWindow = 0
             bytesThisWindow = 0
             stallsThisWindow = 0
@@ -3843,12 +3865,12 @@ final class StreamReceiver: ObservableObject {
                     "dec50": stats.decodeP50.rounded(),
                     "ph50": stats.photonP50.rounded(),
                     "ph95": stats.photonP95.rounded(),
-                    "offsetKnown": clockOffsetMs != nil,
+                    "offsetKnown": presentationTiming.clockOffsetMs != nil,
                 ])
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
                 videoTelemetry.clearDecodeDurationWindow()
-                photonWindow.removeAll(keepingCapacity: true)
+                presentationTiming.resetPhotonWindow()
             }
 
             let uiSink = self.uiSink

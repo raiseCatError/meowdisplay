@@ -212,6 +212,7 @@ targets:
       # (StreamReceiver.init touches all of these).
       - Shared/StreamReceiver.swift
       - Shared/ReceiverVideoTelemetry.swift
+      - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift
       - Shared/ReceiverPipelineActor.swift
       - Shared/ReceiverAudioDecoder.swift
