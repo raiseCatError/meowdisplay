@@ -1336,8 +1336,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the virtual display is released only after Extend capture has stopped,
     /// and video production is disabled only after Mirror setup completes.
     func transitionToMirrorAndDisableVideo(completion: @escaping @MainActor () -> Void) {
-        queue.async { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.desiredVideoEnabled = false
             self.inputInjector?.cancelActiveInput()
             let oldStream = self.stream
@@ -1379,8 +1380,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (`restartVideoCapture`'s `.extend` branch) resumes Extend on the
     /// SAME display normally, headless or not.
     func disableVideoKeepingExtend(completion: @escaping @MainActor () -> Void) {
-        queue.async { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.desiredVideoEnabled = false
             self.applyVideoEnabled(false)
             Task { @MainActor in completion() }
@@ -2439,14 +2441,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func pauseDisplay() {
-        queue.async { [weak self] in
-            guard let self,
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(),
                   self.updateCaptureState({ $0.requestPause() }) else { return }
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
+            let queue = self.queue
+            let audioCaptureEncoder = self.audioCaptureEncoder
             Task {
                 var stopSucceeded = true
                 if let activeStream {
@@ -2459,8 +2464,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 }
                 let stoppedCapture = stopSucceeded
-                self.queue.async {
-                    guard self.captureStateSnapshot().phase == .pausing else { return }
+                queue.async {
+                    guard let self = selfBox.currentOnQueue(), self.captureStateSnapshot().phase == .pausing else { return }
                     if stoppedCapture {
                         if self.stream === activeStream { self.stream = nil }
                         self.videoEncoder.invalidate()
@@ -2472,7 +2477,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         // freshly-anchored audio timeline.
                         self.audioEnabled = false
                         self.beginAudioGeneration()
-                        Task { await self.audioCaptureEncoder.reset() }
+                        Task { await audioCaptureEncoder.reset() }
                     }
                     _ = self.updateCaptureState { $0.pauseCompleted() }
                     let sink = self.statusSink
@@ -2483,8 +2488,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func resumeDisplay() {
-        queue.async { [weak self] in
-            guard let self,
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(),
                   self.updateCaptureState({ $0.requestResume() }) else { return }
             self.captureRecoveryBudget.reset()
             Task { await self.resumeCapture() }
