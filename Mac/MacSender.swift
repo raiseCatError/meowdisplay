@@ -1128,7 +1128,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// A control-request prompt is now up on the Mac for this session — lets
     /// a pv 18+ receiver show "Requesting…" instead of a silent wait.
     func notifyInputRequestPending() {
-        queue.async { [weak self] in self?.sendAllowInputState(state: .requesting) }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.sendAllowInputState(state: .requesting) }
     }
 
     /// A Mac-owner (or auto-policy) decision granted this session control.
@@ -1136,8 +1137,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (`SenderController.handleInputControlRequested`/
     /// `resolveInputControlRequest`), never directly from a wire handler.
     func grantSessionInput() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.sessionInputGrant.set(true)
             self.sendAllowInputState(state: .allowed)
             let sink = self.statusSink
@@ -1150,8 +1152,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// safe to call even if the grant was already off — narrowing input is
     /// never blocked, unlike granting it.
     func denySessionInput(state: SessionInputWireState) {
-        queue.async { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
             let wasGranted = self.sessionInputGrant.get()
             self.sessionInputGrant.set(false)
             if wasGranted {
