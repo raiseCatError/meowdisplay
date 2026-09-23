@@ -228,6 +228,38 @@ struct MacSenderTransitionOwner: @unchecked Sendable {
     let sender: MacSender
 }
 
+/// Runs `disconnect(completion:)`'s completion at most once, regardless of
+/// which of its two possible triggers — the transport send acknowledgment,
+/// or the 1s "the link may be dying" fallback — fires first, and always on
+/// the main actor (callers, like `SenderController.end`, are themselves
+/// `@MainActor` and call synchronously into `completion`). Both triggers now
+/// hop through this gate's `fire()` instead of each separately capturing a
+/// shared `var completed` (that shared mutable local, captured into two
+/// independently-crossing closures, is exactly what Swift 6 region isolation
+/// cannot prove race-free). `fire()` must be callable synchronously from any
+/// queue — including `queue` itself — so the at-most-once check is a plain
+/// `NSLock`, the same pattern `MacSenderSelfBox` already uses; only the
+/// actual `completion()` call hops to the main actor, via `Task`.
+private final class MacSenderDisconnectCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private let completion: @MainActor @Sendable () -> Void
+
+    init(completion: @escaping @MainActor @Sendable () -> Void) {
+        self.completion = completion
+    }
+
+    func fire() {
+        lock.lock()
+        let shouldRun = !completed
+        completed = true
+        lock.unlock()
+        guard shouldRun else { return }
+        let completion = completion
+        Task { @MainActor in completion() }
+    }
+}
+
 @available(macOS 14.0, *)
 final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
@@ -2351,30 +2383,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // every other connection-touching entry point already does. Completion
     // now always fires asynchronously (previously synchronous only on the
     // "not connected" path).
-    func disconnect(completion: @escaping () -> Void) {
+    func disconnect(completion: @escaping @MainActor @Sendable () -> Void) {
         queue.async { [weak self] in
             guard let self, self.transportController.isReady,
                   self.transportController.currentConnection != nil else {
-                DispatchQueue.main.async { completion() }
+                Task { @MainActor in completion() }
                 return
             }
-            var completed = false
-            let finish = {
-                if completed { return }
-                completed = true
-                completion()
-            }
+            let gate = MacSenderDisconnectCompletionGate(completion: completion)
             let json = "{\"type\":\"\(WireMessage.closing)\"}"
             let payload = Data(json.utf8)
             var header = UInt32(payload.count).bigEndian
             var frame = Data(bytes: &header, count: 4)
             frame.append(payload)
             self.transportController.send(content: frame) { _ in
-                DispatchQueue.main.async { finish() }
+                gate.fire()
             }
             // The send completion may never fire on a dying link.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                finish()
+                gate.fire()
             }
         }
     }
@@ -3570,7 +3597,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         transportController.cancelConnectionWithoutClearing()
         helloContinuation?.resume(throwing: PairingError.invalidKey)
         helloContinuation = nil
+        let selfBox = self.selfBox
         Task { @MainActor in
+            guard let self = selfBox.resolve() else { return }
             self.onTrustFailure?("MeowDisplay could not verify this device. Forget it and pair again if its identity was reset.")
         }
     }
@@ -4108,7 +4137,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     invalidateApplicationSession(reason: "trustRevokedOrChanged")
                     stopped = true
                     transportController.cancelConnectionWithoutClearing()
+                    let selfBox = self.selfBox
                     Task { @MainActor in
+                        guard let self = selfBox.resolve() else { return }
                         self.onTrustFailure?("This device is no longer trusted. Pair it again if needed.")
                     }
                     return
@@ -4118,7 +4149,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     invalidateApplicationSession(reason: "applicationIdentityMismatch")
                     stopped = true
                     transportController.cancelConnectionWithoutClearing()
+                    let selfBox = self.selfBox
                     Task { @MainActor in
+                        guard let self = selfBox.resolve() else { return }
                         self.onTrustFailure?("Device identity changed. Forget the device and pair again if you intentionally reset it.")
                     }
                     return
@@ -4157,7 +4190,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     transportController.refreshDirectLinkClassification(
                         for: conn, transport: transport, peerDevice: lastHello?.device)
                 }
-                Task { @MainActor in self.onHello?(info) }
+                let helloSelfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = helloSelfBox.resolve() else { return }
+                    self.onHello?(info)
+                }
                 let addrs = info.addrs ?? []
                 if addrs != peerAddrs {
                     let firstHello = peerAddrs.isEmpty
@@ -4352,7 +4389,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if requestedMode == mode.receiverMode {
                 sendDisplayModeState()
             } else {
-                Task { @MainActor in self.onDisplayModeRequest?(requestedMode) }
+                let displayModeSelfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = displayModeSelfBox.resolve() else { return }
+                    self.onDisplayModeRequest?(requestedMode)
+                }
             }
         case WireMessage.allowInputRequest:
             guard let info = lastHello,
@@ -4369,7 +4410,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // handleInputControlRequested` decides (policy lookup +
                     // Mac prompt), keeping the Mac authoritative and this
                     // session's grant independent of every other session's.
-                    Task { @MainActor in self.onAllowInputRequest?(true) }
+                    let allowInputSelfBox = self.selfBox
+                    Task { @MainActor in
+                        guard let self = allowInputSelfBox.resolve() else { return }
+                        self.onAllowInputRequest?(true)
+                    }
                 }
             } else {
                 // Releasing this session's own grant is always safe/
@@ -4383,7 +4428,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if requested == desiredVideoEnabled {
                 applyVideoEnabled(requested)
             } else {
-                Task { @MainActor in self.onVideoEnabledRequest?(requested) }
+                let videoEnabledSelfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = videoEnabledSelfBox.resolve() else { return }
+                    self.onVideoEnabledRequest?(requested)
+                }
             }
         case WireMessage.streamingProfileRequest:
             guard let info = lastHello,
@@ -4391,13 +4440,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
             let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
-            Task { @MainActor in self.onStreamingProfileRequest?(profile, custom) }
+            let streamingProfileSelfBox = self.selfBox
+            Task { @MainActor in
+                guard let self = streamingProfileSelfBox.resolve() else { return }
+                self.onStreamingProfileRequest?(profile, custom)
+            }
         case WireMessage.streamingPriorityRequest:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.streamingPriorityWireVersion,
                   let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
-            Task { @MainActor in self.onStreamingPriorityRequest?(priority) }
+            let streamingPrioritySelfBox = self.selfBox
+            Task { @MainActor in
+                guard let self = streamingPrioritySelfBox.resolve() else { return }
+                self.onStreamingPriorityRequest?(priority)
+            }
         case WireMessage.mirrorDisplayRequest:
             // Same construction as `promoteInteractiveWake` above: this only
             // ever runs on data read off an already pinned-TLS/loopback
@@ -4405,7 +4462,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String
-            Task { @MainActor in self.onMirrorDisplayRequest?(requestedUUID) }
+            let mirrorDisplaySelfBox = self.selfBox
+            Task { @MainActor in
+                guard let self = mirrorDisplaySelfBox.resolve() else { return }
+                self.onMirrorDisplayRequest?(requestedUUID)
+            }
         case WireMessage.extendShapeRequest:
             // Same construction as `mirrorDisplayRequest` above: only ever
             // read off an already-authenticated `connection`.
@@ -4478,9 +4539,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // before this semantic message. Release again here as a safeguard
             // against an in-flight or missing cancellation.
             inputInjector?.cancelActiveInput()
+            let gestureGranted = sessionInputGrant.get()
             Task { @MainActor in
                 guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                           sessionGranted: self.sessionInputGrant.get()) else { return }
+                                                           sessionGranted: gestureGranted) else { return }
                 SystemGestureInvoker.invoke(gesture)
             }
         case "kf":
