@@ -2726,7 +2726,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return
         }
-        Task { await self.restartVideoCapture() }
+        let selfBox = self.selfBox
+        Task {
+            guard let self = selfBox.resolve() else { return }
+            await self.restartVideoCapture()
+        }
     }
 
     private func restartVideoCapture() async {
@@ -4339,9 +4343,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                           || previous.pixelsHigh != info.pixelsHigh {
                     // Phone rotated — rebuild after a short debounce so a
                     // flurry of orientation flips settles into one rebuild.
+                    let rotationSelfBox = self.selfBox
                     Task {
                         try? await Task.sleep(for: .milliseconds(300))
-                        guard let current = self.lastHello,
+                        guard let self = rotationSelfBox.resolve(),
+                              let current = self.lastHello,
                               current.pixelsWide == info.pixelsWide,
                               current.pixelsHigh == info.pixelsHigh else { return }
                         await self.reconfigure(info)
