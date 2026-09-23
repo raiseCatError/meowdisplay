@@ -107,7 +107,8 @@ enum WakeInspector {
         let result = getnameinfo(addr, socklen_t(addr.pointee.sa_len), &buffer, socklen_t(buffer.count),
                                  nil, 0, NI_NUMERICHOST)
         guard result == 0 else { return nil }
-        return String(cString: buffer)
+        let nullTerminatorIndex = buffer.firstIndex(of: 0) ?? buffer.count
+        return String(decoding: buffer[..<nullTerminatorIndex].map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     /// The one and only place a subprocess is launched from this file — a

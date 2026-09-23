@@ -24,14 +24,16 @@ import Network
 /// Bidirectional, bounded, opaque byte relay between two already-started
 /// `NWConnection`s. Never inspects content. Tears both legs down the moment
 /// either side EOFs, fails to send, fails to receive, or is cancelled.
-private final class ByteSplice {
+// `a`, `b`, and `onTornDown` are immutable and Sendable; the only mutable
+// field, `torn`, is only ever read/written under `lock`.
+private final class ByteSplice: @unchecked Sendable {
     private let a: NWConnection
     private let b: NWConnection
-    private let onTornDown: () -> Void
+    private let onTornDown: @Sendable () -> Void
     private let lock = NSLock()
     private var torn = false
 
-    init(_ a: NWConnection, _ b: NWConnection, onTornDown: @escaping () -> Void) {
+    init(_ a: NWConnection, _ b: NWConnection, onTornDown: @escaping @Sendable () -> Void) {
         self.a = a
         self.b = b
         self.onTornDown = onTornDown
