@@ -2511,6 +2511,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { [weak self] in
             self?.activeUSBBridge?.cancel()
             self?.activeUSBBridge = nil
+            self?.activeUSBBridgeTLS = nil
         }
         videoEncoder.invalidate()
         virtualDisplay = nil   // releasing it removes the display
@@ -2834,6 +2835,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Task { @MainActor in sink.publishTransportPath(nil) }
             self.activeUSBBridge?.cancel()
             self.activeUSBBridge = nil
+            self.activeUSBBridgeTLS = nil
             // Clears the direct-link flag (the new transport re-classifies),
             // bumps the dial generation (a dial still in flight must not
             // adopt), cancels/clears the connection, and stops upgrade
@@ -2957,6 +2959,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.transportController.bumpDialGeneration()
             self.activeUSBBridge?.cancel()
             self.activeUSBBridge = nil
+            self.activeUSBBridgeTLS = nil
             Log.info("reconnectPolicy: automaticRetry cancelled reason=disabled peer=\(self.endpointName)")
             self.reportGone("auto-reconnect disabled — ending session")
         }
@@ -3573,6 +3576,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // superseded bridge explicitly instead of relying only on TCP-level
     // teardown propagation. Only touched on `queue`.
     private var activeUSBBridge: USBTLSBridge?
+    // Holds the TLS config for the USB bridge dial in flight so the
+    // unstructured Task below never captures the non-Sendable
+    // `TLSSessionConfig` (it holds a `SecIdentity`) across the isolation
+    // boundary; it re-reads this queue-confined property once back on
+    // `queue` instead. Only touched on `queue`.
+    private var activeUSBBridgeTLS: TLSSessionConfig?
 
     private func connect() {
         guard !stopped else { return }
@@ -3719,15 +3728,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         activeUSBBridge?.cancel()
         let bridge = USBTLSBridge(udid: udid, queue: queue, dialTunnel: Usbmux.dial)
         activeUSBBridge = bridge
-        Task { [weak self] in
-            guard let self else { return }
+        activeUSBBridgeTLS = tls
+        let selfBox = self.selfBox
+        Task {
             do {
                 let bridgePort = try await bridge.start()
-                queue.async {
-                    guard generation == self.transportController.currentDialGeneration, !self.stopped else {
+                selfBox.resolve()?.queue.async {
+                    guard let self = selfBox.currentOnQueue(),
+                          generation == self.transportController.currentDialGeneration, !self.stopped,
+                          let tls = self.activeUSBBridgeTLS else {
                         bridge.cancel()
                         return
                     }
+                    self.activeUSBBridgeTLS = nil
                     // Reuse connectTCP unmodified: same TLSConfigurator call,
                     // same pin verification, same authenticated-session
                     // machinery LAN/Remote already exercise. `self.transport`
@@ -3738,8 +3751,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             } catch {
                 bridge.cancel()
-                queue.async {
-                    guard generation == self.transportController.currentDialGeneration, !self.stopped else { return }
+                selfBox.resolve()?.queue.async {
+                    guard let self = selfBox.currentOnQueue(),
+                          generation == self.transportController.currentDialGeneration, !self.stopped else { return }
                     // Distinct guidance per failure: cable missing vs app
                     // closed. Composed on `queue`: awaitingWake lives there.
                     // No plaintext downgrade on any USB failure — a failed
@@ -3800,6 +3814,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Task { @MainActor in transportPathSink.publishTransportPath(nil) }
         activeUSBBridge?.cancel()
         activeUSBBridge = nil
+        activeUSBBridgeTLS = nil
         // Whatever this session rode is gone; deciding to redial means it is
         // an ordinary reconnecting session now (a stale direct-link flag
         // would let the first dial hiccup end the session via linkDied),
