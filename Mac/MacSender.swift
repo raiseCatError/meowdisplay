@@ -156,6 +156,36 @@ struct PhoneInfo: Decodable {
 // controller and its unit tests can see them without depending on the rest
 // of this file.
 
+/// Lock-protected box holding a weak `MacSender` reference — the sender-side
+/// analogue of `StreamReceiverSelfBox` (see Shared/StreamReceiver.swift). A
+/// `queue.asyncAfter` telemetry-flush closure needs to reach back into a
+/// queue-confined `MacSender` instance method at fire time without capturing
+/// the non-Sendable `MacSender` itself. `install(_:)` runs once `self` is
+/// fully initialized (see `init`).
+///
+/// The lock protects only the weak-reference slot itself — it does NOT make
+/// `MacSender` thread-safe. `currentOnQueue()` must only be called from code
+/// already executing on the sender's `queue` (`sender.video`); every call
+/// site resolves it from inside a `queue`-confined closure before touching
+/// any `queue`-confined state, exactly like the `weak self` capture it
+/// replaces. Never use this bridge in encode/capture per-frame hot paths.
+final class MacSenderSelfBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var value: MacSender?
+
+    func install(_ sender: MacSender) {
+        lock.lock(); defer { lock.unlock() }
+        value = sender
+    }
+
+    /// Must only be called from code already running on `sender.video` —
+    /// see this type's doc comment.
+    func currentOnQueue() -> MacSender? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
 @available(macOS 14.0, *)
 final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
@@ -314,6 +344,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (Mirror's authoritative availability gate in `requestMode`).
     var virtualDisplayID: CGDirectDisplayID? { virtualDisplay?.displayID }
     private let queue = DispatchQueue(label: "sender.video")
+    /// See `MacSenderSelfBox`'s doc comment. Installed once `self` is fully
+    /// constructed (end of `init`).
+    private let selfBox = MacSenderSelfBox()
     /// Owns the live `NWConnection` and its Network.framework callback
     /// plumbing on `queue` — see MacSenderTransportController.swift for the
     /// `@unchecked Sendable` invariant this relies on. Created before
@@ -861,6 +894,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             queue: queue, endpointName: name, statusSink: statusSink)
         super.init()
         transportController.delegate = self
+        selfBox.install(self)
     }
 
     // MARK: - Lifecycle
@@ -4798,44 +4832,44 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func handleEncodeFailureLogAction(_ action: ThrottledLogPolicy<OSStatus>.Action) {
         switch action {
         case .report(let report):
-            reportEncodeFailures(report)
+            Self.reportEncodeFailures(report)
         case .schedule(let delay):
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.flushEncodeFailureLog()
+            // `pipelineState` is the existing Sendable owner of this policy
+            // (see MacSenderPipelineState) — captured weakly here instead of
+            // `self` so the closure needs no MacSenderSelfBox resolution and
+            // still no-ops once nothing else keeps the sender alive.
+            queue.asyncAfter(deadline: .now() + delay) { [weak pipelineState] in
+                guard let report = pipelineState?.flushEncodeSubmitFailureLog(
+                    at: ProcessInfo.processInfo.systemUptime
+                ) else { return }
+                Self.reportEncodeFailures(report)
             }
         case .none:
             break
         }
     }
 
-    private func flushEncodeFailureLog() {
-        let report = pipelineState.flushEncodeSubmitFailureLog(at: ProcessInfo.processInfo.systemUptime)
-        if let report { reportEncodeFailures(report) }
-    }
-
-    private func reportEncodeFailures(_ report: ThrottledLogPolicy<OSStatus>.Report) {
+    private static func reportEncodeFailures(_ report: ThrottledLogPolicy<OSStatus>.Report) {
         Log.info("VTCompressionSessionEncodeFrame failed: \(report.detail) (\(report.count) since last report)")
     }
 
     private func handleEncodeOutputFailureLogAction(_ action: ThrottledLogPolicy<OSStatus>.Action) {
         switch action {
         case .report(let report):
-            reportEncodeOutputFailures(report)
+            Self.reportEncodeOutputFailures(report)
         case .schedule(let delay):
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.flushEncodeOutputFailureLog()
+            queue.asyncAfter(deadline: .now() + delay) { [weak pipelineState] in
+                guard let report = pipelineState?.flushEncodeOutputFailureLog(
+                    at: ProcessInfo.processInfo.systemUptime
+                ) else { return }
+                Self.reportEncodeOutputFailures(report)
             }
         case .none:
             break
         }
     }
 
-    private func flushEncodeOutputFailureLog() {
-        let report = pipelineState.flushEncodeOutputFailureLog(at: ProcessInfo.processInfo.systemUptime)
-        if let report { reportEncodeOutputFailures(report) }
-    }
-
-    private func reportEncodeOutputFailures(_ report: ThrottledLogPolicy<OSStatus>.Report) {
+    private static func reportEncodeOutputFailures(_ report: ThrottledLogPolicy<OSStatus>.Report) {
         // VideoToolbox can reject a frame with noErr + a nil buffer (e.g.
         // above the H.264 level pixel-rate ceiling) — call that case out.
         let cause = report.detail == noErr ? "nil buffer despite noErr" : "status \(report.detail)"
@@ -4848,8 +4882,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case .report(let report):
             reportUnparseableControl(report)
         case .schedule(let delay):
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.flushUnparseableControlLog()
+            let selfBox = self.selfBox
+            queue.asyncAfter(deadline: .now() + delay) {
+                selfBox.currentOnQueue()?.flushUnparseableControlLog()
             }
         case .none:
             break
