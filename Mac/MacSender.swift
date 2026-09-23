@@ -2554,6 +2554,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// fields `ReceiverUIPreferenceUpdate` understands. Every parameter is
     /// optional and omitted-if-nil, so a caller only ever sends the field(s)
     /// actually being edited rather than re-broadcasting every value.
+    /// `[String: Any]` is non-Sendable by type even when every value it can
+    /// hold is concurrency-safe, so the fields are carried across `queue`
+    /// as this fully-typed `Sendable` snapshot and only turned back into the
+    /// wire dictionary once running on `queue` (see `sendReceiverControlOverrides`).
+    private struct ReceiverControlOverridesSnapshot: Sendable {
+        var functionTrayEnabled: Bool?
+        var inputMode: String?
+        var trackpadSensitivity: Double?
+        var hapticsEnabled: Bool?
+        var avoidNotch: Bool?
+        var pinchTarget: String?
+        var rotateTarget: String?
+        var snapRotation: Bool?
+        var appGestureCommands: AppGestureCommands?
+    }
+
     func setReceiverControlOverrides(
         functionTrayEnabled: Bool? = nil,
         inputMode: String? = nil,
@@ -2565,24 +2581,46 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         snapRotation: Bool? = nil,
         appGestureCommands: AppGestureCommands? = nil
     ) {
+        guard functionTrayEnabled != nil || inputMode != nil || trackpadSensitivity != nil
+            || hapticsEnabled != nil || avoidNotch != nil || pinchTarget != nil
+            || rotateTarget != nil || snapRotation != nil || appGestureCommands != nil
+        else { return }
+        let snapshot = ReceiverControlOverridesSnapshot(
+            functionTrayEnabled: functionTrayEnabled,
+            inputMode: inputMode,
+            trackpadSensitivity: trackpadSensitivity,
+            hapticsEnabled: hapticsEnabled,
+            avoidNotch: avoidNotch,
+            pinchTarget: pinchTarget,
+            rotateTarget: rotateTarget,
+            snapRotation: snapRotation,
+            appGestureCommands: appGestureCommands
+        )
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.sendReceiverControlOverrides(snapshot)
+        }
+    }
+
+    private func sendReceiverControlOverrides(_ snapshot: ReceiverControlOverridesSnapshot) {
         var message: [String: Any] = ["type": WireMessage.receiverUI]
-        if let functionTrayEnabled { message["functionTrayEnabled"] = functionTrayEnabled }
-        if let inputMode { message["inputMode"] = inputMode }
-        if let trackpadSensitivity { message["trackpadSensitivity"] = trackpadSensitivity }
-        if let hapticsEnabled { message["hapticsEnabled"] = hapticsEnabled }
-        if let avoidNotch { message["avoidNotch"] = avoidNotch }
-        if let pinchTarget { message["pinchTarget"] = pinchTarget }
-        if let rotateTarget { message["rotateTarget"] = rotateTarget }
-        if let snapRotation { message["snapRotation"] = snapRotation }
+        if let functionTrayEnabled = snapshot.functionTrayEnabled { message["functionTrayEnabled"] = functionTrayEnabled }
+        if let inputMode = snapshot.inputMode { message["inputMode"] = inputMode }
+        if let trackpadSensitivity = snapshot.trackpadSensitivity { message["trackpadSensitivity"] = trackpadSensitivity }
+        if let hapticsEnabled = snapshot.hapticsEnabled { message["hapticsEnabled"] = hapticsEnabled }
+        if let avoidNotch = snapshot.avoidNotch { message["avoidNotch"] = avoidNotch }
+        if let pinchTarget = snapshot.pinchTarget { message["pinchTarget"] = pinchTarget }
+        if let rotateTarget = snapshot.rotateTarget { message["rotateTarget"] = rotateTarget }
+        if let snapRotation = snapshot.snapRotation { message["snapRotation"] = snapRotation }
         // Reuses `AppGestureCommands`'s own `Codable` conformance — see
         // `ReceiverUIPreferenceUpdate`.
-        if let appGestureCommands,
+        if let appGestureCommands = snapshot.appGestureCommands,
            let data = try? JSONEncoder().encode(appGestureCommands),
            let obj = try? JSONSerialization.jsonObject(with: data) {
             message["appGestureCommands"] = obj
         }
-        guard message.count > 1 else { return }
-        queue.async { [weak self] in self?.sendJSONObject(message) }
+        sendJSONObject(message)
     }
 
     func resetReceiverInputState() {
