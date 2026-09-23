@@ -424,7 +424,7 @@ final class ReceiverSessionStateTests: XCTestCase {
             _ = state.endReconnectAttempt()
         }
         XCTAssertNil(state.beginReconnectAttempt())
-        state.exhaustRecovery()
+        _ = state.exhaustRecovery()
 
         // 3. terminal reconnect-failed state
         XCTAssertEqual(state.phase, .reconnectFailed)
@@ -456,7 +456,7 @@ final class ReceiverSessionStateTests: XCTestCase {
             _ = state.beginReconnectAttempt()
             _ = state.endReconnectAttempt()
         }
-        state.exhaustRecovery()
+        _ = state.exhaustRecovery()
         XCTAssertEqual(state.phase, .reconnectFailed)
 
         // User taps Reconnect from the Connection Lost overlay directly

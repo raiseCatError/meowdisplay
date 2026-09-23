@@ -1,5 +1,25 @@
 import XCTest
 
+/// Lock-protected flag for recording a result observed from concurrently
+/// executing closures in a test; synchronization makes the raw `Bool`
+/// storage safe to share, which `@unchecked Sendable` truthfully declares.
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set(_ newValue: Bool) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 /// Covers `ReceiverDisplayGeometryState` (`Shared/StreamReceiver.swift`) —
 /// the Receiver Swift6-Geometry-1 lock-protected owner for the announced
 /// panel geometry (`devicePixelsWide`/`devicePixelsHigh`/`deviceScale`,
@@ -106,8 +126,7 @@ final class ReceiverDisplayGeometryStateTests: XCTestCase {
             ReceiverDisplayGeometryState.Snapshot(pixelsWide: 100, pixelsHigh: 200, scale: 1),
             ReceiverDisplayGeometryState.Snapshot(pixelsWide: 300, pixelsHigh: 400, scale: 2),
         ]
-        let lock = NSLock()
-        var observedInvalid = false
+        let observedInvalid = LockedFlag()
         let group = DispatchGroup()
         for i in 0..<300 {
             group.enter()
@@ -119,13 +138,13 @@ final class ReceiverDisplayGeometryStateTests: XCTestCase {
                 }
                 let snapshot = state.snapshot()
                 if !knownTriples.contains(snapshot) {
-                    lock.lock(); observedInvalid = true; lock.unlock()
+                    observedInvalid.set(true)
                 }
                 group.leave()
             }
         }
         group.wait()
-        XCTAssertFalse(observedInvalid)
+        XCTAssertFalse(observedInvalid.get())
         XCTAssertTrue(knownTriples.contains(state.snapshot()))
     }
 }

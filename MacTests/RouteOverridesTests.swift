@@ -2,10 +2,10 @@ import XCTest
 
 @MainActor
 final class RouteOverridesTests: XCTestCase {
-    override func tearDown() {
+    override func tearDown() async throws {
         RouteOverrides.shared.onChange = nil
         RouteOverrides.shared.reset()
-        super.tearDown()
+        try await super.tearDown()
     }
 
     func testAllRoutesAllowedByDefault() {
