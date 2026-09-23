@@ -3421,14 +3421,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Bonjour resolution, so the retry loop reaches the receiver the
         // moment it advertises again.
         let generation = transportController.currentDialGeneration
-        queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            guard let self, generation == self.transportController.currentDialGeneration, !self.stopped,
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 5.0) {
+            guard let self = selfBox.currentOnQueue(), generation == self.transportController.currentDialGeneration, !self.stopped,
                   self.transportController.currentConnection === conn, conn.state != .ready else { return }
             Log.info("dial timed out in \(conn.state) — redialing")
             self.scheduleReconnect()
         }
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self, self.transportController.currentConnection === conn else { return }
+        conn.stateUpdateHandler = { state in
+            guard let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn else { return }
             switch state {
             case .ready:
                 self.transportController.becomeReady(conn, transport: self.transport)
