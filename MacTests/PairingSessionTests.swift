@@ -90,13 +90,93 @@ private final class Decider: @unchecked Sendable {
     }
 }
 
-private final class Hints: RemoteEndpointHinting {
-    private(set) var saved: [String] = []
-    func setEndpoint(_ host: String, port: UInt16, forPeerID peerID: String) { saved.append(peerID) }
+/// Structurally synchronized: every access to `savedStorage` is lock-protected,
+/// so this test double is truthfully Sendable rather than merely unchecked.
+///
+/// Type: Hints
+/// Mutable state: `savedStorage: [String]`
+/// Synchronization: `NSLock` around every read and write
+/// Why all accesses are safe: no access reaches `savedStorage` outside the lock
+/// Why unchecked is necessary: `RemoteEndpointHinting` is not `Sendable` itself
+/// Why scope is narrow: test-private, only used by `Side`
+private final class Hints: RemoteEndpointHinting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var savedStorage: [String] = []
+    func setEndpoint(_ host: String, port: UInt16, forPeerID peerID: String) {
+        lock.lock(); savedStorage.append(peerID); lock.unlock()
+    }
+    var saved: [String] { lock.lock(); defer { lock.unlock() }; return savedStorage }
+}
+
+/// Test-local `PeerTrustStoring` conformer with genuine lock-protected state,
+/// used in place of the production `InMemoryPeerTrustStore` (whose `pins` are
+/// unsynchronized and not truthfully Sendable) wherever a `Side` crosses a
+/// concurrency domain.
+///
+/// Type: TestPeerTrustStore
+/// Mutable state: `pinsStorage: [String: Data]`
+/// Synchronization: `NSLock` around every read and write
+/// Why all accesses are safe: no access reaches `pinsStorage` outside the lock,
+/// and no callback is invoked while the lock is held
+/// Why unchecked is necessary: `PeerTrustStoring` is not `Sendable` itself
+/// Why scope is narrow: test-private, only used by `Side`
+private final class TestPeerTrustStore: PeerTrustStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pinsStorage: [String: Data] = [:]
+
+    func pin(peerID: String) -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        return pinsStorage[peerID]
+    }
+
+    func setPin(peerID: String, spki: Data, displayName: String, allowIdentityChange: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        switch TrustPinPolicy.decision(existing: pinsStorage[peerID], presented: spki) {
+        case .new, .match: pinsStorage[peerID] = spki; return true
+        case .identityChanged:
+            guard allowIdentityChange else { return false }
+            pinsStorage[peerID] = spki
+            return true
+        }
+    }
+
+    func forget(peerID: String) { lock.lock(); pinsStorage[peerID] = nil; lock.unlock() }
+
+    var pinCount: Int { lock.lock(); defer { lock.unlock() }; return pinsStorage.count }
+}
+
+/// Bridges @Sendable closures crossing into `PairingSessionCore.run` to the
+/// @MainActor `PairingPromptModel` without ever making the production model
+/// itself Sendable. Every access to `prompt` happens on MainActor: `request`
+/// awaits into it (an ordinary actor hop), and the fire-and-forget methods
+/// hop over explicitly. The handle itself holds no independently mutable
+/// unsynchronized state.
+///
+/// Type: PromptHandle
+/// Mutable state: none (a single `let` reference to the MainActor model)
+/// Synchronization: all access to `prompt` occurs on MainActor, either via
+/// `await` (actor hop) or `Task { @MainActor in ... }`
+/// Why all accesses are safe: `prompt`'s own state is only ever touched while
+/// isolated to MainActor
+/// Why unchecked is necessary: `PairingPromptModel` is not `Sendable`
+/// Why scope is narrow: test-private, only used by the shared-prompt tests
+private final class PromptHandle: @unchecked Sendable {
+    private let prompt: PairingPromptModel
+    init(_ prompt: PairingPromptModel) { self.prompt = prompt }
+
+    func request(_ value: PendingPairing, token: UUID) async -> Bool {
+        await prompt.request(value, token: token)
+    }
+    func peerAborted(token: UUID) {
+        Task { @MainActor [prompt] in prompt.peerAborted(token: token) }
+    }
+    func markCommitting(token: UUID) {
+        Task { @MainActor [prompt] in prompt.markCommitting(token: token) }
+    }
 }
 
 private final class Side {
-    let store = InMemoryPeerTrustStore()
+    let store = TestPeerTrustStore()
     let hints = Hints()
     let decider = Decider()
     let gate = PairingCommitGate()
@@ -104,7 +184,11 @@ private final class Side {
     let role: PairingHandshake.Role
     let result: PairingResult
     let transport: MemoryTransport
-    private(set) var committing = false
+    // Backed by the existing thread-safe PairingFlag rather than an
+    // unsynchronized Bool, since Side itself stays non-Sendable and this is
+    // read from tests while `start()`'s Task is still running.
+    private let committingFlag = PairingFlag()
+    var committing: Bool { committingFlag.isSet }
     var task: Task<Void, Error>?
 
     init(role: PairingHandshake.Role, result: PairingResult, transport: MemoryTransport) {
@@ -112,13 +196,24 @@ private final class Side {
     }
 
     func start(remoteHost: String? = nil) {
+        // Hoist every value the Task needs into local, Sendable constants
+        // before creating it: the closure must not capture `self`/`Side`.
+        let role = role
+        let result = result
+        let pending = result.pending
+        let transport = transport
+        let gate = gate
+        let slot = slot
+        let store = store
+        let hints: RemoteEndpointHinting? = remoteHost == nil ? nil : hints
         let decider = decider
-        task = Task { [self] in
+        let committingFlag = committingFlag
+        task = Task {
             try await PairingSessionCore.run(
-                role: role, result: result, pending: result.pending, transport: transport,
+                role: role, result: result, pending: pending, transport: transport,
                 gate: gate, abortSlot: slot, decide: { _ in await decider.decide() },
-                onPeerAbort: { decider.resolve(false) }, onCommitting: { committing = true },
-                store: store, remoteHost: remoteHost, hints: remoteHost == nil ? nil : hints)
+                onPeerAbort: { decider.resolve(false) }, onCommitting: { committingFlag.set() },
+                store: store, remoteHost: remoteHost, hints: hints)
         }
     }
 
@@ -131,7 +226,11 @@ private final class Side {
     }
 
     func outcome() async -> Result<Void, Error> { await task!.result }
-    var pinCount: Int { store.pins.count }
+    /// Synchronous accessor so a @MainActor caller can await the task's
+    /// result without sending non-Sendable `Side` across an isolation
+    /// boundary: `Task<Void, Error>` itself is unconditionally Sendable.
+    var taskHandle: Task<Void, Error> { task! }
+    var pinCount: Int { store.pinCount }
 }
 
 final class PairingSessionTests: XCTestCase {
@@ -146,9 +245,11 @@ final class PairingSessionTests: XCTestCase {
         let (a, b) = MemoryTransport.pair()
         let i = Side(role: .initiator, result: try phone.result(peerHello: mac.localHello), transport: a)
         let r = Side(role: .responder, result: try mac.result(peerHello: phone.localHello), transport: b)
-        // Watchdog standing in for the real 65s network backstop.
+        // Watchdog standing in for the real 65s network backstop. Capture
+        // only the (Sendable) transport, never Side itself.
         for side in [i, r] {
-            Task { try? await Task.sleep(nanoseconds: 4_000_000_000); side.transport.sendLastAndClose(nil) }
+            let transport = side.transport
+            Task { try? await Task.sleep(nanoseconds: 4_000_000_000); transport.sendLastAndClose(nil) }
         }
         return (i, r, a, b)
     }
@@ -340,6 +441,7 @@ final class PairingSessionTests: XCTestCase {
     @MainActor
     func testConcurrentAttemptBCannotAffectAttemptAOnSharedPrompt() async throws {
         let prompt = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        let promptHandle = PromptHandle(prompt)
         let a = try makePair()    // legitimate attempt; responder side uses the prompt
         let b = try makePair()    // unrelated attempt to the same listener
         let (tokenA, tokenB) = (UUID(), UUID())
@@ -356,14 +458,26 @@ final class PairingSessionTests: XCTestCase {
         func run(_ pair: (initiator: Side, responder: Side, iT: MemoryTransport, rT: MemoryTransport),
                  token: UUID) {
             pair.initiator.start()
-            pair.responder.task = Task { [pair] in
+            // Hoist locals so the Task captures no non-Sendable `Side`/`pair`.
+            let result = pair.responder.result
+            let pending = pair.responder.result.pending
+            let transport = pair.responder.transport
+            let gate = pair.responder.gate
+            let slot = pair.responder.slot
+            let store = pair.responder.store
+            // Typed explicitly @Sendable: PairingSessionCore.run executes off
+            // the main actor, so these closures must not be inferred as
+            // MainActor-isolated merely because they're built inside a Task
+            // created from @MainActor code.
+            let decide: @Sendable (PendingPairing) async -> Bool = { await promptHandle.request($0, token: token) }
+            let onPeerAbort: @Sendable () -> Void = { promptHandle.peerAborted(token: token) }
+            let onCommitting: @Sendable () -> Void = { promptHandle.markCommitting(token: token) }
+            pair.responder.task = Task {
                 try await PairingSessionCore.run(
-                    role: .responder, result: pair.responder.result, pending: pair.responder.result.pending,
-                    transport: pair.responder.transport, gate: pair.responder.gate, abortSlot: pair.responder.slot,
-                    decide: { await prompt.request($0, token: token) },
-                    onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: token) } },
-                    onCommitting: { Task { @MainActor in prompt.markCommitting(token: token) } },
-                    store: pair.responder.store)
+                    role: .responder, result: result, pending: pending,
+                    transport: transport, gate: gate, abortSlot: slot,
+                    decide: decide, onPeerAbort: onPeerAbort, onCommitting: onCommitting,
+                    store: store)
             }
         }
         run(a, token: tokenA)
@@ -371,7 +485,7 @@ final class PairingSessionTests: XCTestCase {
         prompt.decide(accept: true)                       // A: local confirm → waiting
         a.initiator.decider.resolve(false)                // (A's peer stays undecided/irrelevant)
         run(b, token: tokenB)                             // B connects: duplicate, refused
-        _ = await b.responder.outcome()
+        _ = await b.responder.taskHandle.result
         b.initiator.cancel()                              // B's peer sends a valid abort for B
         Task { @MainActor in prompt.attemptEnded(token: tokenB) }
         for _ in 0..<50 { await Task.yield() }
@@ -404,6 +518,7 @@ final class PairingSessionTests: XCTestCase {
     @MainActor
     func testWaitingCancelThenLatePeerConfirmCannotEstablishTrust() async throws {
         let prompt = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        let promptHandle = PromptHandle(prompt)
         let pair = try makePair()
         let token = UUID()
         let side = pair.responder
@@ -411,14 +526,22 @@ final class PairingSessionTests: XCTestCase {
             PairingSessionCore.cancelAttempt(gate: side.gate, slot: side.slot, transport: side.transport)
         }
         pair.initiator.start()
+        // Hoist locals so the Task captures no non-Sendable `Side`.
+        let result = side.result
+        let pending = side.result.pending
+        let transport = side.transport
+        let gate = side.gate
+        let slot = side.slot
+        let store = side.store
+        let decide: @Sendable (PendingPairing) async -> Bool = { await promptHandle.request($0, token: token) }
+        let onPeerAbort: @Sendable () -> Void = { promptHandle.peerAborted(token: token) }
+        let onCommitting: @Sendable () -> Void = { promptHandle.markCommitting(token: token) }
         side.task = Task {
             try await PairingSessionCore.run(
-                role: .responder, result: side.result, pending: side.result.pending,
-                transport: side.transport, gate: side.gate, abortSlot: side.slot,
-                decide: { await prompt.request($0, token: token) },
-                onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: token) } },
-                onCommitting: { Task { @MainActor in prompt.markCommitting(token: token) } },
-                store: side.store)
+                role: .responder, result: result, pending: pending,
+                transport: transport, gate: gate, abortSlot: slot,
+                decide: decide, onPeerAbort: onPeerAbort, onCommitting: onCommitting,
+                store: store)
         }
         while prompt.pending == nil { await Task.yield() }
         prompt.decide(accept: true)
@@ -427,7 +550,7 @@ final class PairingSessionTests: XCTestCase {
         prompt.cancelWaiting()
         XCTAssertNil(prompt.confirmedLocally)
         pair.initiator.decider.resolve(true)              // late peer confirm
-        let (io, ro) = (await pair.initiator.outcome(), await side.outcome())
+        let (io, ro) = (await pair.initiator.taskHandle.result, await side.taskHandle.result)
         XCTAssertThrowsError(try io.get()); XCTAssertThrowsError(try ro.get())
         XCTAssertEqual(side.pinCount, 0); XCTAssertEqual(pair.initiator.pinCount, 0)
     }
