@@ -1738,6 +1738,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// `VirtualDisplay.init` is `@MainActor`; this wraps it as a single
+    /// cross-actor call rather than `setupExtend` capturing `self`/an outer
+    /// result var into a `MainActor.run` closure — that closure form is what
+    /// sends the non-Sendable `MacSender`/`VirtualDisplay` across the
+    /// boundary. The freshly created `VirtualDisplay` itself never leaves
+    /// the main actor: on success it's stored directly into
+    /// `self.virtualDisplay` here, and only its Sendable `displayID` is
+    /// returned to the nonisolated caller. Re-checks staleness once more
+    /// right after creation, immediately before that assignment — the
+    /// hop/construction can itself take a while, and a disconnect or a newer
+    /// session racing it must not resurrect a display for a session that no
+    /// longer exists.
+    @MainActor
+    private func makeVirtualDisplayIfNotStale(
+        ownerGeneration: UInt64?, name: String, pointsWide: Int, pointsHigh: Int,
+        sizeInMillimeters: CGSize, serialNum: UInt32, productID: UInt32, refreshRate: Int,
+        arrangementKey: String, sizeInPoints: CGSize
+    ) throws -> CGDirectDisplayID? {
+        guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
+        // Headless (no usable physical display exists): place the VD at
+        // (0,0) — CoreGraphics defines "main display" as whichever display
+        // sits at that origin — instead of the per-device saved arrangement,
+        // so the login/lock UI has an actual main display to render onto.
+        // This never touches the saved arrangement itself (no `save` call
+        // fires unless something later actually moves it), so a physical
+        // display returning still restores normally.
+        let restoreOrigin: CGPoint? = DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)
+            ? DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
+            : CGPoint.zero
+        guard let vd = VirtualDisplay(name: name,
+                              pointsWide: pointsWide, pointsHigh: pointsHigh,
+                              sizeInMillimeters: sizeInMillimeters,
+                              serialNum: serialNum,
+                              productID: productID,
+                              refreshRate: refreshRate,
+                              restoreOrigin: restoreOrigin,
+                              onOriginChange: { origin, currentSize in
+                                  DisplayArrangement.save(origin: origin, size: currentSize,
+                                                           device: arrangementKey)
+                              }) else { return nil }
+        guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
+        virtualDisplay = vd
+        return vd.displayID
+    }
+
     /// Build (or rebuild) the virtual display + capture for the announced
     /// phone dimensions. Called at startup and again whenever the phone
     /// rotates (it re-sends hello with swapped dimensions).
@@ -1811,7 +1856,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // enforcement can undo that, so an identity that never surfaces is
         // abandoned for a fresh serial. The controller persists the working
         // offset, so the device skips its poisoned identities from then on.
-        var vd: VirtualDisplay?
+        // Only `displayID` (Sendable) is tracked here — the `VirtualDisplay`
+        // itself is never held by this nonisolated function; it is created
+        // and stored into `self.virtualDisplay` entirely on the main actor
+        // by `makeVirtualDisplayIfNotStale`, so the non-Sendable object
+        // never has to cross back out to this scope.
+        var vdID: CGDirectDisplayID?
         var display: SCDisplay?
         var identityError = NSError(domain: "MacSender", code: 2,
                                     userInfo: [NSLocalizedDescriptionKey: "CGVirtualDisplay creation failed"])
@@ -1826,11 +1876,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // moving to a fallback identity is fine for THIS session, but the
         // move must not be persisted over a merely-transient condition.
         var sawPoisonedIdentity = false
+        // Resolved fresh inside the `MainActor.run` hop below instead of
+        // calling `self.makeVirtualDisplayIfNotStale` directly — a direct
+        // cross-actor call sends `self` to the main actor, and `self` here
+        // is not a disconnected region (this function keeps using it after
+        // the call returns), so the compiler rejects the send outright.
+        let selfBox = self.selfBox
         identities: for probe in 0..<UInt32(3) {
             let totalOffset = baseIdentityOffset &+ probe
             // A lingering serial belongs to a just-quit twin of the CURRENT
             // identity; fresh fallback identities get a shorter window.
-            var created: VirtualDisplay?
+            var createdID: CGDirectDisplayID?
             for attempt in 0..<(probe == 0 ? 8 : 3) {
                 if attempt > 0 { try await Task.sleep(for: .seconds(2)) }
                 // A Disconnect (or a newer session) during the retry window
@@ -1839,63 +1895,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // now, so a late attempt would *succeed* and resurrect the
                 // very zombie this retry exists to avoid. Checked again
                 // INSIDE the MainActor hop below — the race can land during
-                // the hop itself, not just before it — and once more right
-                // after, before this candidate is ever assigned.
+                // the hop itself, not just before it, and once more right
+                // after creation succeeds, before it is ever adopted as the
+                // live display.
                 guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
-                try await MainActor.run {
-                    guard !self.isExtendSetupStale(ownerGeneration: ownerGeneration) else {
-                        throw CancellationError()
-                    }
-                    // Headless (no usable physical display exists): place the
-                    // VD at (0,0) — CoreGraphics defines "main display" as
-                    // whichever display sits at that origin — instead of the
-                    // per-device saved arrangement, so the login/lock UI has
-                    // an actual main display to render onto. This never
-                    // touches the saved arrangement itself (no `save` call
-                    // fires unless something later actually moves it), so a
-                    // physical display returning still restores normally.
-                    let restoreOrigin: CGPoint? = DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)
-                        ? DisplayArrangement.origin(for: sizeInPoints, device: arrangementKey)
-                        : CGPoint.zero
-                    // The productID moves with the serial: field data in #206
-                    // suggests some macOS versions key the hostile state on
-                    // the product, not the serial — bumping both escapes
-                    // either keying.
-                    created = VirtualDisplay(name: displayName,
-                                          pointsWide: pointsWide, pointsHigh: pointsHigh,
-                                          sizeInMillimeters: mm,
-                                          serialNum: serial &+ totalOffset,
-                                          productID: 0x4F53 &+ totalOffset,
-                                          refreshRate: virtualDisplayFPS,
-                                          restoreOrigin: restoreOrigin,
-                                          onOriginChange: { origin, currentSize in
-                                              DisplayArrangement.save(origin: origin, size: currentSize,
-                                                                      device: arrangementKey)
-                                          })
+                // A dedicated @MainActor method, not `MainActor.run` with a
+                // closure mutating an outer `var`: that closure form
+                // captures `self` (and the var) into a `@Sendable` closure,
+                // which is what actually sends the non-Sendable
+                // `MacSender`/`VirtualDisplay` across the boundary, and a
+                // non-Sendable return value can't cross back either. Instead
+                // the callee stores the freshly created `VirtualDisplay`
+                // into `self.virtualDisplay` itself, entirely on the main
+                // actor, and only a Sendable `displayID` comes back here.
+                createdID = try await MainActor.run {
+                    guard let live = selfBox.resolve() else { return nil }
+                    return try live.makeVirtualDisplayIfNotStale(
+                        ownerGeneration: ownerGeneration,
+                        name: displayName,
+                        pointsWide: pointsWide, pointsHigh: pointsHigh,
+                        sizeInMillimeters: mm,
+                        serialNum: serial &+ totalOffset,
+                        productID: 0x4F53 &+ totalOffset,
+                        refreshRate: virtualDisplayFPS,
+                        arrangementKey: arrangementKey,
+                        sizeInPoints: sizeInPoints)
                 }
-                if created != nil { break }
+                if createdID != nil { break }
                 Log.info("virtual display creation failed (identity +\(totalOffset), attempt \(attempt + 1)) — retrying")
                 await status("Preparing virtual display…")
             }
-            guard let candidate = created else { continue }
-            // The MainActor hop above may have taken a while — re-check once
-            // more before this candidate is ever adopted as the live display.
-            guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
-            virtualDisplay = candidate
+            guard let candidateID = createdID else { continue }
             do {
-                display = try await findSCDisplay(id: candidate.displayID, isCancelled: { [weak self] in
+                display = try await findSCDisplay(id: candidateID, isCancelled: { [weak self] in
                     self?.isExtendSetupStale(ownerGeneration: ownerGeneration) ?? true
                 })
                 // Transactional creation (#288's lesson: a successful
                 // CGVirtualDisplay apply does not mean WindowServer/SCK
                 // actually expose it) — `findSCDisplay` proves SCK sees it;
                 // this also proves CoreGraphics agrees it's actually usable.
-                guard DisplayUsability.evaluate(DisplayHealth.reading(for: candidate.displayID)) == .usable else {
+                guard DisplayUsability.evaluate(DisplayHealth.reading(for: candidateID)) == .usable else {
                     throw NSError(domain: "MacSender", code: 12, userInfo: [
                         NSLocalizedDescriptionKey: "virtual display appeared but is not usable"])
                 }
                 guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
-                vd = candidate
+                vdID = candidateID
                 if probe > 0, sawPoisonedIdentity {
                     Log.info("display identity +\(totalOffset) came online — the previous one is "
                         + "poisoned by saved system state; persisting the offset")
@@ -1922,7 +1966,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 await status("Display blocked by saved macOS state — trying a fresh identity…")
             }
         }
-        guard let vd, let display else {
+        guard let vdID, let display else {
             if sawPoisonedIdentity {
                 throw NSError(domain: "MacSender", code: 5, userInfo: [
                     NSLocalizedDescriptionKey: "saved display state in macOS is blocking "
@@ -1931,7 +1975,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw identityError
         }
         if let targetID = InputTargetResolver.displayID(
-            mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
+            mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vdID) {
             inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
         }
         // Quality scaling: capture/encode below native when requested — the
@@ -1945,13 +1989,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         #endif
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
                                sessionGeneration: sessionGeneration)
-        await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vd.displayID)
+        await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vdID)
 
         // Debug aid (`defaults write com.peetzweg.opensidecar.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
         // stream so steady-state latency can be measured without user activity.
         if UserDefaults.standard.bool(forKey: "testPattern") {
-            let id = vd.displayID
+            let id = vdID
             Task { @MainActor in TestPattern.show(on: id) }
         }
     }
@@ -2044,8 +2088,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Scoped to THIS VirtualDisplay instance — if stop() or a fresh
         // setupExtend() replaces `virtualDisplay` while this function is
         // suspended, nothing below may resize/reattach/start capture again
-        // on the old identity.
-        func isStale() -> Bool { stopped || virtualDisplay !== vd }
+        // on the old identity. Compares by `displayID` (a Sendable value)
+        // via `selfBox` (safe to resolve from any thread) rather than
+        // capturing `self`/`vd` directly, so this closure never sends the
+        // non-Sendable `MacSender`/`VirtualDisplay` across the isolation
+        // boundaries it gets passed through below (e.g. into
+        // `findSCDisplay`, or the main-actor resize hops further down).
+        let vdID = vd.displayID
+        let selfBox = self.selfBox
+        func isStale() -> Bool {
+            guard let live = selfBox.resolve() else { return true }
+            return live.stopped || live.virtualDisplay?.displayID != vdID
+        }
         guard !isStale() else { throw CancellationError() }
 
         if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
@@ -2100,9 +2154,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let previousRefreshRate = vd.currentRefreshRate
         let previousSize = CGSize(width: previousPointsWide, height: previousPointsHigh)
 
+        // Re-resolves the live `VirtualDisplay` from `selfBox` on the main
+        // actor rather than capturing `vd` into this `@Sendable` closure —
+        // `vd` is not Sendable, and re-checking identity here (instead of
+        // trusting the pre-hop `vd`) also means a replacement racing this
+        // exact hop is caught before mutating the wrong display.
         let didResize = try await MainActor.run { () -> Bool in
-            guard !isStale() else { throw CancellationError() }
-            return vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
+            guard !isStale(), let live = selfBox.resolve(), live.virtualDisplay?.displayID == vdID else {
+                throw CancellationError()
+            }
+            return live.virtualDisplay!.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, refreshRate: targetFPS,
                               movingTo: DisplayArrangement.origin(for: size, device: arrangementKey))
         }
         guard didResize else { return false }
@@ -2118,8 +2179,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 + "rolling back \(vd.displayID) to \(previousPointsWide)x\(previousPointsHigh)")
             guard !isStale() else { throw CancellationError() }
             let rolledBack = try await MainActor.run { () -> Bool in
-                guard !isStale() else { throw CancellationError() }
-                return vd.resize(pointsWide: previousPointsWide, pointsHigh: previousPointsHigh,
+                guard !isStale(), let live = selfBox.resolve(), live.virtualDisplay?.displayID == vdID else {
+                    throw CancellationError()
+                }
+                return live.virtualDisplay!.resize(pointsWide: previousPointsWide, pointsHigh: previousPointsHigh,
                                   refreshRate: previousRefreshRate,
                                   movingTo: DisplayArrangement.origin(for: previousSize, device: arrangementKey))
             }
@@ -3305,8 +3368,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                CGDisplayBounds(displayID).origin != .zero {
                 Log.info("displayDebug: no usable physical display — repositioning VD "
                     + "\(displayID) to become main (origin 0,0)")
-                Task { @MainActor in vd.repositionForHeadlessMain() }
-                Task { await self.logDisplayTopologyDiagnostics(reason: reason, vdID: displayID) }
+                // Re-derives the VD on the main actor via `selfBox` instead
+                // of capturing `vd` itself into the Task — `vd` is not
+                // Sendable, and `selfBox.resolve()` (safe from any thread,
+                // unlike `currentOnQueue()`) re-checks the same identity so
+                // a replacement/teardown that raced this hop is a no-op.
+                Task { @MainActor in
+                    guard let sender = selfBox.resolve(), !sender.stopped,
+                          sender.virtualDisplay?.displayID == displayID else { return }
+                    sender.virtualDisplay?.repositionForHeadlessMain()
+                }
+                // Resolved via `selfBox` rather than capturing the
+                // queue-confined `self` — that `self` is still in active use
+                // for the rest of this closure, so it is not a disconnected
+                // region the compiler will let this escaping `Task` send.
+                Task {
+                    guard let sender = selfBox.resolve() else { return }
+                    await sender.logDisplayTopologyDiagnostics(reason: reason, vdID: displayID)
+                }
             }
             let usability = DisplayUsability.evaluate(DisplayHealth.reading(for: displayID))
             guard usability != .usable else { return }
