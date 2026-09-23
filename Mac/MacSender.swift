@@ -1429,8 +1429,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         case .extend:
             // awaitingWake is queue-confined — read it there before surfacing.
-            queue.async { [weak self] in
-                guard let self else { return }
+            let selfBox = self.selfBox
+            queue.async {
+                guard let self = selfBox.currentOnQueue() else { return }
                 let text = self.awaitingWake
                     ? "\(self.endpointName) is asleep — reconnects when it wakes…"
                     : "Waiting for the device to connect…"
