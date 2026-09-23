@@ -2497,7 +2497,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = nil
         audioEnabled = false
         beginAudioGeneration()
-        Task { await self.audioCaptureEncoder.reset() }
+        let audioCaptureEncoder = self.audioCaptureEncoder
+        Task { await audioCaptureEncoder.reset() }
         // STOP-B: synchronous relative to `stop()` returning, exactly like
         // the direct `connection?.cancel(); connection = nil` this replaces
         // — see `stopCurrentConnectionSynchronously()`'s doc comment. Also
