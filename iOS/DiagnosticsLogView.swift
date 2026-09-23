@@ -103,11 +103,13 @@ struct DiagnosticsLogView: View {
 
     private func load() {
         Log.snapshot(context: context) { result in
-            guard let (url, text) = result else {
-                snapshot = .failed
-                return
+            Task { @MainActor in
+                guard let (url, text) = result else {
+                    snapshot = .failed
+                    return
+                }
+                snapshot = .ready(url: url, text: text, display: displayText(from: text))
             }
-            snapshot = .ready(url: url, text: text, display: displayText(from: text))
         }
     }
 
