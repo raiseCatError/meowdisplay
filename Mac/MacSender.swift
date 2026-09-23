@@ -1493,7 +1493,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// it's produced fresh inside the domain that uses it.
     nonisolated func beginStart() -> MacSenderStartupHandle {
         stopped = false
-        queue.async { self.connect() }   // dial state lives on `queue`
+        let selfBoxForConnect = self.selfBox
+        queue.async { selfBoxForConnect.currentOnQueue()?.connect() }   // dial state lives on `queue`
         if !monitorsStarted {
             monitorsStarted = true
             schedulePing()
@@ -2305,7 +2306,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
             startCursorEcho()
+            let selfBox = self.selfBox
             queue.async {
+                guard let self = selfBox.currentOnQueue() else { return }
                 self.sendDisplayState(self.captureStateSnapshot().receiverDisplayState)
                 self.sendDisplayModeState()
                 self.sendAllowInputState()
@@ -2415,7 +2418,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
         let receiverState = captureStateSnapshot().receiverDisplayState
+        let selfBox = self.selfBox
         queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.captureRecoveryBudget.reset()
             // Every successful capture start is authoritative. This also
             // clears a paused state retained by the receiver when changing
@@ -2778,7 +2783,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             } catch {
                 let nsError = error as NSError
                 Log.info("resume could not stop retained stream domain=\(nsError.domain) code=\(nsError.code): \(error)")
+                let selfBox = self.selfBox
                 queue.async {
+                    guard let self = selfBox.currentOnQueue() else { return }
                     _ = self.updateCaptureState { $0.resumeStopFailed() }
                 }
                 return
@@ -2810,7 +2817,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard captureStateSnapshot().phase == .resuming else { return }
             let nsError = error as NSError
             Log.info("capture resume failed domain=\(nsError.domain) code=\(nsError.code): \(error) — retrying")
-            queue.async { self.recoveryRoundEnded() }
+            let selfBox = self.selfBox
+            queue.async { selfBox.currentOnQueue()?.recoveryRoundEnded() }
         }
     }
 
