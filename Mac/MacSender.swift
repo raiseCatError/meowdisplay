@@ -4920,10 +4920,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // defaults change mid-generation cannot steer this specific
             // callback's encode down the other codec's path.
             if activeAudioIsPCM {
+                let selfBox = self.selfBox
+                let queue = self.queue
                 Task {
                     guard let packet = await encoder.encodePCM(boxed) else { return }
-                    self.queue.async {
-                        guard generation == self.captureGenerationNow,
+                    queue.async {
+                        guard let self = selfBox.currentOnQueue(),
+                              generation == self.captureGenerationNow,
                               audioGen == self.audioGenerationNow,
                               self.audioEnabled else { return }
                         self.sendPCMConfigIfNeeded()
@@ -4933,11 +4936,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
             #endif
+            let selfBox = self.selfBox
+            let queue = self.queue
             Task {
                 let packets = await encoder.encode(boxed)
                 guard !packets.isEmpty else { return }
-                self.queue.async {
-                    guard generation == self.captureGenerationNow,
+                queue.async {
+                    guard let self = selfBox.currentOnQueue(),
+                          generation == self.captureGenerationNow,
                           audioGen == self.audioGenerationNow,
                           self.audioEnabled else { return }
                     self.sendAudioConfigIfNeeded()
