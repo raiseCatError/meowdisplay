@@ -5372,11 +5372,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// sender state or sending, exactly like `runWakeCaptureRecovery` does.
     private func sendMirrorDisplayState() {
         guard mode == .mirror else { return }
-        Task { [weak self] in
+        let selfBox = self.selfBox
+        Task {
+            guard selfBox.resolve() != nil else { return }
             let candidates = await MirrorDisplayCandidate.listCandidates()
-            guard let self else { return }
-            self.queue.async {
-                guard self.mode == .mirror, !self.stopped else { return }
+            selfBox.resolve()?.queue.async {
+                guard let self = selfBox.currentOnQueue(), self.mode == .mirror, !self.stopped else { return }
                 let displays = candidates.compactMap { candidate -> [String: Any]? in
                     guard let uuid = candidate.persistentID else { return nil }
                     return [
