@@ -931,7 +931,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func pushDisplayModeState() {
-        queue.async { [weak self] in self?.sendDisplayModeState() }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.sendDisplayModeState() }
     }
 
     /// Broadcasts `mirrorUnavailable` outside the headless-Mirror-STARTUP
@@ -943,8 +944,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// apart by its own already-confirmed mode (see
     /// `StreamReceiver`'s handling) — no new field, no new message type.
     func pushMirrorUnavailable() {
-        queue.async { [weak self] in
-            self?.sendJSONObject(["type": WireMessage.mirrorUnavailable, "reason": "noUsablePhysicalDisplay"])
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.sendJSONObject(["type": WireMessage.mirrorUnavailable, "reason": "noUsablePhysicalDisplay"])
         }
     }
 
@@ -965,8 +967,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// own `extendShapeRequest` takes, so both directions of PROTOCOL.md 6.7
     /// stay one source of truth.
     func requestExtendShape(_ preference: ExtendDisplayShapePreference) {
-        queue.async { [weak self] in
-            guard let self, let info = self.lastHello else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), let info = self.lastHello else { return }
             self.applyExtendShape(preference, info: info)
         }
     }
@@ -1027,8 +1030,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// drives this directly — same authoritative path a receiver's own
     /// `maxFPSRequest` takes, so both directions stay one source of truth.
     func requestMaxFPS(_ preference: ReceiverMaxFPSPreference) {
-        queue.async { [weak self] in
-            guard let self, let info = self.lastHello else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), let info = self.lastHello else { return }
             self.applyMaxFPS(preference, info: info)
         }
     }
@@ -1294,7 +1298,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Public entry point for `AppController.allowInput`'s `didSet` to
     /// broadcast the Mac's new state to this receiver.
     func pushAllowInputState() {
-        queue.async { [weak self] in self?.sendAllowInputState() }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.sendAllowInputState() }
     }
 
     /// Thread-safe read of this session's own live grant — used by
@@ -2341,8 +2346,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func setReceiverUIPreferences(trayEnabled: Bool, keyboardButtonEnabled: Bool) {
-        queue.async { [weak self] in
-            self?.sendJSONObject([
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.sendJSONObject([
                 "type": WireMessage.receiverUI,
                 "trayEnabled": trayEnabled,
                 "keyboardButtonEnabled": keyboardButtonEnabled,
@@ -2387,9 +2393,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func resetReceiverInputState() {
-        queue.async { [weak self] in
-            self?.inputInjector?.cancelActiveInput()
-            self?.sendJSONObject(["type": WireMessage.inputReset])
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.inputInjector?.cancelActiveInput()
+            self.sendJSONObject(["type": WireMessage.inputReset])
         }
     }
 
