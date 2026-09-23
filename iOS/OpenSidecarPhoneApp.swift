@@ -4,7 +4,7 @@ import UIKit
 import Combine
 
 /// "iPad" or "iPhone" — so UI copy names the device the user is holding.
-let deviceKind = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+@MainActor let deviceKind = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
 
 /// Repository — hosts the Mac app download and explains the two-app setup.
 /// MeowDisplay does not yet have its own landing-page domain, so this points
@@ -525,7 +525,7 @@ struct ReceiverInterruptionOverlay: View {
 /// to the enclosing Button.
 struct OverflowMarqueeText: View {
     private struct WidthKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
+        static let defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
     }
 
@@ -611,7 +611,7 @@ struct OverflowMarqueeText: View {
     }
 
     private struct TextWidthKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
+        static let defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
     }
 }
