@@ -4077,6 +4077,7 @@ final class TwoFingerViewportGestureRecognizer: UIGestureRecognizer {
 ///
 /// TODO: Capture Apple Pencil Pro barrel roll (UIKit rollAngle, iOS 17.5+) once
 /// hardware is available for testing.
+@MainActor
 final class InputCaptureEngine: NSObject {
     var onPencil: ((_ phase: String, _ x: Double, _ y: Double,
                     _ pressure: Double, _ azimuth: Double, _ altitude: Double) -> Void)?

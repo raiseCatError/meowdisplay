@@ -48,7 +48,7 @@ enum Log {
     /// snapshot that races the write that motivated it is worthless. The
     /// completion lands on the main queue for the caller's UI.
     static func snapshot(context: LogSnapshot.Context,
-                         completion: @escaping ((url: URL, text: String)?) -> Void) {
+                         completion: @escaping @Sendable ((url: URL, text: String)?) -> Void) {
         queue.async {
             let log = (try? Data(contentsOf: fileURL)) ?? Data()
             let now = Date()
