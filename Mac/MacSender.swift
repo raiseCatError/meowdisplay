@@ -1207,26 +1207,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         config.sampleRate = 48_000
         config.channelCount = 2
         config.excludesCurrentProcessAudio = true
+        let selfBox = self.selfBox
+        let queue = self.queue
+        let audioCaptureEncoder = self.audioCaptureEncoder
         Task {
             do {
                 try await stream.updateConfiguration(config)
             } catch {
                 Log.info("audio reconfigure failed: \(error)")
             }
-            self.queue.async {
-                guard self.stream === stream else { return }
-                self.audioEnabled = enabled
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), sender.stream === stream else { return }
+                sender.audioEnabled = enabled
                 if !enabled {
-                    Task { await self.audioCaptureEncoder.reset() }
+                    Task { await audioCaptureEncoder.reset() }
                 }
-                self.beginAudioGeneration()
-                self.sendAudioState()
-                if !enabled, self.videoEnabled == false, self.desiredAudioEnabled == false {
+                sender.beginAudioGeneration()
+                sender.sendAudioState()
+                if !enabled, sender.videoEnabled == false, sender.desiredAudioEnabled == false {
                     // Nothing wants this stream anymore — release it the
                     // same way Video Off does on its own.
-                    self.stream = nil
+                    sender.stream = nil
                     stream.stopCapture { _ in }
-                    _ = self.updateCaptureState { $0.stop(); return true }
+                    _ = sender.updateCaptureState { $0.stop(); return true }
                 }
             }
         }
@@ -1315,12 +1318,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func setVideoEnabled(_ enabled: Bool) {
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.desiredVideoEnabled = enabled
-            guard let info = self.lastHello,
+        let selfBox = self.selfBox
+        queue.async {
+            guard let sender = selfBox.currentOnQueue() else { return }
+            sender.desiredVideoEnabled = enabled
+            guard let info = sender.lastHello,
                   info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
-            self.applyVideoEnabled(enabled)
+            sender.applyVideoEnabled(enabled)
         }
     }
 
@@ -2772,8 +2776,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        queue.async { [weak self] in
-            self?.handleCaptureStopped(stream, error: error)
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.handleCaptureStopped(stream, error: error)
         }
     }
 
