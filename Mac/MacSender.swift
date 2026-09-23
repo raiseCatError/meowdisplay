@@ -215,6 +215,19 @@ struct MacSenderStartupHandle: Sendable {
     }
 }
 
+/// Strong analog of `MacSenderSelfBox`, for the one place (currently only
+/// `transitionToMirrorAndDisableVideo`) where dropping `self` mid-async-chain
+/// would silently drop the caller's completion. `MacSenderSelfBox` resolves
+/// weakly and is fine when the operation is best-effort; here the transition
+/// must run to completion even if every other owner releases the sender
+/// first, so this holds `self` strongly for exactly the lifetime of one
+/// transition. Like `selfBox`, it's only ever read to produce a fresh local
+/// `self` inside the domain that's about to use it — never sent across a
+/// suspension point itself.
+struct MacSenderTransitionOwner: @unchecked Sendable {
+    let sender: MacSender
+}
+
 @available(macOS 14.0, *)
 final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
@@ -1384,18 +1397,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.stream = nil
             self.invalidateCapturePipeline(discardingLastFrame: true)
             self.videoEncoder.invalidate()
-            let continueTransition = {
-                self.queue.async {
-                    self.mode = .mirror
-                    self.virtualDisplay = nil
+            let owner = MacSenderTransitionOwner(sender: self)
+            let continueTransition: @Sendable () -> Void = {
+                let sender = owner.sender
+                sender.queue.async {
+                    let sender = owner.sender
+                    sender.mode = .mirror
+                    sender.virtualDisplay = nil
                     Task {
+                        let sender = owner.sender
                         do {
-                            try await self.startMirrorCaptureUsingPreference()
+                            try await sender.startMirrorCaptureUsingPreference()
                         } catch {
                             Log.info("Extend to Mirror transition failed before Video Off: \(error)")
                         }
-                        self.queue.async {
-                            self.applyVideoEnabled(false)
+                        sender.queue.async {
+                            let sender = owner.sender
+                            sender.applyVideoEnabled(false)
                             Task { @MainActor in completion() }
                         }
                     }
