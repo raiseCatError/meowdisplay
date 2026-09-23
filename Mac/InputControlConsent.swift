@@ -131,7 +131,7 @@ enum EffectiveInputAuthorization {
 /// instead. Lives exactly as long as its owning `MacSender`/`DeviceSession`
 /// — there is no persistence here, and no separate teardown path is needed:
 /// when the logical session ends, this box is deallocated with it.
-final class SessionInputGrantBox {
+final class SessionInputGrantBox: @unchecked Sendable {
     private var granted = false
     private let lock = NSLock()
 

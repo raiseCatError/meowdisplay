@@ -4539,10 +4539,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // before this semantic message. Release again here as a safeguard
             // against an in-flight or missing cancellation.
             inputInjector?.cancelActiveInput()
-            let gestureGranted = sessionInputGrant.get()
+            let sessionInputGrant = self.sessionInputGrant
             Task { @MainActor in
                 guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                           sessionGranted: gestureGranted) else { return }
+                                                           sessionGranted: sessionInputGrant.get()) else { return }
                 SystemGestureInvoker.invoke(gesture)
             }
         case "kf":
