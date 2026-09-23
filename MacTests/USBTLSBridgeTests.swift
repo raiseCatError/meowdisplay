@@ -161,18 +161,7 @@ final class USBTLSBridgeTests: XCTestCase {
         deviceSide.cancel()
 
         let macTornDown = expectation(description: "mac side torn down")
-        func poll() {
-            queue.async {
-                macSide.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, isComplete, error in
-                    if isComplete || error != nil || (data?.isEmpty ?? true) {
-                        macTornDown.fulfill()
-                    } else {
-                        poll()
-                    }
-                }
-            }
-        }
-        poll()
+        TeardownPoller(queue: queue, connection: macSide, expectation: macTornDown).poll()
         await fulfillment(of: [macTornDown], timeout: 5)
         macSide.cancel()
         bridge.cancel()
@@ -222,6 +211,34 @@ private final class SettleState: @unchecked Sendable {
         settled = true
         self.reachedReady = reachedReady
         return true
+    }
+}
+
+/// Recursively polls a connection on `queue` until it observes EOF/closure,
+/// then fulfills `expectation`. A plain recursive local function can't be
+/// typed `@Sendable` (it would need to reference itself before it exists),
+/// so the recursion is hung off a reference type instead.
+private final class TeardownPoller: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let connection: NWConnection
+    private let expectation: XCTestExpectation
+
+    init(queue: DispatchQueue, connection: NWConnection, expectation: XCTestExpectation) {
+        self.queue = queue
+        self.connection = connection
+        self.expectation = expectation
+    }
+
+    func poll() {
+        queue.async {
+            self.connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, isComplete, error in
+                if isComplete || error != nil || (data?.isEmpty ?? true) {
+                    self.expectation.fulfill()
+                } else {
+                    self.poll()
+                }
+            }
+        }
     }
 }
 
