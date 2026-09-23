@@ -1266,7 +1266,7 @@ final class SenderController: ObservableObject {
               let pin = TrustStore.shared.pin(peerID: peerID),
               let identity = TrustStore.shared.ownIdentity() else { return nil }
         return .tcp(result.endpoint,
-                    tls: TLSSessionConfig(identity: identity,
+                    tls: TLSSessionConfig(identity: SendableSecIdentity(value: identity),
                                           pinnedPeerSPKI: pin,
                                           peerID: peerID))
     }
@@ -1307,7 +1307,7 @@ final class SenderController: ObservableObject {
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(resolvedHost), port: port)
         Log.info("routeDebug: dialing Remote candidate peer=\(peerID) endpoint=\(resolvedHost):\(resolvedPort)")
         return .tcp(endpoint,
-                    tls: TLSSessionConfig(identity: identity,
+                    tls: TLSSessionConfig(identity: SendableSecIdentity(value: identity),
                                           pinnedPeerSPKI: pin,
                                           peerID: peerID))
     }
@@ -1996,7 +1996,7 @@ final class SenderController: ObservableObject {
                     udid: udid, installIDByUDID: installIDByUDID,
                     pin: { TrustStore.shared.pin(peerID: $0) }),
                   let identity = TrustStore.shared.ownIdentity() else { return nil }
-            return .usb(udid: udid, tls: TLSSessionConfig(identity: identity,
+            return .usb(udid: udid, tls: TLSSessionConfig(identity: SendableSecIdentity(value: identity),
                                                             pinnedPeerSPKI: resolved.pin,
                                                             peerID: resolved.peerID))
         case .wifi(let result):

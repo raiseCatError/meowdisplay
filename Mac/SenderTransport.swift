@@ -8,13 +8,23 @@ import Security
 /// Pulled out of MacSender.swift (Phase 1 of the MT-C1 transport-isolation
 /// design) so `MacSenderTransportController` and its unit tests can
 /// reference these types without pulling in all of `MacSender.swift`.
-struct TLSSessionConfig {
-    let identity: SecIdentity
+/// Narrow carrier for the single non-Sendable leaf in `TLSSessionConfig`:
+/// the `SecIdentity` credential handle. Unchecked is truthful here because
+/// the wrapped reference is never mutated after `init` — it's used only as
+/// an opaque credential passed straight into `TLSConfigurator`'s Security/
+/// Network.framework TLS setup — and this wrapper adds no synchronization
+/// and exposes no mutable state of its own.
+struct SendableSecIdentity: @unchecked Sendable {
+    let value: SecIdentity
+}
+
+struct TLSSessionConfig: Sendable {
+    let identity: SendableSecIdentity
     let pinnedPeerSPKI: Data
     let peerID: String
 }
 
-enum SenderTransport {
+enum SenderTransport: Sendable {
     // `tls` is REQUIRED: no production or debug path dials plaintext media.
     case tcp(NWEndpoint, tls: TLSSessionConfig)
     // Native usbmuxd dial; nil udid = first device. `tls` is REQUIRED — USB

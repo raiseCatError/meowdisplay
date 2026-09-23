@@ -2868,8 +2868,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// one and the video resyncs with a keyframe. Which transport to be on
     /// is the controller's call (cable-in upgrade, unplug failover).
     func switchTransport(to newTransport: SenderTransport) {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             let label = if case .usb = newTransport { "USB" } else { "WiFi" }
             Log.info("switching \(self.endpointName) to \(label)")
             // A held hardware key (or drag/pen contact) must not survive the
@@ -3663,7 +3664,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // pre-dial was tried and only ever hung until its timeout, adding 2s
         // to every connect. becomeReady reports which path won.
         guard let tlsOptions = TLSConfigurator.mutualTLSOptions(
-            identity: tls.identity,
+            identity: tls.identity.value,
             pinnedSPKIs: { [tls.pinnedPeerSPKI] },
             isListener: false, queue: queue) else {
             let sink = statusSink

@@ -352,7 +352,7 @@ final class MacSenderTransportController: @unchecked Sendable {
             tcp.noDelay = true
             guard case .tcp(_, let config) = transport,
                   let tlsOptions = TLSConfigurator.mutualTLSOptions(
-                    identity: config.identity,
+                    identity: config.identity.value,
                     pinnedSPKIs: { [config.pinnedPeerSPKI] },
                     isListener: false, queue: queue) else { continue }
             let params = NWParameters(tls: tlsOptions, tcp: tcp)
