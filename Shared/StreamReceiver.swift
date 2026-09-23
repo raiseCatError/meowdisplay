@@ -3372,12 +3372,15 @@ final class StreamReceiver: ObservableObject {
         guard !audioSessionObserversRegistered else { return }
         audioSessionObserversRegistered = true
         let center = NotificationCenter.default
-        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] note in
+        let queue = self.queue
+        let selfBox = self.selfBox
+        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
             let typeRaw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
             let type = AVAudioSession.InterruptionType(rawValue: typeRaw)
             let optionsRaw = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
             let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
-            self?.queue.async {
+            queue.async {
+                guard let receiver = selfBox.currentOnQueue() else { return }
                 Log.info("audioTrace: AVAudioSession interruption type=\(type == .began ? "began" : "ended") shouldResume=\(shouldResume)")
                 // `.began`: the system already silenced/deactivated us —
                 // there is nothing to recover yet, only something to stop
@@ -3387,16 +3390,17 @@ final class StreamReceiver: ObservableObject {
                 // NOT blindly resume stale audio otherwise (GOAL: "Do not
                 // blindly resume stale audio after an interruption").
                 if type == .began {
-                    self?.handleAudioSessionDisruption(reactivateSession: false)
+                    receiver.handleAudioSessionDisruption(reactivateSession: false)
                 } else if type == .ended, shouldResume {
-                    self?.handleAudioSessionDisruption(reactivateSession: true)
+                    receiver.handleAudioSessionDisruption(reactivateSession: true)
                 }
             }
         }
-        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] note in
+        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { note in
             let reasonRaw = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
             let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) ?? .unknown
-            self?.queue.async {
+            queue.async {
+                guard let receiver = selfBox.currentOnQueue() else { return }
                 Log.info("audioTrace: AVAudioSession route change reason=\(reason)")
                 switch reason {
                 case .newDeviceAvailable, .oldDeviceUnavailable, .routeConfigurationChange, .categoryChange:
@@ -3405,7 +3409,7 @@ final class StreamReceiver: ObservableObject {
                     // longer correspond to when the NEW route actually
                     // renders audio) — reactivate defensively since some
                     // route changes leave the session inactive.
-                    self?.handleAudioSessionDisruption(reactivateSession: true)
+                    receiver.handleAudioSessionDisruption(reactivateSession: true)
                 default:
                     break   // e.g. `.noSuitableRouteForCategory`, `.override` — nothing to recover from
                 }
