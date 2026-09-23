@@ -2447,8 +2447,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // now always fires asynchronously (previously synchronous only on the
     // "not connected" path).
     func disconnect(completion: @escaping @MainActor @Sendable () -> Void) {
-        queue.async { [weak self] in
-            guard let self, self.transportController.isReady,
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), self.transportController.isReady,
                   self.transportController.currentConnection != nil else {
                 Task { @MainActor in completion() }
                 return
@@ -2508,18 +2509,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // MainActor work in it) and leaves less of a window where a stray
         // probe callback could fire after `stop()` returned.
         transportController.stopCurrentConnectionSynchronously()
-        queue.async { [weak self] in
-            self?.activeUSBBridge?.cancel()
-            self?.activeUSBBridge = nil
-            self?.activeUSBBridgeTLS = nil
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.activeUSBBridge?.cancel()
+            self.activeUSBBridge = nil
+            self.activeUSBBridgeTLS = nil
         }
         videoEncoder.invalidate()
         virtualDisplay = nil   // releasing it removes the display
         cancelDropReplayTimer()
-        queue.async { [weak self] in
+        queue.async {
             // Unblock a start() that is still waiting for the hello.
-            self?.helloContinuation?.resume(throwing: CancellationError())
-            self?.helloContinuation = nil
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.helloContinuation?.resume(throwing: CancellationError())
+            self.helloContinuation = nil
         }
     }
 
@@ -2919,8 +2923,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// prove a WiFi receiver quit, where dials just stall instead of
     /// being refused.
     func peerServiceWithdrawn() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped, self.everConnected,
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped, self.everConnected,
                   !self.transportController.isReady else { return }
             self.reportGone("service withdrawn and connection down — receiver app is gone, ending session")
         }
@@ -2929,8 +2934,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Drop the current connection and dial again — fresh TCP through the
     /// tunnel, fresh accept on the phone. Bound to the UI Reconnect button.
     func forceReconnect() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             Log.info("manual reconnect requested")
             Log.info("reconnectPolicy: manualAttempt allowed autoReconnect=\(self.autoReconnectEnabled)")
             self.disconnectedSince = Date()   // fresh grace window
@@ -2946,8 +2952,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the user's back — `SenderController` leaves it out of `sessions`
     /// afterward, so the device stays reachable for a manual Connect.
     func applyAutoReconnectPreferenceChange(enabled: Bool) {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             self.autoReconnectEnabled = enabled
             guard !enabled, self.everConnected, !self.transportController.isReady,
                   self.disconnectedSince != nil else { return }
@@ -3824,13 +3831,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = transportController.resetForRedial()
         pipelineState.setPendingSends(0)
         pipelineState.resetPendingEncodes()
-        queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 1.0) {
             // Generation-guarded so a switchTransport (or another reconnect)
             // that landed in this 1s window supersedes this dial instead of
             // racing it — otherwise the queued connect() re-dials the new
             // transport, briefly running two live connections. (No bare
             // self-rescheduling asyncAfter — the pattern banned in #76.)
-            guard let self, generation == self.transportController.currentDialGeneration,
+            guard let self = selfBox.currentOnQueue(), generation == self.transportController.currentDialGeneration,
                   !self.stopped else { return }
             self.connect()
         }
