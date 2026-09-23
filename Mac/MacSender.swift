@@ -4745,8 +4745,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let lastHello, let generation = authenticatedSession.liveGeneration {
             return ApplicationReadySession(info: lastHello, generation: generation)
         }
+        let selfBox = self.selfBox
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard let self = selfBox.currentOnQueue() else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 if let hello = self.lastHello,
                    let generation = self.authenticatedSession.liveGeneration {
                     continuation.resume(returning: ApplicationReadySession(
