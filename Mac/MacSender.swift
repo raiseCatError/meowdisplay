@@ -2867,14 +2867,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         needsKeyframe = true
         let config = SCStreamConfiguration()
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(downgraded * 2))
+        let selfBox = self.selfBox
+        let queue = self.queue
         Task {
             do {
                 try await stream.updateConfiguration(config)
             } catch {
                 Log.info("failure-streak SCK reconfigure failed: \(error)")
             }
-            self.queue.async {
-                guard self.stream === stream, generation == self.captureGenerationNow else { return }
+            queue.async {
+                guard let self = selfBox.currentOnQueue(),
+                      self.stream === stream, generation == self.captureGenerationNow else { return }
                 self.captureTargetFPS = downgraded
                 do {
                     try self.setupEncoder(width: self.capturePixelsWide, height: self.capturePixelsHigh,
@@ -2903,8 +2906,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let attempt = captureRecoveryBudget.failedAttempts + 1
         Log.info("capture recovery starting mode=\(mode.rawValue) "
             + "attempt=\(attempt)/\(captureRecoveryBudget.maximumAttempts) delay=3s")
-        queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 3.0) {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.captureRecoveryScheduled = false
             guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped, self.stream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
@@ -2967,7 +2971,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Log.info("capture rebuild fallback failed domain=\(rebuildError.domain) code=\(rebuildError.code): \(error)")
             }
         }
-        queue.async { self.recoveryRoundEnded() }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.recoveryRoundEnded() }
     }
 
     private func reattachMirrorCapture() async throws {
@@ -3177,8 +3182,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // at (250ms) before judging the display — an immediate read during
         // the transition itself would false-positive on a display that is
         // about to be fine.
-        queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self, !self.stopped, self.mode == .extend,
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 0.25) {
+            guard let self = selfBox.currentOnQueue(), !self.stopped, self.mode == .extend,
                   !GenerationGate.isStale(capturedAt: generation, current: self.topologyGenerationNow),
                   self.virtualDisplay?.displayID == displayID else { return }
             // Going headless mid-session: the VD is still healthy, but if
@@ -3224,8 +3230,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         wakeCaptureRecoveryScheduled = true
-        queue.asyncAfter(deadline: .now() + 0.75) { [weak self] in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 0.75) {
+            guard let self = selfBox.currentOnQueue() else { return }
             self.wakeCaptureRecoveryScheduled = false
             guard self.mode == .mirror, !self.stopped, !self.wakeCaptureRecoveryRunning else { return }
             self.wakeCaptureRecoveryRunning = true
@@ -3242,7 +3249,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// ignored by the checks already in `stream(_:didOutputSampleBuffer:)`
     /// and `encode`, so they cannot affect the new stream once it exists.
     private func runWakeCaptureRecovery(reason: String) async {
-        defer { queue.async { self.wakeCaptureRecoveryRunning = false } }
+        let selfBox = self.selfBox
+        defer { queue.async { selfBox.currentOnQueue()?.wakeCaptureRecoveryRunning = false } }
         Log.info("wakeCapture: begin reason=\(reason)")
 
         invalidateCapturePipeline(discardingLastFrame: true)
@@ -3335,8 +3343,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// than leaving the session stuck — the wake path is a best-effort fast
     /// path, not the only route back to a live capture.
     private func scheduleCaptureRecoveryAfterWakeFailure() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             _ = self.updateCaptureState { $0.unexpectedStop() }
             self.scheduleCaptureRecovery()
         }
@@ -3619,8 +3628,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Liveness (ping + watchdog)
 
     private func schedulePing() {
-        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 2.0) {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             if self.transportController.isReady {
                 // Liveness + send-side health for the phone's overlay.
                 let elapsed = Date().timeIntervalSince(self.capWindowStart)
@@ -3652,8 +3662,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func scheduleWatchdog() {
-        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self, !self.stopped else { return }
+        let selfBox = self.selfBox
+        queue.asyncAfter(deadline: .now() + 2.0) {
+            guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             if self.transportController.isReady, Date().timeIntervalSince(self.lastReceived) > 5 {
                 // A suspended receiver app (user switched apps) goes silent
                 // like this while its kernel still accepts redials — the
@@ -3886,7 +3897,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             size.width > 0 ? hot.x / size.width : 0,
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
-        queue.async { self.sendJSONFrame(msg) }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.sendJSONFrame(msg) }
         #if DEBUG
         logCursorTraceIfDue(reason: "cursorImg sent: \(png.count) bytes size=\(size) hot=\(hot)")
         #endif
