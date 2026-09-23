@@ -1021,9 +1021,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sendExtendShapeState()
             return
         }
+        let selfBox = self.selfBox
         Task {
+            guard let self = selfBox.resolve() else { return }
             await self.reconfigure(info)
-            self.queue.async { self.sendExtendShapeState() }
+            self.queue.async {
+                guard let self = selfBox.currentOnQueue() else { return }
+                self.sendExtendShapeState()
+            }
         }
     }
 
@@ -1100,14 +1105,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         needsKeyframe = true
         let config = SCStreamConfiguration()
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fpsResult.fps * 2))
+        let selfBox = self.selfBox
         Task {
             do {
                 try await stream.updateConfiguration(config)
             } catch {
                 Log.info("FPS reconfigure failed: \(error)")
             }
-            self.queue.async {
-                guard self.stream === stream else { return }
+            selfBox.resolve()?.queue.async {
+                guard let self = selfBox.currentOnQueue(), self.stream === stream else { return }
                 self.captureTargetFPS = fpsResult.fps
                 if self.videoEnabled {
                     do {
@@ -1268,10 +1274,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendAudioConfigIfNeeded() {
+        let selfBox = self.selfBox
         Task {
-            guard let config = await audioCaptureEncoder.formatConfig else { return }
+            guard let self = selfBox.resolve(),
+                  let config = await self.audioCaptureEncoder.formatConfig else { return }
             self.queue.async {
-                guard !self.audioConfigSent else { return }
+                guard let self = selfBox.currentOnQueue(), !self.audioConfigSent else { return }
                 self.audioConfigSent = true
                 self.sendFramed(AudioMediaFrame.config(AudioConfigFrame(
                     sampleRate: config.sampleRate,
@@ -1308,10 +1316,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// DEBUG-only PCM bypass A/B mode counterparts of
     /// `sendAudioConfigIfNeeded`/`sendAudioPacket` — see `audioDebugPCMMode`.
     private func sendPCMConfigIfNeeded() {
+        let selfBox = self.selfBox
         Task {
-            guard let config = await audioCaptureEncoder.pcmFormatConfig else { return }
+            guard let self = selfBox.resolve(),
+                  let config = await self.audioCaptureEncoder.pcmFormatConfig else { return }
             self.queue.async {
-                guard !self.pcmConfigSent else { return }
+                guard let self = selfBox.currentOnQueue(), !self.pcmConfigSent else { return }
                 self.pcmConfigSent = true
                 self.sendFramed(AudioMediaFrame.pcmConfig(PCMConfigFrame(
                     sampleRate: config.sampleRate,
