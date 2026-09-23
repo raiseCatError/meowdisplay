@@ -3317,10 +3317,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// place cannot launch overlapping reconstructions.
     private func startWakeCaptureObserver() {
         guard wakeCaptureObserver == nil else { return }
+        let queue = self.queue
+        let selfBox = self.selfBox
         wakeCaptureObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.queue.async { self?.topologyChanged(reason: "screensDidWake") }
+        ) { _ in
+            queue.async {
+                guard let self = selfBox.currentOnQueue() else { return }
+                self.topologyChanged(reason: "screensDidWake")
+            }
         }
     }
 
@@ -5442,11 +5447,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// capture itself.
     private func startMirrorDisplayTopologyObserver() {
         guard mirrorDisplayTopologyObserver == nil else { return }
+        let queue = self.queue
+        let selfBox = self.selfBox
         mirrorDisplayTopologyObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.sendMirrorDisplayState()
-            self?.queue.async { self?.topologyChanged(reason: "didChangeScreenParameters") }
+        ) { _ in
+            queue.async {
+                guard let self = selfBox.currentOnQueue() else { return }
+                self.sendMirrorDisplayState()
+                self.topologyChanged(reason: "didChangeScreenParameters")
+            }
         }
     }
 
