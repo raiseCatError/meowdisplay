@@ -48,9 +48,13 @@ private final class MemoryTransport: PairingTransport, @unchecked Sendable {
         lock.unlock()
     }
 
+    private func checkClosed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closed
+    }
+
     func send(_ envelope: PairingEnvelope) async throws {
-        lock.lock(); let isClosed = closed; lock.unlock()
-        if isClosed { throw PairingError.malformedMessage }
+        if checkClosed() { throw PairingError.malformedMessage }
         peer?.deliver(.frame(envelope))
     }
 

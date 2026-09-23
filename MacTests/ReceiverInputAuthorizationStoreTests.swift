@@ -11,7 +11,7 @@ final class ReceiverInputAuthorizationStoreTests: XCTestCase {
     private func isolatedDefaults() -> UserDefaults {
         let suite = "ReceiverInputAuthorizationStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        addTeardownBlock { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
         return defaults
     }
 

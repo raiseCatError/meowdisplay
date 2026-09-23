@@ -17,8 +17,9 @@ final class USBTLSBridgeTests: XCTestCase {
     private func makeFakeDeviceEndpoint() throws -> (port: NWEndpoint.Port, accept: () async -> NWConnection) {
         let listener = try NWListener(using: .tcp, on: .any)
         let box = AcceptBox()
+        let queue = self.queue
         listener.newConnectionHandler = { conn in
-            conn.start(queue: self.queue)
+            conn.start(queue: queue)
             box.append(conn)
         }
         let ready = expectation(description: "fake device listener ready")
@@ -29,7 +30,7 @@ final class USBTLSBridgeTests: XCTestCase {
         return (port, { await box.next() })
     }
 
-    private func dialTunnel(to port: NWEndpoint.Port) -> (String?, UInt16, DispatchQueue) async throws -> NWConnection {
+    private static func dialTunnel(to port: NWEndpoint.Port) -> (String?, UInt16, DispatchQueue) async throws -> NWConnection {
         { _, _, queue in
             try await withCheckedThrowingContinuation { cont in
                 let conn = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
@@ -47,7 +48,7 @@ final class USBTLSBridgeTests: XCTestCase {
 
     func testBridgeIsLoopbackOnly() async throws {
         let (devicePort, _) = try makeFakeDeviceEndpoint()
-        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: dialTunnel(to: devicePort))
+        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: Self.dialTunnel(to: devicePort))
         let bridgePort = try await bridge.start()
         // requiredLocalEndpoint pins the bridge to 127.0.0.1; connecting to
         // that literal loopback address must succeed (proves the bridge
@@ -63,7 +64,7 @@ final class USBTLSBridgeTests: XCTestCase {
 
     func testBridgeAcceptsExactlyOneConnectionThenStopsListening() async throws {
         let (devicePort, _) = try makeFakeDeviceEndpoint()
-        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: dialTunnel(to: devicePort))
+        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: Self.dialTunnel(to: devicePort))
         let bridgePort = try await bridge.start()
 
         let first = NWConnection(host: "127.0.0.1", port: bridgePort, using: .tcp)
@@ -83,27 +84,26 @@ final class USBTLSBridgeTests: XCTestCase {
         // bridge only ever wires up one accepted connection, ever.
         let second = NWConnection(host: "127.0.0.1", port: bridgePort, using: .tcp)
         let secondSettled = expectation(description: "second dial settles")
-        var secondReachedReady = false
-        var settled = false
+        let settleState = SettleState()
         second.stateUpdateHandler = { state in
             // `.waiting` can transition into `.failed` afterwards — only the
             // FIRST settling transition matters here, so guard against a
             // second fulfill() rather than assuming exactly one state fires.
-            guard !settled else { return }
             switch state {
             case .ready:
-                settled = true
-                secondReachedReady = true
-                secondSettled.fulfill()
+                if settleState.settleOnce(reachedReady: true) {
+                    secondSettled.fulfill()
+                }
             case .failed, .waiting:
-                settled = true
-                secondSettled.fulfill()
+                if settleState.settleOnce(reachedReady: false) {
+                    secondSettled.fulfill()
+                }
             default: break
             }
         }
         second.start(queue: queue)
         await fulfillment(of: [secondSettled], timeout: 5)
-        if secondReachedReady {
+        if settleState.reachedReady {
             // Backlog-completed but never serviced: it must see EOF/closure,
             // never any bytes from the bridge (nothing pumps for it).
             let neverServiced = expectation(description: "unserviced second connection closes")
@@ -121,7 +121,7 @@ final class USBTLSBridgeTests: XCTestCase {
 
     func testSpliceRelaysBytesBidirectionally() async throws {
         let (devicePort, acceptOnDevice) = try makeFakeDeviceEndpoint()
-        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: dialTunnel(to: devicePort))
+        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: Self.dialTunnel(to: devicePort))
         let bridgePort = try await bridge.start()
 
         let macSide = NWConnection(host: "127.0.0.1", port: bridgePort, using: .tcp)
@@ -147,7 +147,7 @@ final class USBTLSBridgeTests: XCTestCase {
 
     func testEitherLegClosingTearsDownBoth() async throws {
         let (devicePort, acceptOnDevice) = try makeFakeDeviceEndpoint()
-        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: dialTunnel(to: devicePort))
+        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: Self.dialTunnel(to: devicePort))
         let bridgePort = try await bridge.start()
 
         let macSide = NWConnection(host: "127.0.0.1", port: bridgePort, using: .tcp)
@@ -180,7 +180,7 @@ final class USBTLSBridgeTests: XCTestCase {
 
     func testCancelBeforeStartCompletesLeavesNothingRunning() async throws {
         let (devicePort, _) = try makeFakeDeviceEndpoint()
-        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: dialTunnel(to: devicePort))
+        let bridge = USBTLSBridge(udid: "fake", queue: queue, dialTunnel: Self.dialTunnel(to: devicePort))
         bridge.cancel()   // cancel racing start() must not crash or hang
         do {
             _ = try await bridge.start()
@@ -203,6 +203,25 @@ final class USBTLSBridgeTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+/// Lock-guarded one-shot settle flag: records only the first state
+/// transition a connection's handler observes, guarding against later
+/// re-entrant calls on the connection's own dispatch queue.
+private final class SettleState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var settled = false
+    private(set) var reachedReady = false
+
+    @discardableResult
+    func settleOnce(reachedReady: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !settled else { return false }
+        settled = true
+        self.reachedReady = reachedReady
+        return true
     }
 }
 

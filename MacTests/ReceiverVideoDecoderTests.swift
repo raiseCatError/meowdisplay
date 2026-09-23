@@ -39,6 +39,17 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         var keyframeRequests: Int { lock.lock(); defer { lock.unlock() }; return _keyframeRequests }
     }
 
+    /// Lock-protected append-only log, used where a test needs to observe
+    /// values arriving from a debug hook off the actor's own scheduling.
+    private final class OrderRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Double] = []
+
+        func append(_ value: Double) { lock.lock(); values.append(value); lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return values.count }
+        func snapshot() -> [Double] { lock.lock(); defer { lock.unlock() }; return values }
+    }
+
     private func makeDecoder() -> (ReceiverVideoDecoder, Recorder) {
         let recorder = Recorder()
         let effects = ReceiverVideoDecoder.OutputEffects(
@@ -219,11 +230,10 @@ final class ReceiverVideoDecoderTests: XCTestCase {
         let (decoder, _) = makeDecoder()
         let formatDesc = makeFormatDescription()
 
-        let lock = NSLock()
-        var observedOrder: [Double] = []
+        let observedOrder = OrderRecorder()
         await decoder.setDebugSubmissionObserver { command in
             guard case .decode(_, _, let captureMs) = command, let captureMs else { return }
-            lock.lock(); observedOrder.append(captureMs); lock.unlock()
+            observedOrder.append(captureMs)
         }
 
         // Enqueue 1...5 back-to-back from a single caller — exactly the
@@ -238,10 +248,9 @@ final class ReceiverVideoDecoderTests: XCTestCase {
             decoder.enqueueDecode(FrameMediaBox(sample), generation: 0, captureMs: Double(tag))
         }
 
-        await waitFor { lock.lock(); defer { lock.unlock() }; return observedOrder.count == 5 }
+        await waitFor { observedOrder.count == 5 }
 
-        let finalOrder = { lock.lock(); defer { lock.unlock() }; return observedOrder }()
-        XCTAssertEqual(finalOrder, [1, 2, 3, 4, 5],
+        XCTAssertEqual(observedOrder.snapshot(), [1, 2, 3, 4, 5],
             "decode submissions must reach the pump in exact enqueue order on every run, "
             + "not merely whichever order scheduling happened to produce")
     }

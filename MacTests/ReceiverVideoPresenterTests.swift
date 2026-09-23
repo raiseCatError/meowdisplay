@@ -39,6 +39,17 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         var framesPresented: Int { lock.lock(); defer { lock.unlock() }; return _framesPresented }
     }
 
+    /// Lock-protected append-only log, used to observe values arriving from
+    /// `debugSubmissionObserver` off the presenter's own scheduling.
+    private final class LockedLog<Element>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Element] = []
+
+        func append(_ value: Element) { lock.lock(); values.append(value); lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return values.count }
+        func snapshot() -> [Element] { lock.lock(); defer { lock.unlock() }; return values }
+    }
+
     @MainActor
     private func makePresenter() -> (ReceiverVideoPresenter, Recorder) {
         let recorder = Recorder()
@@ -50,6 +61,7 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         return (ReceiverVideoPresenter(displayLayer: AVSampleBufferDisplayLayer(), outputEffects: effects), recorder)
     }
 
+    @MainActor
     private func waitFor(_ condition: @escaping () -> Bool, timeout: TimeInterval = 2) async {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
@@ -124,11 +136,10 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         let (presenter, _) = makePresenter()
         let formatDesc = makeFormatDescription()
 
-        let lock = NSLock()
-        var observedOrder: [Double] = []
+        let observedOrder = LockedLog<Double>()
         presenter.debugSubmissionObserver = { command in
             guard case .presentSample(_, _, _, let captureMs) = command, let captureMs else { return }
-            lock.lock(); observedOrder.append(captureMs); lock.unlock()
+            observedOrder.append(captureMs)
         }
 
         for tag in 1...5 {
@@ -137,9 +148,8 @@ final class ReceiverVideoPresenterTests: XCTestCase {
                 generation: 0, viaMetalPath: false, captureMs: Double(tag))
         }
 
-        await waitFor { lock.lock(); defer { lock.unlock() }; return observedOrder.count == 5 }
-        let finalOrder = { lock.lock(); defer { lock.unlock() }; return observedOrder }()
-        XCTAssertEqual(finalOrder, [1, 2, 3, 4, 5],
+        await waitFor { observedOrder.count == 5 }
+        XCTAssertEqual(observedOrder.snapshot(), [1, 2, 3, 4, 5],
             "presentSample submissions must reach the pump in exact enqueue order on every run")
     }
 
@@ -150,16 +160,13 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         let (presenter, _) = makePresenter()
         let formatDesc = makeFormatDescription()
 
-        let lock = NSLock()
-        var observedKinds: [String] = []
+        let observedKinds = LockedLog<String>()
         presenter.debugSubmissionObserver = { command in
-            lock.lock()
             switch command {
             case .presentSample: observedKinds.append("frame")
             case .flush: observedKinds.append("flush")
             default: break
             }
-            lock.unlock()
         }
 
         presenter.enqueuePresentSample(
@@ -168,9 +175,8 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         presenter.enqueuePresentSample(
             FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)), generation: 0, viaMetalPath: false, captureMs: 2)
 
-        await waitFor { lock.lock(); defer { lock.unlock() }; return observedKinds.count == 3 }
-        let finalKinds = { lock.lock(); defer { lock.unlock() }; return observedKinds }()
-        XCTAssertEqual(finalKinds, ["frame", "flush", "frame"],
+        await waitFor { observedKinds.count == 3 }
+        XCTAssertEqual(observedKinds.snapshot(), ["frame", "flush", "frame"],
             "a flush enqueued between two frames must be PROCESSED between them, never reordered "
             + "around either by independent scheduling")
     }

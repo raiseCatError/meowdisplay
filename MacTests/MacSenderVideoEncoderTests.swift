@@ -128,11 +128,11 @@ final class MacSenderVideoEncoderTests: XCTestCase {
     func testSubmitWithoutASessionReportsInvalidSessionAndNeverCallsBack() throws {
         let encoder = MacSenderVideoEncoder()
         let pixelBuffer = try makePixelBuffer()
-        var callbacks = 0
+        let callbacks = LockedCount()
         let status = encoder.submit(pixelBuffer, pts: CMTime(value: 0, timescale: 600),
-                                    forceKeyframe: false) { _, _, _ in callbacks += 1 }
+                                    forceKeyframe: false) { _, _, _ in callbacks.increment() }
         XCTAssertEqual(status, kVTInvalidSessionErr)
-        XCTAssertEqual(callbacks, 0,
+        XCTAssertEqual(callbacks.value, 0,
                        "a frame that was never submitted must not produce an output callback")
     }
 
@@ -183,5 +183,12 @@ final class MacSenderVideoEncoderTests: XCTestCase {
         var status: OSStatus { lock.lock(); defer { lock.unlock() }; return statusValue }
         var hasBuffer: Bool { lock.lock(); defer { lock.unlock() }; return hasBufferValue }
         var codec: StreamCodec? { lock.lock(); defer { lock.unlock() }; return codecValue }
+    }
+
+    private final class LockedCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = 0
+        func increment() { lock.lock(); _value += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
     }
 }
