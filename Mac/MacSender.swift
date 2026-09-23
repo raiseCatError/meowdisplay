@@ -168,7 +168,12 @@ struct PhoneInfo: Decodable {
 /// already executing on the sender's `queue` (`sender.video`); every call
 /// site resolves it from inside a `queue`-confined closure before touching
 /// any `queue`-confined state, exactly like the `weak self` capture it
-/// replaces. Never use this bridge in encode/capture per-frame hot paths.
+/// replaces. Avoid this bridge in encode/capture per-frame hot paths where
+/// avoidable — the encode completion path is an accepted exception: its
+/// `@Sendable` VT callback cannot capture `self` at all, and `currentOnQueue()`
+/// is only ever resolved after re-entering `queue` via the existing
+/// `queue.async` hops, so the added cost is one `NSLock` lock/unlock per
+/// frame alongside the locks `MacSenderPipelineState` already takes there.
 final class MacSenderSelfBox: @unchecked Sendable {
     private let lock = NSLock()
     private weak var value: MacSender?
@@ -354,7 +359,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// all of which have their own default initializers); `delegate` is
     /// wired to `self` right after `super.init()`.
     private let transportController: MacSenderTransportController
-    private let startCode: [UInt8] = [0, 0, 0, 1]
+    private static let startCode: [UInt8] = [0, 0, 0, 1]
 
     // The dial target. Written on `queue` only (after init): the controller
     // can migrate a live session between transports via switchTransport.
@@ -4773,34 +4778,47 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // owned by this class.
         let forceKeyframe = needsKeyframe
         if forceKeyframe { needsKeyframe = false }
+        // The completion below runs on VideoToolbox's own callback thread,
+        // not `queue` ("sender.video"), so it must not capture non-Sendable
+        // `self` directly. Everything it needs off-queue is either an
+        // immutable value captured here, or `pipelineState` — the existing
+        // `@unchecked Sendable` owner of this pipeline's cross-thread
+        // counters/generation state. `selfBox` is resolved only from inside
+        // the nested `queue.async` blocks below, which already run on
+        // `sender.video` — matching `MacSenderSelfBox.currentOnQueue()`'s
+        // documented precondition — for the two operations
+        // (`recoverFromEncoderFailureStreak`, `sendFramed`) that genuinely
+        // need live `MacSender` state.
+        let pipelineState = self.pipelineState
+        let queue = self.queue
+        let selfBox = self.selfBox
         let submitStatus = videoEncoder.submit(
             pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
-        ) { [weak self] status, buffer, sessionCodec in
-            guard let self else { return }
-            defer { self.pipelineState.decrementPendingEncodes() }
+        ) { status, buffer, sessionCodec in
+            defer { pipelineState.decrementPendingEncodes() }
             guard status == noErr, let buffer else {
                 // A session rejecting every frame looks healthy in all other
                 // counters — the receiver just stays black. Don't be silent.
-                let (logAction, shouldAttemptRecovery) = self.pipelineState.recordEncodeOutputFailure(
+                let (logAction, shouldAttemptRecovery) = pipelineState.recordEncodeOutputFailure(
                     status, at: ProcessInfo.processInfo.systemUptime, generation: generation
                 )
-                self.handleEncodeOutputFailureLogAction(logAction)
-                if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
-                    self.wakeCaptureAwaitingEncodedFrameGeneration = nil
+                MacSender.handleEncodeOutputFailureLogAction(logAction, queue: queue, pipelineState: pipelineState)
+                if pipelineState.wakeCaptureAwaitingEncodedFrameGeneration == generation {
+                    pipelineState.wakeCaptureAwaitingEncodedFrameGeneration = nil
                     Log.info("wakeCapture: encoderRejectedFirstFrame error=\(status)")
                 }
                 if shouldAttemptRecovery {
-                    self.queue.async { self.recoverFromEncoderFailureStreak(generation: generation) }
+                    queue.async { selfBox.currentOnQueue()?.recoverFromEncoderFailureStreak(generation: generation) }
                 }
                 return
             }
-            self.pipelineState.recordEncodeSuccess(generation: generation)
+            pipelineState.recordEncodeSuccess(generation: generation)
             #if DEBUG
-            self.pipelineState.incrementDebugVTCompletedWindow()
+            pipelineState.incrementDebugVTCompletedWindow()
             #endif
-            guard generation == self.captureGenerationNow else { return }
-            if self.wakeCaptureAwaitingEncodedFrameGeneration == generation {
-                self.wakeCaptureAwaitingEncodedFrameGeneration = nil
+            guard generation == pipelineState.captureGenerationNow else { return }
+            if pipelineState.wakeCaptureAwaitingEncodedFrameGeneration == generation {
+                pipelineState.wakeCaptureAwaitingEncodedFrameGeneration = nil
                 Log.info("wakeCapture: firstEncodedFrame")
                 Log.info("wakeCapture: ready")
             }
@@ -4809,12 +4827,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // actually emitting non-trivial output — and whether it's the
             // keyframe/parameter-set-bearing packet a dimension change
             // needs — for the first few encoded frames of every generation.
-            let encodeLogNumber = self.pipelineState.nextDebugEncodeLogNumber(generation: generation)
+            let encodeLogNumber = pipelineState.nextDebugEncodeLogNumber(generation: generation)
             if let encodeLogNumber {
                 let dims = CMSampleBufferGetFormatDescription(buffer).map { CMVideoFormatDescriptionGetDimensions($0) }
                 Log.info("extendDebug: encoder output gen=\(generation) #\(encodeLogNumber) "
                     + "dims=\(dims.map { "\($0.width)x\($0.height)" } ?? "?") "
-                    + "bytes=\(CMSampleBufferGetTotalSampleSize(buffer)) keyframe=\(self.isKeyframe(buffer))")
+                    + "bytes=\(CMSampleBufferGetTotalSampleSize(buffer)) keyframe=\(MacSender.isKeyframe(buffer))")
             }
             #endif
             // STALE OUTPUT. `sessionCodec` is nil once the compression
@@ -4828,7 +4846,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // alone). It is a genuine encode success — counted above — but
             // it must never be published as if the current session made it.
             guard let sessionCodec else { return }
-            guard let data = self.annexB(from: buffer, codec: sessionCodec) else { return }
+            guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return }
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
@@ -4840,8 +4858,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // via `becomeReady` without rebuilding capture) can complete this
             // encode after the old connection is gone, and this frame must
             // not be delivered onto the new one.
-            self.queue.async {
-                guard generation == self.captureGenerationNow,
+            queue.async {
+                guard let self = selfBox.currentOnQueue(),
+                      generation == self.captureGenerationNow,
                       connectionGeneration == self.activeConnectionGeneration else { return }
                 self.sendFramed(framed)
             }
@@ -4889,7 +4908,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("VTCompressionSessionEncodeFrame failed: \(report.detail) (\(report.count) since last report)")
     }
 
-    private func handleEncodeOutputFailureLogAction(_ action: ThrottledLogPolicy<OSStatus>.Action) {
+    private static func handleEncodeOutputFailureLogAction(
+        _ action: ThrottledLogPolicy<OSStatus>.Action, queue: DispatchQueue, pipelineState: MacSenderPipelineState
+    ) {
         switch action {
         case .report(let report):
             Self.reportEncodeOutputFailures(report)
@@ -5002,7 +5023,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// was configured for — passed in rather than read from `activeCodec`,
     /// which is `queue`-confined while this runs on VideoToolbox's output
     /// thread, and which by then may already describe a newer session.
-    private func annexB(from sample: CMSampleBuffer, codec: StreamCodec) -> Data? {
+    private static func annexB(from sample: CMSampleBuffer, codec: StreamCodec) -> Data? {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
         var len = 0, total = 0
         var ptr: UnsafeMutablePointer<Int8>?
@@ -5078,7 +5099,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return out
     }
 
-    private func isKeyframe(_ sample: CMSampleBuffer) -> Bool {
+    private static func isKeyframe(_ sample: CMSampleBuffer) -> Bool {
         guard let arr = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false),
               let dict = (arr as? [[CFString: Any]])?.first else { return true }
         return !(dict[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
