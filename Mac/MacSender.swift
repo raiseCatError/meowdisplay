@@ -189,6 +189,30 @@ final class MacSenderSelfBox: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return value
     }
+
+    /// Safe to call from any thread — resolves the weak reference under
+    /// `lock`, same as `currentOnQueue()`. Kept as a separate name so call
+    /// sites stay honest about whether they're already queue-confined;
+    /// used by `MacSender.beginStart()`'s startup `Task`, which runs on
+    /// the global executor rather than `sender.video`.
+    func resolve() -> MacSender? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+}
+
+
+/// Sendable handle for the async remainder of startup, returned by
+/// `MacSender.beginStart()`. Never holds a raw `MacSender` — the
+/// underlying `Task` resolves `self` from a `MacSenderSelfBox` only
+/// after it has already hopped onto the global executor, so no
+/// non-Sendable value ever crosses a suspension point on its way here.
+struct MacSenderStartupHandle: Sendable {
+    fileprivate let task: Task<Void, Error>
+
+    func wait() async throws {
+        try await task.value
+    }
 }
 
 @available(macOS 14.0, *)
@@ -1394,7 +1418,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    func start() async throws {
+    /// Synchronous initiation half of startup. Safe to call directly from
+    /// `@MainActor` (e.g. `SenderController`): `DeviceSession` already owns
+    /// this `MacSender` before startup begins, and a plain synchronous call
+    /// never suspends, so no isolation boundary is actually crossed here —
+    /// nothing needs to be `Sendable` yet.
+    ///
+    /// Does only the queue-owned/fire-and-forget setup (dial kickoff,
+    /// monitor startup) and returns a `Sendable` handle whose `wait()`
+    /// performs the rest of startup (permission gates, hello wait, mirror/
+    /// extend setup) off-actor. That Task captures only `selfBox`
+    /// (`@unchecked Sendable`) and resolves `self` locally once it's
+    /// already running there — `self` is never sent across the suspension,
+    /// it's produced fresh inside the domain that uses it.
+    nonisolated func beginStart() -> MacSenderStartupHandle {
         stopped = false
         queue.async { self.connect() }   // dial state lives on `queue`
         if !monitorsStarted {
@@ -1405,6 +1442,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             startMirrorDisplayTopologyObserver()
         }
 
+        let selfBox = self.selfBox
+        let task = Task {
+            guard let sender = selfBox.resolve() else { throw CancellationError() }
+            try await sender.awaitStartup()
+        }
+        return MacSenderStartupHandle(task: task)
+    }
+
+    /// Async wait half of startup — see `beginStart()`. Only ever invoked
+    /// from the Task `beginStart()` creates, on a `self` resolved fresh in
+    /// that Task's own isolation domain.
+    private func awaitStartup() async throws {
         // Screen Recording permission: poll until granted. No auto-prompt at
         // launch — the permission panel's Grant button triggers the system
         // dialog, so the request always has visible context.

@@ -2348,9 +2348,10 @@ final class SenderController: ObservableObject {
         sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
         }
+        let startup = sender.beginStart()
         Task {
             do {
-                try await sender.start()
+                try await startup.wait()
             } catch is CancellationError {
                 // stopped by the user while waiting — nothing to report
             } catch {
