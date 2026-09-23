@@ -36,6 +36,7 @@ final class VirtualDisplay {
     /// keeping it within `StreamingFPSPolicy.hardCapFPS` and matching it to
     /// the receiver's actual capability; this class just publishes whatever
     /// it's given.
+    @MainActor
     init?(name: String, pointsWide: Int, pointsHigh: Int, sizeInMillimeters: CGSize,
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
           refreshRate: Int = 60,
