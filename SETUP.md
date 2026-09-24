@@ -1,7 +1,8 @@
 # MeowDisplay setup guide
 
-This covers building MeowDisplay from source in this repository. See the
-[README](README.md) for what the project is and its current capabilities.
+This covers building MeowDisplay from source, connecting your devices, and
+day-to-day use. See the [README](README.md) for what the project is and its
+current capabilities.
 
 ## Requirements
 
@@ -148,6 +149,61 @@ receiving device, then add the Mac's Tailscale address as a remote endpoint
 in the app's connection/endpoint settings. The endpoint address is only a
 routing hint — the same pairing-derived encrypted session still authenticates
 the connection; see [README.md § Architecture & security summary](README.md#architecture--security-summary).
+
+## Using MeowDisplay
+
+### Mirror vs. Extend
+
+In the Mac app's **Displays** settings, **Display Mode** is a segmented
+control with two options:
+
+- **Extend** creates a genuine additional display (a virtual display) that
+  the receiving device shows — your Mac gains a real second screen, not a
+  copy of an existing one. Requires video capture to be enabled.
+- **Mirror** streams one of your Mac's actual physical displays as-is.
+  Requires an active physical display — the option is unavailable
+  (disabled) if none is present, e.g. a closed-clamshell Mac with no
+  external monitor.
+
+Switch modes at any time from that picker; when Mirror is selected, a second
+**Mirror** section lets you pick which physical display to stream if you
+have more than one.
+
+### Audio
+
+System audio streams from the Mac to the connected device automatically
+once a session is active — there's no separate audio toggle to enable it.
+
+### Input
+
+Touch, mouse, and keyboard input from the receiving device is routed back
+to the Mac and injected as real input events once connected, alongside
+supported gestures (two-finger scroll, pinch/rotate, and system gestures
+like Spotlight where implemented). This requires the Mac's Accessibility
+permission — see [Required permissions](#required-permissions) above.
+
+### Connecting and reconnecting
+
+- **Connect** — tap/click Connect next to a paired device to start a
+  session over whichever route (USB, LAN, or Remote Access) is currently
+  reachable.
+- **Wake & Connect** — if the Mac is asleep, this sends a Wake-on-LAN
+  packet and requests interactive wake, then connects automatically once
+  the Mac responds. Requires Wake for Network Access enabled on the Mac and
+  Wake-on-LAN–capable hardware/firmware; currently local-network only (see
+  the README's [Remote Access](README.md#remote-access) section for the
+  Tailscale/remote-wake limitation).
+- **Auto-Reconnect** (toggle in Mac Settings) keeps a previously connected
+  device reconnecting automatically after a drop; turning it off only stops
+  *automatic* connecting — Connect, Reconnect, and Wake & Connect still work
+  manually, and an already-active session isn't affected.
+
+### Forgetting and re-pairing a device
+
+In the Mac app's Devices list, use **Forget Device** (or **Forget…**) on a
+paired device to remove its stored trust. The next connection attempt from
+that device will require pairing again, including a fresh SAS confirmation
+— see [Pairing](#pairing) above.
 
 ## Start at Login
 
