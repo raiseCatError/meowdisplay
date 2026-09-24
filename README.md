@@ -298,7 +298,9 @@ it's used, and [PROTOCOL.md](PROTOCOL.md) for the underlying handshake.
 
 A broader pre-release security/code review is part of the current release
 roadmap (see below) — the summary above describes what's implemented today,
-not the outcome of a completed audit.
+not the outcome of a completed audit. See **[SECURITY.md](SECURITY.md)** for
+the full detail, including exactly what's stored and where, and how to
+report a security issue.
 
 ## Roadmap
 
