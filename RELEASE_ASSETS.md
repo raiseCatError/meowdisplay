@@ -1,43 +1,62 @@
 # Release screenshots and assets checklist
 
-What's already in place, and exactly what needs physical capture before a
-public beta/release. No screenshots are fabricated here — this is a
-checklist for the maintainer to work through with real hardware.
+What's already in place, and what still needs physical capture. Two
+separate tracks: public repository/website presentation (mockups are
+acceptable, and now exist) and App Store submission screenshots (real
+captures only, explicitly deferred).
 
-## Already exist
+## Public repository / website assets — now available
 
-- App icons for Mac, Mac Receiver, and iOS (`Mac/Assets.xcassets`,
-  `MacReceiver/Assets.xcassets`, `iOS/Assets.xcassets`) — complete size sets
-  for each platform, including the Debug variant icon.
-- Marketing site assets in `assets/`/`public/`: `Github Readme Icon.png`,
-  `MeowDisplay-mark.png`, `logo.png`, `icon.png`/`icon-256.png`, `og.png`
-  (social share preview).
-- No in-app product screenshots exist yet anywhere in the repo — the README
-  currently only shows the icon, no screen captures.
+Reconstructed SVG product visuals live in `assets/mockups/`. These are
+**not literal screenshots** — they're clean, source-accurate
+reconstructions of the real UI (verified against `Mac/OverviewSettingsView.swift`,
+`Mac/DisplaysSettingsView.swift`, and `Shared/ConnectionRoute.swift` for
+exact labels/states before drawing them), used because no physical device
+capture exists yet. Each file's `<desc>` says so explicitly, and the README
+captions them the same way.
 
-## Still needs physical capture
+| Asset | Purpose | Source | Used in |
+|---|---|---|---|
+| `hero.svg` | README/GitHub hero image — Mac + iPad connecting, Extend mode | SVG | README top |
+| `mirror-mode.svg` | Explains Mirror mode | SVG | README § Features |
+| `extend-mode.svg` | Explains Extend mode | SVG | README § Features |
+| `connection-state.svg` | Overview panel in a connected, authenticated state, exact field labels from source | SVG | README § How it works |
 
-For each item: what to show, and what to avoid.
+These are reusable as-is for `meowdisplay.app` once that site exists (see
+[Website/marketing content](#websitemarketing-content-not-yet-deployed)
+below) — same SVGs, same accuracy constraints.
 
-### README / GitHub
+Also already exist: app icons for Mac, Mac Receiver, and iOS
+(`Mac/Assets.xcassets`, `MacReceiver/Assets.xcassets`,
+`iOS/Assets.xcassets`) — complete size sets including the Debug variant;
+marketing site assets in `assets/`/`public/` (`Github Readme Icon.png`,
+`MeowDisplay-mark.png`, `logo.png`, `icon.png`/`icon-256.png`, `og.png`).
 
-| Screenshot | Show | Avoid |
+## Still worth capturing later (real device photos/screen recordings)
+
+Once real hardware capture happens, these can replace or sit alongside the
+mockups above — real captures are always preferable once available:
+
+| Capture | Show | Avoid |
 |---|---|---|
-| Hero image | The Mac app actively connected to a device, with a clean desktop/wallpaper | Personal files, real usernames, real device names |
 | Mac menu bar / overview | The Mac app's main overview panel with a connected device | Sensitive window content in the background |
 | iPhone/iPad connected view | The receiving device showing the Mac's extended or mirrored display | Personal photos/notifications visible on the Mac's real screen |
-
-### Feature explanation
-
-| Screenshot | Show | Avoid |
-|---|---|---|
-| Mirror mode | Receiving device showing a mirrored physical display | — |
-| Extend mode | Receiving device showing the virtual extended display in use (e.g. a window dragged onto it) | — |
 | Remote Access | The Remote Access settings pane with a Tailscale endpoint configured | The actual Tailscale address/hostname — redact or use a placeholder |
 | Pairing / SAS | The SAS confirmation screen on both devices | — |
 | Settings overview | Devices, Displays, and Security settings panes | Any real paired-device names if they reveal personal info |
 
-### TestFlight / App Store (only needed once Issue tracking iOS submission proceeds)
+This is not blocking — the mockups above are sufficient for current public
+presentation.
+
+## App Store submission screenshots — DEFERRED
+
+**Not started, and intentionally out of scope until iOS submission is
+actually being prepared (Issue #3's remaining account-side work).**
+App Store Connect requires real device screenshots, not reconstructed
+visuals — mockups from this checklist must not be submitted as App Store
+assets.
+
+### TestFlight / App Store (only needed once iOS submission proceeds)
 
 - Required iPhone screenshot sizes and iPad screenshot sizes (if the app is
   submitted as universal) must be checked against **current** App Store
@@ -57,6 +76,25 @@ For each item: what to show, and what to avoid.
   Apple's official device frame templates.
 - Save originals at full resolution; downscale copies for README/web use to
   keep the repo lean.
+
+## Website/marketing content (not yet deployed)
+
+`meowdisplay.app` (the `homepage` set on the GitHub repo) has no live
+GitHub Pages deployment yet (see Issue #1/#3 findings — `gh api
+repos/.../pages` returns 404). The following is ready to reuse once that
+site exists; nothing here is deployed by this checklist:
+
+- The four `assets/mockups/*.svg` files above — same accuracy/labeling
+  constraints apply on a public site as in the README.
+- Short product description: reuse the README's opening paragraph and
+  "Why MeowDisplay?" section verbatim — it's already accurate and
+  intentionally free of unsupported claims.
+- Security/privacy summary for a future `meowdisplay.app/privacy` page:
+  reuse `SECURITY.md` as the source of truth rather than writing separate
+  privacy copy that could drift from it.
+- No content was fabricated or deployed here — this section only says
+  what's *ready* to reuse when the site is built, which is a decision (and
+  a separate effort) for the maintainer, not something this pass performs.
 
 ## Not blocking
 

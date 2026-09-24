@@ -29,6 +29,12 @@ combinations below may already work but aren't yet as thoroughly validated —
 see [Platform status](#platform-status).
 
 <p align="center">
+<img src="assets/mockups/hero.svg" alt="MeowDisplay connecting a Mac to an iPad in Extend mode" width="720">
+</p>
+
+<p align="center"><em>Reconstructed product visual — not a literal screenshot. See <a href="RELEASE_ASSETS.md">RELEASE_ASSETS.md</a>.</em></p>
+
+<p align="center">
 <a href="#getting-started">Getting Started</a> ·
 <a href="#features">Features</a> ·
 <a href="#how-it-works">How it works</a> ·
@@ -68,6 +74,12 @@ user-provided reachable private network such as Tailscale — see
 ## Features
 
 ### Display & media
+
+<p align="center">
+<img src="assets/mockups/mirror-mode.svg" alt="Mirror mode: the iPad shows the same content as the Mac's physical display" width="420">
+<img src="assets/mockups/extend-mode.svg" alt="Extend mode: the iPad becomes a genuine additional display" width="420">
+</p>
+
 - True extended display or mirrored output from the Mac, Retina-sharp,
   low-latency (hardware H.264 encode via VideoToolbox, capture via
   ScreenCaptureKit).
@@ -144,6 +156,10 @@ MAC HOST                                          RECEIVER (iPhone/iPad/Mac)
 
 The full wire protocol is specified in [PROTOCOL.md](PROTOCOL.md); how it
 evolves across releases is in [COMPATIBILITY.md](COMPATIBILITY.md).
+
+<p align="center">
+<img src="assets/mockups/connection-state.svg" alt="Mac app Overview panel showing a connected, authenticated session" width="500">
+</p>
 
 ## Getting Started
 
