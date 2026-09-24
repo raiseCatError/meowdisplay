@@ -7,17 +7,16 @@ captures only, explicitly deferred).
 
 ## Public repository / website assets — now available
 
-Real app captures live in `assets/readme/`. These are literal screenshots
-of the running Mac app and iPhone Simulator receiver (WebP), not
-reconstructions — see the table below for what each shows.
+README images live in `assets/readme/`. Each is a transparent WebP
+composition of real app captures (the website's Mac app and iPhone/iPad
+receiver screenshots) with rounded masks and soft shadows, so they sit
+cleanly on GitHub light and dark themes. No app UI is reconstructed.
 
-| Asset | Purpose | Source | Used in |
-|---|---|---|---|
-| `mac-overview.webp` | README/GitHub hero — real Mac app, Overview panel, idle | Mac app capture | README top |
-| `iphone-home.webp` | README/GitHub hero — real receiver home screen | iPhone Simulator capture | README top |
-| `mac-mirror.webp` | Explains Mirror mode | Mac app capture | README § Features |
-| `mac-extend.webp` | Explains Extend mode | Mac app capture | README § Features |
-| `mac-input.webp` | Explains Allow Input | Mac app capture | README § Features |
+| Asset | Contents | Used in |
+|---|---|---|
+| `hero.webp` | Mac app Overview + tilted iPhone receiver home | README top |
+| `display-modes.webp` | Displays settings, Mirror and Extend cascaded | README § Display |
+| `devices.webp` | Devices list + per-device settings + iPad receiver | README § Devices |
 
 The earlier reconstructed `assets/mockups/*.svg` visuals have been
 superseded by these real captures and removed from the README.
@@ -84,8 +83,8 @@ a GitHub Pages check specifically, which was never the actual hosting path.
 `https://meowdisplay.app/...` URLs throughout (canonical link, Open Graph,
 sitemap, robots.txt) — nothing there needed changing.
 
-- The `assets/readme/*.webp` captures above remain README/GitHub-only;
-  the live site has its own asset set already in place.
+- The `assets/readme/*.webp` compositions above are built from the live
+  site's captures and are README/GitHub-only copies (never hotlinked).
 - The site's product description and privacy copy already exist
   independently on `meowdisplay.app` — no further reuse work is pending
   here.

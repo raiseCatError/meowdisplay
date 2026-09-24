@@ -1,428 +1,249 @@
 <div align="center">
 
-<img src="assets/Github Readme Icon.png" alt="MeowDisplay icon" width="140">
+<img src="assets/Github Readme Icon.png" alt="MeowDisplay icon" width="128">
 
 # MeowDisplay
 
-**MEOW — Mac Everywhere, On Whatever Display**
+**Mac everywhere.<br>On whatever display.**
 
-*Mac, Every Other Way*
+Use your iPhone or iPad as another display for your Mac — and control the Mac
+right from it.
+
+[Website](https://meowdisplay.app) ·
+[Features](https://meowdisplay.app/features.html) ·
+[Setup](https://meowdisplay.app/docs.html) ·
+[Support](https://meowdisplay.app/support.html) ·
+[Privacy](https://meowdisplay.app/privacy.html)
+
+<br>
+
+<img src="assets/readme/hero.webp" alt="The MeowDisplay Mac app open to Overview, beside the MeowDisplay receiver on iPhone" width="760">
 
 </div>
 
-MeowDisplay turns an iPhone or iPad into a secure remote display and control
-surface for your Mac — locally over USB or WiFi, or remotely through a
-reachable private network such as Tailscale. It began as a fork of the
-open-source [OpenDisplay](#meowdisplay-and-opendisplay) project and has grown
-in a broader remote-access direction: secure pairing, remote connectivity,
-audio, reconnect/wake workflows, and device control on top of OpenDisplay's
-original display/capture/encoding foundation.
+## Overview
 
-**Status: public beta preparation.** MeowDisplay is not yet published as a
-signed download or a TestFlight build — build from source today (see
-[Getting Started](#getting-started)). Core functionality below is real and
-working in day-to-day use; see [Roadmap](#roadmap) for what's left before a
-public release.
+MeowDisplay mirrors or extends your Mac onto an iPhone or iPad, then turns
+that device into a way to work the Mac: touch, a trackpad-style pointer,
+multi-finger gestures, a keyboard, and trays of modifiers and shortcuts all
+travel back to the Mac. Connect over USB, local Wi-Fi, or a private network
+you control, with devices paired and every session encrypted.
 
-**Primary tested configuration: Mac host → iPhone receiver.** Other
-combinations below may already work but aren't yet as thoroughly validated —
-see [Platform status](#platform-status).
+No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
+or server in the middle.
 
-<p align="center">
-<img src="assets/readme/mac-overview.webp" alt="The real MeowDisplay Mac app, open to Overview" width="420">
-<img src="assets/readme/iphone-home.webp" alt="MeowDisplay receiver home screen running in iPhone Simulator" width="180">
-</p>
+<sub>Public release builds are being prepared. Until then, MeowDisplay can be
+[built from source](#build-from-source).</sub>
 
-<p align="center"><em>Real MeowDisplay Mac app and receiver captures.</em></p>
+## At a glance
 
-<p align="center">
-<a href="#getting-started">Getting Started</a> ·
-<a href="#features">Features</a> ·
-<a href="#how-it-works">How it works</a> ·
-<a href="#platform-status">Platform status</a> ·
-<a href="#roadmap">Roadmap</a> ·
-<a href="#want-to-contribute">Contributing</a> ·
-<a href="#architecture--security-summary">Security</a>
-</p>
+| | |
+|---|---|
+| **Display** | Mirror an existing Mac display, choosing the source when several are connected · Extend with a virtual display · Extend shape options, including Use Full Display, where supported |
+| **Control** | Direct Touch · Trackpad mode · keyboard · click, drag and right-click · scroll, pinch and rotate · Mac system gestures |
+| **Shortcuts** | Main Control Tray · Function Tray · Chords and modifier palettes · customizable actions · profiles · Auto-hide |
+| **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
+| **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
+| **Security** | Trusted pairing with a matching code · TLS 1.3 · pinned peer identity |
+| **Receivers** | iPhone and iPad |
 
----
-
-## Why MeowDisplay?
-
-Most "use your iPad as a second monitor" tools stop at mirroring a screen.
-MeowDisplay's direction is broader: making a Mac genuinely *reachable and
-usable* from another device — not just viewable. That means real input
-(touch, mouse, keyboard, system gestures) routed back to the Mac, system
-audio, secure paired sessions instead of an open port, and connectivity that
-follows you from the same room to a different network entirely, without
-requiring an account, a subscription, or a proprietary relay service.
-
-The goal isn't to be "another second-monitor clone" — it's a Mac you can
-reach from whatever display or device you have on hand, on your own network
-terms.
-
-**Scope, on purpose:** MeowDisplay focuses on remote display and control. It
-does not try to become a general file-transfer suite, a cloud-drive
-replacement, or a clipboard-sync ecosystem — use iCloud, a cable, or whatever
-you already use for that, alongside MeowDisplay for the display/control part.
-
-**No MeowDisplay-hosted account or relay:** normal connectivity doesn't
-depend on a MeowDisplay-hosted account, cloud relay, or subscription
-service. Local operation uses USB or LAN; remote operation can use a
-user-provided reachable private network such as Tailscale — see
-[Remote Access](#remote-access).
-
-## Features
-
-### Display & media
+## Display: Mirror & Extend
 
 <p align="center">
-<img src="assets/readme/mac-mirror.webp" alt="MeowDisplay Displays settings with Mirror selected" width="420">
-<img src="assets/readme/mac-extend.webp" alt="MeowDisplay Displays settings with Extend selected" width="420">
+<img src="assets/readme/display-modes.webp" alt="MeowDisplay Displays settings, with the Mirror and Extend modes" width="640">
 </p>
 
-<p align="center"><em>Mirror and Extend, in the running Mac app.</em></p>
+- **Mirror** shows an existing Mac display on the receiver. With more than
+  one display connected, choose which one to mirror.
+- **Extend** adds a separate virtual display to the Mac, arranged alongside
+  your other displays in macOS. Where supported, Extend shape controls tune
+  that display to the receiver, including an option to use the full display.
 
-- True extended display or mirrored output from the Mac, Retina-sharp,
-  low-latency (hardware H.264 encode via VideoToolbox, capture via
-  ScreenCaptureKit).
-- Virtual display creation (`CGVirtualDisplay`) for extend mode, alongside
-  physical-display mirror/capture modes.
-- System audio streaming from the Mac to the receiving device.
-- Display/mirror source selection on the receiving side.
+## Input & gestures
 
-### Input & control
+With **Allow Input** enabled on the Mac and Accessibility permission granted,
+the receiver becomes an input device for the Mac. Choose an input mode in the
+receiver's Settings:
+
+- **Direct Touch** — a touch maps to the matching position on the Mac screen.
+- **Trackpad** — the pointer moves relatively, like a MacBook trackpad.
+  Touching doesn't jump the cursor to that spot. Sensitivity is adjustable,
+  and multi-finger gestures keep working.
+
+| Gesture | On your Mac |
+|---|---|
+| Tap | Click |
+| Double tap | Double-click |
+| Triple tap | Triple-click |
+| Tap, then hold and move | Left drag |
+| Two-finger tap | Right-click |
+| Two-finger tap, then hold and move | Right-button drag |
+| Two-finger pan | Scroll, with momentum |
+| Pinch / spread | **Viewport**, **App**, or **Disabled** |
+| Two-finger rotate | **Viewport**, **App**, or **Disabled**, with optional **Snap Rotation** |
+| Two-finger double tap | Reset or restore the viewport zoom and pan |
+
+### Mac system gestures
+
+| Gesture | On your Mac |
+|---|---|
+| Three-finger swipe up | Mission Control |
+| Three-finger swipe down | App Exposé |
+| Three-finger swipe left / right | Next / Previous Space |
+| Three-finger tap | Spotlight |
+| Four- or five-finger spread | Show Desktop |
+| Four- or five-finger pinch | Launchpad |
+
+Full details are on the [Features page](https://meowdisplay.app/features.html#pointer).
+
+### Trackpad mode, without the picture
+
+Turn **Video** off and keep using MeowDisplay for pointer and keyboard input.
+The connection, trays and selected input mode stay active, so the receiver
+works as a trackpad and keyboard for the Mac.
+
+### Keyboard
+
+Tap the tray's Keyboard button for the on-screen keyboard, or use a hardware
+keyboard connected to the iPhone or iPad. Latched modifiers from the Control
+Tray combine with the keys you type.
+
+## Control Trays & Chords
+
+### Main Control Tray
+
+The keys a touch screen is missing, close at hand: **Command**, **Option**,
+**Control**, **Shift**, **Escape**, **Tab**, **Dock**, **Keyboard** and
+**Settings**. Reorder controls, show or hide each one, and keep several
+setups as profiles. Haptics, a landscape tray side, and Avoid Notch let it fit
+the device you're holding.
+
+### Chords
+
+Hold or latch a modifier and a palette of matching shortcuts appears beside
+it. Combine modifiers and the palette changes with the chord — for example
+**⌘** for Copy, Paste and Undo, **⌘⌥** for Force Quit and Hide Others, **⌘⇧**
+for Redo and Screenshot. Pick commands without reaching for a physical
+keyboard, and choose which actions each palette offers.
+
+### Function Tray
+
+A separate tray of one-tap actions — **Zoom In**, **Zoom Out**, **Undo** and
+**Redo** by default. It's customized independently of the Main Control Tray,
+with its own profiles, and can sit on the same or the opposite side.
+
+### Auto-hide
+
+**There when you need it. Out of the way when you don't.** With Auto-hide, the
+control trays retreat after a period of inactivity and interacting with the
+receiver brings them back. Manual Collapse stays separate, and Auto-hide can
+be turned off.
+
+## Devices
 
 <p align="center">
-<img src="assets/readme/mac-input.webp" alt="The real Mac Input settings showing Allow Input and per-device input requests" width="420">
+<img src="assets/readme/devices.webp" alt="MeowDisplay Devices settings and a paired device's settings on the Mac, beside the receiver on iPad" width="720">
 </p>
 
-- Touch, mouse, and keyboard input routed from the receiving device back to
-  the Mac and injected as real input events.
-- Two-finger scroll, configurable pinch/rotate and other gesture behavior.
-- Application and system gestures (e.g. Spotlight) where implemented.
+The Mac app manages every receiver: paired and nearby devices with their
+status, per-device settings and input request controls, and **Forget
+Device**. **Allow Input** on the Mac remains the master switch for whether
+any receiver can control it.
 
-### Connectivity
-- **USB** over macOS's built-in `usbmuxd` — no helper tools.
-- **LAN/WiFi** with zero-config discovery via Bonjour, including automatic
-  AWDL (peer-to-peer WiFi) route detection.
-- **Remote Access** over a reachable private network such as Tailscale.
-- **Auto-Reconnect**, configurable.
+## Connections
 
-### Wake & reliability
-- **Wake & Connect — Release-capable.** A one-tap "Wake & Connect" action
-  sends bounded local Wake-on-LAN packets, requests interactive wake
-  promotion, and reconnects/recovers capture automatically, authenticated
-  against the same pinned-mutual-TLS identity as every other connection.
-  Waking a Mac depends on its hardware/firmware supporting Wake-on-LAN and
-  Wake for Network Access being enabled — see [FAQ](#faq) for the local-only
-  limitation and the [Roadmap](#roadmap) for physical-hardware validation
-  still in progress.
-- Session/generation-guarded reconnect so a dropped route resumes cleanly
-  (this part ships today).
+- **USB** — plug in a data-capable cable and trust the Mac. A direct,
+  reliable path with no network setup.
+- **Local Wi-Fi** — receivers are discovered over Bonjour on your network,
+  including nearby peer-to-peer Wi-Fi.
+- **Remote Access** — reach a paired Mac through a private network you
+  control, such as Tailscale. The address only routes the connection; pairing
+  still authenticates it.
+- **Auto-Reconnect** restores the session whenever the connection becomes
+  available again.
+- **Wake & Connect** can wake a supported paired Mac on its network and
+  reconnect when it becomes available. It needs Wake for Network Access and
+  compatible hardware, and is designed for a logged-in Mac that has gone to
+  sleep or locked. See
+  [Setup](https://meowdisplay.app/docs.html) for networking limitations.
 
-### Experience
-- Dock, Menu Bar, or Dock & Menu Bar operating modes.
-- Start at Login.
-- **MeowDisplay Receiver** — use a spare Mac itself as a display, where
-  implemented.
+## Audio
 
-### Security
-- **Secure device pairing** — a short authentication code (SAS) confirmed on
-  both ends before a session is trusted.
-- **Pinned, encrypted transport** for wireless and remote sessions — no
-  plaintext wireless fallback.
-- A remote endpoint (like a Tailscale address) is a **routing hint, not an
-  identity** — see [Architecture & security summary](#architecture--security-summary).
+Mac system audio can stream to the receiver while the Mac keeps playing
+locally. Turn it on with the receiver's **Audio** toggle; if sound and picture
+drift apart, adjust **A/V Sync** or tap **Resync**.
 
-## How it works
+## Security
 
-```text
-MAC HOST                                          RECEIVER (iPhone/iPad/Mac)
-  display source (physical or CGVirtualDisplay)
-       │
-       ▼
-  ScreenCaptureKit  ──capture──▶  VideoToolbox (H.264 hw encode)
-       │
-       ▼
-  pinned, encrypted transport  ────────────────▶  decode + render
-  (USB / LAN / AWDL / Remote)  ◀────────────────  touch · mouse · keyboard
-       ▲                                               │
-       │                                               ▼
-  CGEvent / input injection  ◀──authenticated control──┘
-```
+- Devices pair explicitly, confirming a matching verification code (SAS) on
+  both screens.
+- Every session is encrypted and mutually authenticated with **TLS 1.3**
+  against the **pinned peer identity** you trusted.
+- There is no plaintext media fallback.
 
-- **Discovery** is local via **Bonjour**; USB is discovered separately over
-  `usbmuxd`. Neither step grants trust by itself.
-- **Route** (USB, LAN, AWDL, or Remote) is classified automatically once a
-  connection is live — it changes how the bytes travel, not who's on the
-  other end.
-- **Trust** comes from the pinned, encrypted session established during
-  pairing, regardless of which route carried the connection. A remote
-  endpoint address (e.g. Tailscale) only gets you *to* a peer — it doesn't
-  authenticate one.
+More in [SECURITY.md](SECURITY.md) and the
+[Privacy page](https://meowdisplay.app/privacy.html).
 
-The full wire protocol is specified in [PROTOCOL.md](PROTOCOL.md); how it
-evolves across releases is in [COMPATIBILITY.md](COMPATIBILITY.md).
+## Getting started
 
-## Getting Started
+1. Run MeowDisplay on your Mac.
+2. Open the MeowDisplay receiver on your iPhone or iPad.
+3. Connect over USB or Wi-Fi, and pair the devices by confirming the matching
+   code.
+4. Choose **Mirror** or **Extend**.
+5. Grant Screen Recording, Accessibility and Local Network permissions as
+   macOS and iOS ask for them.
 
-**macOS** — build from source today (see below); a signed, Developer
-ID–notarized direct download is planned. The Mac App Store isn't the
-immediate distribution target (MeowDisplay relies on `CGVirtualDisplay`, a
-private API — see the FAQ).
+The [Setup guide](https://meowdisplay.app/docs.html) covers permissions,
+pairing, USB & Wi-Fi, Remote Access and troubleshooting.
 
-**iOS** — build and install through Xcode today; a TestFlight beta is
-planned, with the App Store to follow after broader validation and review.
-Cold-boot/LoginWindow support is not required for either.
+## Build from source
 
 ```sh
-git clone <your fork URL>
-cd MeowDisplay
+git clone https://github.com/raiseCatError/meowdisplay.git
+cd meowdisplay
 echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
 ./generate-local.sh
 ```
 
-Then open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac sender)
-and `OpenSidecariOS` (iPhone/iPad receiver) schemes. Full instructions —
-signing, permissions, USB/WiFi/Remote Access setup, pairing, and
-troubleshooting — are in **[SETUP.md](SETUP.md)**. For how releases are
-versioned and built once distribution starts, see
-**[RELEASE.md](RELEASE.md)**.
+Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac) and
+`OpenSidecariOS` (iPhone/iPad receiver) schemes. Signing, permissions and
+troubleshooting are in [SETUP.md](SETUP.md); release process in
+[RELEASE.md](RELEASE.md).
 
-## Platform status
+## Documentation
 
-**Primary tested:**
-- Mac host → iPhone receiver
+- [Features](https://meowdisplay.app/features.html) ·
+  [Setup](https://meowdisplay.app/docs.html) ·
+  [Support](https://meowdisplay.app/support.html) ·
+  [Privacy](https://meowdisplay.app/privacy.html)
+- [SETUP.md](SETUP.md) — building, signing and local setup
+- [SECURITY.md](SECURITY.md) — security model and reporting issues
+- [PROTOCOL.md](PROTOCOL.md) and [COMPATIBILITY.md](COMPATIBILITY.md) — wire
+  protocol and versioning
+- [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — virtual displays, sleep and
+  wake, and other internals
 
-**Exists, needs broader validation:**
-- iPad receiver
-- MeowDisplay Receiver (spare Mac as a display)
-- Multiple Macs, different Mac models/display combinations
+## Contributing
 
-**Planned / community roadmap:**
-- Android and Linux clients
-- Broader headless/clamshell validation
-- Additional hardware/platform combinations
-- Stylus/pen support
+Issues and pull requests are welcome, especially testing on iPad, different
+Mac models, external-display setups and networks. Please open an issue before
+starting large architecture work.
 
-If code already exists for a configuration, we say "needs broader
-validation," not "doesn't work" — see [Want to contribute?](#want-to-contribute)
-if you can help test one.
+## License & credits
 
-## Remote Access
+MeowDisplay is licensed under [GPL-3.0](LICENSE). It began as a fork of
+[OpenDisplay](https://github.com/peetzweg/opendisplay) by Philip Poloczek,
+which provided the original display, capture, encoding and receiver
+foundation. Original work Copyright (c) 2026 Philip Poloczek; this fork's
+changes are contributed under the same license. If you distribute a modified
+version, it must remain open source under the same license with attribution
+intact.
 
-MeowDisplay can connect to a paired Mac through any reachable address, not
-just the local network. [Tailscale](https://tailscale.com) (or an equivalent
-private network) is the recommended way to get that reachability — install
-and sign in on both devices, then add the Mac's Tailscale address as a
-remote endpoint.
-
-Tailscale is **not** MeowDisplay's authentication system. The endpoint
-address is only routing information — a way to find the peer. Actual trust
-still comes from the pinned, encrypted transport established during pairing,
-the same as any other route.
-
-One current honest limitation: MeowDisplay can't magically send a
-local-network Wake-on-LAN packet through a sleeping Mac's Tailscale node —
-WoL is a link-layer LAN broadcast, and a sleeping Mac's Tailscale node isn't
-itself online to relay one in. Today's practical remote-wake path, where it
-works at all, looks like: something else on the Mac's own LAN (a router
-feature, another always-on device) sends the actual WoL broadcast → the Mac
-wakes → its Tailscale link comes back → MeowDisplay connects. An integrated
-remote-WoL relay/router solution is future work — see
-[Roadmap](#roadmap) and [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md#remote-wake-on-lan)
-for the detail.
-
-## FAQ
-
-**Why does macOS show the purple screen-recording indicator?**
-macOS shows that indicator for any app capturing the screen — MeowDisplay
-included. It's a system-level privacy signal, not something an app can
-suppress.
-
-**Why can't MeowDisplay see my iPhone over WiFi?**
-Check Local Network permission on both the Mac and the device, confirm both
-are on the same network, and keep the receiving app open. See
-[SETUP.md](SETUP.md#troubleshooting).
-
-**Does it work over USB?**
-Yes — plug in with a data-capable cable, accept the Trust prompt, and it
-connects without any network setup.
-
-**Can I use it away from home?**
-Yes, via [Remote Access](#remote-access) over a reachable private network
-like Tailscale.
-
-**Does it require Tailscale?**
-No. Tailscale is only needed for Remote Access; USB and same-network WiFi
-work without it.
-
-**Can it wake a sleeping Mac?**
-Yes, over the local network: "Wake & Connect" sends a standard Wake-on-LAN
-packet and reconnects automatically once the Mac responds — this requires
-Wake for Network Access to be enabled on the Mac and hardware/firmware that
-supports it. Waking a Mac remotely over Tailscale isn't solved yet (a
-sleeping Mac's Tailscale node isn't itself reachable to relay a wake) — see
-[Remote Access](#remote-access).
-
-**Does iPad work?**
-The receiver runs on iPad, but it isn't the primary tested configuration
-yet — see [Platform status](#platform-status).
-
-**Can another Mac be the receiver?**
-Yes, using the separate **MeowDisplay Receiver** app, where implemented —
-see [Platform status](#platform-status).
-
-**Why isn't the iOS app on TestFlight/the App Store yet?**
-It's planned but not live yet — see [Getting Started](#getting-started)
-and [Roadmap](#roadmap).
-
-**Why does MeowDisplay use `CGVirtualDisplay`, a private API?**
-It's the same technique used by other virtual-display tools (e.g.
-BetterDisplay, DeskPad) to create a genuine extended display rather than a
-mirror — there's no public third-party API for host-side virtual display
-creation yet. This use is deliberately isolated to one place in the
-codebase, and MeowDisplay should switch to a supported public equivalent if
-Apple ever exposes one. See [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) for the
-detail.
-
-**Does closing the Settings window stop the app?**
-No — the Mac app keeps running (Dock, Menu Bar, or both, depending on your
-chosen operating mode).
-
-**What happens to my pairing/security data?**
-Pairing trust is stored locally on your own devices; see
-[Architecture & security summary](#architecture--security-summary) for how
-it's used, and [PROTOCOL.md](PROTOCOL.md) for the underlying handshake.
-
-## Architecture & security summary
-
-- Local discovery uses **Bonjour** — unchanged from upstream, for
-  compatibility with any client speaking the same protocol.
-- Remote endpoints (e.g. a Tailscale address) are **routing hints, not
-  identity** — they get you to a peer, they don't authenticate it.
-- Wireless and remote sessions authenticate using the existing **pinned,
-  encrypted transport** established during pairing — the same trust model
-  regardless of how the peer was reached.
-- **Tailscale** (or an equivalent private network) is optional, recommended
-  networking for Remote Access — not itself an authentication mechanism.
-- There is **no plaintext wireless fallback**.
-- **Session model today:** MeowDisplay targets a Mac with an existing
-  logged-in (Aqua) user session that sleeps or locks — wake, reconnect,
-  capture recovery, and remote input are built and validated around that
-  lifecycle. A fully logged-out, cold-boot / LoginWindow session is a
-  different architecture and isn't required for the first public beta; see
-  [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md#sleeplock-vs-cold-boot) for the
-  distinction.
-
-A broader pre-release security/code review is part of the current release
-roadmap (see below) — the summary above describes what's implemented today,
-not the outcome of a completed audit. See **[SECURITY.md](SECURITY.md)** for
-the full detail, including exactly what's stored and where, and how to
-report a security issue.
-
-## Roadmap
-
-Distinguishing **planned** work (intended, not merely an idea) from
-**future** (longer-term direction). No dates are promised for either.
-
-### Planned
-
-- **Wake & Connect physical validation** — the one-tap wake/reconnect/
-  interactive-promotion flow ships in Release builds; what's left is
-  systematic physical retesting across sleep/lock/display-selection/
-  Remote-Access combinations (see the physical retest plan in this repo's
-  engineering notes) before calling it fully validated in the field.
-- **Release readiness / packaging** — final branding/assets, Developer ID
-  signing + notarization, packaging, setup/permission polish.
-- **Sparkle/update validation** — once MeowDisplay hosts its own appcast and
-  signing key (see [SETUP.md](SETUP.md)); Sparkle checks are inert until then.
-- **TestFlight preparation** — getting the iOS receiver ready for a beta.
-- **Security/code review** — full code/security review, pairing/trust
-  review, remote/session review, authenticated peer-identity hardening,
-  protocol/versioning review, ahead of wider distribution.
-- **Headless / display-topology validation + fallback** — some clamshell
-  configurations already work; what's left is systematic validation across
-  (1) physical external display only, (2) built-in display only, and (3)
-  true clamshell/headless with no usable physical display, with a
-  deterministic MeowDisplay-owned virtual-display fallback for case 3. The
-  private `CGVirtualDisplay` path stays isolated until a public equivalent
-  exists.
-- **Broader iPad / MeowDisplay Receiver / multi-Mac validation** — different
-  display/network combinations.
-- **Android support** (planned/community area).
-- **Linux support** (planned/community area).
-
-### Future
-
-Longer-term direction, not required for the first public beta:
-
-- Cold boot / fully logged-out LoginWindow remote access (**not** required
-  for the first MeowDisplay public beta).
-- Apple persistent remote-desktop capability work, where appropriate.
-- A QUIC transport experiment plus a separate security review (**not** part
-  of the current release plan).
-- An integrated remote Wake-on-LAN relay/router solution (the Remote Access
-  wake limitation above).
-- Apple Pencil / stylus improvements, including Android/Linux pen-device
-  support.
-- Display-shape/resolution presets, where appropriate.
-- Cat Mode and other later extras.
-
-## Want to contribute?
-
-MeowDisplay is actively developed, and community hardware testing is very
-welcome — especially on hardware the maintainer can't currently test
-reliably:
-
-- iPad receiver behavior
-- Android devices
-- Linux
-- Multiple-Mac environments
-- MeowDisplay Receiver behavior
-- Different Mac models
-- Clamshell/headless configurations
-- Unusual external-display combinations
-- Different routers/networks
-- Stylus/pen hardware
-
-These are useful open-source contribution and testing opportunities, not
-gaps to apologize for. Please open or claim an issue before starting any
-large architecture work.
-
-## MeowDisplay and OpenDisplay
-
-MeowDisplay began as a fork of [OpenDisplay](https://github.com/peetzweg/opendisplay)
-by Philip Poloczek — a free, open-source alternative to Apple Sidecar, Duet
-Display, and Luna Display that turns spare Apple devices into second
-monitors for a Mac. OpenDisplay provided the original display/capture/
-encoding/receiver foundation this project is built on; OpenDisplay's own
-website, TestFlight beta, and community client projects (Android/Linux
-receivers and senders speaking the same wire protocol) are linked from its
-repository.
-
-MeowDisplay has since followed a broader remote-display/control direction,
-expanding substantially in areas like secure pairing, remote connectivity,
-system audio, wake/reconnect workflows, and device control. This isn't a
-claim that one project is better than the other — they now serve
-overlapping but different goals, and this fork keeps OpenDisplay's
-[GPL-3.0](LICENSE) license and original copyright notice intact, per the
-license's terms. See [PROTOCOL.md](PROTOCOL.md) and
-[COMPATIBILITY.md](COMPATIBILITY.md) for the technical detail this fork
-inherited and has extended.
-
-## License
-
-[GPL-3.0](LICENSE). Original work Copyright (c) 2026 Philip Poloczek; this
-fork's changes are contributed under the same license. If you distribute a
-modified version it must stay open source under the same license with
-attribution intact.
-
----
+Independent open-source software, not affiliated with Apple.
 
 <div align="center">
 
-*MeowDisplay — Mac Everywhere, On Whatever Display.*
+<sub>Made by raiseCatError</sub>
 
 </div>
