@@ -72,24 +72,23 @@ README captures above must not be submitted as App Store assets.
 - Save originals at full resolution; downscale copies for README/web use to
   keep the repo lean.
 
-## Website/marketing content (not yet deployed)
+## Website/marketing content
 
-`meowdisplay.app` (the `homepage` set on the GitHub repo) has no live
-GitHub Pages deployment yet (see Issue #1/#3 findings — `gh api
-repos/.../pages` returns 404). The following is ready to reuse once that
-site exists; nothing here is deployed by this checklist:
+`meowdisplay.app` (the `homepage` set on the GitHub repo) is now live,
+hosted on Cloudflare (Pages/DNS) rather than GitHub Pages — the earlier
+"no live deployment, `gh api repos/.../pages` returns 404" note applied to
+a GitHub Pages check specifically, which was never the actual hosting path.
+`www.meowdisplay.app` redirects to the apex domain. The separate
+`MeowDisplayWebsite` repository's `privacy.html`/`support.html`/
+`docs.html`/`features.html` already reference the canonical
+`https://meowdisplay.app/...` URLs throughout (canonical link, Open Graph,
+sitemap, robots.txt) — nothing there needed changing.
 
-- The `assets/readme/*.webp` captures above — same accuracy constraints
-  apply on a public site as in the README.
-- Short product description: reuse the README's opening paragraph and
-  "Why MeowDisplay?" section verbatim — it's already accurate and
-  intentionally free of unsupported claims.
-- Security/privacy summary for a future `meowdisplay.app/privacy` page:
-  reuse `SECURITY.md` as the source of truth rather than writing separate
-  privacy copy that could drift from it.
-- No content was fabricated or deployed here — this section only says
-  what's *ready* to reuse when the site is built, which is a decision (and
-  a separate effort) for the maintainer, not something this pass performs.
+- The `assets/readme/*.webp` captures above remain README/GitHub-only;
+  the live site has its own asset set already in place.
+- The site's product description and privacy copy already exist
+  independently on `meowdisplay.app` — no further reuse work is pending
+  here.
 
 ## Not blocking
 
