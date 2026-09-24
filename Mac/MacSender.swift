@@ -4202,8 +4202,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Control messages (phone -> Mac)
 
     private func receiveControl(on conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, _, error in
-            guard let self, self.transportController.currentConnection === conn,
+        let selfBox = self.selfBox
+        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { data, _, _, error in
+            guard let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn,
                   error == nil, let data, data.count == 4 else {
                 if let error {
                     Log.info("control receive ended: \(error)")
@@ -4214,10 +4215,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // redial), not the link dying.
                     var isOwnCancel = false
                     if case .posix(let code) = error, code == .ECANCELED { isOwnCancel = true }
-                    if let self, self.transportController.currentConnection === conn, !isOwnCancel {
+                    if let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn, !isOwnCancel {
                         self.linkDied("receive failed: \(error)")
                     }
-                } else if let self, self.transportController.currentConnection === conn {
+                } else if let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn {
                     Log.info("control receive ended: EOF")
                     self.invalidateApplicationSession(reason: "controlEOF")
                     self.linkDied("control EOF")
@@ -4226,10 +4227,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             let len = Int(UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
             guard len > 0, len < 1 << 20 else { return }
-            conn.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] payload, _, _, error in
-                guard let self, self.transportController.currentConnection === conn,
+            conn.receive(minimumIncompleteLength: len, maximumLength: len) { payload, _, _, error in
+                guard let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn,
                       error == nil, let payload, payload.count == len else {
-                    if let self, self.transportController.currentConnection === conn {
+                    if let self = selfBox.currentOnQueue(), self.transportController.currentConnection === conn {
                         Log.info("control payload receive ended: \(error.map(String.init(describing:)) ?? "EOF")")
                         self.invalidateApplicationSession(reason: error == nil ? "controlEOF" : "controlReceiveFailed")
                         self.linkDied("control receive ended")
