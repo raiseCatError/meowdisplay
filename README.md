@@ -18,6 +18,12 @@ in a broader remote-access direction: secure pairing, remote connectivity,
 audio, reconnect/wake workflows, and device control on top of OpenDisplay's
 original display/capture/encoding foundation.
 
+**Status: public beta preparation.** MeowDisplay is not yet published as a
+signed download or a TestFlight build — build from source today (see
+[Getting Started](#getting-started)). Core functionality below is real and
+working in day-to-day use; see [Roadmap](#roadmap) for what's left before a
+public release.
+
 **Primary tested configuration: Mac host → iPhone receiver.** Other
 combinations below may already work but aren't yet as thoroughly validated —
 see [Platform status](#platform-status).
@@ -160,7 +166,9 @@ echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
 Then open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac sender)
 and `OpenSidecariOS` (iPhone/iPad receiver) schemes. Full instructions —
 signing, permissions, USB/WiFi/Remote Access setup, pairing, and
-troubleshooting — are in **[SETUP.md](SETUP.md)**.
+troubleshooting — are in **[SETUP.md](SETUP.md)**. For how releases are
+versioned and built once distribution starts, see
+**[RELEASE.md](RELEASE.md)**.
 
 ## Platform status
 
