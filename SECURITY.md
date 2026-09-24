@@ -1,9 +1,8 @@
 # Security and privacy
 
-> **Do not report security vulnerabilities through public GitHub issues,
-> Discussions or pull requests.** Report them privately via this repository's
-> **Security** tab → **Report a vulnerability**. See
-> [Reporting a vulnerability](#reporting-a-vulnerability) below.
+> **Do not report security vulnerabilities in public GitHub issues. Use GitHub’s private “Report a vulnerability” flow instead.**
+
+To report privately: open the [MeowDisplay GitHub repository](https://github.com/raiseCatError/meowdisplay) → **Security** → **Report a vulnerability**. Don't include secrets, keys or personal data in public places — the private report is visible only to maintainers. See [Reporting a vulnerability](#reporting-a-vulnerability) below.
 
 How MeowDisplay actually secures a connection, and what it stores. This
 describes the current implementation (`Shared/TLSConfigurator.swift`,

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         > [!CAUTION]
-        > **Security or privacy vulnerability? STOP.** Do not file it here. Use this repository's **Security** tab → **Report a vulnerability** to report it privately. See [SECURITY.md](https://github.com/raiseCatError/meowdisplay/blob/main/SECURITY.md).
+        > **Security or privacy vulnerability? STOP.** Do not file it here. Use this repository's **Security** tab → **Report a vulnerability** to report it privately. See the [security policy](https://github.com/raiseCatError/meowdisplay/security/policy).
 
         This issue is public. Do not paste passwords, private keys, pairing codes or secrets, private endpoints/IP addresses, or personal content. For setup help, see the [setup guide](https://meowdisplay.app/docs.html) and [support page](https://meowdisplay.app/support.html).
   - type: checkboxes
