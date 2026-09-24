@@ -5162,6 +5162,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
+            let framedForSend = framed
             // The encode above ran asynchronously on VideoToolbox's own
             // callback thread. `activeConnectionGeneration` and `connection`
             // are `queue`-confined, so hop back before touching either — and
@@ -5174,7 +5175,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let self = selfBox.currentOnQueue(),
                       generation == self.captureGenerationNow,
                       connectionGeneration == self.activeConnectionGeneration else { return }
-                self.sendFramed(framed)
+                self.sendFramed(framedForSend)
             }
         }
         if submitStatus == noErr {
