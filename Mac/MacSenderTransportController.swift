@@ -134,7 +134,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// Sends a pre-framed payload on the current connection iff one exists
     /// and is ready. Returns whether the send was handed to the connection.
     @discardableResult
-    func send(content: Data, completion: @escaping (NWError?) -> Void) -> Bool {
+    func send(content: Data, completion: @escaping @Sendable (NWError?) -> Void) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let connection, connectionReady else { return false }
         connection.send(content: content, completion: .contentProcessed { completion($0) })
@@ -528,7 +528,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// `queue`-confined work. Off `queue`, it hops once via `queue.async` —
     /// fire-and-forget, since no caller here ever awaited the pre-Phase-1
     /// synchronous read's result either.
-    func sendFromAnyContext(content: Data, completion: @escaping (NWError?) -> Void) {
+    func sendFromAnyContext(content: Data, completion: @escaping @Sendable (NWError?) -> Void) {
         if DispatchQueue.getSpecific(key: queueSpecificKey) != nil {
             _ = send(content: content, completion: completion)
         } else {

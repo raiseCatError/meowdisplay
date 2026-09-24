@@ -5572,6 +5572,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
+        let frameByteCount = frame.count
         let pendingSendsAfterIncrement = pipelineState.incrementPendingSends()
         #if DEBUG
         let queuedAt = Date()
@@ -5579,8 +5580,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         debugSendsStartedWindow += 1
         debugPeakPendingSends = max(debugPeakPendingSends, pendingSendsAfterIncrement)
         #endif
-        transportController.send(content: frame) { [weak self] error in
-            guard let self else { return }
+        let selfBox = self.selfBox
+        transportController.send(content: frame) { error in
+            guard let self = selfBox.currentOnQueue() else { return }
             _ = self.pipelineState.decrementPendingSends()
             self.lastSendCompletionAt = Date()
             self.sendStallReported = false
@@ -5589,7 +5591,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
             self.framesSent += 1
-            self.bytesSent += frame.count
+            self.bytesSent += frameByteCount
             #if DEBUG
             self.debugSendsCompletedWindow += 1
             if kind == "audio" {
