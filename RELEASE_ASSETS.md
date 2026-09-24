@@ -7,24 +7,20 @@ captures only, explicitly deferred).
 
 ## Public repository / website assets — now available
 
-Reconstructed SVG product visuals live in `assets/mockups/`. These are
-**not literal screenshots** — they're clean, source-accurate
-reconstructions of the real UI (verified against `Mac/OverviewSettingsView.swift`,
-`Mac/DisplaysSettingsView.swift`, and `Shared/ConnectionRoute.swift` for
-exact labels/states before drawing them), used because no physical device
-capture exists yet. Each file's `<desc>` says so explicitly, and the README
-captions them the same way.
+Real app captures live in `assets/readme/`. These are literal screenshots
+of the running Mac app and iPhone Simulator receiver (WebP), not
+reconstructions — see the table below for what each shows.
 
 | Asset | Purpose | Source | Used in |
 |---|---|---|---|
-| `hero.svg` | README/GitHub hero image — Mac + iPad connecting, Extend mode | SVG | README top |
-| `mirror-mode.svg` | Explains Mirror mode | SVG | README § Features |
-| `extend-mode.svg` | Explains Extend mode | SVG | README § Features |
-| `connection-state.svg` | Overview panel in a connected, authenticated state, exact field labels from source | SVG | README § How it works |
+| `mac-overview.webp` | README/GitHub hero — real Mac app, Overview panel, idle | Mac app capture | README top |
+| `iphone-home.webp` | README/GitHub hero — real receiver home screen | iPhone Simulator capture | README top |
+| `mac-mirror.webp` | Explains Mirror mode | Mac app capture | README § Features |
+| `mac-extend.webp` | Explains Extend mode | Mac app capture | README § Features |
+| `mac-input.webp` | Explains Allow Input | Mac app capture | README § Features |
 
-These are reusable as-is for `meowdisplay.app` once that site exists (see
-[Website/marketing content](#websitemarketing-content-not-yet-deployed)
-below) — same SVGs, same accuracy constraints.
+The earlier reconstructed `assets/mockups/*.svg` visuals have been
+superseded by these real captures and removed from the README.
 
 Also already exist: app icons for Mac, Mac Receiver, and iOS
 (`Mac/Assets.xcassets`, `MacReceiver/Assets.xcassets`,
@@ -35,7 +31,7 @@ marketing site assets in `assets/`/`public/` (`Github Readme Icon.png`,
 ## Still worth capturing later (real device photos/screen recordings)
 
 Once real hardware capture happens, these can replace or sit alongside the
-mockups above — real captures are always preferable once available:
+captures above:
 
 | Capture | Show | Avoid |
 |---|---|---|
@@ -45,16 +41,15 @@ mockups above — real captures are always preferable once available:
 | Pairing / SAS | The SAS confirmation screen on both devices | — |
 | Settings overview | Devices, Displays, and Security settings panes | Any real paired-device names if they reveal personal info |
 
-This is not blocking — the mockups above are sufficient for current public
+This is not blocking — the captures above are sufficient for current public
 presentation.
 
 ## App Store submission screenshots — DEFERRED
 
 **Not started, and intentionally out of scope until iOS submission is
 actually being prepared (Issue #3's remaining account-side work).**
-App Store Connect requires real device screenshots, not reconstructed
-visuals — mockups from this checklist must not be submitted as App Store
-assets.
+App Store Connect requires its own dedicated device screenshots — the
+README captures above must not be submitted as App Store assets.
 
 ### TestFlight / App Store (only needed once iOS submission proceeds)
 
@@ -84,8 +79,8 @@ GitHub Pages deployment yet (see Issue #1/#3 findings — `gh api
 repos/.../pages` returns 404). The following is ready to reuse once that
 site exists; nothing here is deployed by this checklist:
 
-- The four `assets/mockups/*.svg` files above — same accuracy/labeling
-  constraints apply on a public site as in the README.
+- The `assets/readme/*.webp` captures above — same accuracy constraints
+  apply on a public site as in the README.
 - Short product description: reuse the README's opening paragraph and
   "Why MeowDisplay?" section verbatim — it's already accurate and
   intentionally free of unsupported claims.

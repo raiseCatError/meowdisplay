@@ -29,10 +29,11 @@ combinations below may already work but aren't yet as thoroughly validated —
 see [Platform status](#platform-status).
 
 <p align="center">
-<img src="assets/mockups/hero.svg" alt="MeowDisplay connecting a Mac to an iPad in Extend mode" width="720">
+<img src="assets/readme/mac-overview.webp" alt="The real MeowDisplay Mac app, open to Overview" width="420">
+<img src="assets/readme/iphone-home.webp" alt="MeowDisplay receiver home screen running in iPhone Simulator" width="180">
 </p>
 
-<p align="center"><em>Reconstructed product visual — not a literal screenshot. See <a href="RELEASE_ASSETS.md">RELEASE_ASSETS.md</a>.</em></p>
+<p align="center"><em>Real MeowDisplay Mac app and receiver captures.</em></p>
 
 <p align="center">
 <a href="#getting-started">Getting Started</a> ·
@@ -76,9 +77,11 @@ user-provided reachable private network such as Tailscale — see
 ### Display & media
 
 <p align="center">
-<img src="assets/mockups/mirror-mode.svg" alt="Mirror mode: the iPad shows the same content as the Mac's physical display" width="420">
-<img src="assets/mockups/extend-mode.svg" alt="Extend mode: the iPad becomes a genuine additional display" width="420">
+<img src="assets/readme/mac-mirror.webp" alt="MeowDisplay Displays settings with Mirror selected" width="420">
+<img src="assets/readme/mac-extend.webp" alt="MeowDisplay Displays settings with Extend selected" width="420">
 </p>
+
+<p align="center"><em>Mirror and Extend, in the running Mac app.</em></p>
 
 - True extended display or mirrored output from the Mac, Retina-sharp,
   low-latency (hardware H.264 encode via VideoToolbox, capture via
@@ -89,6 +92,11 @@ user-provided reachable private network such as Tailscale — see
 - Display/mirror source selection on the receiving side.
 
 ### Input & control
+
+<p align="center">
+<img src="assets/readme/mac-input.webp" alt="The real Mac Input settings showing Allow Input and per-device input requests" width="420">
+</p>
+
 - Touch, mouse, and keyboard input routed from the receiving device back to
   the Mac and injected as real input events.
 - Two-finger scroll, configurable pinch/rotate and other gesture behavior.
@@ -156,10 +164,6 @@ MAC HOST                                          RECEIVER (iPhone/iPad/Mac)
 
 The full wire protocol is specified in [PROTOCOL.md](PROTOCOL.md); how it
 evolves across releases is in [COMPATIBILITY.md](COMPATIBILITY.md).
-
-<p align="center">
-<img src="assets/mockups/connection-state.svg" alt="Mac app Overview panel showing a connected, authenticated session" width="500">
-</p>
 
 ## Getting Started
 
