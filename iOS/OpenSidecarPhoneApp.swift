@@ -148,7 +148,9 @@ struct ReceiverScreen: View {
                                    safeInsets: effectiveSafeInsets,
                                    occupiedControlFrames: occupiedControlFrames,
                                    onRotationSnap: { haptics.play(.selection) },
-                                   onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 })
+                                   onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
+                                   onActivityBegan: { controlStore.beginAutoHideActivity() },
+                                   onActivityEnded: { controlStore.scheduleAutoHide() })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .ignoresSafeArea()
                         // Allow Input OFF disables ALL touch/gesture
@@ -2161,6 +2163,10 @@ struct VideoLayerView: UIViewRepresentable {
     let occupiedControlFrames: [CGRect]
     let onRotationSnap: () -> Void
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
+    /// See `VideoView.onActivityBegan`/`onActivityEnded` — lets Auto-hide
+    /// reveal from any receiver-surface interaction, not only a tray touch.
+    let onActivityBegan: () -> Void
+    let onActivityEnded: () -> Void
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
@@ -2178,6 +2184,8 @@ struct VideoLayerView: UIViewRepresentable {
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        view.onActivityBegan = onActivityBegan
+        view.onActivityEnded = onActivityEnded
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
         }
@@ -2292,6 +2300,8 @@ struct VideoLayerView: UIViewRepresentable {
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        uiView.onActivityBegan = onActivityBegan
+        uiView.onActivityEnded = onActivityEnded
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -2385,6 +2395,18 @@ struct VideoLayerView: UIViewRepresentable {
         // bottom; nil whenever the keyboard is closed or not ours.
         private var keyboardVisibleRect: CGRect?
         var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
+        /// Fired on every new touch beginning on the receiver surface —
+        /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
+        /// multi-finger/system gestures, and Pencil all route through
+        /// `touchesBegan` — so Auto-hide can reveal from ANY receiver-surface
+        /// interaction, not only a touch on the tray itself. Purely a
+        /// notification: it never consumes or alters the touch.
+        var onActivityBegan: (() -> Void)?
+        /// Fired once every touch has lifted (see `activeFingerTouchIDs`),
+        /// so Auto-hide's countdown only restarts once the interaction is
+        /// actually over, not after each individual finger in a multi-touch
+        /// gesture.
+        var onActivityEnded: (() -> Void)?
         // Most recent meaningful primary interaction, in normalized
         // remote-display coordinates — the typing-focus anchor. Never
         // updated from multi-finger/system gestures, Pencil hover, the
@@ -3745,6 +3767,9 @@ struct VideoLayerView: UIViewRepresentable {
             // `beginScroll` also cancels it explicitly for the specific
             // fresh-scroll case; this is the catch-all for every other one.
             cancelScrollMomentum()
+            // A pure notification — never consumes/alters the touch — so
+            // Auto-hide can reveal from any receiver-surface interaction.
+            onActivityBegan?()
             routeTouches("began", touches, event, ended: false)
         }
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -3752,9 +3777,14 @@ struct VideoLayerView: UIViewRepresentable {
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
             routeTouches("ended", touches, event, ended: true)
+            // Only once every finger has actually lifted — not per-touch in
+            // a multi-finger gesture — is it safe to restart Auto-hide's
+            // countdown.
+            if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
             routeTouches("cancelled", touches, event, ended: true)
+            if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
     }
 }

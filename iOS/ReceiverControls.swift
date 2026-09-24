@@ -12,12 +12,63 @@ final class ReceiverControlStore: ObservableObject {
     // allowInput` (kept for every existing call site that already gates
     // input generation on that bool) purely for richer receiver UI text.
     @Published private(set) var sessionInputState: SessionInputWireState = .off
+    /// Transient Auto-hide presentation state — deliberately separate from
+    /// `preferences.trayCollapsed` (the user's manual, persisted choice).
+    /// Owned here (rather than by `ReceiverControlOverlay`) so ANY
+    /// receiver-surface interaction — not just a touch on the tray itself —
+    /// can reveal it (see `VideoLayerView`'s `onActivityBegan`/
+    /// `onActivityEnded` in `OpenSidecarPhoneApp.swift`). Never persisted: a
+    /// relaunch always starts `false`.
+    @Published private(set) var autoHidden = false
+    private var autoHideTask: Task<Void, Never>?
+    private static let autoHideDelay: Duration = .seconds(9)
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
 
     init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository()) {
         self.repository = repository
         preferences = repository.load()
+    }
+
+    /// Call at the start of ANY meaningful interaction — anywhere on the
+    /// receiver surface, not only the tray. Reveals immediately (never
+    /// touches `trayEnabled`/`functionTrayEnabled`/`trayCollapsed`/profile
+    /// state) and suspends the countdown; pair with `scheduleAutoHide` once
+    /// the interaction is fully over.
+    func beginAutoHideActivity() {
+        autoHideTask?.cancel()
+        autoHidden = false
+    }
+
+    /// (Re)starts the 9-second Auto-hide countdown from now, or declines to
+    /// schedule at all when hiding wouldn't be appropriate right now: the
+    /// feature is off, the tray can't show, it's manually collapsed, or
+    /// `interactionIdle` is false because some other interaction (a touch
+    /// still down, a latched chord, an open palette, …) is still ongoing.
+    /// Re-validates the same conditions when the delay elapses so a stale
+    /// task can never hide the tray after a newer interaction already
+    /// cancelled it.
+    func scheduleAutoHide(interactionIdle: Bool = true) {
+        autoHideTask?.cancel()
+        guard preferences.autoHideEnabled, preferences.trayCanBeShown,
+              !preferences.trayCollapsed, interactionIdle else { return }
+        autoHideTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.autoHideDelay)
+            guard let self, !Task.isCancelled else { return }
+            guard self.preferences.autoHideEnabled, self.preferences.trayCanBeShown,
+                  !self.preferences.trayCollapsed else { return }
+            self.autoHidden = true
+        }
+    }
+
+    /// Cancels any pending countdown and clears auto-hidden state, then
+    /// restarts the countdown from now. The shared "something happened"
+    /// entry point for state transitions (new session, profile switch, a
+    /// preference changing) where the right behavior is simply "start over
+    /// from visible."
+    func resetAutoHide() {
+        beginAutoHideActivity()
+        scheduleAutoHide()
     }
 
     var activeProfile: ControlProfile {
@@ -132,12 +183,7 @@ struct ReceiverControlOverlay: View {
     @State private var initiatingItem: ControlTrayItem?
     @State private var gestureActive = false
     @State private var lastHoveredModifier: ControlModifier?
-    /// Transient Auto-hide presentation state — deliberately separate from
-    /// `store.preferences.trayCollapsed` (the user's manual, persisted
-    /// choice). Never persisted itself: a relaunch always starts `false`.
-    @State private var autoHidden = false
-    @State private var autoHideTask: Task<Void, Never>?
-    private static let autoHideDelay: Duration = .seconds(3)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if DEBUG
     /// Visual diagnostic for the Avoid Notch runtime path (see the
     /// "Notch Debug Overlay" toggle in Settings → Analytics): red =
@@ -166,10 +212,12 @@ struct ReceiverControlOverlay: View {
     /// list clustered for rendering; `functionItems` is the flattened form
     /// used wherever only "is there anything to show at all" matters.
     private var functionGroups: [[ShortcutItem]] {
-        // Auto-hide retreats Main Tray + Function Tray together (see
-        // `perform(_:)`'s `.settings` case and `body`'s `collapsed`) without
-        // touching the user's own "Show Function Tray" preference.
-        guard store.preferences.functionTrayCanBeShown, !autoHidden else { return [] }
+        // Deliberately independent of `store.autoHidden` — Auto-hide fades
+        // this content out in place (opacity/offset/hit-testing, see
+        // `body`) rather than removing it, so the transition has something
+        // to animate. Never touches the user's own "Show Function Tray"
+        // preference.
+        guard store.preferences.functionTrayCanBeShown else { return [] }
         return store.activeFunctionTrayProfile.visibleGroups
     }
     private var functionItems: [ShortcutItem] { functionGroups.flatMap { $0 } }
@@ -186,11 +234,10 @@ struct ReceiverControlOverlay: View {
         // Settings (where it is un-collapsed) stays reachable without a
         // shake. It ignores per-profile visibility for that reason.
         guard !store.preferences.trayCollapsed else { return [.settings] }
-        // Auto-hidden reuses the exact same gear-only collapsed
-        // representation — see `body`'s `collapsed` — so revealing it is
-        // the same tap-the-gear affordance the user already knows, not a
-        // separate UI (see `perform(_:)`'s `.settings` case).
-        guard !autoHidden else { return [.settings] }
+        // Deliberately NOT gated on `store.autoHidden` here — see
+        // `functionGroups`'s doc above; the full tray (settings gear
+        // included, since it is one of `visibleTrayItems` whenever the tray
+        // isn't manually collapsed) stays mounted and fades out in place.
         return profile.visibleTrayItems.filter {
             if $0.modifier != nil {
                 return receiver.macProtocolVersion >= WireProtocol.receiverControlsWireVersion
@@ -208,9 +255,25 @@ struct ReceiverControlOverlay: View {
         // off), so there is deliberately no top-level condition here that
         // could hide the gear itself.
         let portrait = containerSize.height > containerSize.width
-        let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown || autoHidden
+        let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown
         let count = max(controls.count, 1)
         let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count)
+        // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
+        // tray content out in place rather than removing it — `collapsed`
+        // above is untouched by it, since `store.autoHidden` can only ever
+        // be true while `collapsed` is false (see `ReceiverControlStore.
+        // scheduleAutoHide`'s guard). Reduce Motion drops the positional/
+        // scale nudge and shortens the animation to a near-instant fade.
+        let autoHiding = store.autoHidden
+        let autoHideRetreat: CGFloat = reduceMotion ? 0 : 3
+        let autoHideOffset: CGSize = autoHiding
+            ? (portrait
+                ? CGSize(width: 0, height: autoHideRetreat)
+                : CGSize(width: store.preferences.preferredLandscapeSide == .leading
+                                 ? -autoHideRetreat : autoHideRetreat, height: 0))
+            : .zero
+        let autoHideOpacity: Double = autoHiding ? 0 : 1
+        let autoHideScale: CGFloat = autoHiding && !reduceMotion ? 0.98 : 1
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
         let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
@@ -312,6 +375,10 @@ struct ReceiverControlOverlay: View {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
+                    .opacity(autoHideOpacity)
+                    .scaleEffect(autoHideScale)
+                    .offset(autoHideOffset)
+                    .allowsHitTesting(!autoHiding)
             }
 
             ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
@@ -320,6 +387,10 @@ struct ReceiverControlOverlay: View {
                     functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
                         .frame(width: frame.width, height: frame.height)
                         .position(x: frame.midX, y: frame.midY)
+                        .opacity(autoHideOpacity)
+                        .scaleEffect(autoHideScale)
+                        .offset(autoHideOffset)
+                        .allowsHitTesting(!autoHiding)
                         .animation(.snappy(duration: 0.24), value: frame)
                 }
             }
@@ -333,7 +404,7 @@ struct ReceiverControlOverlay: View {
 
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
-                .contentShape(ControlRegionShape(tray: layout.trayFrame,
+                .contentShape(ControlRegionShape(tray: autoHiding ? .zero : layout.trayFrame,
                                                  palette: paletteChord == nil ? nil : layout.paletteFrame))
                 .gesture(controlGesture())
 
@@ -382,43 +453,47 @@ struct ReceiverControlOverlay: View {
         // A fresh mount (new session, view recreated) always begins visible
         // according to the normal tray settings, then starts counting down
         // if Auto-hide is on.
-        .onAppear { resetAutoHide() }
+        .onAppear { store.resetAutoHide() }
         .animation(.snappy(duration: 0.24), value: store.preferences.trayCollapsed)
-        .animation(.snappy(duration: 0.24), value: autoHidden)
+        // One coordinated animation for the whole Auto-hide fade (Main Tray +
+        // Function Tray, see their `.opacity`/`.scaleEffect`/`.offset` above)
+        // — restrained and short, never the tray's own spring/snappy feel.
+        // Reduce Motion collapses it to a near-instant fade.
+        .animation(reduceMotion ? .easeInOut(duration: 0.12) : .easeInOut(duration: 0.28), value: store.autoHidden)
         .animation(.snappy(duration: 0.2), value: interaction.phase)
         // Any session interruption — pause, recovery, a failed recovery or a
         // plain disconnect — drops every latched modifier/held control, so no
         // transient control state survives into the next live session.
         .onChange(of: receiver.session.phase) { phase in
             if phase != .connected { apply(interaction.resetAll()) }
-            resetAutoHide()
+            store.resetAutoHide()
         }
         .onChange(of: receiver.displayState) { state in
             if state != .running { apply(interaction.resetAll()) }
-            resetAutoHide()
+            store.resetAutoHide()
         }
         .onChange(of: store.preferences.activeControlProfile) { _ in
             apply(interaction.resetAll())
-            resetAutoHide()
+            store.resetAutoHide()
         }
         .onChange(of: store.preferences.activeFunctionTrayProfile) { _ in
             apply(interaction.resetAll())
-            resetAutoHide()
+            store.resetAutoHide()
         }
         // The Mac released its synthetic input state; drop the matching
         // local latch silently. A Mac-originated refresh is not a
         // receiver-confirmed action and must not buzz.
         .onChange(of: receiver.inputResetGeneration) { _ in
             apply(interaction.resetAll())
-            resetAutoHide()
+            store.resetAutoHide()
         }
         .onChange(of: receiver.controlResetGeneration) { _ in
             apply(interaction.resetAll())
-            resetAutoHide()
+            store.resetAutoHide()
         }
-        .onChange(of: store.preferences.autoHideEnabled) { _ in resetAutoHide() }
-        .onChange(of: store.preferences.trayCollapsed) { _ in resetAutoHide() }
-        .onChange(of: store.preferences.trayCanBeShown) { _ in resetAutoHide() }
+        .onChange(of: store.preferences.autoHideEnabled) { _ in store.resetAutoHide() }
+        .onChange(of: store.preferences.trayCollapsed) { _ in store.resetAutoHide() }
+        .onChange(of: store.preferences.trayCanBeShown) { _ in store.resetAutoHide() }
     }
 
     #if DEBUG
@@ -569,7 +644,7 @@ struct ReceiverControlOverlay: View {
         receiver.sendKeyboardPress(usage: shortcut.usage,
                                    modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
         haptics.play(.confirmation)
-        resetAutoHide()
+        store.scheduleAutoHide()
     }
 
     private func modifierButton(_ modifier: ControlModifier) -> some View {
@@ -668,9 +743,10 @@ struct ReceiverControlOverlay: View {
             .onChanged { value in
                 if !gestureActive {
                     gestureActive = true
-                    // A touch is down on the tray: never let a pending
+                    // A touch is down on the tray: reveal immediately (a
+                    // no-op if already visible) and never let a pending
                     // Auto-hide fire out from under it mid-interaction.
-                    autoHideTask?.cancel()
+                    store.beginAutoHideActivity()
                     initiatingItem = trayItem(at: value.startLocation)
                     if let modifier = initiatingItem?.modifier {
                         initiatingModifier = modifier
@@ -730,7 +806,7 @@ struct ReceiverControlOverlay: View {
                 // The touch lifted: safe to (re)start counting down again,
                 // unless a latched chord is still active (`scheduleAutoHide`
                 // itself declines in that case).
-                scheduleAutoHide()
+                store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
             }
     }
 
@@ -783,52 +859,11 @@ struct ReceiverControlOverlay: View {
             keyboardActive.toggle()
             haptics.play(.selection)
         case .settings:
-            // Auto-hidden reuses the collapsed gear affordance (see
-            // `controls`), so tapping it while auto-hidden reveals the tray
-            // in place rather than jumping to Settings — a manually
-            // collapsed tray (never auto-hidden) still opens Settings, its
-            // existing reveal path.
-            if autoHidden {
-                resetAutoHide()
-                haptics.play(.expandCollapse)
-            } else {
-                apply(interaction.resetAll())
-                showSettings = true
-                haptics.play(.settings)
-            }
+            apply(interaction.resetAll())
+            showSettings = true
+            haptics.play(.settings)
         default: break
         }
-    }
-
-    /// (Re)starts the Auto-hide inactivity countdown from now. Safe to call
-    /// on every meaningful interaction: it always cancels whatever task was
-    /// pending first, so a newer interaction can never be pre-empted by a
-    /// stale one firing late. Declines to schedule (rather than hiding
-    /// immediately) whenever hiding would be disruptive right now — mid-
-    /// gesture, a latched/active chord, the tray already collapsed/hidden
-    /// by other means, or the feature simply being off (spec section 5).
-    private func scheduleAutoHide() {
-        autoHideTask?.cancel()
-        guard store.preferences.autoHideEnabled, store.preferences.trayCanBeShown,
-              !store.preferences.trayCollapsed, !gestureActive, interaction.phase == .idle
-        else { return }
-        autoHideTask = Task { @MainActor in
-            try? await Task.sleep(for: Self.autoHideDelay)
-            guard !Task.isCancelled, store.preferences.autoHideEnabled, store.preferences.trayCanBeShown,
-                  !store.preferences.trayCollapsed, !gestureActive, interaction.phase == .idle
-            else { return }
-            autoHidden = true
-        }
-    }
-
-    /// Cancels any pending countdown and clears auto-hidden state, then
-    /// restarts the countdown from now — the shared "something happened"
-    /// entry point for both a genuine reveal and any other meaningful
-    /// interaction while already visible.
-    private func resetAutoHide() {
-        autoHideTask?.cancel()
-        autoHidden = false
-        scheduleAutoHide()
     }
 
     private func apply(_ effects: [ControlInteractionEffect]) {
