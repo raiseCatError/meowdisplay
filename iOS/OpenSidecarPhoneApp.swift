@@ -882,10 +882,11 @@ struct IdleView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
+                    let isPaired = receiver.pairingMacIsPaired(result)
                     HStack {
                         Text(receiver.pairingMacName(result)).lineLimit(1)
                         Spacer()
-                        if receiver.pairingMacIsPaired(result) {
+                        if isPaired {
                             if receiver.connected {
                                 Text("Connected").foregroundStyle(.secondary)
                             } else {
@@ -1033,7 +1034,8 @@ struct IdleView: View {
         }
         switch receiver.session.phase {
         case .connecting, .reconnecting: return "Connecting…"
-        case .reconnectFailed, .disconnected: return "Remote Mac isn't reachable yet"
+        case .connected: return "Connected"
+        case .reconnectFailed, .disconnected: return "Not connected"
         default: return "Remote endpoint unavailable"
         }
     }
