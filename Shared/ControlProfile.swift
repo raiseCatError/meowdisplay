@@ -499,7 +499,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 12
+    static let schemaVersion = 13
 
     var version = schemaVersion
     var trayEnabled = true
@@ -508,6 +508,15 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var preferredLandscapeSide = LandscapeTraySide.trailing
     var activeControlProfile = ControlProfileSlot.default
     var trayCollapsed = false
+    /// Whether the control trays retreat after a short period of inactivity.
+    /// This only enables the *behavior* — the actual moment-to-moment
+    /// "is a tray auto-hidden right now" state is transient, tracked by
+    /// `ReceiverControlOverlay` itself, and never persisted here, so a
+    /// relaunch always starts visible according to `trayCollapsed`/
+    /// `trayEnabled` as normal. Independent of `trayCollapsed`, which stays
+    /// the user's manual, persisted collapse choice. Defaults off so
+    /// existing users see no behavior change until they opt in.
+    var autoHideEnabled = false
     /// Whether THIS session currently has effective input, mirrored from the
     /// Mac's per-session consent decision once connected (see
     /// `ReceiverControlStore.sessionInputState`/`applySessionInputState`,
@@ -632,6 +641,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // existed" — default off/centered, matching a brand-new install.
         audioPreferred = try value(.audioPreferred, fallback.audioPreferred)
         avSyncOffsetMs = AVSyncOffset.clamped(try value(.avSyncOffsetMs, fallback.avSyncOffsetMs))
+        // Absent (schema < 13) means "written before Auto-hide existed" —
+        // default off, matching a brand-new install.
+        autoHideEnabled = try value(.autoHideEnabled, fallback.autoHideEnabled)
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -769,6 +781,11 @@ struct ReceiverControlPreferencesRepository {
         // 0 — nothing to transform.
         if value.version < 12 {
             value.version = 12
+        }
+        // Schema 12 predates Auto-hide; the custom decoder above already
+        // defaulted `autoHideEnabled` to off — nothing to transform.
+        if value.version < 13 {
+            value.version = 13
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

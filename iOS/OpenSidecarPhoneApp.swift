@@ -1487,6 +1487,7 @@ struct SettingsView: View {
                     Toggle("Show Keyboard Button", isOn: preferenceBinding(\.keyboardButtonEnabled))
                     Toggle("Haptics", isOn: preferenceBinding(\.hapticsEnabled))
                     Toggle("Collapse Control Tray", isOn: preferenceBinding(\.trayCollapsed))
+                    Toggle("Auto-hide Control Trays", isOn: preferenceBinding(\.autoHideEnabled))
                     landscapeTraySidePicker
                     Picker("Active Profile", selection: Binding(
                         get: { controlStore.preferences.activeControlProfile },
