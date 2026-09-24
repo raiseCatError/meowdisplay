@@ -166,17 +166,6 @@ Useful references:
 Useful for locked-session/daemon-vs-GUI-agent thinking; MeowDisplay's own
 architecture and code are independent of it.
 
-### Reminal
-
-[Reminal](https://github.com/harshalgajjar/reminal) is a macOS
-ScreenCaptureKit-based remote-access tool (streams windows/desktop/terminal
-to a browser). Its [closed-lid documentation](https://github.com/harshalgajjar/Reminal/blob/main/docs/closed-lid.md)
-describes keeping a closed MacBook awake and usable purely in software —
-disabling sleep and creating a virtual display — instead of the common
-hardware workaround of a dummy HDMI plug. That's a directly relevant
-precedent for MeowDisplay's own closed-lid/headless roadmap item (private
-`CGVirtualDisplay` use included).
-
 ### AnyDesk
 
 [AnyDesk](https://anydesk.com) is a commercial remote-desktop product.
