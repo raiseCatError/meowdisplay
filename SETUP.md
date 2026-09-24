@@ -223,3 +223,41 @@ automatically after you log in.
   open **Settings & Help** → **Connection log**.
 - **Pairing fails / trust reset**: forget the device in the app's device
   list and pair again.
+- **An already-paired device shows "Pair" instead of Connect/Wake & Connect**:
+  a known, intermittent issue — the underlying trust check
+  (`TrustStore.hasPin(peerID:)` against the Bonjour-advertised peer ID) is
+  correct by inspection and hasn't been reliably reproduced. If it happens:
+  don't re-pair unnecessarily if you believe trust should still exist; quit
+  and reopen the app on both sides first, and only forget/re-pair the device
+  if it persists after that.
+- **Connection fails generally**: confirm both devices are on the expected
+  route (same WiFi network for LAN, a data-capable cable for USB, or a live
+  Tailscale/remote endpoint for Remote Access — see below), and that Local
+  Network permission is granted (see [Required permissions](#required-permissions)).
+- **Display doesn't appear on the receiving device**: check macOS Screen
+  Recording permission is granted to the Mac app (a missing grant is the
+  most common cause of a black screen) — see
+  [Required permissions](#required-permissions).
+- **Extend doesn't create a virtual display**: Extend requires video capture
+  to be enabled; the Display Mode picker disables Extend if it isn't. Switch
+  to Extend from **Displays** settings (see
+  [Mirror vs. Extend](#mirror-vs-extend)) and confirm video capture is on.
+- **Input does nothing**: grant the Mac's Accessibility permission (see
+  [Required permissions](#required-permissions)) — input injection silently
+  does nothing without it.
+- **No audio**: audio streams automatically once connected; if it's silent,
+  confirm the session is actually connected (not just displaying a stale
+  frame) and check the Mac's system output/volume isn't muted.
+- **USB connection problems**: see USB device doesn't appear, above — a
+  charge-only cable is the most common cause.
+- **Remote Access doesn't connect**: confirm Tailscale (or your private
+  network) is signed in and shows both devices as online, that the Mac's
+  Tailscale address entered in the app's Remote Access settings is current,
+  and that the Mac isn't asleep (Remote Access wake has the local-only
+  limitation described in the README's
+  [Remote Access](README.md#remote-access) section).
+- **Wake & Connect doesn't work**: confirm Wake for Network Access is
+  enabled on the Mac (System Settings → Energy) and that the Mac's
+  hardware/firmware supports Wake-on-LAN; this currently only works over
+  the local network, not through Remote Access — see the README's
+  [Remote Access](README.md#remote-access) section.
