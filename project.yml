@@ -39,7 +39,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
     CODE_SIGN_STYLE: Automatic
-    SWIFT_VERSION: "5.9"
+    SWIFT_VERSION: "6"
     # Version defaults for local builds. CI overrides both via xcargs:
     # MARKETING_VERSION from the release tag, CURRENT_PROJECT_VERSION from
     # the GitHub Actions run number (monotonic, keeps TestFlight builds unique).
