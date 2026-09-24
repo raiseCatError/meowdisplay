@@ -12,7 +12,7 @@ permissions:
   actions: write
 
 # Serialize release runs on the same ref so two quick merges can't race two
-# uploads. Never cancel an in-flight run — it may be mid-upload to TestFlight.
+# uploads. Never cancel an in-flight run — it may be mid-upload or notarizing.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -29,44 +29,9 @@ jobs:
         with:
           release-type: simple
 
-  build-ios:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.3'
-          bundler-cache: true
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate project
-        env:
-          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-        run: xcodegen generate
-
-      - name: Set up SSH for match certs repo
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
-
-      - name: Build iOS app and upload to TestFlight
-        env:
-          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
-          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          APP_BUILD_NUMBER: ${{ github.run_number }}
-        run: |
-          export APP_MARKETING_VERSION="${TAG_NAME#v}"
-          bundle exec fastlane ios beta
+  # The iOS app is not built here: App Store candidates are uploaded ahead of
+  # the public release by the manually dispatched app-store-candidate.yml
+  # workflow, so the iOS build can clear App Review first. See RELEASE.md.
 
   build-mac:
     needs: release-please

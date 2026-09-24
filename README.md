@@ -32,7 +32,8 @@ you control, with devices paired and every session encrypted.
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
 
-<sub>Public release builds are being prepared. Until then, MeowDisplay can be
+<sub>Public release builds are being prepared. iPhone and iPad availability on
+the App Store is pending Apple approval. Until then, MeowDisplay can be
 [built from source](#build-from-source).</sub>
 
 ## At a glance

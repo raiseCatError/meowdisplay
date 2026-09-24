@@ -43,21 +43,19 @@ captures above:
 This is not blocking — the captures above are sufficient for current public
 presentation.
 
-## App Store submission screenshots — DEFERRED
+## App Store submission screenshots — OUTSTANDING
 
-**Not started, and intentionally out of scope until iOS submission is
-actually being prepared (Issue #3's remaining account-side work).**
-App Store Connect requires its own dedicated device screenshots — the
-README captures above must not be submitted as App Store assets.
+**Not captured yet.** App Store Connect requires its own device screenshots —
+the README captures above must not be submitted as App Store assets.
 
-### TestFlight / App Store (only needed once iOS submission proceeds)
-
-- Required iPhone screenshot sizes and iPad screenshot sizes (if the app is
-  submitted as universal) must be checked against **current** App Store
-  Connect requirements at submission time — sizes change between Apple's
-  device generations and aren't hardcoded here to avoid going stale.
-- `fastlane/APP_STORE_LISTING.md` already has the text fields drafted;
-  screenshots are the remaining gap for that submission.
+- The planned set (six real captures, iPhone and iPad) is in
+  [`fastlane/APP_STORE_LISTING.md` § Screenshot plan](fastlane/APP_STORE_LISTING.md#screenshot-plan).
+- Required iPhone and iPad sizes must be confirmed in App Store Connect at
+  upload time; they aren't recorded here to avoid going stale.
+- Screenshots are uploaded by hand — `fastlane ios release` skips them.
+- The listing text is drafted in `fastlane/APP_STORE_LISTING.md`; the
+  remaining App Store inputs (rights holder, pricing, questionnaires, review
+  contact) are tracked in its checklist.
 
 ## Capture guidance
 
