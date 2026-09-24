@@ -1,5 +1,10 @@
 # Security and privacy
 
+> **Do not report security vulnerabilities through public GitHub issues,
+> Discussions or pull requests.** Report them privately via this repository's
+> **Security** tab → **Report a vulnerability**. See
+> [Reporting a vulnerability](#reporting-a-vulnerability) below.
+
 How MeowDisplay actually secures a connection, and what it stores. This
 describes the current implementation (`Shared/TLSConfigurator.swift`,
 `Shared/TrustStore.swift`, `Shared/Pairing.swift`,
@@ -87,8 +92,46 @@ against your device itself (e.g. a compromised OS, a physically accessed
 unlocked device, or a compromised Tailscale account) — the guarantees above
 are specifically about the pairing and transport model.
 
-## Reporting a security issue
+## Reporting a vulnerability
 
-If you find a security issue, please open a GitHub issue with as much detail
-as you can share publicly, or contact the maintainer directly if the issue
-involves sensitive exploit details you'd rather not post publicly first.
+Use GitHub Private Vulnerability Reporting: open the
+[repository](https://github.com/raiseCatError/meowdisplay), go to the
+**Security** tab (shown as **Security and quality** in some GitHub layouts)
+and choose **Report a vulnerability**. The report is visible only to you and
+the maintainers.
+
+**Never** post vulnerability details in public issues, Discussions, pull
+requests or elsewhere before a fix is available.
+
+Helpful details to include:
+
+- Affected MeowDisplay version or commit
+- Affected platform(s): Mac model and macOS version, and/or iPhone/iPad model
+  and iOS/iPadOS version
+- A description of the vulnerability
+- Steps to reproduce, or a proof of concept where it is safe to share
+- The impact you believe it has
+- Relevant logs, with secrets, private endpoints, identifiers and personal
+  content removed
+- A suggested mitigation, if you have one
+
+Do not send passwords, private keys, pairing secrets, Keychain contents or
+other credentials — they are never needed to investigate a report.
+
+### What to expect
+
+This is a small, volunteer-maintained project. Reports are taken seriously
+and handled as promptly as possible, but there is no guaranteed response time
+and no bug bounty or reward programme. You'll be kept informed as the report
+is investigated, and credited in the fix if you'd like.
+
+Please allow reasonable time to investigate and ship a fix before disclosing
+an unresolved vulnerability publicly. Good-faith research that avoids
+privacy violations, data destruction and disruption to other people's
+devices is welcome.
+
+### Not a vulnerability?
+
+Ordinary bugs that don't present a security or privacy risk — crashes,
+connection failures, display glitches — should use the normal
+**Bug report** issue form. See [SUPPORT.md](SUPPORT.md).

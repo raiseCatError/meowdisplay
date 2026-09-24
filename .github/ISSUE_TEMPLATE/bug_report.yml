@@ -1,0 +1,103 @@
+name: Bug report
+description: Report something in MeowDisplay that isn't working. Not for security vulnerabilities.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!CAUTION]
+        > **Security or privacy vulnerability? STOP.** Do not file it here. Use this repository's **Security** tab → **Report a vulnerability** to report it privately. See [SECURITY.md](https://github.com/raiseCatError/meowdisplay/blob/main/SECURITY.md).
+
+        This issue is public. Do not paste passwords, private keys, pairing codes or secrets, private endpoints/IP addresses, or personal content. For setup help, see the [setup guide](https://meowdisplay.app/docs.html) and [support page](https://meowdisplay.app/support.html).
+  - type: checkboxes
+    id: not-security
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm this is not a security vulnerability.
+          required: true
+        - label: I searched existing issues and this hasn't been reported.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A concise description of the bug.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MeowDisplay version or commit
+      placeholder: e.g. 1.4.0 or a1b2c3d (if known)
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and macOS version
+      placeholder: e.g. MacBook Air M2, macOS 26.1
+    validations:
+      required: true
+  - type: input
+    id: receiver
+    attributes:
+      label: Receiver device and iOS/iPadOS version
+      placeholder: e.g. iPad Pro 11" (M4), iPadOS 26.1
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection type
+      options:
+        - USB
+        - Wi-Fi
+        - Remote
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Display mode
+      options:
+        - Mirror
+        - Extend
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Is it reproducible?
+      options:
+        - Every time
+        - Sometimes
+        - Happened once
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Mac Logs or the iOS Connection log help a lot. Remove private endpoints, identifiers, device names and personal content first.

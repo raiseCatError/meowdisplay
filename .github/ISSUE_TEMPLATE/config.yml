@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup guide
+    url: https://meowdisplay.app/docs.html
+    about: Requirements, building, permissions and pairing.
+  - name: Support
+    url: https://meowdisplay.app/support.html
+    about: Troubleshooting and general help. Security vulnerabilities go to the Security tab → Report a vulnerability, never a public issue.

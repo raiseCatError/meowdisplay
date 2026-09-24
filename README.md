@@ -230,6 +230,10 @@ Issues and pull requests are welcome, especially testing on iPad, different
 Mac models, external-display setups and networks. Please open an issue before
 starting large architecture work.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
+
 ## License & credits
 
 MeowDisplay is licensed under [GPL-3.0](LICENSE). It began as a fork of
