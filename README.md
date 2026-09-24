@@ -71,6 +71,15 @@ receiver's Settings:
   Touching doesn't jump the cursor to that spot. Sensitivity is adjustable,
   and multi-finger gestures keep working.
 
+**Smart Touch (Experimental)** is an optional add-on to Direct Touch, off by
+default. When the Mac's Accessibility information shows that you touched a
+scrollable area, such as a list, table, document or web page, a one-finger
+swipe scrolls instead of moving the pointer. Anywhere else, or when the Mac
+can't identify the interface reliably, Direct Touch behaves exactly as normal.
+Taps, tap-then-hold drags, two-finger scroll, pinch, rotate and system
+gestures are unchanged. It works best in apps that expose standard macOS
+accessibility information, and it has no effect in Trackpad mode.
+
 | Gesture | On your Mac |
 |---|---|
 | Tap | Click |
@@ -96,6 +105,20 @@ receiver's Settings:
 | Four- or five-finger pinch | Launchpad |
 
 Full details are on the [Features page](https://meowdisplay.app/features.html#pointer).
+
+### Apple Pencil
+
+Use Apple Pencil for precise input on supported iPad models:
+
+- Pencil strokes reach the Mac as pen-tablet events, separate from finger input
+- Tilt is passed through with each stroke
+- Hover moves the pointer before the tip touches, on iPads that support Pencil hover
+- Strokes are sent at the iPad's full touch sample rate
+- Fingers resting on the screen are ignored while the Pencil tip is down
+- Tap and double-tap with the tip to click and double-click
+
+Apple Pencil support is still evolving, with additional capabilities and
+refinements planned for future releases.
 
 ### Trackpad mode, without the picture
 

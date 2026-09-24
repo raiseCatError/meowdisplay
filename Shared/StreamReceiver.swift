@@ -787,6 +787,14 @@ final class StreamReceiver: ObservableObject {
     /// True when the connected Mac understands the `pointer` message family (M7).
     @MainActor var macSupportsPointerWire: Bool { macProtocolVersion >= WireProtocol.pointerWireVersion }
 
+    /// True when the connected Mac answers Smart Touch probes (pv 20).
+    @MainActor var macSupportsSmartTouch: Bool { macProtocolVersion >= WireProtocol.smartTouchWireVersion }
+
+    /// Smart Touch (Experimental): the Mac's answer to `sendSmartTouchProbe`.
+    /// Delivered on the main actor; the probe `id` lets the caller drop
+    /// replies for touches that are already over.
+    @MainActor var onSmartTouchProbeResult: ((_ id: Int, _ scrollable: Bool) -> Void)?
+
     /// True when the connected Mac understands Mac system audio (`pv` 12).
     /// No legacy fallback, same as keyboard: below this, Audio simply stays
     /// unavailable rather than degrading to something else.
@@ -2420,6 +2428,10 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishReceiverUIPreferences(update) }
         case WireMessage.inputReset:
             DispatchQueue.main.async { uiSink.publishInputResetBump() }
+        case WireMessage.smartTouchProbeResult:
+            guard let id = obj["id"] as? Int else { return }
+            let scrollable = obj["scrollable"] as? Bool ?? false
+            DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, scrollable: scrollable) }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -2722,6 +2734,14 @@ final class StreamReceiver: ObservableObject {
     @MainActor func sendPointerUp(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
         sendUIControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
+    }
+
+    /// Smart Touch (Experimental) probe — callers MUST check
+    /// `macSupportsSmartTouch` first. `x`/`y` normalized [0,1] in video
+    /// space; the reply arrives via `onSmartTouchProbeResult`.
+    @MainActor func sendSmartTouchProbe(id: Int, x: Double, y: Double) {
+        guard displayState == .running, macSupportsSmartTouch else { return }
+        sendUIControl(["type": WireMessage.smartTouchProbe, "id": id, "x": x, "y": y])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
@@ -4857,6 +4877,10 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyReceiverUIPreferencesUpdate(_ update: ReceiverUIPreferenceUpdate) {
         onReceiverUIPreferences?(update)
+    }
+
+    @MainActor func applySmartTouchProbeResult(id: Int, scrollable: Bool) {
+        onSmartTouchProbeResult?(id, scrollable)
     }
 
     @MainActor func applyInputResetBump() {

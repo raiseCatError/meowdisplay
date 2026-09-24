@@ -389,6 +389,7 @@ Coordinates use the conventions of section 7.
 | `mirrorDisplayRequest` | pv 13 | `selectedUUID`? | Select Auto (absent/null) or a specific stable display UUID as the Mirror capture source |
 | `extendShapeRequest` | pv 14 | `shape`, `useFullDisplay` (bool) | Request an Extend virtual-display shape change (section 6.7) |
 | `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
+| `smartTouchProbe` | pv 20 | `id` (int), `x`, `y` | Smart Touch (Experimental): ask whether the element at a normalized point is scrollable |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -483,6 +484,13 @@ is up is a hover move.
 
 **`proximity`** (pv 3) carries `entering` (bool) and the normalized `x`,
 `y` where the stylus entered or left hover range.
+
+**`smartTouchProbe`** (pv 20) asks the sender to classify the Accessibility
+element under normalized `x`, `y`. The sender MUST answer every probe it
+receives with `smartTouchProbeResult` echoing `id`; any failure (no
+Accessibility permission, no element, input not allowed) answers
+`scrollable: false`. A receiver MUST NOT send it to a sender below pv 20,
+and MUST treat a missing or late reply as `false`.
 
 **Pencil fallback (normative):** a receiver MUST NOT send `pencil` or
 `proximity` to a sender whose `pv` is below 3; it MUST degrade the stylus
@@ -612,6 +620,7 @@ section 4.
 | `audioState` | pv 12 | `enabled` (bool) | Mac-authoritative confirmed system-audio production state |
 | `mirrorDisplayState` | pv 13 | `selectedUUID`?, `displays` (array) | Mac-authoritative confirmed Mirror capture-source selection + display inventory |
 | `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool) | Mac-authoritative confirmed active Extend shape (section 6.7) |
+| `smartTouchProbeResult` | pv 20 | `id` (int), `scrollable` (bool) | Reply to `smartTouchProbe` |
 | `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
 
@@ -1063,6 +1072,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 13 | Mac-authoritative Mirror capture-source selection: `mirrorDisplayRequest` / `mirrorDisplayState` |
 | 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
 | 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
+| 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
 
 ---
 

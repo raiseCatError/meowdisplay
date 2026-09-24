@@ -499,7 +499,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 13
+    static let schemaVersion = 14
 
     var version = schemaVersion
     var trayEnabled = true
@@ -536,6 +536,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `defaultTrackpadSensitivity`. Never affects Direct Touch or any
     /// multi-finger gesture.
     var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
+    /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
+    /// scroll when the Mac confirms the touched element is scrollable.
+    /// No effect in Trackpad mode. Defaults off.
+    var smartTouchEnabled = false
     var profiles: [ControlProfile]
     /// Independent second tray of immediate-fire shortcut buttons (Undo/
     /// Redo initially) — see `FunctionTrayProfile`. Its own
@@ -644,6 +648,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Absent (schema < 13) means "written before Auto-hide existed" —
         // default off, matching a brand-new install.
         autoHideEnabled = try value(.autoHideEnabled, fallback.autoHideEnabled)
+        // Absent (schema < 14) means "written before Smart Touch existed" —
+        // default off, matching a brand-new install.
+        smartTouchEnabled = try value(.smartTouchEnabled, fallback.smartTouchEnabled)
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -786,6 +793,11 @@ struct ReceiverControlPreferencesRepository {
         // defaulted `autoHideEnabled` to off — nothing to transform.
         if value.version < 13 {
             value.version = 13
+        }
+        // Schema 13 predates Smart Touch; the custom decoder above already
+        // defaulted `smartTouchEnabled` to off — nothing to transform.
+        if value.version < 14 {
+            value.version = 14
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

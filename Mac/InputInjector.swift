@@ -608,6 +608,12 @@ final class InputInjector {
         return (sin(azimuth) * mag, cos(azimuth) * mag)
     }
 
+    /// Global CG point for a normalized video coordinate on this injector's
+    /// target display — the same mapping touch/pointer input uses.
+    func globalPoint(x: Double, y: Double) -> CGPoint {
+        InputCoordinateMapper.point(x: x, y: y, in: CGDisplayBounds(displayID))
+    }
+
     private func screenPoint(nx: Double, ny: Double) -> CGPoint {
         let bounds = CGDisplayBounds(displayID)
         return CGPoint(x: bounds.minX + nx * bounds.width,

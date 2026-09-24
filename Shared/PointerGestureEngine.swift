@@ -45,6 +45,17 @@ enum PointerCommand: Equatable {
     case moveRelative(dx: Double, dy: Double)
     case mouseDown(button: PointerButton, clickCount: Int)
     case mouseUp(button: PointerButton, clickCount: Int)
+    /// Smart Touch (Experimental): ask the Mac whether the Accessibility
+    /// element under this normalized point sits in a scrollable container.
+    /// The answer comes back through `resolveSmartTouchProbe(id:scrollable:)`.
+    case probeScrollTarget(id: Int, x: Double, y: Double)
+    /// Smart Touch one-finger scroll delta, in the same view-local point
+    /// units as `moveRelative` (natural-scrolling direction, like the
+    /// two-finger scroll path).
+    case scroll(dx: Double, dy: Double)
+    /// The Smart Touch scroll finger lifted (`momentum: true`) or was
+    /// cancelled (`momentum: false`).
+    case scrollEnded(momentum: Bool)
 }
 
 /// One raw touch sample fed into the engine. `id` must be stable for a
@@ -206,6 +217,11 @@ enum PointerEngineMode: Equatable {
     /// and two later fingers are forming a right-click/drag chord; not
     /// yet resolved between a tap and a held drag.
     case chordPending
+    /// Smart Touch (Experimental): a solo Direct Touch finger whose
+    /// touch-down target the Mac confirmed as scrollable, committed to
+    /// one-finger scrolling. Locked until that finger lifts — extra
+    /// fingers are ignored, exactly like `.leftDragHeld`.
+    case smartScroll
     /// 3+ fingers arrived together, fresh, with no established anchor.
     /// The engine steps aside entirely — the existing system-gesture
     /// recognizers own this touch sequence.
@@ -257,6 +273,27 @@ final class PointerGestureEngine {
             trackpadSensitivity = clamped
         }
     }
+
+    /// Smart Touch (Experimental). Only ever consulted for a fresh solo
+    /// finger in `.direct` mode with no tap chain buffered; Trackpad and
+    /// every multi-finger path ignore it. Safe to change mid-session: it
+    /// only affects the next touch-down's probe and commit decision.
+    var smartTouchEnabled = false
+
+    private var smartTouchIsActive: Bool { smartTouchEnabled && inputMode == .direct }
+
+    /// Whether the Mac has classified the current `.firstTouchPending`
+    /// finger's touch-down target. Meaningful only while that mode lasts;
+    /// a fresh first touch always overwrites it.
+    private enum SmartTouchProbeState: Equatable {
+        case none
+        case pending(id: Int)
+        case scrollable
+        case notScrollable
+    }
+    private var smartTouchProbe = SmartTouchProbeState.none
+    private var nextSmartTouchProbeID = 0
+    private var smartScrollLastView: CGPoint?
 
     /// Whether the current `.chordPending`/`.twoFingerPending` chord was
     /// recognized as continuing a just-buffered right tap (see
@@ -556,7 +593,15 @@ final class PointerGestureEngine {
             pendingLastNormalized = sample.normalized
             pendingLastView = sample.viewPoint
             mode = .firstTouchPending
-            return []
+            smartTouchProbe = .none
+            // Smart Touch asks once per touch, at touch-down, so the Mac's
+            // Accessibility lookup overlaps the drag-slop movement rather
+            // than sitting in the movement path. A buffered tap chain
+            // means tap-then-hold-drag, which Smart Touch never changes.
+            guard smartTouchIsActive, tapChain == nil, let n = sample.normalized else { return [] }
+            nextSmartTouchProbeID &+= 1
+            smartTouchProbe = .pending(id: nextSmartTouchProbeID)
+            return [.probeScrollTarget(id: nextSmartTouchProbeID, x: Double(n.x), y: Double(n.y))]
 
         case .firstTouchPending:
             // A second touch joined before the first resolved — always a
@@ -610,9 +655,10 @@ final class PointerGestureEngine {
             chordPositions.removeAll()
             return []
 
-        case .leftDragHeld, .rightDragHeld:
-            // Extra fingers while a drag is already committed don't
-            // change its meaning — ignore until release.
+        case .leftDragHeld, .rightDragHeld, .smartScroll:
+            // Extra fingers while a drag (or Smart Touch scroll) is
+            // already committed don't change its meaning — ignore until
+            // release.
             return []
 
         case .deferredSystemGesture:
@@ -753,6 +799,19 @@ final class PointerGestureEngine {
                     ? beginTrackpadDrag(id: sample.id, at: sample.viewPoint, time: sample.time)
                     : beginLeftDrag(id: sample.id, normalized: sample.normalized)
             }
+            if smartTouchIsActive {
+                switch smartTouchProbe {
+                case .pending:
+                    // Withheld until the Mac answers — bounded by the
+                    // existing arbitration window, after which `poll()`
+                    // commits ordinary Direct Touch as before.
+                    return []
+                case .scrollable:
+                    return commitToSmartScroll(id: sample.id, viewPoint: sample.viewPoint)
+                case .none, .notScrollable:
+                    break
+                }
+            }
             // Trackpad only: this lone finger might still be joined by a
             // partner to continue a just-buffered right tap into a chord
             // (see `promoteToChord`) — committing it to its own solo
@@ -817,6 +876,14 @@ final class PointerGestureEngine {
         case .leftDragHeld:
             guard sample.id == anchorID, let n = sample.normalized else { return [] }
             return [.moveAbsolute(x: Double(n.x), y: Double(n.y))]
+
+        case .smartScroll:
+            guard sample.id == anchorID, let last = smartScrollLastView else { return [] }
+            smartScrollLastView = sample.viewPoint
+            let dx = sample.viewPoint.x - last.x
+            let dy = sample.viewPoint.y - last.y
+            guard dx != 0 || dy != 0 else { return [] }
+            return [.scroll(dx: Double(dx), dy: Double(dy))]
 
         case .rightDragHeld:
             guard chordIDs.contains(sample.id) else { return [] }
@@ -948,6 +1015,12 @@ final class PointerGestureEngine {
                 resetToIdle()
             }
 
+        case .smartScroll:
+            if sample.id == anchorID {
+                out.append(.scrollEnded(momentum: !cancelled))
+                resetToIdle()
+            }
+
         case .rightDragHeld:
             chordIDs.remove(sample.id)
             chordPositions.removeValue(forKey: sample.id)
@@ -1050,6 +1123,52 @@ final class PointerGestureEngine {
         guard let n = normalized else { return [] }
         anchorNormalized = n
         return [.moveAbsolute(x: Double(n.x), y: Double(n.y))]
+    }
+
+    /// Smart Touch counterpart of `commitToAbsolutePointer`, reached only
+    /// when the Mac confirmed the touch-down target as scrollable. Parks
+    /// the cursor once at the touch-down point (the point the Mac
+    /// classified, and where macOS will deliver the scroll), then replays
+    /// the pre-commit movement as the first scroll delta so content tracks
+    /// the finger 1:1 from contact.
+    private func commitToSmartScroll(id: AnyHashable, viewPoint: CGPoint) -> [PointerCommand] {
+        // A probe is only ever issued for a touch-down with a real
+        // normalized point, so `start.point` is never the `.zero` stand-in.
+        let start = pendingStart
+        pendingID = nil
+        pendingStart = nil
+        pendingLastNormalized = nil
+        pendingLastView = nil
+        anchorID = id
+        anchorViewPoint = viewPoint
+        mode = .smartScroll
+        smartScrollLastView = viewPoint
+        var out: [PointerCommand] = []
+        if let start {
+            out.append(.moveAbsolute(x: Double(start.point.x), y: Double(start.point.y)))
+            let dx = viewPoint.x - start.view.x
+            let dy = viewPoint.y - start.view.y
+            if dx != 0 || dy != 0 { out.append(.scroll(dx: Double(dx), dy: Double(dy))) }
+        }
+        return out
+    }
+
+    /// The Mac's answer to a `.probeScrollTarget`. Ignored unless it
+    /// matches the current, still-undecided first touch's own probe, so a
+    /// late reply from an earlier touch or session can never classify a
+    /// newer one. If the finger already crossed `dragSlop` while waiting,
+    /// the withheld commit happens now.
+    @discardableResult
+    func resolveSmartTouchProbe(id: Int, scrollable: Bool) -> [PointerCommand] {
+        guard mode == .firstTouchPending, smartTouchProbe == .pending(id: id) else { return [] }
+        smartTouchProbe = scrollable ? .scrollable : .notScrollable
+        guard smartTouchIsActive, let pid = pendingID, let start = pendingStart,
+              let last = pendingLastView,
+              hypot(last.x - start.view.x, last.y - start.view.y) > PointerGestureConfig.dragSlop
+        else { return [] }
+        return scrollable
+            ? commitToSmartScroll(id: pid, viewPoint: last)
+            : commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized, viewPoint: last)
     }
 
     /// Trackpad-mode counterpart of `commitToAbsolutePointer`: commits
@@ -1203,6 +1322,8 @@ final class PointerGestureEngine {
         tapChain = nil
         liveTouchStart.removeAll()
         heldMouseButton = nil
+        smartTouchProbe = .none
+        smartScrollLastView = nil
     }
 }
 

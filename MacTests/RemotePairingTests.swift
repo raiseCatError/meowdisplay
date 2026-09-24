@@ -611,8 +611,8 @@ final class RemotePairingTests: XCTestCase {
     func testPairingVersionIsDecoupledFromMediaWireVersion() {
         XCTAssertEqual(WireProtocol.pairingVersion, 13)
         XCTAssertEqual(WireProtocol.minPairingVersion, 13)
-        // Media protocol version 19 remains independently valid and unrelated.
-        XCTAssertEqual(WireProtocol.version, 19)
+        // Media protocol version 20 remains independently valid and unrelated.
+        XCTAssertEqual(WireProtocol.version, 20)
         XCTAssertNotEqual(WireProtocol.pairingVersion, WireProtocol.version)
     }
 

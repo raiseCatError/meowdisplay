@@ -138,6 +138,8 @@ struct ReceiverScreen: View {
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
+                                   smartTouchEnabled: controlStore.preferences.smartTouchEnabled
+                                       && model.receiver.macSupportsSmartTouch,
                                    allowInput: inputReachesMac,
                                    videoEnabled: model.receiver.videoEnabled,
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
@@ -1419,6 +1421,24 @@ struct SettingsView: View {
                     Text(controlStore.preferences.inputMode.explanation)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if controlStore.preferences.inputMode == .direct {
+                        Toggle(isOn: preferenceBinding(\.smartTouchEnabled)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text("Smart Touch")
+                                    Text("Experimental")
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                                        .foregroundStyle(.orange)
+                                }
+                                Text("Use interface context to make one-finger scrolling feel more natural. Falls back to normal Direct Touch when the Mac can't identify a scrollable area.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                     HStack {
                         Text("Trackpad Sensitivity")
                         Spacer()
@@ -2144,6 +2164,9 @@ struct VideoLayerView: UIViewRepresentable {
     /// Linear multiplier on Trackpad's primary one-finger relative delta —
     /// see `PointerGestureConfig.trackpadSensitivityRange`.
     let trackpadSensitivity: Double
+    /// Smart Touch (Experimental), already ANDed with the Mac's support for
+    /// it — see `PointerGestureEngine.smartTouchEnabled`.
+    let smartTouchEnabled: Bool
     /// Master remote-input gate (SETTINGS / ALLOW INPUT INVARIANTS). Belt-
     /// and-suspenders alongside the `.allowsHitTesting` gate `ReceiverScreen`
     /// applies to this whole view: that gate stops new touches from ever
@@ -2177,6 +2200,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setKeyboardRequested(keyboardRequested)
         view.setInputMode(inputMode)
         view.setTrackpadSensitivity(trackpadSensitivity)
+        view.setSmartTouchEnabled(smartTouchEnabled)
         view.setAllowInput(allowInput)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
@@ -2186,6 +2210,9 @@ struct VideoLayerView: UIViewRepresentable {
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
+        receiver.onSmartTouchProbeResult = { [weak view] id, scrollable in
+            view?.resolveSmartTouchProbe(id: id, scrollable: scrollable)
+        }
         receiver.onDisplayStateChange = { [weak view] state in
             if state == .paused { view?.clearInputStateForPause() }
         }
@@ -2293,6 +2320,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
+        uiView.setSmartTouchEnabled(smartTouchEnabled)
         uiView.setAllowInput(allowInput)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
@@ -2521,6 +2549,19 @@ struct VideoLayerView: UIViewRepresentable {
         func setTrackpadSensitivity(_ sensitivity: Double) {
             guard sensitivity != pointerEngine.trackpadSensitivity else { return }
             pointerEngine.trackpadSensitivity = sensitivity
+        }
+
+        /// Smart Touch (Experimental). A plain stored flag on the engine —
+        /// only read at the next touch-down/commit, so no session to cancel.
+        func setSmartTouchEnabled(_ enabled: Bool) {
+            guard enabled != pointerEngine.smartTouchEnabled else { return }
+            pointerEngine.smartTouchEnabled = enabled
+        }
+
+        /// The Mac's classification of a Smart Touch touch-down target.
+        func resolveSmartTouchProbe(id: Int, scrollable: Bool) {
+            dispatchPointerCommands(pointerEngine.resolveSmartTouchProbe(id: id, scrollable: scrollable))
+            schedulePointerPoll()
         }
 
         private var allowsInput = true
@@ -3303,7 +3344,8 @@ struct VideoLayerView: UIViewRepresentable {
         /// for the same reason.
         private var pointerEngineOwnsAnchor: Bool {
             switch pointerEngine.mode {
-            case .absolutePointer, .relativePointerSession, .leftDragHeld, .chordPending, .rightDragHeld:
+            case .absolutePointer, .relativePointerSession, .leftDragHeld, .chordPending, .rightDragHeld,
+                 .smartScroll:
                 return true
             case .twoFingerPending:
                 return pointerEngine.isChordContinuation
@@ -3628,6 +3670,24 @@ struct VideoLayerView: UIViewRepresentable {
                     }
                 case .mouseUp(let button, let clickCount):
                     receiver.sendPointerUp(button: button, clickCount: clickCount)
+                case .probeScrollTarget(let id, let x, let y):
+                    // Every Smart Touch candidate starts here, so this is
+                    // also where its velocity history starts clean.
+                    scrollVelocityTracker.reset()
+                    receiver.sendSmartTouchProbe(id: id, x: x, y: y)
+                case .scroll(let dx, let dy):
+                    // Same units, direction, and momentum sampling as the
+                    // two-finger scroll path (`continueScroll`).
+                    guard let scale = pointsPerRemotePixel(video: video) else { continue }
+                    receiver.sendScroll(dx: dx / scale, dy: dy / scale)
+                    scrollVelocityTracker.record(dx: CGFloat(dx), dy: CGFloat(dy), at: CACurrentMediaTime())
+                case .scrollEnded(let momentum):
+                    if momentum {
+                        beginScrollMomentum()
+                    } else {
+                        cancelScrollMomentum()
+                        scrollVelocityTracker.reset()
+                    }
                 }
             }
         }

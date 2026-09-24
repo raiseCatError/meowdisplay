@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 19
+    static let version = 20
 
     /// The pairing protocol's own version, decoupled from `version` (the
     /// media/streaming wire protocol above). Pairing and media evolve on
@@ -170,6 +170,15 @@ enum WireProtocol {
     /// H.264 exactly as before this feature existed.
     static let hevcCodecWireVersion = 19
 
+    /// Protocol version that introduced Smart Touch (Experimental):
+    /// `smartTouchProbe` (receiver -> Mac: classify the Accessibility
+    /// element under a normalized point) and `smartTouchProbeResult`
+    /// (Mac -> receiver: `scrollable` for that probe `id`). A receiver MUST
+    /// NOT send `smartTouchProbe` when the peer is below this version —
+    /// Smart Touch then simply stays off and Direct Touch behaves exactly
+    /// as before.
+    static let smartTouchWireVersion = 20
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -266,6 +275,12 @@ enum WireMessage {
     // receiver that never sent `codecs` never receives this and correctly
     // assumes H.264, the only codec it can ever be sent.
     static let streamCodecState = "streamCodecState"
+    // receiver -> Mac: Smart Touch (Experimental) probe — `id`, normalized
+    // `x`/`y`. See `smartTouchWireVersion`.
+    static let smartTouchProbe = "smartTouchProbe"
+    // Mac -> receiver: `id` echoed back plus `scrollable`. Any failure
+    // (no Accessibility permission, no element, timeout) answers false.
+    static let smartTouchProbeResult = "smartTouchProbeResult"
 }
 
 enum WireCrypto {

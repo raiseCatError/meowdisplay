@@ -77,6 +77,7 @@ CONTROL
 • Direct Touch: tap exactly where you want on screen
 • Trackpad: move a pointer with familiar gestures
 • Click, double-click, drag, right-click and scroll
+• Apple Pencil on supported iPads, with tilt and hover
 • Multi-finger gestures for Mission Control, Spaces, Spotlight and more
 • A keyboard, a Main Control Tray for modifier keys, a customizable Function Tray, and Chords with shortcut palettes
 • Controls can hide automatically while you work
