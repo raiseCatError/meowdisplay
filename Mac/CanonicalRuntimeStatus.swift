@@ -24,7 +24,10 @@ enum CanonicalRuntimeStatus {
     /// "Mirroring · LAN" / "Extending · Remote" / "Extending" when the route
     /// isn't known yet (still dialing).
     static func headline(mode: CaptureMode, route: ConnectionRoute?) -> String {
-        headline(verb: mode == .mirror ? "Mirroring" : "Extending", route: route)
+        headline(verb: mode == .mirror
+                 ? String(localized: "Mirroring", comment: "Status: showing a copy of a Mac display on the device.")
+                 : String(localized: "Extending", comment: "Status: the device is acting as an extra Mac display."),
+                 route: route)
     }
 
     /// The general "<verb> · <route>" shape `headline(mode:route:)` builds
@@ -40,8 +43,13 @@ enum CanonicalRuntimeStatus {
     /// pre-hello session is not yet a connected device — this is the
     /// canonical fix for the false-Idle / false-"N connected" class of bug).
     static func statusText(activeDisplayCount: Int) -> String {
-        guard activeDisplayCount > 0 else { return "Idle" }
-        return "\(activeDisplayCount) device\(activeDisplayCount == 1 ? "" : "s") connected"
+        guard activeDisplayCount > 0 else { return String(localized: "Idle") }
+        // Singular keeps its own key so English output never depends on the
+        // plural variant being loaded (the hostless test bundle has no catalog);
+        // translators can still vary the counted form by plural category.
+        if activeDisplayCount == 1 { return String(localized: "1 device connected") }
+        return String(localized: "\(activeDisplayCount) devices connected",
+                      comment: "Toolbar status; the count is always 2 or more.")
     }
 
     /// Maps one session's *existing* capture-lifecycle/failed state (see
@@ -78,10 +86,10 @@ enum CanonicalRuntimeStatus {
                                  phase: CanonicalConnectionPhase) -> String {
         switch phase {
         case .connected: return headline(mode: mode, route: route)
-        case .paused: return headline(verb: "Paused", route: route)
-        case .reconnecting: return "Reconnecting…"
-        case .lost: return "Connection Lost"
-        case .idle: return "Idle"
+        case .paused: return headline(verb: String(localized: "Paused"), route: route)
+        case .reconnecting: return String(localized: "Reconnecting…")
+        case .lost: return String(localized: "Connection Lost")
+        case .idle: return String(localized: "Idle")
         }
     }
 
@@ -91,14 +99,15 @@ enum CanonicalRuntimeStatus {
     static func aggregateStatusText(
         entries: [(mode: CaptureMode, route: ConnectionRoute?, phase: CanonicalConnectionPhase)]
     ) -> String {
-        guard !entries.isEmpty else { return "Idle" }
+        guard !entries.isEmpty else { return String(localized: "Idle") }
         if entries.count == 1, let only = entries.first {
             return entryStatusText(mode: only.mode, route: only.route, phase: only.phase)
         }
         switch aggregatePhase(entryPhases: entries.map(\.phase)) {
-        case .lost: return "Connection Lost"
-        case .reconnecting: return "Reconnecting…"
-        case .paused: return "\(entries.count) devices paused"
+        case .lost: return String(localized: "Connection Lost")
+        case .reconnecting: return String(localized: "Reconnecting…")
+        case .paused: return String(localized: "\(entries.count) devices paused",
+                                                  comment: "Toolbar status; the count is always 2 or more.")
         case .connected, .idle: return statusText(activeDisplayCount: entries.count)
         }
     }

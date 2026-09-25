@@ -536,7 +536,7 @@ struct OverflowMarqueeText: View {
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
     }
 
-    let text: String
+    let text: LocalizedStringKey
     var font: Font = .subheadline.weight(.semibold)
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -544,7 +544,7 @@ struct OverflowMarqueeText: View {
     @State private var containerWidth: CGFloat = 0
     @State private var offset: CGFloat = 0
 
-    init(_ text: String) { self.text = text }
+    init(_ text: LocalizedStringKey) { self.text = text }
 
     private static let fadeWidth: CGFloat = 12
 
@@ -851,7 +851,7 @@ struct IdleView: View {
     }
 
     /// Fixed-width icon column so every row's text starts at the same x.
-    private func instructionRow(_ symbol: String, _ text: String) -> some View {
+    private func instructionRow(_ symbol: String, _ text: LocalizedStringKey) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Image(systemName: symbol)
                 .frame(width: 28, alignment: .center)
@@ -1032,18 +1032,18 @@ struct IdleView: View {
     private func remoteStatusText(peerID: String) -> String {
         if let reason = wakeConnect.failureReason(forPeerID: peerID) {
             switch reason {
-            case "timedOut": return "Connection timed out"
-            case "cancelled": return "Cancelled"
-            case "protocolIncompatible": return "Mac requires app update"
-            case "peerForgotten": return "Mac pairing removed"
-            default: return "Connection failed"
+            case "timedOut": return String(localized: "Connection timed out")
+            case "cancelled": return String(localized: "Cancelled")
+            case "protocolIncompatible": return String(localized: "Mac requires app update")
+            case "peerForgotten": return String(localized: "Mac pairing removed")
+            default: return String(localized: "Connection failed")
             }
         }
         switch receiver.session.phase {
-        case .connecting, .reconnecting: return "Connecting…"
-        case .connected: return "Connected"
-        case .reconnectFailed, .disconnected: return "Not connected"
-        default: return "Remote endpoint unavailable"
+        case .connecting, .reconnecting: return String(localized: "Connecting…")
+        case .connected: return String(localized: "Connected")
+        case .reconnectFailed, .disconnected: return String(localized: "Not connected")
+        default: return String(localized: "Remote endpoint unavailable")
         }
     }
 
@@ -1323,7 +1323,7 @@ struct SettingsView: View {
                         }
                     } else {
                         LabeledContent("Display Mode",
-                                       value: receiver.connected ? "Waiting for Mac" : "Unavailable")
+                                       value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
                     }
                 }
 
@@ -1796,7 +1796,7 @@ struct SettingsView: View {
                         receiver.requestMirrorDisplaySelection(display.uuid)
                     } label: {
                         HStack {
-                            Text(display.isMain ? "\(display.name) (Main)" : display.name)
+                            Text(display.isMain ? String(localized: "\(display.name) (Main)", comment: "A display name, marked as the Mac's main display.") : display.name)
                                 .foregroundStyle(.primary)
                             Spacer()
                             if state.selectedUUID == display.uuid {
@@ -1853,7 +1853,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         } else {
-            LabeledContent("Extend Shape", value: receiver.connected ? "Waiting for Mac" : "Unavailable")
+            LabeledContent("Extend Shape", value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
         }
     }
 
@@ -1869,8 +1869,8 @@ struct SettingsView: View {
         if state.encoderSafeFPS >= state.requestedFPS {
             return nil
         }
-        return "\(receiver.streamingProfile.label) requests \(state.requestedFPS) FPS. "
-            + "Limited to \(state.encoderSafeFPS) FPS at this display size."
+        return String(localized: "\(receiver.streamingProfile.label) requests \(state.requestedFPS) FPS. Limited to \(state.encoderSafeFPS) FPS at this display size.",
+                      comment: "The first value is a streaming profile name, such as Performance.")
     }
 
     @ViewBuilder
@@ -1949,7 +1949,7 @@ struct SettingsView: View {
                         LabeledContent("Updating Maximum FPS…") { ProgressView() }
                     }
                 } else {
-                    LabeledContent("Maximum FPS", value: receiver.connected ? "Waiting for Mac" : "Unavailable")
+                    LabeledContent("Maximum FPS", value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
                 }
             } footer: {
                 Text("Caps how fast this Mac streams to this device, on top of its normal profile/display limits.")

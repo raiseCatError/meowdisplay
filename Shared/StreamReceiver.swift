@@ -701,7 +701,7 @@ final class StreamReceiver: ObservableObject {
     /// re-deriving it from `connected` alone, which used to miss states
     /// like reconnecting/paused.
     @MainActor var canonicalPhaseTitle: String {
-        session.interruption?.title ?? (session.phase == .connected ? "Connected" : "Waiting for a Mac…")
+        session.interruption?.title ?? (session.phase == .connected ? String(localized: "Connected") : String(localized: "Waiting for a Mac…"))
     }
     /// Auto-Reconnect preference (Settings/Home toggle) — this receiver's own
     /// local setting, independent of the paired Mac's and not synced with
@@ -1495,7 +1495,7 @@ final class StreamReceiver: ObservableObject {
                     connection: connection, localID: Self.installID,
                     localName: serviceName, prompt: pairingPrompt,
                     expectedPeerID: expectedPeerID, allowIdentityChange: false)
-                pairingPrompt.finish("Paired with \(paired.peerName)")
+                pairingPrompt.finish(String(localized: "Paired with \(paired.peerName)"))
                 notePairingSucceeded()
                 finishExplicitPairing(success: true)
             } catch {
@@ -2071,7 +2071,7 @@ final class StreamReceiver: ObservableObject {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: installID,
                             localName: localName, prompt: prompt, allowIdentityChange: false)
-                        await prompt.finish("Paired with \(paired.peerName)")
+                        await prompt.finish(String(localized: "Paired with \(paired.peerName)"))
                         await uiSink.publishPairingSucceeded()
                         Self.finishExplicitPairing(
                             queue: queue, pairingSuppressionState: pairingSuppressionState, success: true)

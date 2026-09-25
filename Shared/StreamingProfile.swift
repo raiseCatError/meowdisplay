@@ -14,17 +14,17 @@ enum StreamingProfile: String, CaseIterable, Codable, Identifiable {
 
     var label: String {
         switch self {
-        case .efficiency: return "Efficiency"
-        case .performance: return "Performance"
-        case .custom: return "Custom"
+        case .efficiency: return String(localized: "Efficiency")
+        case .performance: return String(localized: "Performance")
+        case .custom: return String(localized: "Custom")
         }
     }
 
     var explanation: String {
         switch self {
-        case .efficiency: return "Lower power/bandwidth, up to 60 FPS."
-        case .performance: return "Prioritize responsiveness, up to the receiver's supported refresh rate, capped at 120 FPS."
-        case .custom: return "Manual streaming controls."
+        case .efficiency: return String(localized: "Lower power/bandwidth, up to 60 FPS.")
+        case .performance: return String(localized: "Prioritize responsiveness, up to the receiver's supported refresh rate, capped at 120 FPS.")
+        case .custom: return String(localized: "Manual streaming controls.")
         }
     }
 }
@@ -55,7 +55,7 @@ enum CustomFrameRateSelection: String, CaseIterable, Codable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "Auto"
+        case .auto: return String(localized: "Auto")
         case .fps30: return "30"
         case .fps60: return "60"
         case .fps90: return "90"

@@ -24,7 +24,7 @@ struct RemoteAccessSettingsView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(remoteEntries) { entry in
-                        LabeledContent(entry.name, value: "Connected · Remote")
+                        LabeledContent(entry.name, value: String(localized: "Connected · Remote"))
                     }
                 }
             }
@@ -75,14 +75,14 @@ struct RemoteEndpointEditorView: View {
         let target = ConnectionTarget.remote(peerID: peerID)
         if let session = controller.session(for: target.sessionID) {
             if controller.activeDisplayEntries.contains(where: { $0.id == session.id }) {
-                return "Connected via Remote"
+                return String(localized: "Connected via Remote")
             }
             if session.failed {
-                return "Connection Lost"
+                return String(localized: "Connection Lost")
             }
-            return "Connecting…"
+            return String(localized: "Connecting…")
         }
-        return selectedPeerHasSavedEndpoint ? nil : "Endpoint unavailable"
+        return selectedPeerHasSavedEndpoint ? nil : String(localized: "Endpoint unavailable")
     }
 
     var body: some View {
@@ -150,7 +150,7 @@ struct RemoteEndpointEditorView: View {
             // instead of claiming success.
             guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
                   readBack.host == value.host, readBack.port == value.port else {
-                errorMessage = "Couldn't save this endpoint. Try again."
+                errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
             }
             host = readBack.host
@@ -160,9 +160,9 @@ struct RemoteEndpointEditorView: View {
         case .failure(let error):
             savedConfirmation = false
             switch error {
-            case .emptyHost: errorMessage = "Enter a host or IP address."
-            case .invalidHost: errorMessage = "That doesn't look like a valid host or IP address."
-            case .invalidPort: errorMessage = "Enter a port between 1 and 65535."
+            case .emptyHost: errorMessage = String(localized: "Enter a host or IP address.")
+            case .invalidHost: errorMessage = String(localized: "That doesn't look like a valid host or IP address.")
+            case .invalidPort: errorMessage = String(localized: "Enter a port between 1 and 65535.")
             }
         }
     }

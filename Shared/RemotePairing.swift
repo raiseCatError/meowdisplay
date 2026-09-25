@@ -256,17 +256,17 @@ enum RemotePairingFailureKind: Equatable {
 
     var title: String {
         switch self {
-        case .unreachable: "Couldn't reach the Mac"
-        case .timedOut: "Pairing timed out"
-        case .rejected: "Pairing was rejected"
-        case .cancelledByPeer: "Pairing was cancelled on the other device"
-        case .ownerAuthFailed: "Device owner authentication failed"
-        case .keyChanged: "Trusted device key changed"
-        case .codesDidNotMatch: "Codes did not match"
-        case .updateRequired: "Update MeowDisplay on both devices to pair"
-        case .failed: "Pairing failed"
+        case .unreachable: String(localized: "Couldn't reach the Mac")
+        case .timedOut: String(localized: "Pairing timed out")
+        case .rejected: String(localized: "Pairing was rejected")
+        case .cancelledByPeer: String(localized: "Pairing was cancelled on the other device")
+        case .ownerAuthFailed: String(localized: "Device owner authentication failed")
+        case .keyChanged: String(localized: "Trusted device key changed")
+        case .codesDidNotMatch: String(localized: "Codes did not match")
+        case .updateRequired: String(localized: "Update MeowDisplay on both devices to pair")
+        case .failed: String(localized: "Pairing failed")
         // Calm, non-alarmist wording — never "possible attack".
-        case .tooManyAttempts: "Too many pairing attempts. Try again in 30 seconds."
+        case .tooManyAttempts: String(localized: "Too many pairing attempts. Try again in 30 seconds.")
         }
     }
 
@@ -275,8 +275,8 @@ enum RemotePairingFailureKind: Equatable {
 
     var detail: String? {
         switch self {
-        case .unreachable: "Make sure the address is correct and Pair Over Remote is turned on on the Mac."
-        case .keyChanged: "Forget the device to pair again."
+        case .unreachable: String(localized: "Make sure the address is correct and Pair Over Remote is turned on on the Mac.")
+        case .keyChanged: String(localized: "Forget the device to pair again.")
         default: nil
         }
     }
@@ -347,7 +347,7 @@ enum RemotePairingFailure {
     /// Mac side: a handshake always occurred by the time an error is reported.
     static func message(for error: Error, timedOut: Bool = false) -> String {
         guard let kind = classify(error, cancelledByUser: false, deadlineFired: timedOut, handshakeReached: true) else {
-            return "Pairing was cancelled"
+            return String(localized: "Pairing was cancelled")
         }
         return kind.title
     }
@@ -495,10 +495,10 @@ enum OwnerAuthPolicy {
     static func reason(peerName: String, updatingEndpointOnly: Bool = false) -> String {
         let name = sanitizedName(peerName)
         if updatingEndpointOnly {
-            return name.isEmpty ? "Confirm that you want to update this device's remote address in MEOW."
-                                : "Confirm that you want to update the remote address for \u{201C}\(name)\u{201D} in MEOW."
+            return name.isEmpty ? String(localized: "Confirm that you want to update this device's remote address in MEOW.")
+                                : String(localized: "Confirm that you want to update the remote address for \u{201C}\(name)\u{201D} in MEOW.")
         }
-        return name.isEmpty ? "Confirm that you want to trust this device in MEOW."
-                            : "Confirm that you want to trust \u{201C}\(name)\u{201D} in MEOW."
+        return name.isEmpty ? String(localized: "Confirm that you want to trust this device in MEOW.")
+                            : String(localized: "Confirm that you want to trust \u{201C}\(name)\u{201D} in MEOW.")
     }
 }

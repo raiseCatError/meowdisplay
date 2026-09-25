@@ -1,7 +1,1027 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ (Main)" : {
+      "comment" : "A display name, marked as the Mac's main display."
+    },
+    "%@ requests %lld FPS. Limited to %lld FPS at this display size." : {
+      "comment" : "The first value is a streaming profile name, such as Performance.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ requests %2$lld FPS. Limited to %3$lld FPS at this display size."
+          }
+        }
+      }
+    },
+    "%lld" : {
 
+    },
+    "A newer version of MeowDisplay is available." : {
+
+    },
+    "A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the Main Tray above. \"Same Side\" groups it with the Main Tray; \"Opposite Side\" puts it on the other edge of the screen." : {
+
+    },
+    "A/V Sync" : {
+
+    },
+    "AAC Integrity Logging" : {
+
+    },
+    "About" : {
+
+    },
+    "Active Profile" : {
+
+    },
+    "Add" : {
+
+    },
+    "Add Shortcut" : {
+
+    },
+    "Adjust if sound plays slightly before or after the picture." : {
+
+    },
+    "Allowed for this session" : {
+
+    },
+    "Always uses H.264, the universal compatibility codec." : {
+
+    },
+    "Analytics" : {
+
+    },
+    "App" : {
+      "comment" : "Gesture target: send the gesture to the Mac app."
+    },
+    "App Gesture Commands" : {
+
+    },
+    "Audio" : {
+
+    },
+    "Audio Comparison Dump" : {
+
+    },
+    "Auto" : {
+
+    },
+    "Auto-Reconnect" : {
+
+    },
+    "Auto-hide Control Trays" : {
+
+    },
+    "Automatic" : {
+
+    },
+    "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen." : {
+
+    },
+    "Avoid Notch" : {
+
+    },
+    "Back to Home" : {
+
+    },
+    "Balanced default." : {
+
+    },
+    "Bottom Left" : {
+
+    },
+    "Bottom Right" : {
+
+    },
+    "Builds while you hold a title bar, then ticks when the window can move. Also confirms switching to Direct Touch." : {
+
+    },
+    "Can't Connect" : {
+
+    },
+    "Cancel" : {
+
+    },
+    "Cancelled" : {
+
+    },
+    "Caps how fast this Mac streams to this device, on top of its normal profile/display limits." : {
+
+    },
+    "Cat Mode" : {
+
+    },
+    "Cat Mode unlocked 🐾" : {
+
+    },
+    "Choose Another Mac" : {
+
+    },
+    "Close" : {
+
+    },
+    "Codes Match" : {
+
+    },
+    "Codes did not match" : {
+
+    },
+    "Collapse Control Tray" : {
+
+    },
+    "Collapsed" : {
+
+    },
+    "Command" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Confirm that you want to trust this device in MEOW." : {
+
+    },
+    "Confirm that you want to trust “%@” in MEOW." : {
+
+    },
+    "Confirm that you want to update the remote address for “%@” in MEOW." : {
+
+    },
+    "Confirm that you want to update this device's remote address in MEOW." : {
+
+    },
+    "Connect" : {
+
+    },
+    "Connect the %@ by USB, or join the same WiFi" : {
+
+    },
+    "Connect to the Mac first." : {
+
+    },
+    "Connected" : {
+
+    },
+    "Connecting…" : {
+
+    },
+    "Connection" : {
+
+    },
+    "Connection Instructions" : {
+
+    },
+    "Connection Lost" : {
+
+    },
+    "Connection failed" : {
+
+    },
+    "Connection log" : {
+
+    },
+    "Connection timed out" : {
+
+    },
+    "Continuous" : {
+
+    },
+    "Control" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Couldn't reach the Mac" : {
+
+    },
+    "Couldn't save this endpoint. Try again." : {
+
+    },
+    "Custom" : {
+
+    },
+    "Default" : {
+
+    },
+    "Developer" : {
+
+    },
+    "Developer — Audio Diagnostics" : {
+
+    },
+    "Developer — Cat Mode" : {
+
+    },
+    "Developer — Promote Interactive Wake" : {
+
+    },
+    "Developer — Wake Testing" : {
+
+    },
+    "Device identity changed" : {
+
+    },
+    "Device name" : {
+
+    },
+    "Device owner authentication failed" : {
+
+    },
+    "Diagnostics" : {
+
+    },
+    "Direct Touch" : {
+      "comment" : "Input mode: touch where you want the pointer to go."
+    },
+    "Disabled" : {
+
+    },
+    "Disconnect" : {
+
+    },
+    "Display" : {
+
+    },
+    "Display Mode" : {
+
+    },
+    "Display Paused" : {
+
+    },
+    "Done" : {
+
+    },
+    "Double-tap to %@" : {
+
+    },
+    "Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream." : {
+
+    },
+    "Edit %@" : {
+
+    },
+    "Edit Current Profile" : {
+
+    },
+    "Edit Function Tray" : {
+
+    },
+    "Edit Remote Details…" : {
+
+    },
+    "Efficiency" : {
+
+    },
+    "Enforce Maximum FPS" : {
+
+    },
+    "Enlarge the area you're typing in when the keyboard is open." : {
+
+    },
+    "Enter a host or IP address." : {
+
+    },
+    "Enter a port between 1 and 65535." : {
+
+    },
+    "Escape" : {
+
+    },
+    "Expanded" : {
+
+    },
+    "Experimental" : {
+
+    },
+    "Experimental app command mode" : {
+
+    },
+    "Extend" : {
+      "comment" : "Display mode: add the device as a second, separate screen (not the verb \"to extend\")."
+    },
+    "Extend Shape" : {
+
+    },
+    "Fast" : {
+
+    },
+    "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency." : {
+
+    },
+    "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+
+    },
+    "Forget" : {
+
+    },
+    "Forget the device to pair again." : {
+
+    },
+    "Forget “%@”?" : {
+
+    },
+    "Frame Rate" : {
+
+    },
+    "Function Profile" : {
+
+    },
+    "Function Tray" : {
+
+    },
+    "Function Tray Position" : {
+
+    },
+    "Gestures" : {
+
+    },
+    "Get the Mac app" : {
+
+    },
+    "GitHub — raiseCatError/MeowDisplay" : {
+
+    },
+    "Haptics" : {
+
+    },
+    "Host (Tailscale IP or MagicDNS name)" : {
+
+    },
+    "How to connect" : {
+
+    },
+    "If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above." : {
+
+    },
+    "Input" : {
+
+    },
+    "Input Mode" : {
+
+    },
+    "Install the MeowDisplay Mac app on your Mac" : {
+
+    },
+    "Invalid pairing message" : {
+
+    },
+    "Keep this app open — streaming starts automatically" : {
+
+    },
+    "Keep this app open — streaming starts on its own" : {
+
+    },
+    "Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape." : {
+
+    },
+    "Key" : {
+
+    },
+    "Keyboard" : {
+
+    },
+    "Landscape Tray Side" : {
+
+    },
+    "Later" : {
+
+    },
+    "Left" : {
+
+    },
+    "Legacy SampleBuffer Renderer" : {
+
+    },
+    "Lower power/bandwidth, up to 60 FPS." : {
+
+    },
+    "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices." : {
+
+    },
+    "Mac" : {
+
+    },
+    "Mac Address" : {
+
+    },
+    "Mac Disconnected" : {
+
+    },
+    "Mac pairing removed" : {
+
+    },
+    "Mac requires app update" : {
+
+    },
+    "Main Tray" : {
+
+    },
+    "Make sure the address is correct and Pair Over Remote is turned on on the Mac." : {
+
+    },
+    "Manual" : {
+
+    },
+    "Manual diagnostic, not automated: asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake." : {
+
+    },
+    "Manual streaming controls." : {
+
+    },
+    "Manually control streaming profile, priority, codec, frame rate and quality." : {
+
+    },
+    "Maximum FPS" : {
+
+    },
+    "MeowDisplay" : {
+
+    },
+    "MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet." : {
+
+    },
+    "MeowDisplay turns this %@ into a second screen for your Mac — but it needs the **MeowDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network." : {
+
+    },
+    "Metal renderer (experimental)" : {
+
+    },
+    "Mirror" : {
+      "comment" : "Display mode: duplicate the Mac's screen onto the device."
+    },
+    "Mirror Display" : {
+
+    },
+    "Mirror isn’t available" : {
+
+    },
+    "Mirror requires an active physical display." : {
+
+    },
+    "Modifiers" : {
+
+    },
+    "Move the pointer relative to your finger." : {
+
+    },
+    "Name" : {
+
+    },
+    "Nearby Devices" : {
+
+    },
+    "Nice" : {
+
+    },
+    "No LAN wake info learned yet for this Mac — connect to it at least once first." : {
+
+    },
+    "No devices nearby" : {
+
+    },
+    "No displays reported." : {
+
+    },
+    "No paired Macs" : {
+
+    },
+    "No shortcuts for %@" : {
+
+    },
+    "Not allowed" : {
+
+    },
+    "Not connected" : {
+
+    },
+    "Notch Debug Overlay" : {
+
+    },
+    "OK" : {
+
+    },
+    "Off" : {
+
+    },
+    "Off while Haptics is turned off." : {
+
+    },
+    "On" : {
+
+    },
+    "On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here." : {
+
+    },
+    "One more app to go" : {
+
+    },
+    "Open iOS Settings for MeowDisplay" : {
+
+    },
+    "Opposite Side" : {
+
+    },
+    "Option" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Options for %@" : {
+
+    },
+    "Or choose this %@ under WiFi in the Mac app" : {
+
+    },
+    "PCM Engine" : {
+
+    },
+    "PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this %@ and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My %@ → MeowDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this %1$@ and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My %2$@ → MeowDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change."
+          }
+        }
+      }
+    },
+    "PCM Scheduling" : {
+
+    },
+    "Pair" : {
+
+    },
+    "Pair over Remote" : {
+
+    },
+    "Pair with %@?" : {
+
+    },
+    "Pair with a Mac first — Remote Access uses the same secure pairing as local connections." : {
+
+    },
+    "Paired Mac" : {
+
+    },
+    "Paired Macs" : {
+
+    },
+    "Paired Successfully" : {
+
+    },
+    "Paired with %@" : {
+
+    },
+    "Pairing could not be verified" : {
+
+    },
+    "Pairing failed" : {
+
+    },
+    "Pairing timed out" : {
+
+    },
+    "Pairing was cancelled" : {
+
+    },
+    "Pairing was cancelled on the other device" : {
+
+    },
+    "Pairing was rejected" : {
+
+    },
+    "Performance" : {
+
+    },
+    "Performance overlay" : {
+
+    },
+    "Permissions" : {
+
+    },
+    "Pinch / Zoom" : {
+
+    },
+    "Playback Path" : {
+
+    },
+    "Plays a copy of what the Mac is playing. It keeps playing there too — this never changes the Mac's output device." : {
+
+    },
+    "Plug in the USB cable and start the Mac app" : {
+
+    },
+    "Port" : {
+
+    },
+    "Precise Scheduled" : {
+
+    },
+    "Prefer FPS" : {
+
+    },
+    "Prefer Latency" : {
+
+    },
+    "Preview" : {
+
+    },
+    "Prioritize responsiveness, up to the receiver's supported refresh rate, capped at 120 FPS." : {
+
+    },
+    "Production Codec" : {
+
+    },
+    "Profile 1" : {
+
+    },
+    "Profile 2" : {
+
+    },
+    "Promote Mac to Interactive Wake" : {
+
+    },
+    "Re-locks the About/version row's nine-tap easter egg for retesting the unlock flow." : {
+
+    },
+    "Receiver Controls" : {
+
+    },
+    "Receiver Local AAC Decode" : {
+
+    },
+    "Reconnect" : {
+
+    },
+    "Reconnecting…" : {
+
+    },
+    "Remote Access" : {
+
+    },
+    "Remote Access Settings…" : {
+
+    },
+    "Remote Access options" : {
+
+    },
+    "Remote endpoint unavailable" : {
+
+    },
+    "Remove Remote Details" : {
+
+    },
+    "Request Control" : {
+
+    },
+    "Requesting…" : {
+
+    },
+    "Requests disabled by Mac" : {
+
+    },
+    "Reset" : {
+
+    },
+    "Reset %@?" : {
+
+    },
+    "Reset App Gesture Commands to their defaults?" : {
+
+    },
+    "Reset Audio Diagnostics" : {
+
+    },
+    "Reset Cat Mode" : {
+
+    },
+    "Reset Function Tray" : {
+
+    },
+    "Reset Function Tray to Default" : {
+
+    },
+    "Reset Profile" : {
+
+    },
+    "Reset Profile to Default" : {
+
+    },
+    "Reset to Defaults" : {
+
+    },
+    "Restart MeowDisplay and try again." : {
+
+    },
+    "Restore This Palette" : {
+
+    },
+    "Resume from MeowDisplay on your Mac." : {
+
+    },
+    "Resync" : {
+
+    },
+    "Right" : {
+
+    },
+    "Rotate Left" : {
+
+    },
+    "Rotate Right" : {
+
+    },
+    "Rotate the %@ for a vertical second monitor." : {
+
+    },
+    "Rotation" : {
+
+    },
+    "Same Side" : {
+
+    },
+    "Save" : {
+
+    },
+    "Saved" : {
+
+    },
+    "Scroll with one finger in any direction. Hold a title bar, then drag, to move its window. Elsewhere, touch and hold for normal Direct Touch. Falls back to Direct Touch when the Mac can't identify the area." : {
+
+    },
+    "Selected display unavailable" : {
+
+    },
+    "Select…" : {
+
+    },
+    "Send LAN Wake Packet" : {
+
+    },
+    "Sends a standard Wake-on-LAN magic packet to an already-paired Mac's last-learned local network address. Same-LAN only — this never uses Remote/Tailscale." : {
+
+    },
+    "Set Up Remote Access" : {
+
+    },
+    "Settings" : {
+
+    },
+    "Settings & Help" : {
+
+    },
+    "Settings always stays reachable, even with input turned off. Sensitivity only affects Trackpad mode's one-finger pointer movement." : {
+
+    },
+    "Shift" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Shortcut" : {
+
+    },
+    "Shortcut Palettes" : {
+
+    },
+    "Show Control Tray" : {
+
+    },
+    "Show Function Tray" : {
+
+    },
+    "Show Keyboard Button" : {
+
+    },
+    "Show Surface Grid" : {
+
+    },
+    "Shown in the Mac app's WiFi connection menu. iOS hides this %@'s real name from apps, so set it here once." : {
+
+    },
+    "Slow" : {
+
+    },
+    "Smart Touch Haptics" : {
+      "comment" : "Toggle label. \"Smart Touch\" is the feature's brand name and must stay untranslated; only \"Haptics\" is translatable."
+    },
+    "Snap Rotation" : {
+
+    },
+    "Some Mac apps use different shortcuts for zooming and rotating. Customize the commands MeowDisplay sends when App mode is selected." : {
+
+    },
+    "Starting video…" : {
+
+    },
+    "Status" : {
+
+    },
+    "Stream" : {
+
+    },
+    "Streaming" : {
+
+    },
+    "Streaming Priority" : {
+
+    },
+    "Streaming Profile" : {
+
+    },
+    "Switching to %@" : {
+
+    },
+    "Tab" : {
+
+    },
+    "Tailscale IP or MagicDNS name" : {
+
+    },
+    "That doesn't look like a valid host or IP address." : {
+
+    },
+    "The Mac ended this session." : {
+
+    },
+    "The log could not be read." : {
+
+    },
+    "The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging." : {
+
+    },
+    "This Mac and this device can't work together yet." : {
+
+    },
+    "This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?" : {
+
+    },
+    "This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings." : {
+
+    },
+    "This device must be updated before pairing" : {
+
+    },
+    "This restores its default Undo/Redo layout. Other receiver settings stay unchanged." : {
+
+    },
+    "This restores its tray layout and shortcut palettes. Other receiver settings stay unchanged." : {
+
+    },
+    "This version of MeowDisplay is no longer supported. Update from the App Store to keep using your second display." : {
+
+    },
+    "Tip: shake the %@ to open settings anytime" : {
+
+    },
+    "Toggle Dock" : {
+
+    },
+    "Too many pairing attempts. Try again in 30 seconds." : {
+
+    },
+    "Top Left" : {
+
+    },
+    "Top Right" : {
+
+    },
+    "Touch where you want the pointer." : {
+
+    },
+    "Touch: tap to click, drag to drag, two-finger pan to scroll." : {
+
+    },
+    "Trackpad" : {
+      "comment" : "Input mode: relative pointer control like a laptop trackpad, not the physical accessory."
+    },
+    "Trackpad Sensitivity" : {
+
+    },
+    "Trust changed during pairing. Try again" : {
+
+    },
+    "Trusted device key changed" : {
+
+    },
+    "Try Again" : {
+
+    },
+    "Trying to restore the connection to your Mac." : {
+
+    },
+    "Turn Off" : {
+
+    },
+    "Turning video off keeps the connection, keyboard, controls, and selected input mode active." : {
+
+    },
+    "USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency)." : {
+
+    },
+    "Unavailable" : {
+
+    },
+    "Update" : {
+
+    },
+    "Update MeowDisplay on both devices to pair" : {
+
+    },
+    "Update available" : {
+
+    },
+    "Update on the App Store" : {
+
+    },
+    "Update required" : {
+
+    },
+    "Updating Extend shape…" : {
+
+    },
+    "Updating Maximum FPS…" : {
+
+    },
+    "Use Extend" : {
+
+    },
+    "Use Full Display" : {
+
+    },
+    "Use a reachable private-network address for this paired Mac, such as its Tailscale address or MagicDNS name. This lets you connect when the Mac isn't on the same network — it's only used to reach the device, it does not grant trust, and every connection still requires the existing secure pairing." : {
+
+    },
+    "Uses H.264 unless HEVC is needed and available to satisfy the requested stream." : {
+
+    },
+    "Uses HEVC when both this Mac and the connected device support it, otherwise falls back to H.264." : {
+
+    },
+    "Version" : {
+
+    },
+    "Video" : {
+
+    },
+    "Video Off temporarily routes pinch and rotate to App without changing these saved choices. App mode is experimental: instead of injecting native gestures into the foreground app, it sends the keyboard commands configured in App Gesture Commands." : {
+
+    },
+    "Viewport" : {
+      "comment" : "Gesture target: zoom or rotate the displayed picture."
+    },
+    "Waiting for Mac" : {
+
+    },
+    "Waiting for a Mac…" : {
+
+    },
+    "Wake & Connect" : {
+
+    },
+    "Waking display…" : {
+
+    },
+    "Waking…" : {
+
+    },
+    "We couldn't restore the connection." : {
+
+    },
+    "Welcome" : {
+
+    },
+    "What this %@ saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the %@ unless you share it. Attach it to a GitHub issue if a connection won't come up." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "What this %1$@ saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the %2$@ unless you share it. Attach it to a GitHub issue if a connection won't come up."
+          }
+        }
+      }
+    },
+    "WiFi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it." : {
+
+    },
+    "WiFi: both devices on the same network, then pick this %@ in the Mac app's Connection menu." : {
+
+    },
+    "You can find this link again anytime in Settings — shake the %@ to open it." : {
+
+    },
+    "You can now connect to this Mac." : {
+
+    },
+    "You'll need to pair with this Mac again before connecting." : {
+
+    },
+    "Zoom" : {
+
+    },
+    "Zoom In" : {
+
+    },
+    "Zoom Out" : {
+
+    },
+    "Zoom While Typing" : {
+
+    }
   },
   "version" : "1.0"
 }

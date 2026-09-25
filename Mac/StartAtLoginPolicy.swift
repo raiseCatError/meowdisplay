@@ -28,11 +28,11 @@ enum StartAtLoginPolicy {
         case .enabled, .notRegistered:
             return nil
         case .requiresApproval:
-            return "Approve MeowDisplay in System Settings → General → Login Items to finish enabling Start at Login."
+            return String(localized: "Approve MeowDisplay in System Settings → General → Login Items to finish enabling Start at Login.")
         case .notFound:
-            return "Start at Login is unavailable for this build."
+            return String(localized: "Start at Login is unavailable for this build.")
         @unknown default:
-            return "Start at Login status is unknown."
+            return String(localized: "Start at Login status is unknown.")
         }
     }
 

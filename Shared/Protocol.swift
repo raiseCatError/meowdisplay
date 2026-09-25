@@ -375,11 +375,11 @@ enum SessionInputWireState: String, Equatable {
 
     var receiverDisplayText: String {
         switch self {
-        case .off: return "Off"
-        case .requesting: return "Requesting…"
-        case .allowed: return "Allowed for this session"
-        case .notAllowed: return "Not allowed"
-        case .requestsDisabled: return "Requests disabled by Mac"
+        case .off: return String(localized: "Off")
+        case .requesting: return String(localized: "Requesting…")
+        case .allowed: return String(localized: "Allowed for this session")
+        case .notAllowed: return String(localized: "Not allowed")
+        case .requestsDisabled: return String(localized: "Requests disabled by Mac")
         }
     }
 }
@@ -389,7 +389,12 @@ enum ReceiverDisplayMode: String, Codable, CaseIterable, Identifiable {
     case extend
 
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .mirror: return String(localized: "Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
+        case .extend: return String(localized: "Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+        }
+    }
 }
 
 /// Receiver-side request bookkeeping. The Mac's state message always wins;

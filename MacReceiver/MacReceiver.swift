@@ -33,7 +33,7 @@ final class ReceiverController: ObservableObject {
     // this app (the toolbar status badge and the Overview status row)
     // reads this pair instead of each independently re-deriving "Connected"/
     // "Waiting for a Mac…" from `connected`, which could otherwise drift.
-    @Published private(set) var statusTitle = "Waiting for a Mac…"
+    @Published private(set) var statusTitle = String(localized: "Waiting for a Mac…")
     @Published private(set) var statusColor: Color = .secondary
     // The sender has no usable physical display for Mirror (pv 17). Mirrors
     // `receiver.mirrorUnavailable` so Settings can present the Cancel /
@@ -193,7 +193,7 @@ final class ReceiverController: ObservableObject {
         self.receiver = nil
         connected = false
         streaming = false
-        statusTitle = "Waiting for a Mac…"
+        statusTitle = String(localized: "Waiting for a Mac…")
         statusColor = .secondary
         mirrorUnavailableOffer = false
         closeWindow()

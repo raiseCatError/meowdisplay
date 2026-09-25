@@ -24,7 +24,8 @@ instead (repository → **Security** → **Report a vulnerability**). See
 
 ## Pull requests
 
-1. Fork the repository and create a branch from `main`.
+1. Fork the repository and create a branch from the repository's default
+   branch.
 2. Make a focused change — one fix or feature per PR, without unrelated
    refactors or formatting churn.
 3. Follow the existing Swift and project style (see [AGENTS.md](AGENTS.md) and
@@ -58,10 +59,32 @@ awkward or incorrect translations. Minor tooling assistance for file
 formatting or working with `.xcstrings` files is fine; the translated text
 itself must be human-written and human-reviewed.
 
-User-facing strings live in `Localizable.xcstrings` String Catalogs (one per
-app target: `Mac/`, `iOS/`, `MacReceiver/`). If the meaning or context of a
-string is unclear, please open an issue or ask before translating it rather
-than guessing.
+User-facing strings live in String Catalogs, one set per app target:
+`Localizable.xcstrings` for the app's text and `InfoPlist.xcstrings` for
+system permission prompts, in `Mac/` (the Mac app), `iOS/` (iPhone and iPad)
+and `MacReceiver/` (the Mac Receiver). English is the source language and
+every catalog already contains the current English strings.
+
+To contribute a translation:
+
+1. Fork and clone the repository, and create a branch from the repository's
+   default branch.
+2. Generate and open the Xcode project as described in [SETUP.md](SETUP.md).
+3. Open a String Catalog, click **+** at the bottom of its language list and
+   add your language (or select it if it already exists).
+4. Translate the entries. Read the comment shown next to a string for
+   context, keep placeholders such as `%@` and `%lld`, and leave product names
+   (MeowDisplay, MEOW) and technical terms like H.264, HEVC and USB as they
+   are. Don't change source code, identifiers or protocol values.
+5. If you can, build and run the app you translated with your language
+   selected and check that the text fits.
+6. Open a pull request that names the language, which catalogs it covers and
+   who wrote or reviewed the translation.
+
+Partial translations are welcome as long as the pull request says what is
+still missing — quality matters more than the number of languages. If the
+meaning or context of a string is unclear, please open an issue or ask before
+translating it rather than guessing.
 
 ## License
 

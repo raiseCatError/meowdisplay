@@ -26,7 +26,7 @@ struct InputSettingsView: View {
 
             if !controller.activeDisplayEntries.isEmpty {
                 Section("Current Session") {
-                    LabeledContent("Accessibility", value: permissions.accessibility ? "Granted" : "Not Granted")
+                    LabeledContent("Accessibility", value: permissions.accessibility ? String(localized: "Granted") : String(localized: "Not Granted"))
                 }
             }
 

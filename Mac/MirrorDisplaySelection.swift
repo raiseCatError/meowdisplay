@@ -52,14 +52,18 @@ struct MirrorDisplayCandidate: Identifiable, Equatable {
     var isHiDPI: Bool { pixelSize.width > logicalSize.width }
 
     var label: String {
-        isMain ? "\(name) (Main)" : name
+        isMain ? String(localized: "\(name) (Main)", comment: "A display name, marked as the Mac's main display.") : name
     }
 
     var detail: String {
-        var parts = ["\(Int(logicalSize.width))×\(Int(logicalSize.height)) logical"]
-        parts.append("\(Int(pixelSize.width))×\(Int(pixelSize.height)) backing")
+        // Sizes are interpolated as plain strings: a localized integer would
+        // gain digit grouping ("2,560"), which reads wrong in a resolution.
+        let logical = "\(Int(logicalSize.width))×\(Int(logicalSize.height))"
+        let backing = "\(Int(pixelSize.width))×\(Int(pixelSize.height))"
+        var parts = [String(localized: "\(logical) logical", comment: "Display size in points, such as 2560×1440.")]
+        parts.append(String(localized: "\(backing) backing", comment: "Display size in pixels, such as 5120×2880."))
         if isHiDPI { parts.append("HiDPI") }
-        if likelyVirtual { parts.append("possibly virtual") }
+        if likelyVirtual { parts.append(String(localized: "possibly virtual")) }
         return parts.joined(separator: " · ")
     }
 

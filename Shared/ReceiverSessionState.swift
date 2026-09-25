@@ -63,21 +63,21 @@ enum ReceiverSessionInterruption: Equatable {
 
     var title: String {
         switch self {
-        case .paused: return "Display Paused"
-        case .reconnecting: return "Reconnecting…"
-        case .reconnectFailed: return "Connection Lost"
-        case .unrecoverable: return "Can't Connect"
-        case .peerDisconnected: return "Mac Disconnected"
+        case .paused: return String(localized: "Display Paused")
+        case .reconnecting: return String(localized: "Reconnecting…")
+        case .reconnectFailed: return String(localized: "Connection Lost")
+        case .unrecoverable: return String(localized: "Can't Connect")
+        case .peerDisconnected: return String(localized: "Mac Disconnected")
         }
     }
 
     var message: String {
         switch self {
-        case .paused: return "Resume from MeowDisplay on your Mac."
-        case .reconnecting: return "Trying to restore the connection to your Mac."
-        case .reconnectFailed: return "We couldn't restore the connection."
-        case .unrecoverable: return "This Mac and this device can't work together yet."
-        case .peerDisconnected: return "The Mac ended this session."
+        case .paused: return String(localized: "Resume from MeowDisplay on your Mac.")
+        case .reconnecting: return String(localized: "Trying to restore the connection to your Mac.")
+        case .reconnectFailed: return String(localized: "We couldn't restore the connection.")
+        case .unrecoverable: return String(localized: "This Mac and this device can't work together yet.")
+        case .peerDisconnected: return String(localized: "The Mac ended this session.")
         }
     }
 

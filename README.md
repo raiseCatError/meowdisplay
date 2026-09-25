@@ -288,7 +288,8 @@ privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
 **Want to translate MeowDisplay?** Community translations are welcome.
 Human-written translations only, please — no AI or machine-generated
-localization. See [CONTRIBUTING.md](CONTRIBUTING.md).
+localization. See [Translations in CONTRIBUTING.md](CONTRIBUTING.md#translations)
+for how to get started.
 
 ## Prefer something simpler?
 

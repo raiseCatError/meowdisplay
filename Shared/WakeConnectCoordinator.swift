@@ -74,11 +74,11 @@ final class WakeConnectCoordinator: ObservableObject {
     var statusLabel: String {
         switch attempt.stage {
         case .idle, .failed: return ""
-        case .preparing, .waking, .waitingForConnection: return "Waking…"
-        case .authenticating: return "Connecting…"
-        case .promoting: return "Waking display…"
-        case .waitingForVideo: return "Starting video…"
-        case .connected: return "Connected"
+        case .preparing, .waking, .waitingForConnection: return String(localized: "Waking…")
+        case .authenticating: return String(localized: "Connecting…")
+        case .promoting: return String(localized: "Waking display…")
+        case .waitingForVideo: return String(localized: "Starting video…")
+        case .connected: return String(localized: "Connected")
         }
     }
 

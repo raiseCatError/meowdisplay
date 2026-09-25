@@ -34,7 +34,7 @@ enum CodecPreference: String, CaseIterable, Codable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "Auto"
+        case .auto: return String(localized: "Auto")
         case .h264: return "H.264"
         case .hevc: return "HEVC"
         }
@@ -42,9 +42,9 @@ enum CodecPreference: String, CaseIterable, Codable, Identifiable {
 
     var explanation: String {
         switch self {
-        case .auto: return "Uses H.264 unless HEVC is needed and available to satisfy the requested stream."
-        case .h264: return "Always uses H.264, the universal compatibility codec."
-        case .hevc: return "Uses HEVC when both this Mac and the connected device support it, otherwise falls back to H.264."
+        case .auto: return String(localized: "Uses H.264 unless HEVC is needed and available to satisfy the requested stream.")
+        case .h264: return String(localized: "Always uses H.264, the universal compatibility codec.")
+        case .hevc: return String(localized: "Uses HEVC when both this Mac and the connected device support it, otherwise falls back to H.264.")
         }
     }
 }

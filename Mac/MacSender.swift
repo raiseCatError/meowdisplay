@@ -45,17 +45,17 @@ enum StreamQuality: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .best: return "Best (native)"
-        case .balanced: return "Balanced (75%)"
-        case .fast: return "Fast (50%)"
+        case .best: return String(localized: "Best (native)")
+        case .balanced: return String(localized: "Balanced (75%)")
+        case .fast: return String(localized: "Fast (50%)")
         }
     }
 
     var explanation: String {
         switch self {
-        case .best: return "Pixel-perfect at the device's native resolution. Highest bandwidth and latency."
-        case .balanced: return "75% capture resolution — noticeably lower latency, slight softness."
-        case .fast: return "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi."
+        case .best: return String(localized: "Pixel-perfect at the device's native resolution. Highest bandwidth and latency.")
+        case .balanced: return String(localized: "75% capture resolution — noticeably lower latency, slight softness.")
+        case .fast: return String(localized: "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi.")
         }
     }
 

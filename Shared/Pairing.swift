@@ -17,17 +17,17 @@ enum PairingError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .malformedMessage: "Invalid pairing message"
-        case .unsupportedVersion: "This device must be updated before pairing"
-        case .invalidKey, .invalidConfirmation: "Pairing could not be verified"
-        case .rejected: "Pairing was cancelled"
-        case .identityChanged: "Device identity changed"
-        case .cancelledByPeer: "Pairing was cancelled on the other device"
-        case .cancelledLocally: "Pairing was cancelled"
-        case .ownerAuthenticationFailed: "Device owner authentication failed"
-        case .trustStateChanged: "Trust changed during pairing. Try again"
-        case .commitmentMismatch: "Pairing could not be verified"
-        case .tooManyAttempts: "Too many pairing attempts. Try again in 30 seconds."
+        case .malformedMessage: String(localized: "Invalid pairing message")
+        case .unsupportedVersion: String(localized: "This device must be updated before pairing")
+        case .invalidKey, .invalidConfirmation: String(localized: "Pairing could not be verified")
+        case .rejected: String(localized: "Pairing was cancelled")
+        case .identityChanged: String(localized: "Device identity changed")
+        case .cancelledByPeer: String(localized: "Pairing was cancelled on the other device")
+        case .cancelledLocally: String(localized: "Pairing was cancelled")
+        case .ownerAuthenticationFailed: String(localized: "Device owner authentication failed")
+        case .trustStateChanged: String(localized: "Trust changed during pairing. Try again")
+        case .commitmentMismatch: String(localized: "Pairing could not be verified")
+        case .tooManyAttempts: String(localized: "Too many pairing attempts. Try again in 30 seconds.")
         }
     }
 }

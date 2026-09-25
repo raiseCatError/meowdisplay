@@ -61,17 +61,17 @@ struct OverviewSettingsView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
 
-                        LabeledContent("Video", value: entry.videoActive ? "Streaming" : "Off")
-                        LabeledContent("Audio", value: entry.audioActive ? "Streaming" : "Off")
-                        LabeledContent("Input", value: entry.allowInput ? "Enabled" : "Disabled")
+                        LabeledContent("Video", value: entry.videoActive ? String(localized: "Streaming") : String(localized: "Off"))
+                        LabeledContent("Audio", value: entry.audioActive ? String(localized: "Streaming") : String(localized: "Off"))
+                        LabeledContent("Input", value: entry.allowInput ? String(localized: "Enabled") : String(localized: "Disabled"))
 
                         if entry.videoWidth > 0, entry.videoHeight > 0 {
                             LabeledContent("Resolution", value: "\(entry.videoWidth) × \(entry.videoHeight)")
                         }
                         LabeledContent("Video Bitrate", value: "\(entry.bitrateBps / 1_000_000) Mbps")
 
-                        LabeledContent("Connection", value: entry.route?.rawValue ?? "Connecting…")
-                        LabeledContent("Status", value: "Authenticated")
+                        LabeledContent("Connection", value: entry.route?.rawValue ?? String(localized: "Connecting…"))
+                        LabeledContent("Status", value: String(localized: "Authenticated"))
 
                         HStack {
                             if let session = controller.session(for: entry.id) {

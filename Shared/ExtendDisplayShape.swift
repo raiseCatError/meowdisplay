@@ -25,7 +25,7 @@ enum ExtendDisplayShape: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var title: String {
-        self == .automatic ? "Automatic" : rawValue
+        self == .automatic ? String(localized: "Automatic") : rawValue
     }
 
     /// width/height for every explicit ratio; `nil` for `.automatic`, whose

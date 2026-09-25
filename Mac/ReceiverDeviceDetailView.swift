@@ -32,7 +32,7 @@ struct ReceiverDeviceDetailView: View {
                     LabeledContent("Status", value: CanonicalRuntimeStatus.entryStatusText(
                         mode: entry.mode, route: entry.route, phase: entry.phase))
                 } else {
-                    LabeledContent("Status", value: "Paired · Offline")
+                    LabeledContent("Status", value: String(localized: "Paired · Offline"))
                 }
             }
 
@@ -58,12 +58,12 @@ struct ReceiverDeviceDetailView: View {
 
             Section {
                 if let session, session.sessionInputGranted {
-                    LabeledContent("Current Session", value: "Control allowed")
+                    LabeledContent("Current Session", value: String(localized: "Control allowed"))
                     Button("Revoke Control", role: .destructive) {
                         controller.revokeSessionInput(peerID: peerID)
                     }
                 } else {
-                    LabeledContent("Current Session", value: "Off")
+                    LabeledContent("Current Session", value: String(localized: "Off"))
                 }
                 Picker("Input Requests", selection: Binding(
                     get: { controller.inputPolicy(peerID: peerID) },
@@ -194,13 +194,14 @@ struct ReceiverDeviceDetailView: View {
     /// something is actually limiting it below what was requested.
     private func fpsLimitationText(width: Int, height: Int, encoderSafeFPS: Int) -> String {
         guard let profile = StreamingProfile(rawValue: UserDefaults.standard.string(forKey: "streamingProfile") ?? "") else {
-            return "Maximum for this display size: \(encoderSafeFPS) FPS."
+            return String(localized: "Maximum for this display size: \(encoderSafeFPS) FPS.")
         }
         let requested = StreamingFPSPolicy.profileRequestedFPS(profile: profile, requestedFPS: nil)
         if encoderSafeFPS >= requested {
-            return "Maximum for this display size: \(encoderSafeFPS) FPS."
+            return String(localized: "Maximum for this display size: \(encoderSafeFPS) FPS.")
         }
-        return "\(profile.label) requests \(requested) FPS. Limited to \(encoderSafeFPS) FPS at this display size."
+        return String(localized: "\(profile.label) requests \(requested) FPS. Limited to \(encoderSafeFPS) FPS at this display size.",
+                      comment: "The first value is a streaming profile name, such as Performance.")
     }
 
     @ViewBuilder

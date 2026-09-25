@@ -19,17 +19,17 @@ enum StreamingPriority: String, CaseIterable, Codable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "Auto"
-        case .preferFPS: return "Prefer FPS"
-        case .preferLatency: return "Prefer Latency"
+        case .auto: return String(localized: "Auto")
+        case .preferFPS: return String(localized: "Prefer FPS")
+        case .preferLatency: return String(localized: "Prefer Latency")
         }
     }
 
     var explanation: String {
         switch self {
-        case .auto: return "Balanced default."
-        case .preferFPS: return "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency."
-        case .preferLatency: return "Favors the newest frame and bounded latency, accepting lower frame rate under pressure."
+        case .auto: return String(localized: "Balanced default.")
+        case .preferFPS: return String(localized: "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency.")
+        case .preferLatency: return String(localized: "Favors the newest frame and bounded latency, accepting lower frame rate under pressure.")
         }
     }
 }

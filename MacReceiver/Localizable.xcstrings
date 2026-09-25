@@ -1,7 +1,831 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
 
+    },
+    "%@ (Main)" : {
+      "comment" : "A display name, marked as the Mac's main display."
+    },
+    "%@ is already paired with this Mac." : {
+
+    },
+    "A/V Sync" : {
+
+    },
+    "About" : {
+
+    },
+    "About MeowDisplay Receiver" : {
+
+    },
+    "Adjust if sound plays slightly before or after the picture." : {
+
+    },
+    "Allowed for this session" : {
+
+    },
+    "Always uses H.264, the universal compatibility codec." : {
+
+    },
+    "App" : {
+      "comment" : "Gesture target: send the gesture to the Mac app."
+    },
+    "App Behavior" : {
+
+    },
+    "Appears as “%@”" : {
+
+    },
+    "Audio" : {
+
+    },
+    "Auto" : {
+
+    },
+    "Auto-Reconnect" : {
+
+    },
+    "Automatic" : {
+
+    },
+    "Automatically open the receiver window in native macOS full screen when a stream starts. Using the window's green button also updates this." : {
+
+    },
+    "Automatically reconnect after connection interruptions." : {
+
+    },
+    "Automatically reconnect to paired devices after connection interruptions." : {
+
+    },
+    "Back" : {
+      "comment" : "Settings toolbar: go to the previously viewed page."
+    },
+    "Balanced default." : {
+
+    },
+    "Bottom Left" : {
+
+    },
+    "Bottom Right" : {
+
+    },
+    "Bring the video window back if you closed it — the stream keeps running either way." : {
+
+    },
+    "Can't Connect" : {
+
+    },
+    "Cancel" : {
+
+    },
+    "Cancelled" : {
+
+    },
+    "Caps how fast the other Mac streams to this one, on top of its normal profile and display limits." : {
+
+    },
+    "Check for Updates…" : {
+
+    },
+    "Close" : {
+
+    },
+    "Closing this window keeps MeowDisplay Receiver running and available as a display. While a stream is on screen this Mac stays awake; if its screen sleeps, the other Mac is told and reconnects after it wakes." : {
+
+    },
+    "Codec" : {
+
+    },
+    "Codes Match" : {
+
+    },
+    "Codes did not match" : {
+
+    },
+    "Command" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Confirm that you want to trust this device in MEOW." : {
+
+    },
+    "Confirm that you want to trust “%@” in MEOW." : {
+
+    },
+    "Confirm that you want to update the remote address for “%@” in MEOW." : {
+
+    },
+    "Confirm that you want to update this device's remote address in MEOW." : {
+
+    },
+    "Connect" : {
+
+    },
+    "Connect asks that Mac to start streaming to this one. Forgetting a Mac removes its pairing; you'll need to pair again before connecting." : {
+
+    },
+    "Connect to the Mac first." : {
+
+    },
+    "Connected" : {
+
+    },
+    "Connecting…" : {
+
+    },
+    "Connection" : {
+
+    },
+    "Connection Lost" : {
+
+    },
+    "Connection failed" : {
+
+    },
+    "Connection timed out" : {
+
+    },
+    "Control" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Copy" : {
+
+    },
+    "Couldn't reach the Mac" : {
+
+    },
+    "Couldn't save this endpoint. Try again." : {
+
+    },
+    "Current Stream" : {
+
+    },
+    "Custom" : {
+
+    },
+    "Cut" : {
+
+    },
+    "Default" : {
+
+    },
+    "Developer" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Device identity changed" : {
+
+    },
+    "Device owner authentication failed" : {
+
+    },
+    "Devices" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Direct Touch" : {
+      "comment" : "Input mode: touch where you want the pointer to go."
+    },
+    "Disabled" : {
+
+    },
+    "Disconnect" : {
+
+    },
+    "Dismiss" : {
+
+    },
+    "Display Mode" : {
+
+    },
+    "Display Paused" : {
+
+    },
+    "Displays" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Edit" : {
+
+    },
+    "Efficiency" : {
+
+    },
+    "End this session. Pairing is kept — connect again from the other Mac." : {
+
+    },
+    "Enforce Maximum FPS" : {
+
+    },
+    "Enter a host or IP address." : {
+
+    },
+    "Enter a port between 1 and 65535." : {
+
+    },
+    "Escape" : {
+
+    },
+    "Extend" : {
+      "comment" : "Display mode: add the device as a second, separate screen (not the verb \"to extend\")."
+    },
+    "Extend Shape" : {
+
+    },
+    "Extend adds this Mac as a separate display; Mirror shows a copy of the other Mac's screen. The other Mac confirms every change." : {
+
+    },
+    "FPS, bitrate, frame timing, and latency graphs at the bottom of the video window while streaming — the same HUD the iPhone app has." : {
+
+    },
+    "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency." : {
+
+    },
+    "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+
+    },
+    "Forget" : {
+
+    },
+    "Forget the device to pair again." : {
+
+    },
+    "Forget “%@”?" : {
+
+    },
+    "Forget…" : {
+
+    },
+    "Forward" : {
+      "comment" : "Settings toolbar: go to the next page in history."
+    },
+    "Frame Rate" : {
+
+    },
+    "Hide MeowDisplay Receiver" : {
+
+    },
+    "Host" : {
+
+    },
+    "How this Mac appears in the other Mac's Devices list." : {
+
+    },
+    "How to Connect" : {
+
+    },
+    "If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above." : {
+
+    },
+    "Input" : {
+
+    },
+    "Install and open MeowDisplay on the Mac whose screen you want to extend." : {
+
+    },
+    "Invalid pairing message" : {
+
+    },
+    "Keyboard" : {
+
+    },
+    "Left" : {
+
+    },
+    "Logs" : {
+
+    },
+    "Lower power/bandwidth, up to 60 FPS." : {
+
+    },
+    "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices." : {
+
+    },
+    "Mac" : {
+
+    },
+    "Mac Disconnected" : {
+
+    },
+    "Mac pairing removed" : {
+
+    },
+    "Mac requires app update" : {
+
+    },
+    "Macs" : {
+
+    },
+    "Macs on this network running MeowDisplay. Pairing shows a code on both Macs — confirm only if they match. You can also start pairing from the other Mac's Devices list." : {
+
+    },
+    "Make sure the address is correct and Pair Over Remote is turned on on the Mac." : {
+
+    },
+    "Manual" : {
+
+    },
+    "Manual streaming controls." : {
+
+    },
+    "Manually control streaming profile, priority, codec, frame rate and quality." : {
+
+    },
+    "Maximum FPS" : {
+
+    },
+    "MeowDisplay Receiver" : {
+      "comment" : "App title. \"MeowDisplay\" is the product name and must stay untranslated; only \"Receiver\" (this Mac acting as a display for another Mac) is translatable.\nSettings window title. \"MeowDisplay\" is the product name and must stay untranslated; only \"Receiver\" (this Mac acting as a display for another Mac) is translatable."
+    },
+    "Minimize" : {
+
+    },
+    "Mirror" : {
+      "comment" : "Display mode: duplicate the Mac's screen onto the device."
+    },
+    "Mirror Display" : {
+
+    },
+    "Mirror isn’t available" : {
+
+    },
+    "Mirror needs an active physical display on the other Mac. It stays on Extend." : {
+
+    },
+    "Mode" : {
+
+    },
+    "Move the pointer relative to your finger." : {
+
+    },
+    "Name" : {
+
+    },
+    "Nearby" : {
+
+    },
+    "Nearby Macs" : {
+
+    },
+    "No LAN wake info learned yet for this Mac — connect to it at least once first." : {
+
+    },
+    "No Results" : {
+
+    },
+    "No displays reported." : {
+
+    },
+    "No paired Macs" : {
+
+    },
+    "No settings found for “%@”" : {
+
+    },
+    "No unpaired Macs nearby" : {
+
+    },
+    "Not allowed" : {
+
+    },
+    "Off" : {
+
+    },
+    "On" : {
+
+    },
+    "Open Devices…" : {
+
+    },
+    "Open Displays…" : {
+
+    },
+    "Open in Full Screen" : {
+
+    },
+    "Opposite Side" : {
+
+    },
+    "Option" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Overview" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Pair" : {
+
+    },
+    "Pair with %@?" : {
+
+    },
+    "Pair with a Mac first — Remote Access uses the same secure pairing as local connections." : {
+
+    },
+    "Paired Mac" : {
+
+    },
+    "Paired Macs" : {
+
+    },
+    "Paired with %@" : {
+
+    },
+    "Paired · Nearby" : {
+
+    },
+    "Paired · Not nearby" : {
+
+    },
+    "Paired · Remote Access" : {
+
+    },
+    "Pairing Request" : {
+
+    },
+    "Pairing could not be verified" : {
+
+    },
+    "Pairing failed" : {
+
+    },
+    "Pairing timed out" : {
+
+    },
+    "Pairing was cancelled" : {
+
+    },
+    "Pairing was cancelled on the other device" : {
+
+    },
+    "Pairing was rejected" : {
+
+    },
+    "Paste" : {
+
+    },
+    "Performance" : {
+
+    },
+    "Performance Overlay" : {
+
+    },
+    "Playing" : {
+
+    },
+    "Plays a copy of what the other Mac is playing. It keeps playing there too — this never changes that Mac's output device." : {
+
+    },
+    "Port" : {
+
+    },
+    "Prefer FPS" : {
+
+    },
+    "Prefer Latency" : {
+
+    },
+    "Prioritize responsiveness, up to the receiver's supported refresh rate, capped at 120 FPS." : {
+
+    },
+    "Profile 1" : {
+
+    },
+    "Profile 2" : {
+
+    },
+    "Promote Interactive Wake" : {
+
+    },
+    "Promote Mac to Interactive Wake" : {
+
+    },
+    "Quit MeowDisplay Receiver" : {
+
+    },
+    "Quit MeowDisplay Receiver entirely — equivalent to ⌘Q. Closing just this window keeps this Mac available as a display and any stream running." : {
+
+    },
+    "Re-arm this Mac's listener and wait for the other Mac to reconnect." : {
+
+    },
+    "Re-pair" : {
+
+    },
+    "Re-pair only if you trust %@ — its saved key no longer matches." : {
+
+    },
+    "Receiver Name" : {
+
+    },
+    "Reconnect" : {
+
+    },
+    "Reconnecting…" : {
+
+    },
+    "Redo" : {
+
+    },
+    "Remote Access" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Remote Endpoint" : {
+
+    },
+    "Remove Remote Details" : {
+
+    },
+    "Requesting…" : {
+
+    },
+    "Requests disabled by Mac" : {
+
+    },
+    "Reset" : {
+
+    },
+    "Resolution" : {
+
+    },
+    "Resume from MeowDisplay on your Mac." : {
+
+    },
+    "Resync" : {
+
+    },
+    "Reveal Log Files in Finder" : {
+
+    },
+    "Right" : {
+
+    },
+    "Rotate Left" : {
+
+    },
+    "Rotate Right" : {
+
+    },
+    "Same Side" : {
+
+    },
+    "Save" : {
+
+    },
+    "Saved" : {
+
+    },
+    "Search" : {
+
+    },
+    "Select All" : {
+
+    },
+    "Selected display unavailable" : {
+
+    },
+    "Select…" : {
+
+    },
+    "Send LAN Wake Packet" : {
+
+    },
+    "Sending Mac" : {
+
+    },
+    "Settings" : {
+
+    },
+    "Settings…" : {
+
+    },
+    "Shape" : {
+
+    },
+    "Shift" : {
+      "comment" : "Keyboard modifier key."
+    },
+    "Show Window" : {
+
+    },
+    "Software Updates" : {
+
+    },
+    "Starting video…" : {
+
+    },
+    "Status" : {
+
+    },
+    "Status: %@" : {
+
+    },
+    "Stream Resolution" : {
+
+    },
+    "Streaming" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Streaming Priority" : {
+
+    },
+    "Streaming Profile" : {
+
+    },
+    "Support" : {
+
+    },
+    "Switching to %@…" : {
+
+    },
+    "System" : {
+      "comment" : "Settings sidebar category."
+    },
+    "Tab" : {
+
+    },
+    "Tailscale IP or MagicDNS name" : {
+
+    },
+    "Terminates the application, ending any active connection." : {
+
+    },
+    "That doesn't look like a valid host or IP address." : {
+
+    },
+    "The Mac ended this session." : {
+
+    },
+    "The device is requesting to pair again." : {
+
+    },
+    "The other Mac decides what is actually applied and reports it back. Automatic/Custom mode and the codec choice (Auto, H.264, HEVC) are set in MeowDisplay on that Mac." : {
+
+    },
+    "The other Mac has no active physical display, for example its lid is closed. Use Extend to create a virtual display instead?" : {
+
+    },
+    "The other Mac's version of MeowDisplay doesn't support audio." : {
+
+    },
+    "The receiver is not running." : {
+
+    },
+    "The shape of the extra display the other Mac creates for this one." : {
+
+    },
+    "The stream opens here in full screen. The green traffic light switches to a window, and MeowDisplay remembers your choice." : {
+
+    },
+    "This Mac" : {
+
+    },
+    "This Mac and this device can't work together yet." : {
+
+    },
+    "This Mac as an extra display for another Mac" : {
+
+    },
+    "This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request." : {
+
+    },
+    "This device must be updated before pairing" : {
+
+    },
+    "This device's cryptographic identity has changed." : {
+
+    },
+    "Toggle Dock" : {
+
+    },
+    "Too many pairing attempts. Try again in 30 seconds." : {
+
+    },
+    "Top Left" : {
+
+    },
+    "Top Right" : {
+
+    },
+    "Touch where you want the pointer." : {
+
+    },
+    "Trackpad" : {
+      "comment" : "Input mode: relative pointer control like a laptop trackpad, not the physical accessory."
+    },
+    "Trust changed during pairing. Try again" : {
+
+    },
+    "Trusted device key changed" : {
+
+    },
+    "Try Again" : {
+
+    },
+    "Trying to restore the connection to your Mac." : {
+
+    },
+    "Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and this Mac keeps listening for a connection either way." : {
+
+    },
+    "Turning video off asks the other Mac to stop streaming its screen while staying connected." : {
+
+    },
+    "Unavailable" : {
+
+    },
+    "Undo" : {
+
+    },
+    "Update MeowDisplay on both devices to pair" : {
+
+    },
+    "Updater unavailable" : {
+
+    },
+    "Updates" : {
+
+    },
+    "Updating Extend shape…" : {
+
+    },
+    "Updating Maximum FPS…" : {
+
+    },
+    "Use Connect on the Devices page to reach a Mac through its saved address. The other Mac must have Remote Access turned on. Wake & Connect can only wake a Mac on this local network." : {
+
+    },
+    "Use Extend" : {
+
+    },
+    "Use Full Display" : {
+
+    },
+    "Use a reachable private-network address for a paired Mac, such as its Tailscale address or MagicDNS name, to connect when it isn't on the same network. The address is only used to reach that Mac — it does not grant trust, and every connection still requires the existing secure pairing." : {
+
+    },
+    "Uses H.264 unless HEVC is needed and available to satisfy the requested stream." : {
+
+    },
+    "Uses HEVC when both this Mac and the connected device support it, otherwise falls back to H.264." : {
+
+    },
+    "Version" : {
+
+    },
+    "Video" : {
+
+    },
+    "Video Window" : {
+
+    },
+    "Viewport" : {
+      "comment" : "Gesture target: zoom or rotate the displayed picture."
+    },
+    "Waiting for Mac" : {
+
+    },
+    "Waiting for a Mac…" : {
+
+    },
+    "Wake" : {
+
+    },
+    "Wake & Connect" : {
+
+    },
+    "Wake Testing" : {
+
+    },
+    "Wake Testing sends a standard Wake-on-LAN magic packet to an already-paired Mac's last-learned local network address (same-LAN only). Promote Interactive Wake asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake." : {
+
+    },
+    "Waking display…" : {
+
+    },
+    "Waking…" : {
+
+    },
+    "We couldn't restore the connection." : {
+
+    },
+    "Which of the other Mac's screens is mirrored here. Auto follows that Mac's own choice." : {
+
+    },
+    "Window" : {
+
+    },
+    "With both Macs on the same network, this Mac appears in its Devices list — click Connect there." : {
+
+    },
+    "You'll need to pair with this Mac again before connecting." : {
+
+    },
+    "Zoom" : {
+      "comment" : "Window menu: toggle the window between its standard and user size."
+    },
+    "Zoom In" : {
+
+    },
+    "Zoom Out" : {
+
+    }
   },
   "version" : "1.0"
 }

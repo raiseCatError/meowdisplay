@@ -111,7 +111,7 @@ struct RemoteEndpointEditorView: View {
             RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
             guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
                   readBack.host == value.host, readBack.port == value.port else {
-                errorMessage = "Couldn't save this endpoint. Try again."
+                errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
             }
             host = readBack.host
@@ -121,9 +121,9 @@ struct RemoteEndpointEditorView: View {
         case .failure(let error):
             savedConfirmation = false
             switch error {
-            case .emptyHost: errorMessage = "Enter a host or IP address."
-            case .invalidHost: errorMessage = "That doesn't look like a valid host or IP address."
-            case .invalidPort: errorMessage = "Enter a port between 1 and 65535."
+            case .emptyHost: errorMessage = String(localized: "Enter a host or IP address.")
+            case .invalidHost: errorMessage = String(localized: "That doesn't look like a valid host or IP address.")
+            case .invalidPort: errorMessage = String(localized: "Enter a port between 1 and 65535.")
             }
         }
     }

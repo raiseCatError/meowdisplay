@@ -14,15 +14,15 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .overview: return "Overview"
-        case .displays: return "Displays"
-        case .streaming: return "Streaming"
-        case .input: return "Input"
-        case .devices: return "Devices"
-        case .remoteAccess: return "Remote Access"
-        case .system: return "System"
+        case .overview: return String(localized: "Overview")
+        case .displays: return String(localized: "Displays")
+        case .streaming: return String(localized: "Streaming")
+        case .input: return String(localized: "Input")
+        case .devices: return String(localized: "Devices")
+        case .remoteAccess: return String(localized: "Remote Access")
+        case .system: return String(localized: "System")
         #if DEBUG
-        case .developer: return "Developer"
+        case .developer: return String(localized: "Developer")
         #endif
         }
     }
@@ -115,41 +115,41 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "displays.mode",
-                title: "Display Mode",
+                title: String(localized: "Display Mode"),
                 category: .displays,
-                subtitle: "Displays",
+                subtitle: String(localized: "Displays"),
                 keywords: ["mirror", "mirroring", "clone", "mode", "display mode"],
                 systemImage: "rectangle.on.rectangle"
             ),
             SettingsSearchItem(
                 id: "displays.mirror",
-                title: "Mirror",
+                title: String(localized: "Mirror"),
                 category: .displays,
-                subtitle: "Displays",
+                subtitle: String(localized: "Displays"),
                 keywords: ["mirror", "mirroring", "clone", "physical display"],
                 systemImage: "rectangle.on.rectangle"
             ),
             SettingsSearchItem(
                 id: "displays.extend",
-                title: "Extend Display",
+                title: String(localized: "Extend Display"),
                 category: .displays,
-                subtitle: "Displays",
+                subtitle: String(localized: "Displays"),
                 keywords: ["extend", "extended display", "shape", "aspect ratio", "use full display"],
                 systemImage: "rectangle.badge.plus"
             ),
             SettingsSearchItem(
                 id: "displays.resolution",
-                title: "Resolution",
+                title: String(localized: "Resolution"),
                 category: .displays,
-                subtitle: "Displays",
+                subtitle: String(localized: "Displays"),
                 keywords: ["resolution", "pixels", "size", "dimensions", "scaling"],
                 systemImage: "aspectratio"
             ),
             SettingsSearchItem(
                 id: "displays.arrange",
-                title: "Arrange Displays",
+                title: String(localized: "Arrange Displays"),
                 category: .displays,
-                subtitle: "Displays",
+                subtitle: String(localized: "Displays"),
                 keywords: ["arrange", "layout", "arrange displays", "position"],
                 systemImage: "macwindow.on.rectangle"
             )
@@ -159,9 +159,9 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "streaming.codec",
-                title: "Codec",
+                title: String(localized: "Codec"),
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["codec", "hevc", "h.264", "h264", "encoding", "compression", "video codec"],
                 systemImage: "film"
             ),
@@ -169,7 +169,7 @@ struct SettingsSearchIndex {
                 id: "streaming.hevc",
                 title: "HEVC",
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["hevc", "h.265", "h265", "codec"],
                 systemImage: "film"
             ),
@@ -177,39 +177,39 @@ struct SettingsSearchIndex {
                 id: "streaming.h264",
                 title: "H.264",
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["h.264", "h264", "avc", "codec"],
                 systemImage: "film"
             ),
             SettingsSearchItem(
                 id: "streaming.fps",
-                title: "Frame Rate",
+                title: String(localized: "Frame Rate"),
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["frame rate", "fps", "refresh rate", "60fps", "120fps", "hz"],
                 systemImage: "speedometer"
             ),
             SettingsSearchItem(
                 id: "streaming.quality",
-                title: "Quality & Bitrate",
+                title: String(localized: "Quality & Bitrate"),
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["quality", "bitrate", "mbps", "bandwidth", "video bitrate"],
                 systemImage: "slider.horizontal.3"
             ),
             SettingsSearchItem(
                 id: "streaming.mode",
-                title: "Streaming Mode",
+                title: String(localized: "Streaming Mode"),
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["streaming mode", "profile", "latency", "performance", "custom"],
                 systemImage: "gearshape.2"
             ),
             SettingsSearchItem(
                 id: "streaming.audio",
-                title: "Audio Streaming",
+                title: String(localized: "Audio Streaming"),
                 category: .streaming,
-                subtitle: "Streaming",
+                subtitle: String(localized: "Streaming"),
                 keywords: ["audio", "sound", "volume", "sync", "a/v sync"],
                 systemImage: "speaker.wave.2"
             )
@@ -219,17 +219,17 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "input.allow",
-                title: "Allow Input",
+                title: String(localized: "Allow Input"),
                 category: .input,
-                subtitle: "Input",
+                subtitle: String(localized: "Input"),
                 keywords: ["allow input", "remote control", "touch control", "master switch", "enable input"],
                 systemImage: "hand.tap"
             ),
             SettingsSearchItem(
                 id: "input.requests",
-                title: "Input Requests",
+                title: String(localized: "Input Requests"),
                 category: .input,
-                subtitle: "Input",
+                subtitle: String(localized: "Input"),
                 keywords: ["input requests", "input policy", "always allow", "ask", "permission"],
                 systemImage: "questionmark.circle"
             )
@@ -239,25 +239,25 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "devices.known",
-                title: "Known Devices",
+                title: String(localized: "Known Devices"),
                 category: .devices,
-                subtitle: "Devices",
+                subtitle: String(localized: "Devices"),
                 keywords: ["known devices", "paired devices", "paired", "forget device", "nearby"],
                 systemImage: "list.bullet.rectangle"
             ),
             SettingsSearchItem(
                 id: "devices.remotePairing",
-                title: "Remote Pairing",
+                title: String(localized: "Remote Pairing"),
                 category: .devices,
-                subtitle: "Devices",
+                subtitle: String(localized: "Devices"),
                 keywords: ["remote pairing", "pair over remote", "pairing code", "tailscale pairing"],
                 systemImage: "qrcode"
             ),
             SettingsSearchItem(
                 id: "devices.activeDisplay",
-                title: "Active Display",
+                title: String(localized: "Active Display"),
                 category: .devices,
-                subtitle: "Devices",
+                subtitle: String(localized: "Devices"),
                 keywords: ["active display", "session", "connected display", "disconnect"],
                 systemImage: "display"
             )
@@ -267,9 +267,9 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "remoteAccess.endpoint",
-                title: "Remote Endpoint",
+                title: String(localized: "Remote Endpoint"),
                 category: .remoteAccess,
-                subtitle: "Remote Access",
+                subtitle: String(localized: "Remote Access"),
                 keywords: ["remote endpoint", "endpoint", "tailscale", "magicdns", "ip address", "port", "saved address"],
                 systemImage: "network"
             )
@@ -279,41 +279,41 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "system.keepAvailable",
-                title: "Keep Mac Available",
+                title: String(localized: "Keep Mac Available"),
                 category: .system,
-                subtitle: "System",
+                subtitle: String(localized: "System"),
                 keywords: ["available", "keep mac available", "sleep", "prevent sleep", "caffeinate", "power", "wake"],
                 systemImage: "powersleep"
             ),
             SettingsSearchItem(
                 id: "system.permissions",
-                title: "Permissions",
+                title: String(localized: "Permissions"),
                 category: .system,
-                subtitle: "System",
+                subtitle: String(localized: "System"),
                 keywords: ["permissions", "screen recording", "accessibility", "local network"],
                 systemImage: "lock.shield"
             ),
             SettingsSearchItem(
                 id: "system.behavior",
-                title: "App Behavior",
+                title: String(localized: "App Behavior"),
                 category: .system,
-                subtitle: "System",
+                subtitle: String(localized: "System"),
                 keywords: ["app behavior", "start at login", "menu bar", "dock", "presentation"],
                 systemImage: "app.badge"
             ),
             SettingsSearchItem(
                 id: "system.autoReconnect",
-                title: "Auto-Reconnect",
+                title: String(localized: "Auto-Reconnect"),
                 category: .system,
-                subtitle: "System",
+                subtitle: String(localized: "System"),
                 keywords: ["auto-reconnect", "reconnect", "automatic connection"],
                 systemImage: "arrow.triangle.2.circlepath"
             ),
             SettingsSearchItem(
                 id: "system.updates",
-                title: "Software Updates",
+                title: String(localized: "Software Updates"),
                 category: .system,
-                subtitle: "System",
+                subtitle: String(localized: "System"),
                 keywords: ["updates", "sparkle", "check for updates", "version", "software update"],
                 systemImage: "arrow.down.circle"
             )
@@ -323,25 +323,25 @@ struct SettingsSearchIndex {
         items.append(contentsOf: [
             SettingsSearchItem(
                 id: "developer.routes",
-                title: "Route Overrides",
+                title: String(localized: "Route Overrides"),
                 category: .developer,
-                subtitle: "Developer",
+                subtitle: String(localized: "Developer"),
                 keywords: ["route overrides", "routes", "transport override"],
                 systemImage: "arrow.triangle.branch"
             ),
             SettingsSearchItem(
                 id: "developer.wake",
-                title: "Wake Testing",
+                title: String(localized: "Wake Testing"),
                 category: .developer,
-                subtitle: "Developer",
+                subtitle: String(localized: "Developer"),
                 keywords: ["wake testing", "wake", "sleep test"],
                 systemImage: "bolt.badge.clock"
             ),
             SettingsSearchItem(
                 id: "developer.diagnostics",
-                title: "Device Diagnostics",
+                title: String(localized: "Device Diagnostics"),
                 category: .developer,
-                subtitle: "Developer",
+                subtitle: String(localized: "Developer"),
                 keywords: ["device diagnostics", "peer diagnostics", "debug info"],
                 systemImage: "stethoscope"
             )

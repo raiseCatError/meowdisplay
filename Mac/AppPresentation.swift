@@ -10,9 +10,9 @@ enum AppPresentation: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .menuBar: return "Menu Bar"
-        case .dock: return "Dock"
-        case .dockAndMenuBar: return "Dock & Menu Bar"
+        case .menuBar: return String(localized: "Menu Bar")
+        case .dock: return String(localized: "Dock")
+        case .dockAndMenuBar: return String(localized: "Dock & Menu Bar")
         }
     }
 

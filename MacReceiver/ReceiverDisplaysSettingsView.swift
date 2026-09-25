@@ -154,7 +154,7 @@ private struct ReceiverDisplaysPage: View {
                         receiver.requestMirrorDisplaySelection(display.uuid)
                     } label: {
                         HStack {
-                            Text(display.isMain ? "\(display.name) (Main)" : display.name)
+                            Text(display.isMain ? String(localized: "\(display.name) (Main)", comment: "A display name, marked as the Mac's main display.") : display.name)
                                 .foregroundStyle(.primary)
                             Spacer()
                             if state.selectedUUID == display.uuid {

@@ -18,18 +18,17 @@ enum StreamingMode: String, CaseIterable, Codable, Identifiable {
 
     var label: String {
         switch self {
-        case .automatic: return "Automatic"
-        case .custom: return "Custom"
+        case .automatic: return String(localized: "Automatic")
+        case .custom: return String(localized: "Custom")
         }
     }
 
     var explanation: String {
         switch self {
         case .automatic:
-            return "MEOW automatically chooses the best connection, codec, quality, "
-                + "frame rate and streaming behavior for your devices."
+            return String(localized: "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices.")
         case .custom:
-            return "Manually control streaming profile, priority, codec, frame rate and quality."
+            return String(localized: "Manually control streaming profile, priority, codec, frame rate and quality.")
         }
     }
 }

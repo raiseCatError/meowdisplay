@@ -179,8 +179,8 @@ struct SystemSettingsView: View {
     }
 
     @ViewBuilder
-    private func permissionRow(_ title: String, granted: Bool, uncertain: Bool = false,
-                               help: String, anchor: String,
+    private func permissionRow(_ title: LocalizedStringKey, granted: Bool, uncertain: Bool = false,
+                               help: LocalizedStringKey, anchor: String,
                                request: (() -> Void)? = nil) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Image(systemName: uncertain ? "questionmark.circle.fill"

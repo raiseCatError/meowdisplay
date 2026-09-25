@@ -17,7 +17,14 @@ enum ControlModifier: String, Codable, CaseIterable, Hashable, Identifiable {
         }
     }
 
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .command: return String(localized: "Command", comment: "Keyboard modifier key.")
+        case .option: return String(localized: "Option", comment: "Keyboard modifier key.")
+        case .control: return String(localized: "Control", comment: "Keyboard modifier key.")
+        case .shift: return String(localized: "Shift", comment: "Keyboard modifier key.")
+        }
+    }
 }
 
 /// A stable, order-independent key for a modifier combination.
@@ -70,15 +77,15 @@ enum ControlTrayItem: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .command: return "Command"
-        case .option: return "Option"
-        case .control: return "Control"
-        case .shift: return "Shift"
-        case .escape: return "Escape"
-        case .tab: return "Tab"
-        case .dock: return "Toggle Dock"
-        case .keyboard: return "Keyboard"
-        case .settings: return "Settings"
+        case .command: return String(localized: "Command")
+        case .option: return String(localized: "Option")
+        case .control: return String(localized: "Control")
+        case .shift: return String(localized: "Shift")
+        case .escape: return String(localized: "Escape")
+        case .tab: return String(localized: "Tab")
+        case .dock: return String(localized: "Toggle Dock")
+        case .keyboard: return String(localized: "Keyboard")
+        case .settings: return String(localized: "Settings")
         }
     }
 
@@ -157,9 +164,9 @@ enum ControlProfileSlot: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .default: return "Default"
-        case .profile1: return "Profile 1"
-        case .profile2: return "Profile 2"
+        case .default: return String(localized: "Default")
+        case .profile1: return String(localized: "Profile 1")
+        case .profile2: return String(localized: "Profile 2")
         }
     }
 }
@@ -253,7 +260,7 @@ enum LandscapeTraySide: String, Codable, CaseIterable, Identifiable {
     case trailing
 
     var id: String { rawValue }
-    var title: String { self == .leading ? "Left" : "Right" }
+    var title: String { self == .leading ? String(localized: "Left") : String(localized: "Right") }
     var opposite: LandscapeTraySide { self == .leading ? .trailing : .leading }
 }
 
@@ -273,7 +280,13 @@ enum ReceiverGestureTarget: String, Codable, CaseIterable, Identifiable {
     case disabled
 
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .viewport: return String(localized: "Viewport", comment: "Gesture target: zoom or rotate the displayed picture.")
+        case .app: return String(localized: "App", comment: "Gesture target: send the gesture to the Mac app.")
+        case .disabled: return String(localized: "Disabled")
+        }
+    }
 }
 
 /// One configurable App-mode gesture command — see the App Gesture Commands
@@ -290,10 +303,10 @@ enum AppGestureCommandKind: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .zoomIn: return "Zoom In"
-        case .zoomOut: return "Zoom Out"
-        case .rotateLeft: return "Rotate Left"
-        case .rotateRight: return "Rotate Right"
+        case .zoomIn: return String(localized: "Zoom In")
+        case .zoomOut: return String(localized: "Zoom Out")
+        case .rotateLeft: return String(localized: "Rotate Left")
+        case .rotateRight: return String(localized: "Rotate Right")
         }
     }
 }
@@ -472,7 +485,7 @@ enum FunctionTrayPosition: String, Codable, CaseIterable, Identifiable {
     case oppositeSide
 
     var id: String { rawValue }
-    var title: String { self == .sameSide ? "Same Side" : "Opposite Side" }
+    var title: String { self == .sameSide ? String(localized: "Same Side") : String(localized: "Opposite Side") }
 }
 
 /// Superseded by `LandscapeTraySide`. Decoded only to migrate schema-2
@@ -486,10 +499,10 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .topLeading: return "Top Left"
-        case .topTrailing: return "Top Right"
-        case .bottomLeading: return "Bottom Left"
-        case .bottomTrailing: return "Bottom Right"
+        case .topLeading: return String(localized: "Top Left")
+        case .topTrailing: return String(localized: "Top Right")
+        case .bottomLeading: return String(localized: "Bottom Left")
+        case .bottomTrailing: return String(localized: "Bottom Right")
         }
     }
 

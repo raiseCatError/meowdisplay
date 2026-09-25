@@ -100,7 +100,7 @@ struct StreamingSettingsView: View {
 
             Section("Audio") {
                 let anyAudioActive = controller.activeDisplayEntries.contains { $0.audioActive }
-                LabeledContent("Audio Streaming", value: anyAudioActive ? "Streaming" : "Off")
+                LabeledContent("Audio Streaming", value: anyAudioActive ? String(localized: "Streaming") : String(localized: "Off"))
                 Text("Audio streaming is started by the connected device — there is no Mac-side enable toggle.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -122,7 +122,7 @@ struct StreamingSettingsView: View {
                                 LabeledContent("Frame Rate", value: "\(entry.videoFPS) fps")
                             }
                             LabeledContent("Bitrate", value: "\(entry.bitrateBps / 1_000_000) Mbps")
-                            LabeledContent("Audio", value: entry.audioActive ? "On" : "Off")
+                            LabeledContent("Audio", value: entry.audioActive ? String(localized: "On") : String(localized: "Off"))
                             // Receiver-owned playback timing — see
                             // `ReceiverDeviceDetailView`'s Audio & Sync
                             // section for the same value; shown here too

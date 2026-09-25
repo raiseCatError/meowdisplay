@@ -95,8 +95,8 @@ struct RemotePairingView: View {
     private func start() {
         switch RemotePairingEndpoint.make(host: host) {
         case .success(let endpoint): receiver.pairWithRemoteHost(endpoint)
-        case .failure(.emptyHost): errorMessage = "Enter a host or IP address."
-        case .failure: errorMessage = "That doesn't look like a valid host or IP address."
+        case .failure(.emptyHost): errorMessage = String(localized: "Enter a host or IP address.")
+        case .failure: errorMessage = String(localized: "That doesn't look like a valid host or IP address.")
         }
     }
 }
