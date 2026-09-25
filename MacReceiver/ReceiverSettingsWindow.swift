@@ -245,6 +245,8 @@ struct ReceiverSettingsSidebarView: View {
     @ObservedObject var navigationModel: ReceiverSettingsNavigationModel
     @State private var searchText = ""
     @State private var selectedSearchItemID: String?
+    /// View-owned `List` selection — see `ReceiverSidebarSelection`.
+    @State private var selection: ReceiverSidebarItem?
 
     private var isSearching: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -254,28 +256,9 @@ struct ReceiverSettingsSidebarView: View {
         ReceiverSettingsSearchIndex.shared.search(query: searchText)
     }
 
-    private var sidebarSelection: Binding<ReceiverSidebarItem?> {
-        Binding(
-            get: {
-                guard isSearching else { return .category(navigationModel.current) }
-                if let selectedSearchItemID,
-                   let match = searchResults.first(where: { $0.id == selectedSearchItemID }) {
-                    return .searchResult(match)
-                }
-                return searchResults.first { $0.category == navigationModel.current }.map { .searchResult($0) }
-            },
-            set: { newItem in
-                switch newItem {
-                case .category(let category):
-                    navigationModel.navigateTo(category)
-                case .searchResult(let item):
-                    selectedSearchItemID = item.id
-                    navigationModel.navigateTo(item.category)
-                case nil:
-                    break
-                }
-            }
-        )
+    private var derivedSelection: ReceiverSidebarItem? {
+        ReceiverSidebarSelection.derived(current: navigationModel.current, isSearching: isSearching,
+                                         results: searchResults, selectedSearchItemID: selectedSearchItemID)
     }
 
     var body: some View {
@@ -286,7 +269,7 @@ struct ReceiverSettingsSidebarView: View {
                 .padding(.top, 10)
                 .padding(.bottom, 8)
 
-            List(selection: sidebarSelection) {
+            List(selection: $selection) {
                 if isSearching {
                     if searchResults.isEmpty {
                         VStack(spacing: 6) {
@@ -331,6 +314,22 @@ struct ReceiverSettingsSidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .onAppear { selection = derivedSelection }
+            // A user selection navigates after the update that changed it;
+            // an echo of the current category is a no-op in `navigateTo`.
+            .onChange(of: selection) { newItem in
+                if case .searchResult(let item) = newItem { selectedSearchItemID = item.id }
+                if let destination = ReceiverSidebarSelection.destination(of: newItem) {
+                    navigationModel.navigateTo(destination)
+                }
+            }
+            // Model -> highlight (Back/Forward, Overview buttons) and search
+            // results changing: re-derive the view-owned selection.
+            .onChange(of: navigationModel.current) { _ in selection = derivedSelection }
+            .onChange(of: searchText) { _ in
+                if !isSearching { selectedSearchItemID = nil }
+                selection = derivedSelection
+            }
 
             Divider()
 

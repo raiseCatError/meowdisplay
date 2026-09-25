@@ -261,3 +261,28 @@ enum ReceiverSidebarItem: Hashable {
     case category(ReceiverSettingsCategory)
     case searchResult(ReceiverSettingsSearchItem)
 }
+
+/// Receiver twin of Mac Sender's `SidebarSelection`: the sidebar binds
+/// `List(selection:)` to view-owned `@State`, never to a Binding whose setter
+/// mutates `ReceiverSettingsNavigationModel` — AppKit's list can write
+/// selection back while SwiftUI is still applying an update, and publishing
+/// navigation state there is illegal. The model is updated from `onChange`.
+enum ReceiverSidebarSelection {
+    static func derived(current: ReceiverSettingsCategory, isSearching: Bool,
+                        results: [ReceiverSettingsSearchItem], selectedSearchItemID: String?) -> ReceiverSidebarItem? {
+        guard isSearching else { return .category(current) }
+        if let selectedSearchItemID, let match = results.first(where: { $0.id == selectedSearchItemID }) {
+            return .searchResult(match)
+        }
+        return results.first { $0.category == current }.map(ReceiverSidebarItem.searchResult)
+    }
+
+    /// A cleared selection never navigates.
+    static func destination(of item: ReceiverSidebarItem?) -> ReceiverSettingsCategory? {
+        switch item {
+        case .category(let category): return category
+        case .searchResult(let result): return result.category
+        case nil: return nil
+        }
+    }
+}

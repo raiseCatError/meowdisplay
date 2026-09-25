@@ -98,4 +98,37 @@ final class ReceiverSettingsCategoryTests: XCTestCase {
         XCTAssertFalse(nav.canGoForward, "a new destination discards Forward history")
         XCTAssertEqual(nav.backStack, [.overview, .displays])
     }
+
+    // MARK: - Sidebar selection sync (no navigation from rendering)
+
+    private func result(_ id: String, _ category: ReceiverSettingsCategory) -> ReceiverSettingsSearchItem {
+        ReceiverSettingsSearchItem(id: id, title: id, category: category, keywords: [], systemImage: "gear")
+    }
+
+    func testDerivedSelectionFollowsNavigationState() {
+        XCTAssertEqual(ReceiverSidebarSelection.derived(current: .displays, isSearching: false, results: [],
+                                                        selectedSearchItemID: "x"), .category(.displays))
+        let a = result("a", .displays), b = result("b", .streaming)
+        XCTAssertEqual(ReceiverSidebarSelection.derived(current: .streaming, isSearching: true, results: [a, b],
+                                                        selectedSearchItemID: nil), .searchResult(b))
+        XCTAssertEqual(ReceiverSidebarSelection.derived(current: .streaming, isSearching: true, results: [a, b],
+                                                        selectedSearchItemID: "a"), .searchResult(a))
+        XCTAssertNil(ReceiverSidebarSelection.derived(current: .system, isSearching: true, results: [a],
+                                                      selectedSearchItemID: "gone"))
+    }
+
+    @MainActor
+    func testSelectingNavigatesOnceAndEchoesAndClearsDoNot() {
+        let nav = ReceiverSettingsNavigationModel()
+        if let destination = ReceiverSidebarSelection.destination(of: .category(.displays)) { nav.navigateTo(destination) }
+        XCTAssertEqual(nav.backStack, [.overview])
+        // The highlight re-derived from the model, fed back: no history change.
+        let echoed = ReceiverSidebarSelection.derived(current: nav.current, isSearching: false, results: [],
+                                                      selectedSearchItemID: nil)
+        if let destination = ReceiverSidebarSelection.destination(of: echoed) { nav.navigateTo(destination) }
+        XCTAssertNil(ReceiverSidebarSelection.destination(of: nil))
+        XCTAssertEqual(nav.backStack, [.overview])
+        XCTAssertEqual(nav.current, .displays)
+        XCTAssertEqual(ReceiverSidebarSelection.destination(of: .searchResult(result("a", .streaming))), .streaming)
+    }
 }
