@@ -270,6 +270,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities
 privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
+## Prefer something simpler?
+
+MeowDisplay builds on OpenDisplay but adds a broader set of input, control,
+audio, remote-access and interaction features. If you only need the core
+second-display experience, or need compatibility better served by the
+upstream project, check out [OpenDisplay](https://github.com/peetzweg/opendisplay).
+
 ## License & credits
 
 MeowDisplay is licensed under [GPL-3.0](LICENSE). It began as a fork of
