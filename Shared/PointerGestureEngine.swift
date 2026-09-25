@@ -57,17 +57,35 @@ enum PointerCommand: Equatable {
     /// The Smart Touch scroll finger lifted (`momentum: true`) or was
     /// cancelled (`momentum: false`).
     case scrollEnded(momentum: Bool)
-    /// A Smart Touch long press just dropped this touch into plain Direct
-    /// Touch. Local feedback only (a haptic) — nothing goes on the wire.
-    case smartTouchOverride
+    /// Smart Touch hold feedback for the receiver to render as haptics.
+    /// Local only — nothing goes on the wire.
+    case smartTouchFeedback(SmartTouchFeedback)
+}
+
+/// The moments of a Smart Touch hold the receiver confirms with haptics.
+/// The engine emits these whether or not haptics are on; they never
+/// change what the gesture does.
+enum SmartTouchFeedback: Equatable {
+    /// A long press on an ordinary Smart Touch target dropped this touch
+    /// into plain Direct Touch.
+    case directTouchOverride
+    /// A still finger on a recognized title bar started building toward a
+    /// window drag, which arms at `deadline` (touch-sample time base).
+    case titleBarHoldBegan(deadline: TimeInterval)
+    /// That title bar hold ended without arming: the finger lifted, moved
+    /// away, or the touch was cancelled.
+    case titleBarHoldCancelled
+    /// The title bar hold reached its threshold: the left button is now
+    /// held and the window follows the finger.
+    case windowDragArmed
 }
 
 /// What the Mac confidently identified under a Smart Touch touch-down.
 enum SmartTouchTarget: Equatable {
     /// A standard scroll container: a one-finger swipe scrolls it.
     case scroll
-    /// A window title bar or empty toolbar space: a one-finger drag moves
-    /// the window.
+    /// A window title bar or empty toolbar space: touch and hold, then
+    /// drag, moves the window.
     case windowDrag
 }
 
@@ -138,6 +156,11 @@ enum PointerGestureConfig {
     /// plain Direct Touch for the rest of that touch (a long-press
     /// override) instead of committing at `firstTouchArbitrationWindow`.
     static let smartTouchLongPressDelay: TimeInterval = 0.4
+    /// Smart Touch window drag: how long a finger must stay still (within
+    /// `dragSlop`) on a recognized title bar, measured from touch-down,
+    /// before the drag arms. Moving earlier falls back to Direct Touch, so
+    /// a window only ever moves after a deliberate hold.
+    static let smartTouchTitleBarHoldDelay: TimeInterval = 0.5
     /// Smart Touch scroll direction lock: a first swipe whose dominant
     /// axis is at least this many times the other scrolls on that axis
     /// only, so a vertical list never drifts sideways (and vice versa).
@@ -244,8 +267,8 @@ enum PointerEngineMode: Equatable {
     /// touch-down target the Mac confirmed as scrollable, committed to
     /// one-finger scrolling. Locked until that finger lifts — extra
     /// fingers are ignored, exactly like `.leftDragHeld`. (A Smart Touch
-    /// window drag needs no mode of its own: it is an ordinary
-    /// `.leftDragHeld` started at the touch-down point.)
+    /// window drag needs no mode of its own: once its title bar hold arms,
+    /// it is an ordinary `.leftDragHeld` started at the touch-down point.)
     case smartScroll
     /// 3+ fingers arrived together, fresh, with no established anchor.
     /// The engine steps aside entirely — the existing system-gesture
@@ -325,9 +348,14 @@ final class PointerGestureEngine {
     private enum SmartScrollAxis { case horizontal, vertical, free }
     private var smartScrollAxis = SmartScrollAxis.free
 
+    /// Whether a `.titleBarHoldBegan` is outstanding, so every way out of
+    /// the hold short of arming reports `.titleBarHoldCancelled` exactly once.
+    private var titleBarHoldActive = false
+
     /// The confidently classified target of a still-undecided Smart Touch
     /// first touch. While set, a stationary finger waits for the long-press
-    /// override instead of committing at the arbitration window.
+    /// override (or, on a title bar, the window-drag hold) instead of
+    /// committing at the arbitration window.
     private var smartTouchDeferredTarget: SmartTouchTarget? {
         guard smartTouchIsActive, tapChain == nil, case .resolved(let target) = smartTouchProbe else { return nil }
         return target
@@ -477,14 +505,23 @@ final class PointerGestureEngine {
                         ? beginTrackpadDrag(id: pid, at: pendingLastView ?? start.view, time: now)
                         : beginLeftDrag(id: pid, normalized: pendingLastNormalized)
                 }
-            } else if smartTouchDeferredTarget != nil {
-                // Smart Touch long-press override: held still on a
-                // confidently classified target, this touch becomes plain
-                // Direct Touch — confirmed with a haptic on the receiver.
-                if now - start.time >= PointerGestureConfig.smartTouchLongPressDelay {
-                    out += commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized,
-                                                   viewPoint: pendingLastView ?? start.view)
-                    out.append(.smartTouchOverride)
+            } else if let target = smartTouchDeferredTarget {
+                switch target {
+                case .scroll:
+                    // Smart Touch long-press override: held still on a
+                    // confidently classified target, this touch becomes
+                    // plain Direct Touch — confirmed with a haptic.
+                    if now - start.time >= PointerGestureConfig.smartTouchLongPressDelay {
+                        out += commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized,
+                                                       viewPoint: pendingLastView ?? start.view)
+                        out.append(.smartTouchFeedback(.directTouchOverride))
+                    }
+                case .windowDrag:
+                    // Held still on a title bar long enough: the window
+                    // drag arms instead of the Direct Touch override.
+                    if now - start.time >= PointerGestureConfig.smartTouchTitleBarHoldDelay {
+                        out += armSmartWindowDrag(id: pid)
+                    }
                 }
             } else if now - start.time >= PointerGestureConfig.firstTouchArbitrationWindow {
                 // Same chord-continuation deferral as `moved()` — see its
@@ -542,8 +579,10 @@ final class PointerGestureEngine {
             let delay: TimeInterval
             if tapChain != nil {
                 delay = PointerGestureConfig.holdCommitDelay
-            } else if smartTouchDeferredTarget != nil {
-                delay = PointerGestureConfig.smartTouchLongPressDelay
+            } else if let target = smartTouchDeferredTarget {
+                delay = target == .windowDrag
+                    ? PointerGestureConfig.smartTouchTitleBarHoldDelay
+                    : PointerGestureConfig.smartTouchLongPressDelay
             } else {
                 delay = PointerGestureConfig.firstTouchArbitrationWindow
             }
@@ -659,7 +698,7 @@ final class PointerGestureEngine {
             // A second touch joined before the first resolved — always a
             // fresh chord (an anchor never commits while still
             // `.firstTouchPending`).
-            return beginFreshChord(sample)
+            return endTitleBarHold() + beginFreshChord(sample)
 
         case .absolutePointer:
             // The first later finger, intentionally added to an already-
@@ -858,9 +897,15 @@ final class PointerGestureEngine {
                     // existing arbitration window, after which `poll()`
                     // commits ordinary Direct Touch as before.
                     return []
-                case .resolved(let target?):
-                    return commitToSmartTarget(target, id: sample.id, normalized: sample.normalized,
-                                               viewPoint: sample.viewPoint)
+                case .resolved(.scroll?):
+                    return commitToSmartScroll(id: sample.id, viewPoint: sample.viewPoint)
+                case .resolved(.windowDrag?):
+                    // Moved before the title bar hold armed: not a
+                    // deliberate window drag, so it never becomes one —
+                    // plain Direct Touch instead.
+                    return endTitleBarHold()
+                        + commitToAbsolutePointer(id: sample.id, normalized: sample.normalized,
+                                                  viewPoint: sample.viewPoint)
                 case .none, .resolved(nil):
                     break
                 }
@@ -968,6 +1013,7 @@ final class PointerGestureEngine {
 
         case .firstTouchPending:
             guard sample.id == pendingID, let start = pendingStart else { break }
+            out += endTitleBarHold()
             pendingID = nil
             pendingStart = nil
             pendingLastNormalized = nil
@@ -1185,16 +1231,6 @@ final class PointerGestureEngine {
         return [.moveAbsolute(x: Double(n.x), y: Double(n.y))]
     }
 
-    /// Commits `.firstTouchPending` to the Smart Touch behavior for a
-    /// confidently classified touch-down target.
-    private func commitToSmartTarget(_ target: SmartTouchTarget, id: AnyHashable,
-                                     normalized: CGPoint?, viewPoint: CGPoint) -> [PointerCommand] {
-        switch target {
-        case .scroll: return commitToSmartScroll(id: id, viewPoint: viewPoint)
-        case .windowDrag: return commitToSmartWindowDrag(id: id, normalized: normalized)
-        }
-    }
-
     /// Smart Touch counterpart of `commitToAbsolutePointer`, reached only
     /// when the Mac confirmed the touch-down target as scrollable. Parks
     /// the cursor once at the touch-down point (the point the Mac
@@ -1240,13 +1276,15 @@ final class PointerGestureEngine {
         }
     }
 
-    /// Smart Touch window drag: the Mac confirmed the touch-down target as
-    /// a window title bar (or empty toolbar space), so the drag presses the
-    /// left button where the finger landed and follows it — macOS moves the
-    /// window exactly as it would for a mouse drag there. From here on it
-    /// is an ordinary `.leftDragHeld`, released when the finger lifts.
-    private func commitToSmartWindowDrag(id: AnyHashable, normalized: CGPoint?) -> [PointerCommand] {
+    /// Smart Touch window drag, armed by a still hold on a recognized
+    /// title bar (see `smartTouchTitleBarHoldDelay`): presses and holds the
+    /// left button at the touch-down point — the point the Mac classified —
+    /// so macOS moves the window exactly as it would for a mouse drag
+    /// there. From here on it is an ordinary `.leftDragHeld`: the window
+    /// follows the finger and the button releases when it lifts.
+    private func armSmartWindowDrag(id: AnyHashable) -> [PointerCommand] {
         let start = pendingStart
+        titleBarHoldActive = false
         pendingID = nil
         pendingStart = nil
         pendingLastNormalized = nil
@@ -1259,10 +1297,15 @@ final class PointerGestureEngine {
             out.append(.moveAbsolute(x: Double(start.point.x), y: Double(start.point.y)))
         }
         out.append(.mouseDown(button: .left, clickCount: 1))
-        if let n = normalized {
-            out.append(.moveAbsolute(x: Double(n.x), y: Double(n.y)))
-        }
+        out.append(.smartTouchFeedback(.windowDragArmed))
         return out
+    }
+
+    /// Ends an outstanding title bar hold that did not arm.
+    private func endTitleBarHold() -> [PointerCommand] {
+        guard titleBarHoldActive else { return [] }
+        titleBarHoldActive = false
+        return [.smartTouchFeedback(.titleBarHoldCancelled)]
     }
 
     /// The Mac's answer to a `.probeScrollTarget` (`nil`: nothing Smart
@@ -1270,19 +1313,27 @@ final class PointerGestureEngine {
     /// undecided first touch's own probe, so a late reply from an earlier
     /// touch or session can never classify a newer one. If the finger
     /// already crossed `dragSlop` while waiting, the withheld commit
-    /// happens now.
+    /// happens now — a scroll, or plain Direct Touch (a title bar never
+    /// drags without its hold). A still finger on a title bar starts the
+    /// hold instead.
     @discardableResult
     func resolveSmartTouchProbe(id: Int, target: SmartTouchTarget?) -> [PointerCommand] {
         guard mode == .firstTouchPending, smartTouchProbe == .pending(id: id) else { return [] }
         smartTouchProbe = .resolved(target)
         guard smartTouchIsActive, let pid = pendingID, let start = pendingStart,
-              let last = pendingLastView,
-              hypot(last.x - start.view.x, last.y - start.view.y) > PointerGestureConfig.dragSlop
-        else { return [] }
-        if let target {
-            return commitToSmartTarget(target, id: pid, normalized: pendingLastNormalized, viewPoint: last)
+              let last = pendingLastView else { return [] }
+        let movedPastSlop = hypot(last.x - start.view.x, last.y - start.view.y) > PointerGestureConfig.dragSlop
+        switch target {
+        case .scroll? where movedPastSlop:
+            return commitToSmartScroll(id: pid, viewPoint: last)
+        case .windowDrag? where !movedPastSlop:
+            titleBarHoldActive = true
+            let deadline = start.time + PointerGestureConfig.smartTouchTitleBarHoldDelay
+            return [.smartTouchFeedback(.titleBarHoldBegan(deadline: deadline))]
+        default:
+            guard movedPastSlop else { return [] }
+            return commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized, viewPoint: last)
         }
-        return commitToAbsolutePointer(id: pid, normalized: pendingLastNormalized, viewPoint: last)
     }
 
     /// Trackpad-mode counterpart of `commitToAbsolutePointer`: commits
@@ -1409,7 +1460,7 @@ final class PointerGestureEngine {
     /// touch. Use for disconnect/pause/system-gesture takeover.
     @discardableResult
     func reset() -> [PointerCommand] {
-        let out = releaseHeld()
+        let out = endTitleBarHold() + releaseHeld()
         resetToIdle()
         return out
     }
@@ -1439,6 +1490,7 @@ final class PointerGestureEngine {
         smartTouchProbe = .none
         smartScrollLastView = nil
         smartScrollAxis = .free
+        titleBarHoldActive = false
     }
 }
 

@@ -3,11 +3,13 @@ import CoreGraphics
 import Foundation
 
 /// Smart Touch (Experimental): decides whether the Accessibility element
-/// under a touch-down point sits inside a standard scrollable container,
-/// or on a standard window's title bar / empty toolbar space.
+/// under a touch-down point is a standard window's title bar / empty
+/// toolbar space, or sits inside a standard scrollable container.
 ///
 /// Conservative by design — anything short of a clear match answers "not
-/// scrollable", and the receiver keeps ordinary Direct Touch.
+/// scrollable", and the receiver keeps ordinary Direct Touch. For title
+/// bars a missed window drag (Direct Touch) is always preferred over a
+/// touch meant for a button moving the window.
 enum SmartTouchTargetClassifier {
     enum Decision: Equatable {
         case scrollable(container: String)
@@ -62,23 +64,64 @@ enum SmartTouchTargetClassifier {
         return .notScrollable(reason: "depthLimit")
     }
 
-    /// Whether a role chain that found no scroll container could be a
-    /// window's drag region: the window itself (its bare title bar), its
-    /// title text, or empty toolbar space — nothing deeper, so any real
-    /// control or content view keeps Direct Touch.
-    static func isWindowDragCandidate(roles: [String]) -> Bool {
-        guard roles.last == kAXWindowRole as String else { return false }
-        switch roles.count {
-        case 1: return true
-        case 2: return roles[0] == kAXToolbarRole as String || roles[0] == kAXStaticTextRole as String
-        default: return false
+    /// How a role chain could be a window's drag region, before the live
+    /// geometry checks. Leaf-first chains that end at the window.
+    enum TitleBarCandidate: Equatable {
+        /// Empty toolbar space (the chain passes through `AXToolbar`):
+        /// draggable wherever the toolbar is.
+        case toolbar
+        /// The bare title bar, its title text or a plain group or scroll
+        /// area showing through it: draggable only inside the title bar
+        /// band (see `isInTitleBar`).
+        case titleBand
+        case rejected(reason: String)
+    }
+
+    /// Plain containers a title bar hit may pass through on its way up to
+    /// the window. Modern unified toolbars nest items in groups; split
+    /// views run underneath full-height sidebars.
+    static let titleBarContainerRoles: Set<String> = [
+        kAXToolbarRole as String,
+        kAXGroupRole as String,
+        kAXSplitGroupRole as String,
+    ]
+
+    /// Extra roles accepted only as the hit element itself: the window
+    /// title, or a scroll area running underneath a transparent title bar
+    /// with no content under the finger.
+    static let titleBarLeafRoles: Set<String> = [
+        kAXStaticTextRole as String,
+        kAXScrollAreaRole as String,
+    ]
+
+    /// Allow-list, not deny-list: every role between the hit and its
+    /// window must be a plain container (or the title text / bare scroll
+    /// area as the hit itself). Buttons — traffic lights included — text
+    /// and search fields, segmented controls, pop-ups, sliders, scroll
+    /// bars, images, links, rows and anything unfamiliar reject the whole
+    /// chain, so the touch stays Direct Touch.
+    static func titleBarCandidate(roles: [String]) -> TitleBarCandidate {
+        guard let last = roles.last else { return .rejected(reason: "noElement") }
+        guard last == kAXWindowRole as String else { return .rejected(reason: "notInWindow:\(last)") }
+        for (index, role) in roles.dropLast().enumerated() {
+            if titleBarContainerRoles.contains(role) { continue }
+            if index == 0, titleBarLeafRoles.contains(role) { continue }
+            return .rejected(reason: "role:\(role)")
         }
+        return roles.contains(kAXToolbarRole as String) ? .toolbar : .titleBand
+    }
+
+    /// Whether the ancestor walk can still end in a title bar candidate —
+    /// once it can't, it may stop at the first scroll container as before.
+    static func canBeTitleBar(role: String, isLeaf: Bool) -> Bool {
+        titleBarContainerRoles.contains(role) || role == kAXWindowRole as String
+            || (isLeaf && titleBarLeafRoles.contains(role))
     }
 
     /// Title bar band from the window's close button: the traffic lights
     /// sit vertically centered in the title bar (or unified toolbar), so
     /// the band reaches twice the button's center offset from the window
-    /// top. Only consulted for a bare-window or title-text hit.
+    /// top. Consulted for every `.titleBand` candidate.
     static func isInTitleBar(pointY: CGFloat, windowTop: CGFloat, closeButtonMidY: CGFloat) -> Bool {
         let bandHeight = 2 * (closeButtonMidY - windowTop)
         guard bandHeight > 0, bandHeight <= maxTitleBarHeight else { return false }
@@ -99,6 +142,10 @@ enum SmartTouchTargetClassifier {
     /// Live lookup at a global CG point (top-left origin — the same space
     /// Accessibility uses). Never prompts for permission: without it this
     /// answers "not scrollable", and the receiver falls back to Direct Touch.
+    ///
+    /// The title bar is checked first: on current macOS, content scroll
+    /// views and full-height sidebars run underneath a transparent title
+    /// bar, and a touch there must move the window, not scroll.
     static func classify(at point: CGPoint) -> Decision {
         guard AXIsProcessTrusted() else { return .notScrollable(reason: "accessibilityUnavailable") }
         let systemWide = AXUIElementCreateSystemWide()
@@ -108,38 +155,51 @@ enum SmartTouchTargetClassifier {
               let element = hit else {
             return .notScrollable(reason: "noElement")
         }
-        let roles = roleChain(from: element)
-        let decision = classify(roles: roles)
-        guard case .notScrollable = decision, isWindowDragCandidate(roles: roles),
-              isWindowDragRegion(leaf: element, leafRole: roles[0], point: point) else { return decision }
-        return .windowDrag
+        let chain = ancestorChain(from: element)
+        let roles = chain.map(\.role)
+        let candidate = titleBarCandidate(roles: roles)
+        let titleBarRejection: String?
+        switch candidate {
+        case .rejected(let reason):
+            titleBarRejection = reason
+        case .toolbar, .titleBand:
+            titleBarRejection = windowDragRejection(window: chain[chain.count - 1].element, point: point,
+                                                    needsTitleBand: candidate == .titleBand)
+        }
+        let decision: Decision = titleBarRejection == nil ? .windowDrag : classify(roles: roles)
+        #if DEBUG
+        // Roles and reasons only — never titles, values or other content.
+        let titleBar = titleBarRejection.map { "rejected(\($0))" } ?? "accepted"
+        Log.info("smartTouch: classify roles=\(roles.joined(separator: ">")) titleBar=\(titleBar) decision=\(decision)")
+        #endif
+        return decision
     }
 
-    /// Live half of the window-drag check: a standard, movable window, and
-    /// — unless the hit is empty toolbar space, which AppKit always lets
-    /// drag the window — a point inside the title bar band.
-    private static func isWindowDragRegion(leaf: AXUIElement, leafRole: String, point: CGPoint) -> Bool {
-        let window: AXUIElement
-        if leafRole == kAXWindowRole as String {
-            window = leaf
-        } else if let parent = copyAttribute(leaf, kAXParentAttribute),
-                  CFGetTypeID(parent) == AXUIElementGetTypeID() {
-            window = parent as! AXUIElement
-        } else {
-            return false
+    /// Live half of the window-drag check, `nil` when it passes: a
+    /// standard, movable, non-full-screen window, and — unless the hit is
+    /// toolbar space — a point inside the title bar band.
+    private static func windowDragRejection(window: AXUIElement, point: CGPoint, needsTitleBand: Bool) -> String? {
+        guard copyAttribute(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole as String else {
+            return "notStandardWindow"
         }
-        AXUIElementSetMessagingTimeout(window, messagingTimeout)
-        guard copyAttribute(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole as String,
-              let windowPosition = pointValue(copyAttribute(window, kAXPositionAttribute)) else { return false }
-        if leafRole == kAXToolbarRole as String { return true }
+        if copyAttribute(window, "AXFullScreen") as? Bool == true { return "fullScreen" }
+        var movable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &movable) == .success,
+              movable.boolValue else { return "notMovable" }
+        guard let windowPosition = pointValue(copyAttribute(window, kAXPositionAttribute)) else {
+            return "noWindowPosition"
+        }
+        guard needsTitleBand else { return nil }
         guard let closeValue = copyAttribute(window, kAXCloseButtonAttribute),
-              CFGetTypeID(closeValue) == AXUIElementGetTypeID() else { return false }
+              CFGetTypeID(closeValue) == AXUIElementGetTypeID() else { return "noCloseButton" }
         let closeButton = closeValue as! AXUIElement
         AXUIElementSetMessagingTimeout(closeButton, messagingTimeout)
         guard let closePosition = pointValue(copyAttribute(closeButton, kAXPositionAttribute)),
-              let closeSize = sizeValue(copyAttribute(closeButton, kAXSizeAttribute)) else { return false }
+              let closeSize = sizeValue(copyAttribute(closeButton, kAXSizeAttribute)) else {
+            return "noCloseButtonFrame"
+        }
         return isInTitleBar(pointY: point.y, windowTop: windowPosition.y,
-                            closeButtonMidY: closePosition.y + closeSize.height / 2)
+                            closeButtonMidY: closePosition.y + closeSize.height / 2) ? nil : "outsideTitleBar"
     }
 
     private static func pointValue(_ value: CFTypeRef?) -> CGPoint? {
@@ -154,20 +214,26 @@ enum SmartTouchTargetClassifier {
         return AXValueGetValue(value as! AXValue, .cgSize, &size) ? size : nil
     }
 
-    private static func roleChain(from leaf: AXUIElement) -> [String] {
-        var roles: [String] = []
+    /// The hit element and its ancestors, leaf first, up to the first
+    /// boundary (normally the window). Stops early at a scroll container or
+    /// drag-owning control once the chain can no longer be a title bar, so
+    /// ordinary content costs no more lookups than a scroll check needs.
+    private static func ancestorChain(from leaf: AXUIElement) -> [(element: AXUIElement, role: String)] {
+        var chain: [(element: AXUIElement, role: String)] = []
+        var titleBarPossible = true
         var current: AXUIElement? = leaf
-        while let element = current, roles.count <= maxAncestorDepth {
+        while let element = current, chain.count <= maxAncestorDepth {
             AXUIElementSetMessagingTimeout(element, messagingTimeout)
             guard let role = copyAttribute(element, kAXRoleAttribute) as? String else { break }
-            roles.append(role)
-            if scrollContainerRoles.contains(role) || dragOwningRoles.contains(role)
-                || boundaryRoles.contains(role) { break }
+            chain.append((element, role))
+            if boundaryRoles.contains(role) { break }
+            titleBarPossible = titleBarPossible && canBeTitleBar(role: role, isLeaf: chain.count == 1)
+            if !titleBarPossible, scrollContainerRoles.contains(role) || dragOwningRoles.contains(role) { break }
             current = copyAttribute(element, kAXParentAttribute).flatMap { value in
                 CFGetTypeID(value) == AXUIElementGetTypeID() ? (value as! AXUIElement) : nil
             }
         }
-        return roles
+        return chain
     }
 
     private static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {

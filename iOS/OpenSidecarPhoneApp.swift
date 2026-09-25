@@ -150,10 +150,9 @@ struct ReceiverScreen: View {
                                    safeInsets: effectiveSafeInsets,
                                    occupiedControlFrames: occupiedControlFrames,
                                    onRotationSnap: { haptics.play(.selection) },
-                                   onSmartTouchOverride: {
-                                       guard controlStore.preferences.smartTouchLongPressHapticEnabled else { return }
-                                       haptics.play(.smartTouchOverride)
-                                   },
+                                   smartTouchHapticsEnabled: SmartTouchHapticPolicy.isEnabled(
+                                       haptics: controlStore.preferences.hapticsEnabled,
+                                       smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
                                    onActivityBegan: { controlStore.beginAutoHideActivity() },
                                    onActivityEnded: { controlStore.scheduleAutoHide() })
@@ -1437,7 +1436,7 @@ struct SettingsView: View {
                                         .background(Capsule().fill(Color.orange.opacity(0.2)))
                                         .foregroundStyle(.orange)
                                 }
-                                Text("Scroll with one finger and drag windows by their title bar. Touch and hold to use normal Direct Touch. Falls back to Direct Touch when the Mac can't identify the area.")
+                                Text("Scroll with one finger in any direction. Hold a title bar, then drag, to move its window. Elsewhere, touch and hold for normal Direct Touch. Falls back to Direct Touch when the Mac can't identify the area.")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                             }
@@ -1445,9 +1444,9 @@ struct SettingsView: View {
                         if controlStore.preferences.smartTouchEnabled {
                             Toggle(isOn: preferenceBinding(\.smartTouchLongPressHapticEnabled)) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Smart Touch Long-Press Haptic")
+                                    Text("Smart Touch Haptics")
                                     Text(controlStore.preferences.hapticsEnabled
-                                         ? "Confirms when touch and hold switches to Direct Touch."
+                                         ? "Builds while you hold a title bar, then ticks when the window can move. Also confirms switching to Direct Touch."
                                          : "Off while Haptics is turned off.")
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
@@ -2202,8 +2201,8 @@ struct VideoLayerView: UIViewRepresentable {
     let safeInsets: ControlSafeInsets
     let occupiedControlFrames: [CGRect]
     let onRotationSnap: () -> Void
-    /// A Smart Touch long press switched a touch into plain Direct Touch.
-    let onSmartTouchOverride: () -> Void
+    /// Whether Smart Touch hold feedback plays — see `SmartTouchHapticPolicy`.
+    let smartTouchHapticsEnabled: Bool
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
     /// See `VideoView.onActivityBegan`/`onActivityEnded` — lets Auto-hide
     /// reveal from any receiver-surface interaction, not only a tray touch.
@@ -2229,7 +2228,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
-        view.onSmartTouchOverride = onSmartTouchOverride
+        view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         receiver.onSmartTouchProbeResult = { [weak view] id, target in
             view?.resolveSmartTouchProbe(id: id, target: target)
         }
@@ -2350,7 +2349,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
-        uiView.onSmartTouchOverride = onSmartTouchOverride
+        uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -2579,9 +2578,8 @@ struct VideoLayerView: UIViewRepresentable {
             pointerEngine.smartTouchEnabled = enabled
         }
 
-        /// Fired when a Smart Touch long press drops a touch into plain
-        /// Direct Touch — the owner decides whether to confirm it.
-        var onSmartTouchOverride: (() -> Void)?
+        /// Plays Smart Touch hold feedback; the owner sets `isEnabled`.
+        let smartTouchHaptics = SmartTouchHaptics()
 
         /// The Mac's classification of a Smart Touch touch-down target.
         func resolveSmartTouchProbe(id: Int, target: SmartTouchTarget?) {
@@ -3713,8 +3711,8 @@ struct VideoLayerView: UIViewRepresentable {
                         cancelScrollMomentum()
                         scrollVelocityTracker.reset()
                     }
-                case .smartTouchOverride:
-                    onSmartTouchOverride?()
+                case .smartTouchFeedback(let feedback):
+                    smartTouchHaptics.play(feedback)
                 }
             }
         }

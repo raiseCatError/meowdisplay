@@ -1,3 +1,4 @@
+import CoreHaptics
 import SwiftUI
 import UIKit
 
@@ -150,9 +151,93 @@ final class ReceiverHaptics {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .confirmation, .reset:
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-        case .smartTouchOverride:
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
+    }
+}
+
+/// Renders `SmartTouchFeedback` as haptics. Owned by the video surface for
+/// its lifetime, since the title bar build-up is a continuous pattern that
+/// must be stopped again, not a one-shot event.
+///
+/// Title bar hold: a soft continuous haptic ramps up while the hold builds,
+/// then a single crisp tick confirms the window drag has armed.
+@MainActor
+final class SmartTouchHaptics {
+    /// `SmartTouchHapticPolicy` for the current settings. Turning it off
+    /// mid-hold stops the build-up at once.
+    var isEnabled = true {
+        didSet { if !isEnabled { stopBuildUp() } }
+    }
+
+    private let supportsHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    private var engine: CHHapticEngine?
+    private var buildUp: CHHapticPatternPlayer?
+
+    func play(_ feedback: SmartTouchFeedback) {
+        switch feedback {
+        case .directTouchOverride:
+            guard isEnabled else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        case .titleBarHoldBegan(let deadline):
+            guard isEnabled else { return }
+            startBuildUp(duration: deadline - CACurrentMediaTime())
+        case .titleBarHoldCancelled:
+            stopBuildUp()
+        case .windowDragArmed:
+            stopBuildUp()
+            guard isEnabled else { return }
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.8)
+        }
+    }
+
+    /// One continuous event whose intensity rises from barely-there to
+    /// moderate over the rest of the hold. Low sharpness keeps it a soft
+    /// swell rather than a buzz. Devices without Core Haptics (iPad) get
+    /// nothing here, like every other receiver haptic.
+    private func startBuildUp(duration: TimeInterval) {
+        stopBuildUp()
+        guard supportsHaptics, duration > 0.05 else { return }
+        do {
+            let engine = try hapticEngine()
+            let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.45),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.2),
+            ], relativeTime: 0, duration: duration)
+            let ramp = CHHapticParameterCurve(parameterID: .hapticIntensityControl, controlPoints: [
+                .init(relativeTime: 0, value: 0.15),
+                .init(relativeTime: duration, value: 1),
+            ], relativeTime: 0)
+            let player = try engine.makePlayer(with: CHHapticPattern(events: [event], parameterCurves: [ramp]))
+            try player.start(atTime: CHHapticTimeImmediate)
+            buildUp = player
+        } catch {
+            buildUp = nil
+        }
+    }
+
+    private func stopBuildUp() {
+        guard let player = buildUp else { return }
+        buildUp = nil
+        try? player.stop(atTime: CHHapticTimeImmediate)
+    }
+
+    private func hapticEngine() throws -> CHHapticEngine {
+        if let engine {
+            try engine.start()
+            return engine
+        }
+        let engine = try CHHapticEngine()
+        engine.isAutoShutdownEnabled = true
+        engine.playsHapticsOnly = true
+        engine.stoppedHandler = { [weak self] _ in
+            Task { @MainActor in self?.buildUp = nil }
+        }
+        engine.resetHandler = { [weak self] in
+            Task { @MainActor in self?.buildUp = nil }
+        }
+        try engine.start()
+        self.engine = engine
+        return engine
     }
 }
 

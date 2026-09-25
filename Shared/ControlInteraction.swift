@@ -24,14 +24,22 @@ enum ControlHapticEvent: String, Equatable {
     case profileChange
     case reset
     case settings
-    /// Smart Touch long press dropped a touch into plain Direct Touch.
-    case smartTouchOverride
 }
 
 enum ControlHapticPolicy {
     static func shouldPlay(_ event: ControlHapticEvent, enabled: Bool) -> Bool {
         _ = event
         return enabled
+    }
+}
+
+/// Smart Touch hold haptics (the Direct Touch override and the title bar
+/// build-up and confirmation) play only while both the global Haptics
+/// setting and Smart Touch Haptics are on. Either switch only silences
+/// feedback — the gestures themselves never change.
+enum SmartTouchHapticPolicy {
+    static func isEnabled(haptics: Bool, smartTouchHaptics: Bool) -> Bool {
+        haptics && smartTouchHaptics
     }
 }
 

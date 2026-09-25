@@ -540,9 +540,12 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults off.
     var smartTouchEnabled = false
-    /// Haptic confirming a Smart Touch long press switched the touch into
-    /// plain Direct Touch. Also silenced whenever `hapticsEnabled` is off.
-    /// Defaults on.
+    /// Smart Touch Haptics: every Smart Touch hold haptic — the long press
+    /// that switches a touch into plain Direct Touch, and the title bar
+    /// hold's build-up and confirmation. Also silenced whenever
+    /// `hapticsEnabled` is off; never changes the gestures themselves.
+    /// Defaults on. Keeps its original persisted name so existing choices
+    /// carry over.
     var smartTouchLongPressHapticEnabled = true
     var profiles: [ControlProfile]
     /// Independent second tray of immediate-fire shortcut buttons (Undo/

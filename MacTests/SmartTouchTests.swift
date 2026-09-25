@@ -181,6 +181,18 @@ final class SmartTouchTests: XCTestCase {
                        [.scroll(dx: 0, dy: 10)])
     }
 
+    func testDiagonalSwipeKeepsCarryingBothAxes() throws {
+        let engine = smartEngine()
+        let probe = try XCTUnwrap(beginProbedTouch(engine))
+        engine.resolveSmartTouchProbe(id: probe, target: .scroll)
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 85, y: 80), t: 0.03)),
+                       [.moveAbsolute(x: 0.2, y: 0.2), .scroll(dx: -15, dy: -20)])
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 60, y: 50), t: 0.04)),
+                       [.scroll(dx: -25, dy: -30)])
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 60, y: 50), t: 0.05)),
+                       [.scrollEnded(momentum: true)])
+    }
+
     func testDiagonalSwipePansFreely() throws {
         let engine = smartEngine()
         let probe = try XCTUnwrap(beginProbedTouch(engine))
@@ -204,7 +216,7 @@ final class SmartTouchTests: XCTestCase {
         XCTAssertEqual(engine.poll(now: PointerGestureConfig.firstTouchArbitrationWindow), [])
         XCTAssertEqual(engine.mode, .firstTouchPending)
         XCTAssertEqual(engine.poll(now: PointerGestureConfig.smartTouchLongPressDelay),
-                       [.moveAbsolute(x: 0.2, y: 0.2), .smartTouchOverride])
+                       [.moveAbsolute(x: 0.2, y: 0.2), .smartTouchFeedback(.directTouchOverride)])
         XCTAssertEqual(engine.mode, .absolutePointer)
         // From here it is plain Direct Touch: movement moves the pointer.
         XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 100, y: 150),
@@ -242,47 +254,155 @@ final class SmartTouchTests: XCTestCase {
         XCTAssertEqual(engine.mode, .absolutePointer)
     }
 
-    // MARK: - Window drag
+    // MARK: - Title bar hold, then drag
 
-    func testTitleBarDragPressesAtTouchDownAndFollowsTheFinger() throws {
-        let engine = smartEngine()
-        let probe = try XCTUnwrap(beginProbedTouch(engine))
-        engine.resolveSmartTouchProbe(id: probe, target: .windowDrag)
-        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 130, y: 100),
-                                            norm: CGPoint(x: 0.3, y: 0.2), t: 0.03)),
-                       [.moveAbsolute(x: 0.2, y: 0.2), .mouseDown(button: .left, clickCount: 1),
-                        .moveAbsolute(x: 0.3, y: 0.2)])
-        XCTAssertEqual(engine.mode, .leftDragHeld)
-        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 160, y: 110),
-                                            norm: CGPoint(x: 0.4, y: 0.25), t: 0.04)),
-                       [.moveAbsolute(x: 0.4, y: 0.25)])
-        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 160, y: 110), t: 0.05)),
-                       [.mouseUp(button: .left, clickCount: 0)])
-        XCTAssertEqual(engine.heldMouseButton, nil)
+    private let holdDeadline = PointerGestureConfig.smartTouchTitleBarHoldDelay
+
+    /// Touch down on a title bar the Mac recognized; returns what the
+    /// probe reply emitted.
+    private func beginTitleBarHold(_ engine: PointerGestureEngine, id: Int = 1,
+                                   t: TimeInterval = 0) throws -> [PointerCommand] {
+        let probe = try XCTUnwrap(beginProbedTouch(engine, id: id, t: t))
+        return engine.resolveSmartTouchProbe(id: probe, target: .windowDrag)
     }
 
-    func testLateWindowDragReplyCommitsTheWithheldDrag() throws {
+    func testRecognizedTitleBarStartsTheHoldInsteadOfDragging() throws {
+        let engine = smartEngine()
+        XCTAssertEqual(try beginTitleBarHold(engine),
+                       [.smartTouchFeedback(.titleBarHoldBegan(deadline: holdDeadline))])
+        XCTAssertEqual(engine.mode, .firstTouchPending)
+        XCTAssertNil(engine.heldMouseButton)
+        // Neither the arbitration window nor the generic long press
+        // commits it — the title bar hold does.
+        XCTAssertEqual(engine.pollDelay(now: 0.05) ?? 0, holdDeadline - 0.05, accuracy: 1e-9)
+        XCTAssertEqual(engine.poll(now: PointerGestureConfig.firstTouchArbitrationWindow), [])
+        XCTAssertEqual(engine.poll(now: PointerGestureConfig.smartTouchLongPressDelay), [])
+        XCTAssertEqual(engine.mode, .firstTouchPending)
+        XCTAssertNil(engine.heldMouseButton)
+    }
+
+    func testTitleBarHoldArmsTheDragThenTheWindowFollowsUntilLift() throws {
+        let engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        // Small wobble inside the slop keeps the hold alive.
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 106, y: 104),
+                                            norm: CGPoint(x: 0.21, y: 0.21), t: 0.2)), [])
+        let armed = engine.poll(now: holdDeadline)
+        XCTAssertEqual(armed, [.moveAbsolute(x: 0.2, y: 0.2), .mouseDown(button: .left, clickCount: 1),
+                               .smartTouchFeedback(.windowDragArmed)])
+        XCTAssertEqual(engine.mode, .leftDragHeld)
+        XCTAssertEqual(engine.heldMouseButton, .left)
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 160, y: 110),
+                                            norm: CGPoint(x: 0.4, y: 0.25), t: 0.6)),
+                       [.moveAbsolute(x: 0.4, y: 0.25)])
+        XCTAssertEqual(engine.handle(sample(1, .moved, view: CGPoint(x: 200, y: 150),
+                                            norm: CGPoint(x: 0.5, y: 0.35), t: 0.7)),
+                       [.moveAbsolute(x: 0.5, y: 0.35)])
+        XCTAssertEqual(engine.poll(now: 0.8), [], "nothing re-arms or presses again")
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 200, y: 150), t: 0.9)),
+                       [.mouseUp(button: .left, clickCount: 0)])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.mode, .idle)
+    }
+
+    func testMouseDownHappensExactlyOncePerTitleBarDrag() throws {
+        let engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        var all = engine.poll(now: holdDeadline)
+        for step in 1...5 {
+            all += engine.handle(sample(1, .moved, view: CGPoint(x: 100 + CGFloat(step) * 20, y: 100),
+                                        norm: CGPoint(x: 0.2 + Double(step) * 0.05, y: 0.2),
+                                        t: holdDeadline + Double(step) * 0.01))
+            all += engine.poll(now: holdDeadline + Double(step) * 0.01)
+        }
+        all += engine.handle(sample(1, .ended, view: CGPoint(x: 200, y: 100), t: 1))
+        XCTAssertEqual(all.filter { $0 == .mouseDown(button: .left, clickCount: 1) }.count, 1)
+        XCTAssertEqual(all.filter { if case .mouseUp = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(all.filter { $0 == .smartTouchFeedback(.windowDragArmed) }.count, 1)
+    }
+
+    func testMovingBeforeTheHoldArmsFallsBackToDirectTouch() throws {
+        let engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        let moved = engine.handle(sample(1, .moved, view: CGPoint(x: 130, y: 100),
+                                         norm: CGPoint(x: 0.3, y: 0.2), t: 0.2))
+        XCTAssertEqual(moved, [.smartTouchFeedback(.titleBarHoldCancelled), .moveAbsolute(x: 0.3, y: 0.2)])
+        XCTAssertEqual(engine.mode, .absolutePointer)
+        XCTAssertNil(engine.heldMouseButton)
+        // The deadline passing later changes nothing.
+        XCTAssertEqual(engine.poll(now: 1), [])
+        XCTAssertNil(engine.heldMouseButton)
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 130, y: 100), t: 1.1)), [])
+    }
+
+    func testTitleBarReplyAfterMovementNeverDrags() throws {
         let engine = smartEngine()
         let probe = try XCTUnwrap(beginProbedTouch(engine))
         engine.handle(sample(1, .moved, view: CGPoint(x: 130, y: 100), norm: CGPoint(x: 0.3, y: 0.2), t: 0.02))
         XCTAssertEqual(engine.resolveSmartTouchProbe(id: probe, target: .windowDrag),
-                       [.moveAbsolute(x: 0.2, y: 0.2), .mouseDown(button: .left, clickCount: 1),
-                        .moveAbsolute(x: 0.3, y: 0.2)])
+                       [.moveAbsolute(x: 0.3, y: 0.2)])
+        XCTAssertEqual(engine.mode, .absolutePointer)
+        XCTAssertNil(engine.heldMouseButton)
     }
 
-    func testTapOnTitleBarIsStillAClickAndLongPressOverrides() throws {
+    func testTapOnTitleBarIsStillAClick() throws {
         let engine = smartEngine()
-        var probe = try XCTUnwrap(beginProbedTouch(engine))
-        engine.resolveSmartTouchProbe(id: probe, target: .windowDrag)
-        engine.handle(sample(1, .ended, view: CGPoint(x: 100, y: 100), norm: CGPoint(x: 0.2, y: 0.2), t: 0.05))
+        _ = try beginTitleBarHold(engine)
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 101, y: 100),
+                                            norm: CGPoint(x: 0.2, y: 0.2), t: 0.08)),
+                       [.smartTouchFeedback(.titleBarHoldCancelled), .moveAbsolute(x: 0.2, y: 0.2)])
         XCTAssertEqual(engine.poll(now: 1), [.mouseDown(button: .left, clickCount: 1),
                                              .mouseUp(button: .left, clickCount: 1)])
+        XCTAssertNil(engine.heldMouseButton)
+    }
 
-        probe = try XCTUnwrap(beginProbedTouch(engine, id: 2, t: 2))
-        engine.resolveSmartTouchProbe(id: probe, target: .windowDrag)
-        XCTAssertEqual(engine.poll(now: 2.01 + PointerGestureConfig.smartTouchLongPressDelay),
-                       [.moveAbsolute(x: 0.2, y: 0.2), .smartTouchOverride])
-        XCTAssertEqual(engine.heldMouseButton, nil)
+    func testReleasingMidHoldStopsTheBuildUpWithoutAClick() throws {
+        let engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        XCTAssertEqual(engine.handle(sample(1, .ended, view: CGPoint(x: 100, y: 100),
+                                            norm: CGPoint(x: 0.2, y: 0.2), t: 0.3)),
+                       [.smartTouchFeedback(.titleBarHoldCancelled), .moveAbsolute(x: 0.2, y: 0.2)])
+        XCTAssertEqual(engine.poll(now: 1), [])
+        XCTAssertNil(engine.heldMouseButton)
+    }
+
+    func testSecondFingerOrResetCancelsTheHold() throws {
+        var engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        XCTAssertEqual(engine.handle(sample(2, .began, view: CGPoint(x: 140, y: 100), t: 0.1)),
+                       [.smartTouchFeedback(.titleBarHoldCancelled)])
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+
+        engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        XCTAssertEqual(engine.reset(), [.smartTouchFeedback(.titleBarHoldCancelled)])
+        XCTAssertEqual(engine.poll(now: 1), [])
+        XCTAssertNil(engine.heldMouseButton)
+    }
+
+    func testGenericLongPressStillSwitchesToDirectTouch() throws {
+        let engine = smartEngine()
+        let probe = try XCTUnwrap(beginProbedTouch(engine))
+        XCTAssertEqual(engine.resolveSmartTouchProbe(id: probe, target: .scroll), [],
+                       "no title bar build-up for an ordinary target")
+        XCTAssertEqual(engine.poll(now: PointerGestureConfig.smartTouchLongPressDelay),
+                       [.moveAbsolute(x: 0.2, y: 0.2), .smartTouchFeedback(.directTouchOverride)])
+        XCTAssertNil(engine.heldMouseButton)
+    }
+
+    /// Haptics settings live only on the receiver: the engine emits the same
+    /// commands either way, and the policy only silences feedback.
+    func testHapticsSettingsChangeFeedbackOnly() throws {
+        XCTAssertTrue(SmartTouchHapticPolicy.isEnabled(haptics: true, smartTouchHaptics: true))
+        XCTAssertFalse(SmartTouchHapticPolicy.isEnabled(haptics: true, smartTouchHaptics: false))
+        XCTAssertFalse(SmartTouchHapticPolicy.isEnabled(haptics: false, smartTouchHaptics: true))
+        XCTAssertFalse(SmartTouchHapticPolicy.isEnabled(haptics: false, smartTouchHaptics: false))
+        let engine = smartEngine()
+        _ = try beginTitleBarHold(engine)
+        let armed = engine.poll(now: holdDeadline).filter {
+            if case .smartTouchFeedback = $0 { return false }; return true
+        }
+        XCTAssertEqual(armed, [.moveAbsolute(x: 0.2, y: 0.2), .mouseDown(button: .left, clickCount: 1)])
     }
 
     // MARK: - Taps and tap-hold-drag
@@ -377,14 +497,71 @@ final class SmartTouchTests: XCTestCase {
                        .notScrollable(reason: "noScrollContainer"))
     }
 
-    func testWindowDragCandidatesAreOnlyBareTitleBarHits() {
-        XCTAssertTrue(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXWindow"]))
-        XCTAssertTrue(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXToolbar", "AXWindow"]))
-        XCTAssertTrue(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXStaticText", "AXWindow"]))
-        XCTAssertFalse(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXButton", "AXWindow"]))
-        XCTAssertFalse(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXButton", "AXToolbar", "AXWindow"]))
-        XCTAssertFalse(SmartTouchTargetClassifier.isWindowDragCandidate(roles: ["AXGroup", "AXSheet"]))
-        XCTAssertFalse(SmartTouchTargetClassifier.isWindowDragCandidate(roles: []))
+    func testStandardTitleBarHitsAreCandidates() {
+        typealias C = SmartTouchTargetClassifier
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXWindow"]), .titleBand)
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXStaticText", "AXWindow"]), .titleBand)
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXToolbar", "AXWindow"]), .toolbar)
+    }
+
+    func testNestedToolbarGroupsAreCandidates() {
+        typealias C = SmartTouchTargetClassifier
+        // Unified toolbars nest item groups inside the toolbar.
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXToolbar", "AXWindow"]), .toolbar)
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXGroup", "AXToolbar", "AXWindow"]), .toolbar)
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXStaticText", "AXGroup", "AXToolbar", "AXWindow"]), .toolbar)
+        // Plain groups or a bare scroll area under a transparent title bar
+        // still need the title bar band.
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXWindow"]), .titleBand)
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXScrollArea", "AXSplitGroup", "AXWindow"]), .titleBand)
+    }
+
+    func testWindowAndToolbarControlsAreNeverCandidates() {
+        typealias C = SmartTouchTargetClassifier
+        // Close, minimize and full screen are AXButtons on the window.
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXButton", "AXWindow"]), .rejected(reason: "role:AXButton"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXButton", "AXGroup", "AXToolbar", "AXWindow"]),
+                       .rejected(reason: "role:AXButton"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXImage", "AXButton", "AXToolbar", "AXWindow"]),
+                       .rejected(reason: "role:AXImage"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXStaticText", "AXButton", "AXToolbar", "AXWindow"]),
+                       .rejected(reason: "role:AXButton"))
+        for control in ["AXTextField", "AXComboBox", "AXRadioGroup", "AXRadioButton", "AXPopUpButton",
+                        "AXMenuButton", "AXCheckBox", "AXSlider", "AXScrollBar", "AXSplitter", "AXLink",
+                        "AXDisclosureTriangle", "AXImage", "AXIncrementor", "AXColorWell"] {
+            XCTAssertEqual(C.titleBarCandidate(roles: [control, "AXGroup", "AXToolbar", "AXWindow"]),
+                           .rejected(reason: "role:\(control)"), control)
+            XCTAssertEqual(C.titleBarCandidate(roles: [control, "AXWindow"]),
+                           .rejected(reason: "role:\(control)"), control)
+        }
+        // A search field's text inside it is still the field.
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXStaticText", "AXTextField", "AXToolbar", "AXWindow"]),
+                       .rejected(reason: "role:AXTextField"))
+    }
+
+    func testOrdinaryContentIsNeverACandidate() {
+        typealias C = SmartTouchTargetClassifier
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXStaticText", "AXCell", "AXRow", "AXTable", "AXScrollArea", "AXWindow"]),
+                       .rejected(reason: "role:AXCell"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXTextArea", "AXScrollArea", "AXWindow"]),
+                       .rejected(reason: "role:AXTextArea"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXWebArea", "AXScrollArea", "AXWindow"]),
+                       .rejected(reason: "role:AXWebArea"))
+        // A scroll area is only a leaf; with content under it, it's content.
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXScrollArea", "AXWindow"]),
+                       .rejected(reason: "role:AXScrollArea"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXSheet"]), .rejected(reason: "notInWindow:AXSheet"))
+        XCTAssertEqual(C.titleBarCandidate(roles: ["AXGroup", "AXGroup"]), .rejected(reason: "notInWindow:AXGroup"))
+        XCTAssertEqual(C.titleBarCandidate(roles: []), .rejected(reason: "noElement"))
+    }
+
+    func testAncestorWalkOnlyContinuesWhileATitleBarIsPossible() {
+        typealias C = SmartTouchTargetClassifier
+        XCTAssertTrue(C.canBeTitleBar(role: "AXScrollArea", isLeaf: true))
+        XCTAssertFalse(C.canBeTitleBar(role: "AXScrollArea", isLeaf: false))
+        XCTAssertTrue(C.canBeTitleBar(role: "AXGroup", isLeaf: false))
+        XCTAssertFalse(C.canBeTitleBar(role: "AXButton", isLeaf: true))
+        XCTAssertFalse(C.canBeTitleBar(role: "AXWebArea", isLeaf: true))
     }
 
     func testTitleBarBandFollowsTheCloseButton() {

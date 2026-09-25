@@ -76,15 +76,22 @@ default. It uses the Mac's Accessibility information to decide what a
 one-finger drag should do:
 
 - **Scrollable areas** — lists, tables, documents, spreadsheets and web
-  pages scroll with one finger, with momentum. Scrolling follows the swipe
-  vertically or horizontally, and locks to one axis when the swipe is
-  clearly up/down or left/right.
-- **Window title bars** — dragging a standard window's title bar or empty
-  toolbar space moves the window.
-- **Touch and hold** — holding still briefly before moving switches that
-  touch to normal Direct Touch. An optional haptic (**Smart Touch
-  Long-Press Haptic**, on by default, and off whenever Haptics is off)
-  confirms the switch.
+  pages scroll with one finger, with momentum: up, down, sideways and
+  diagonally. A clearly vertical or horizontal swipe stays locked to that
+  axis; a diagonal swipe moves both ways (tested on a real device in Google
+  Sheets).
+- **Window title bars** — touch and hold a standard window's title bar or
+  empty toolbar space. A soft haptic builds while you hold; after half a
+  second a short tick confirms, and the window follows your finger until
+  you lift. Moving before the tick is ordinary Direct Touch, a quick tap is
+  still a click, and window buttons, toolbar buttons and fields are never
+  treated as title bar.
+- **Touch and hold elsewhere** — holding still briefly before moving
+  switches that touch to normal Direct Touch, confirmed with a haptic.
+
+**Smart Touch Haptics** (on by default) controls both hold haptics. It is
+silent whenever Haptics is off, and turning it off never changes the
+gestures themselves.
 
 Anywhere else, or when the Mac can't identify the interface reliably, Direct
 Touch behaves exactly as normal. Taps, tap-then-hold drags, two-finger
