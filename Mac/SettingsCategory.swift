@@ -475,3 +475,31 @@ enum SidebarItem: Hashable, Identifiable {
         }
     }
 }
+
+/// Pure mapping between the sidebar's view-owned `List` selection and
+/// `SettingsNavigationModel`. The sidebar binds `List(selection:)` to local
+/// `@State`, never to a Binding whose setter mutates the model: AppKit's list
+/// can write selection back while SwiftUI is still applying an update (rows
+/// changing under a search), and publishing navigation state from there is
+/// illegal. The model is updated from `onChange` instead, after the update.
+enum SidebarSelection {
+    /// What the sidebar should highlight for the current navigation state.
+    static func derived(current: SettingsCategory, isSearching: Bool,
+                        results: [SettingsSearchItem], selectedSearchItemID: String?) -> SidebarItem? {
+        guard isSearching else { return .category(current) }
+        if let selectedSearchItemID, let match = results.first(where: { $0.id == selectedSearchItemID }) {
+            return .searchResult(match)
+        }
+        return results.first { $0.category == current }.map(SidebarItem.searchResult)
+    }
+
+    /// The category a selection navigates to; nil (a cleared selection)
+    /// never navigates.
+    static func destination(of item: SidebarItem?) -> SettingsCategory? {
+        switch item {
+        case .category(let category): return category
+        case .searchResult(let result): return result.category
+        case nil: return nil
+        }
+    }
+}

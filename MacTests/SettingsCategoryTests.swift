@@ -240,4 +240,56 @@ final class SettingsCategoryTests: XCTestCase {
         let results2 = index.search(query: "streaming")
         XCTAssertEqual(results1.map(\.id), results2.map(\.id))
     }
+
+    // MARK: - Sidebar selection sync (no navigation from rendering)
+
+    private func result(_ id: String, _ category: SettingsCategory) -> SettingsSearchItem {
+        SettingsSearchItem(id: id, title: id, category: category, keywords: [], systemImage: "gear")
+    }
+
+    @MainActor
+    func testDivergentHistoryClearsForwardStack() {
+        let nav = SettingsNavigationModel()
+        nav.navigateTo(.devices)
+        nav.navigateTo(.displays)
+        nav.goBack()
+        XCTAssertEqual(nav.forwardStack, [.displays])
+        nav.navigateTo(.system)
+        XCTAssertEqual(nav.forwardStack, [])
+        XCTAssertEqual(nav.backStack, [.overview, .devices])
+        nav.goBack(); nav.goForward()
+        XCTAssertEqual(nav.current, .system)
+    }
+
+    func testDerivedSelectionFollowsNavigationState() {
+        XCTAssertEqual(SidebarSelection.derived(current: .devices, isSearching: false, results: [],
+                                                selectedSearchItemID: "x"), .category(.devices))
+        let a = result("a", .devices), b = result("b", .displays)
+        XCTAssertEqual(SidebarSelection.derived(current: .displays, isSearching: true, results: [a, b],
+                                                selectedSearchItemID: nil), .searchResult(b))
+        XCTAssertEqual(SidebarSelection.derived(current: .displays, isSearching: true, results: [a, b],
+                                                selectedSearchItemID: "a"), .searchResult(a))
+        XCTAssertNil(SidebarSelection.derived(current: .system, isSearching: true, results: [a],
+                                              selectedSearchItemID: "gone"))
+    }
+
+    func testClearedSelectionNeverNavigates() {
+        XCTAssertNil(SidebarSelection.destination(of: nil))
+        XCTAssertEqual(SidebarSelection.destination(of: .category(.devices)), .devices)
+        XCTAssertEqual(SidebarSelection.destination(of: .searchResult(result("a", .displays))), .displays)
+    }
+
+    /// Re-deriving the highlight from the model and feeding it back is an
+    /// echo: it must not change navigation state (no recursive navigation).
+    @MainActor
+    func testEchoedSelectionDoesNotMutateNavigation() {
+        let nav = SettingsNavigationModel()
+        nav.navigateTo(.devices)
+        let echoed = SidebarSelection.derived(current: nav.current, isSearching: false, results: [],
+                                              selectedSearchItemID: nil)
+        if let destination = SidebarSelection.destination(of: echoed) { nav.navigateTo(destination) }
+        XCTAssertEqual(nav.backStack, [.overview])
+        XCTAssertEqual(nav.forwardStack, [])
+        XCTAssertEqual(nav.current, .devices)
+    }
 }

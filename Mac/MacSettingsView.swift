@@ -299,6 +299,8 @@ struct MacSettingsSidebarView: View {
     @ObservedObject var navigationModel: SettingsNavigationModel
     @State private var searchText = ""
     @State private var selectedSearchItemID: String?
+    /// View-owned `List` selection — see `SidebarSelection`.
+    @State private var selection: SidebarItem?
 
     private var isSearching: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -308,33 +310,9 @@ struct MacSettingsSidebarView: View {
         SettingsSearchIndex.shared.search(query: searchText)
     }
 
-    private var sidebarSelection: Binding<SidebarItem?> {
-        Binding(
-            get: {
-                if isSearching {
-                    if let selectedSearchItemID,
-                       let match = searchResults.first(where: { $0.id == selectedSearchItemID }) {
-                        return .searchResult(match)
-                    }
-                    if let match = searchResults.first(where: { $0.category == navigationModel.current }) {
-                        return .searchResult(match)
-                    }
-                    return nil
-                } else {
-                    return .category(navigationModel.current)
-                }
-            },
-            set: { newItem in
-                guard let newItem else { return }
-                switch newItem {
-                case .category(let category):
-                    navigationModel.navigateTo(category)
-                case .searchResult(let item):
-                    selectedSearchItemID = item.id
-                    navigationModel.navigateTo(item.category)
-                }
-            }
-        )
+    private var derivedSelection: SidebarItem? {
+        SidebarSelection.derived(current: navigationModel.current, isSearching: isSearching,
+                                 results: searchResults, selectedSearchItemID: selectedSearchItemID)
     }
 
     var body: some View {
@@ -348,7 +326,7 @@ struct MacSettingsSidebarView: View {
                 .padding(.top, 10)
                 .padding(.bottom, 8)
 
-            List(selection: sidebarSelection) {
+            List(selection: $selection) {
                 if isSearching {
                     if searchResults.isEmpty {
                         VStack(spacing: 6) {
@@ -393,6 +371,23 @@ struct MacSettingsSidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .onAppear { selection = derivedSelection }
+            // A selection the user made navigates. Runs after the update that
+            // changed it, so the model never publishes mid-update; an echo of
+            // the current category is a no-op in `navigateTo`.
+            .onChange(of: selection) { _, newItem in
+                if case .searchResult(let item) = newItem { selectedSearchItemID = item.id }
+                if let destination = SidebarSelection.destination(of: newItem) {
+                    navigationModel.navigateTo(destination)
+                }
+            }
+            // Model -> highlight (Back/Forward, Overview buttons) and search
+            // results changing: re-derive the view-owned selection.
+            .onChange(of: navigationModel.current) { _, _ in selection = derivedSelection }
+            .onChange(of: searchText) { _, _ in
+                if !isSearching { selectedSearchItemID = nil }
+                selection = derivedSelection
+            }
 
             Divider()
 
