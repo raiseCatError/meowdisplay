@@ -9,8 +9,8 @@ describes the current implementation (`Shared/TLSConfigurator.swift`,
 `Shared/TrustStore.swift`, `Shared/Pairing.swift`,
 `Shared/PairingSession.swift`) — see [PROTOCOL.md](PROTOCOL.md) for the wire
 handshake and the README's
-[Architecture & security summary](README.md#architecture--security-summary)
-for a shorter version.
+[Security](README.md#security) section for a shorter version, and
+[ARCHITECTURE.md](ARCHITECTURE.md) for where these pieces sit in the app.
 
 ## Transport encryption
 
@@ -109,13 +109,22 @@ Helpful details to include:
   and iOS/iPadOS version
 - A description of the vulnerability
 - Steps to reproduce, or a proof of concept where it is safe to share
-- The impact you believe it has
+- The impact you believe it has, and whether exploiting it needs an
+  already paired/trusted device or works from an unpaired one on the network
 - Relevant logs, with secrets, private endpoints, identifiers and personal
   content removed
 - A suggested mitigation, if you have one
 
 Do not send passwords, private keys, pairing secrets, Keychain contents or
 other credentials — they are never needed to investigate a report.
+
+### In scope
+
+Anything that could let someone see a stream, control a Mac, or be trusted
+without the owner's consent: video/audio streaming, remote input, network
+listeners and connection handling, pairing and the trust store, and Remote
+Access / Wake & Connect. Reports against the current release or the current
+default branch are the most useful.
 
 ### What to expect
 

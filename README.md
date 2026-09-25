@@ -264,6 +264,8 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 - [SECURITY.md](SECURITY.md) — security model and reporting issues
 - [PROTOCOL.md](PROTOCOL.md) and [COMPATIBILITY.md](COMPATIBILITY.md) — wire
   protocol and versioning
+- [ARCHITECTURE.md](ARCHITECTURE.md) — how the apps fit together and where
+  to start in the code
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — virtual displays, sleep and
   wake, and other internals
 
