@@ -267,6 +267,15 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — virtual displays, sleep and
   wake, and other internals
 
+### iPhone Duo, maybe someday
+
+I wanted to test MeowDisplay on the iPhone Duo, so I spent hours updating
+Xcode to the latest version only to realise my base M2 MacBook Air with 8 GB
+of memory could not handle the thing.
+
+So I gave up on Duo-specific functionality for now. It would've looked so
+cool ):
+
 ## Contributing
 
 Issues and pull requests are welcome, especially testing on iPad, different
