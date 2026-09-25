@@ -214,6 +214,32 @@ covers it.
 Details and threat-model limits: [SECURITY.md](SECURITY.md). Handshake:
 [PROTOCOL.md](PROTOCOL.md).
 
+## Session invitations
+
+Either side may start a session, but **the session initiator is not the
+stream sender**: the Mac Sender is always the video/audio source and the
+dialer, whoever clicked Connect. And **connection approval is not input
+approval**: every session still starts with input off, and only the Mac
+Sender's per-session Allow Input consent turns it on.
+
+- Pure model, policy and lifecycle: `Shared/SessionInvitation.swift`
+  (`SessionInvitation`, `IncomingSessionPolicyStore`,
+  `PendingSessionApprovals`, `SessionAdmissionGate`,
+  `ReceiverSessionAdmission`). Wire format: PROTOCOL.md §6.9.
+- Each endpoint that receives invitations applies its own policy:
+  "Automatically Allow Connections" (default on) plus a per-peer
+  Default / Always Allow / Block keyed by the pinned peer ID. Forget
+  removes the per-peer entry. Background attempts never prompt.
+- Mac Sender: `MacSender.awaitSessionAdmission` holds capture until the
+  receiver accepts (and, for a receiver's request that needs it, until the
+  Mac's user approves in `SessionApprovalPromptModel`). `SenderController`
+  applies the Mac's policy to receiver Connect requests and carries a
+  session's invitation across `restartAll()` and wait-for-wake sessions.
+- Receivers: `StreamReceiver` answers invitations on its control queue and
+  presents no media until admitted; prompts are
+  `Shared/SessionInvitationViews.swift` (iOS) and
+  `MacReceiver/ReceiverSessionInvitationPanel.swift`.
+
 ## Connections, Remote Access, Wake & Connect
 
 - The sender prefers USB when available and can move an active session
@@ -270,6 +296,7 @@ Details and threat-model limits: [SECURITY.md](SECURITY.md). Handshake:
 | Input injection on the Mac | `Mac/InputInjector.swift`, `Mac/InputRouting.swift`, `Mac/SystemGestureInvoker.swift` |
 | Smart Touch | `Mac/SmartTouchTargetClassifier.swift` |
 | Audio / A/V sync | `Mac/AudioCaptureEncoder.swift`, `Shared/ReceiverAudioPresenter.swift`, `Shared/PCMPlaybackEngine.swift` |
+| Session invitations / connection approval | `Shared/SessionInvitation.swift`, `Mac/SessionApprovalPromptModel.swift` |
 | Pairing, trust, TLS | `Shared/Pairing.swift`, `Shared/PairingSession.swift`, `Shared/TrustStore.swift`, `Shared/TLSConfigurator.swift` |
 | Remote Access / Wake & Connect | `Shared/RemoteEndpointStore.swift`, `Shared/WakeConnectCoordinator.swift`, `Mac/RemoteAccessSettingsView.swift`, `iOS/RemoteAccessSettingsView.swift` |
 | Mac Receiver | `MacReceiver/MacReceiver.swift` |

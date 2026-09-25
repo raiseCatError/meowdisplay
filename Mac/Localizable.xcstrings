@@ -13,7 +13,16 @@
     "%@ backing" : {
       "comment" : "Display size in pixels, such as 5120×2880."
     },
+    "%@ cancelled the request." : {
+
+    },
+    "%@ declined the connection." : {
+
+    },
     "%@ is already paired with this Mac." : {
+
+    },
+    "%@ isn't accepting connections from this Mac." : {
 
     },
     "%@ logical" : {
@@ -34,6 +43,12 @@
 
     },
     "%@ wants to control this Mac" : {
+
+    },
+    "%@ wants to share its display with this device." : {
+
+    },
+    "%@ wants to use this Mac as a display source" : {
 
     },
     "%lld" : {
@@ -72,13 +87,28 @@
     "Active Display" : {
 
     },
+    "Allow" : {
+
+    },
+    "Allow & Extend" : {
+
+    },
+    "Allow & Mirror" : {
+
+    },
     "Allow Input" : {
+
+    },
+    "Allow Permanently" : {
 
     },
     "Allow for This Session" : {
 
     },
     "Allowed for this session" : {
+
+    },
+    "Always Allow" : {
 
     },
     "Always Allow Requests" : {
@@ -144,6 +174,9 @@
     "Automatic" : {
 
     },
+    "Automatically Allow Connections" : {
+
+    },
     "Automatically connect and reconnect to paired devices when available." : {
 
     },
@@ -164,6 +197,9 @@
     },
     "Bitrate" : {
 
+    },
+    "Block" : {
+      "comment" : "Per-device connection policy option: refuse session requests from this device."
     },
     "Bottom Left" : {
 
@@ -225,6 +261,12 @@
     "Connect to this paired Mac through a reachable private-network address, such as its Tailscale address or MagicDNS name. This address is only used to reach the device — it does not grant trust; every connection still requires the existing secure pairing." : {
 
     },
+    "Connect with Extend" : {
+
+    },
+    "Connect with Mirror" : {
+
+    },
     "Connected" : {
 
     },
@@ -241,6 +283,12 @@
 
     },
     "Connection Lost" : {
+
+    },
+    "Connection Requests" : {
+
+    },
+    "Connections" : {
 
     },
     "Control" : {
@@ -274,6 +322,9 @@
 
     },
     "Default" : {
+
+    },
+    "Default follows Automatically Allow Connections on the Devices page. Blocking keeps the device paired. Neither choice allows input." : {
 
     },
     "Developer" : {
@@ -313,6 +364,9 @@
 
     },
     "Display Paused" : {
+
+    },
+    "Display Request" : {
 
     },
     "Display layout" : {
@@ -405,6 +459,9 @@
     "Function Tray" : {
 
     },
+    "Future requests from this device connect automatically. Change anytime in Settings." : {
+
+    },
     "Granted" : {
 
     },
@@ -445,6 +502,12 @@
 
     },
     "It can move the pointer, type, and use touch/scroll input until you turn this off." : {
+
+    },
+    "It will connect using Extend." : {
+
+    },
+    "It will connect using Mirror." : {
 
     },
     "Keep Mac Available" : {
@@ -792,6 +855,12 @@
     "Reconnecting…" : {
 
     },
+    "Reject Permanently" : {
+
+    },
+    "Reject for This Session" : {
+
+    },
     "Remote" : {
 
     },
@@ -802,6 +871,9 @@
 
     },
     "Remote Pairing" : {
+
+    },
+    "Remote input stays off until you allow it." : {
 
     },
     "Remove Remote Endpoint" : {
@@ -1080,7 +1152,13 @@
     "Viewport" : {
       "comment" : "Gesture target: zoom or rotate the displayed picture."
     },
+    "Waiting for %@ to accept…" : {
+
+    },
     "Waiting for a Mac…" : {
+
+    },
+    "Waiting for your approval…" : {
 
     },
     "Wake" : {
@@ -1099,6 +1177,15 @@
 
     },
     "We couldn't restore the connection." : {
+
+    },
+    "When a paired Mac starts sharing with this device, connect without asking. Blocked Macs are never connected." : {
+
+    },
+    "When a paired device asks to connect, start sharing without asking. Remote input always starts off." : {
+
+    },
+    "Your Mac" : {
 
     },
     "Zoom In" : {

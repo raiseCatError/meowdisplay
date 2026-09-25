@@ -10,6 +10,9 @@
     "%@ is already paired with this Mac." : {
 
     },
+    "%@ wants to share its display with this device." : {
+
+    },
     "A/V Sync" : {
 
     },
@@ -22,7 +25,16 @@
     "Adjust if sound plays slightly before or after the picture." : {
 
     },
+    "Allow" : {
+
+    },
+    "Allow Permanently" : {
+
+    },
     "Allowed for this session" : {
+
+    },
+    "Always Allow" : {
 
     },
     "Always uses H.264, the universal compatibility codec." : {
@@ -49,6 +61,9 @@
     "Automatic" : {
 
     },
+    "Automatically Allow Connections" : {
+
+    },
     "Automatically open the receiver window in native macOS full screen when a stream starts. Using the window's green button also updates this." : {
 
     },
@@ -63,6 +78,9 @@
     },
     "Balanced default." : {
 
+    },
+    "Block" : {
+      "comment" : "Per-device connection policy option: refuse session requests from this device."
     },
     "Bottom Left" : {
 
@@ -121,6 +139,9 @@
     "Connect" : {
 
     },
+    "Connect asks that Mac to start streaming to this one. Connection Requests: Default follows Automatically Allow Connections; blocking keeps the Mac paired. Forgetting a Mac removes its pairing; you'll need to pair again before connecting." : {
+
+    },
     "Connect asks that Mac to start streaming to this one. Forgetting a Mac removes its pairing; you'll need to pair again before connecting." : {
 
     },
@@ -137,6 +158,9 @@
 
     },
     "Connection Lost" : {
+
+    },
+    "Connection Requests" : {
 
     },
     "Connection failed" : {
@@ -197,6 +221,9 @@
 
     },
     "Display Paused" : {
+
+    },
+    "Display Request" : {
 
     },
     "Displays" : {
@@ -281,6 +308,12 @@
 
     },
     "Invalid pairing message" : {
+
+    },
+    "It will connect using Extend." : {
+
+    },
+    "It will connect using Mirror." : {
 
     },
     "Keyboard" : {
@@ -521,6 +554,12 @@
 
     },
     "Redo" : {
+
+    },
+    "Reject Permanently" : {
+
+    },
+    "Reject for This Session" : {
 
     },
     "Remote Access" : {
@@ -778,6 +817,9 @@
     "Viewport" : {
       "comment" : "Gesture target: zoom or rotate the displayed picture."
     },
+    "Waiting for %@ to accept…" : {
+
+    },
     "Waiting for Mac" : {
 
     },
@@ -805,6 +847,9 @@
     "We couldn't restore the connection." : {
 
     },
+    "When a paired Mac starts sharing with this device, connect without asking. Blocked Macs are never connected." : {
+
+    },
     "Which of the other Mac's screens is mirrored here. Auto follows that Mac's own choice." : {
 
     },
@@ -815,6 +860,9 @@
 
     },
     "You'll need to pair with this Mac again before connecting." : {
+
+    },
+    "Your Mac" : {
 
     },
     "Zoom" : {

@@ -123,6 +123,16 @@ final class ReceiverController: ObservableObject {
                 ReceiverPairingPanel.present(prompt: prompt)
             }
             .store(in: &cancellables)
+        // Session invitations (pv 21): a Mac asking to share, or this Mac's
+        // own Connect waiting for the sending Mac's approval.
+        receiver.$pendingSessionApproval.map { $0?.id }.removeDuplicates()
+            .combineLatest(receiver.$awaitingSenderApprovalName.removeDuplicates())
+            .receive(on: DispatchQueue.main)
+            .sink { [weak receiver] _, _ in
+                guard let receiver else { return }
+                ReceiverSessionInvitationPanel.update(receiver: receiver)
+            }
+            .store(in: &cancellables)
         // Streaming = connected and the video format is known — that's when
         // the window has something to show (and when to take it down again).
         receiver.$connected.combineLatest(receiver.$videoSize)

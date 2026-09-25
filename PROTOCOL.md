@@ -390,6 +390,7 @@ Coordinates use the conventions of section 7.
 | `extendShapeRequest` | pv 14 | `shape`, `useFullDisplay` (bool) | Request an Extend virtual-display shape change (section 6.7) |
 | `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
 | `smartTouchProbe` | pv 20 | `id` (int), `x`, `y` | Smart Touch (Experimental): ask whether the element at a normalized point is scrollable |
+| `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -626,6 +627,8 @@ section 4.
 | `smartTouchProbeResult` | pv 20 | `id` (int), `scrollable` (bool), `windowDrag` (bool, optional) | Reply to `smartTouchProbe` |
 | `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
+| `sessionInvite` | pv 21 | `id`, `initiator`, `intent`, `mode`, `awaitingSender` (bool) | Ask the receiver to admit this display session (section 6.9) |
+| `sessionInviteCancel` | pv 21 | `id` | The sender withdrew or declined this invitation |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -926,6 +929,66 @@ receiver below `pv` 15 gets no enforcement UI and no `maxFPSState`; the
 Mac still applies the encoder-safe ceiling from section 6.6 regardless, so
 an old receiver still gets a working (if unlabeled) stream.
 
+### 6.9 Session invitations (`pv` 21)
+
+Either endpoint may *initiate* a session, but roles never change: the
+sender (the Mac) is always the video/audio source and the dialer (section
+1); the receiver always consumes the stream and is the only side that
+sends input. **Session initiator is not stream sender**, and **connection
+approval is not input approval**: nothing here grants input — every
+session still starts with input off, and `allowInputRequest` (pv 8/18)
+remains the only way to turn it on.
+
+* Receiver-initiated: the receiver's Connect is the existing connect
+  request (Bonjour TXT `cr` token, or the authenticated knock on
+  `remoteRequestPort`). The sender applies its own incoming policy before
+  dialing: blocked → no dial; manual approval → dial, but hold capture
+  until its user decides.
+* Sender-initiated: the sender dials as before, with the display mode its
+  user chose.
+
+**`sessionInvite`** (Mac -> receiver) is sent after `welcome` on every
+`hello` from a pv 21+ receiver. Fields: `id` (string, unique per logical
+session, reused unchanged across in-place reconnects and pipeline rebuilds
+of the same session), `initiator` (`sender` or `receiver`), `intent`
+(`manual` for an explicit user action, `automatic` for auto-connect,
+auto-reconnect, or any re-send after the session was admitted), `mode`
+(`mirror` or `extend`, the sender's intended mode — context only), and
+`awaitingSender` (true while a receiver-initiated request still waits for
+the sender's user). A sender MUST NOT create a virtual display, capture,
+or send media for a pv 21+ receiver until it has answered `accepted`.
+
+**`sessionInviteResponse`** (receiver -> Mac): `id` echoed and `result`,
+one of `accepted`, `pending` (asking the user; a final answer follows),
+`declined` (this attempt only, including a prompt timeout or a background
+attempt that would have needed a prompt), `blocked` (this paired sender is
+blocked), or `cancelled` (the receiver withdrew its own request). A
+response whose `id` is not the current invitation MUST be ignored.
+Receivers decide with this policy, keyed by the pinned peer identity:
+
+| Per-peer policy | Global auto-allow | `intent: automatic` | `intent: manual` |
+|---|---|---|---|
+| Blocked | any | `blocked` | `blocked` |
+| Always Allow | any | `accepted` | `accepted` |
+| Default | on (default) | `accepted` | `accepted` |
+| Default | off | `declined`, no prompt | `pending`, then the user's answer |
+
+An invitation whose `id` this receiver already accepted from the same
+peer, or a `receiver`-initiated invitation arriving shortly after its own
+Connect, is accepted without a prompt (unless blocked). A receiver MUST NOT
+present media before it accepts. After any refusal the sender ends the
+session and does not retry automatically.
+
+**`sessionInviteCancel`** (Mac -> receiver): the sender's user cancelled
+the invitation or rejected the receiver's request; the receiver dismisses
+any prompt for that `id`.
+
+Compatibility: a sender never sends `sessionInvite` below pv 21 and admits
+such receivers as before. A receiver facing a pre-21 sender (known from
+`welcome.pv`) admits it only if it would accept an `automatic` invitation
+from that peer; otherwise it closes the connection, so an older sender
+can never bypass the receiver's approval preference.
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1076,6 +1139,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
 | 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
 | 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
+| 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 
 ---
 

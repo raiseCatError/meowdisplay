@@ -193,6 +193,14 @@ status, per-device settings and input request controls, and **Forget
 Device**. **Allow Input** on the Mac remains the master switch for whether
 any receiver can control it.
 
+Either side can start a session — Connect on the iPhone, iPad or Mac
+Receiver, or Connect (with Mirror or Extend) on the Mac — and the Mac always
+streams. Each app has **Automatically Allow Connections** (on by default) and
+a per-device Default / Always Allow / Block choice. With it off, an explicit
+Connect waits for the other side to accept; background reconnects never
+prompt. Accepting a connection never allows input: every session starts with
+input off.
+
 ## Connections
 
 - **USB** — plug in a data-capable cable and trust the Mac. A direct,

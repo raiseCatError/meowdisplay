@@ -238,6 +238,14 @@ final class DeviceSession: ObservableObject, Identifiable {
     // presence, TrustStore, or a merely-open socket. This, not discovery, is
     // what "Active Display" is authoritative on.
     @Published var applicationAuthenticated = false
+    /// This logical session's invitation (pv 21) — see `SessionInvitation`.
+    /// Fixed for the session's lifetime; `MacSender` owns the live copy.
+    var invitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
+    /// A receiver-initiated request still waiting for this Mac's user.
+    var awaitingLocalApproval = false
+    var invitationAdmitted = false
+    /// Nil once admitted (or before there is anything visible to wait on).
+    @Published var invitationProgress: SessionInvitationProgress?
     // This session's current media activity/geometry, refreshed on the same
     // cadence as `mbps`/`framesSent` (see MacSender.onMediaState) — the
     // source Overview/Active Display read for "Video/Audio Streaming" and
@@ -373,6 +381,12 @@ final class SenderController: ObservableObject {
     /// Mac" — see `InputControlRequestPromptModel`'s doc comment for why
     /// only one prompt is ever live at a time.
     let inputControlPrompt = InputControlRequestPromptModel()
+    /// Receiver-initiated session requests awaiting this Mac's approval.
+    let sessionApprovalPrompt = SessionApprovalPromptModel()
+    /// Invitations carried across `restartAll()` (a Mac-wide mode/quality
+    /// change rebuilds every pipeline) so receivers recognize the same
+    /// session instead of being asked again. Keyed by logical ID.
+    private var continuingInvitations: [String: (invitation: SessionInvitation, needsSenderApproval: Bool)] = [:]
     private var pairingObservation: AnyCancellable?
     // `-mode mirror` / `-mode extend` launch argument also works.
     // Mode/quality apply per-pipeline at construction, so a change rebuilds
@@ -517,6 +531,13 @@ final class SenderController: ObservableObject {
             if mode == .mirror { restartAll() }
         }
     }
+    /// Incoming session requests from paired receivers connect without a
+    /// prompt unless a per-device policy overrides this. Not input
+    /// permission, not Auto-Reconnect.
+    @Published var automaticallyAllowConnections = IncomingSessionPolicyStore.automaticallyAllow() {
+        didSet { IncomingSessionPolicyStore.setAutomaticallyAllow(automaticallyAllowConnections) }
+    }
+
     @Published var allowInput = InputPolicy.allowsInput() {
         didSet {
             guard allowInput != oldValue else { return }
@@ -770,6 +791,13 @@ final class SenderController: ObservableObject {
             guard let self else { return }
             Log.info("inputConsentDebug: onPending peerID=\(pending.peerID)")
             SecurityPresentationCoordinator.presentInputControlRequest(prompt: self.inputControlPrompt)
+        }
+        sessionApprovalPrompt.onPending = { [weak self] in
+            guard let self else { return }
+            SecurityPresentationCoordinator.presentSessionApproval(prompt: self.sessionApprovalPrompt)
+        }
+        sessionApprovalPrompt.onDecision = { [weak self] approval, decision in
+            self?.resolveSessionApproval(approval, decision: decision)
         }
         persistKnownIdentifiers()
         startBrowsing()
@@ -1151,6 +1179,7 @@ final class SenderController: ObservableObject {
             return
         }
         remoteConnectRequestAccepted[peerID] = now
+        guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID) else { return }
 
         func dial(_ target: ConnectionTarget, via routeDescription: String) -> Bool {
             if let existing = session(for: target.sessionID), !existing.failed {
@@ -1158,7 +1187,8 @@ final class SenderController: ObservableObject {
                 return true
             }
             Log.info("routeDebug: remote connect-request peer=\(peerID) resolved via \(routeDescription)")
-            return connect(to: target, userInitiated: true)
+            return connect(to: target, userInitiated: true, initiator: .receiver,
+                           needsSenderApproval: needsApproval)
         }
 
         if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
@@ -1250,13 +1280,16 @@ final class SenderController: ObservableObject {
                 Log.info("connectDebug: senderStartRequested peer=\(peerID) alreadyConnecting=true")
                 continue
             }
-            let localStarted = connect(to: target, userInitiated: true)
+            guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID) else { continue }
+            let localStarted = connect(to: target, userInitiated: true, initiator: .receiver,
+                                       needsSenderApproval: needsApproval)
             if localStarted { continue }
             // A present-but-blocked/unusable local record must not end
             // route evaluation: fall through to a configured Remote hint.
             let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
             guard endpointFound else { continue }
-            connect(to: .remote(peerID: peerID), userInitiated: true)
+            connect(to: .remote(peerID: peerID), userInitiated: true, initiator: .receiver,
+                    needsSenderApproval: needsApproval)
         }
     }
 
@@ -1445,7 +1478,9 @@ final class SenderController: ObservableObject {
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
             removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
-            removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) })
+            removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) },
+            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0) })
+        sessionApprovalPrompt.cancelAll(peerID: peerID)
         // Forget must take effect immediately for a still-open listener
         // socket, not just for the next connection this process happens to
         // build fresh TLS options for — see `scheduleRemoteConnectRequestListenerRefresh`.
@@ -1936,9 +1971,26 @@ final class SenderController: ObservableObject {
         UInt32(clamping: UserDefaults.standard.integer(forKey: Self.identityOffsetKey(for: id)))
     }
 
+    /// Explicit Connect with a chosen display mode (the Mac-side invitation).
+    /// Mirror/Extend is Mac-wide here, so a different choice switches the
+    /// Mac's mode first — through the same guarded transition as the picker.
+    func connect(to target: ConnectionTarget, mode requested: CaptureMode) {
+        if requested != mode, canEnterMode(requested) {
+            mode = requested
+        }
+        connect(to: target, userInitiated: true)
+    }
+
+    private func canEnterMode(_ requested: CaptureMode) -> Bool {
+        VideoModePolicy.allows(requested, videoEnabled: videoEnabled)
+            && (requested != .mirror
+                || MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow()))
+    }
+
     @discardableResult
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
-                 awaitingWake: Bool = false) -> Bool {
+                 awaitingWake: Bool = false, initiator: SessionRole = .sender,
+                 needsSenderApproval: Bool = false) -> Bool {
         if let existing = session(for: target.sessionID), !existing.failed { return true }
         let logicalID = logicalID(for: target)
         let targetIdentifiers = identifiers(for: target)
@@ -1954,7 +2006,8 @@ final class SenderController: ObservableObject {
             attempt = autoConnectPolicy.beginContinuationAttempt(logicalID: logicalID)
         }
         return startSession(to: target, logicalID: logicalID, attempt: attempt,
-                            userInitiated: userInitiated, awaitingWake: awaitingWake)
+                            userInitiated: userInitiated, awaitingWake: awaitingWake,
+                            initiator: initiator, needsSenderApproval: needsSenderApproval)
     }
 
     /// The live session (any route) that already owns this logical peer, if
@@ -2031,7 +2084,9 @@ final class SenderController: ObservableObject {
     private func startSession(to target: ConnectionTarget, logicalID: String,
                               attempt: AutoConnectPolicy.Attempt,
                               userInitiated: Bool = false,
-                              awaitingWake: Bool = false) -> Bool {
+                              awaitingWake: Bool = false,
+                              initiator: SessionRole = .sender,
+                              needsSenderApproval: Bool = false) -> Bool {
         let targetIdentifiers = identifiers(for: target)
         guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
             Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
@@ -2124,6 +2179,22 @@ final class SenderController: ObservableObject {
                                streamingPriority: effectiveStreamingPriority,
                                codecPreference: effectiveCodecPreference)
         sender.autoReconnectEnabled = autoReconnectEnabled
+        // Explicit actions start a fresh invitation; a pipeline rebuilt by
+        // `restartAll()` keeps its session's invitation so the receiver
+        // recognizes it.
+        let continuing = continuingInvitations.removeValue(forKey: logicalID)
+        let invitation: SessionInvitation
+        let needsApproval: Bool
+        if let continuing, !userInitiated {
+            invitation = continuing.invitation
+            needsApproval = continuing.needsSenderApproval
+        } else {
+            invitation = SessionInvitation(
+                initiator: initiator, intent: userInitiated ? .manual : .automatic, mode: mode.receiverMode)
+            needsApproval = needsSenderApproval
+        }
+        sender.sessionInvitation = invitation
+        sender.needsSenderApproval = needsApproval
         let intendedPeerID: String? = {
             if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
             if case .wifi(let result) = target { return txtID(of: result) }
@@ -2134,6 +2205,12 @@ final class SenderController: ObservableObject {
                                     target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
             session.wifiServiceName = serviceName(of: result)
+        }
+        session.invitation = invitation
+        session.awaitingLocalApproval = needsApproval
+        sender.onInvitationProgress = { [weak self, weak session] progress in
+            guard let self, let session, self.owns(session) else { return }
+            self.handleInvitationProgress(progress, session: session)
         }
         sender.onStatus = { [weak session] text in
             // Retry loops re-announce the same status every second (e.g. the
@@ -2305,6 +2382,8 @@ final class SenderController: ObservableObject {
                 Log.info("reconnectPolicy: automaticAttempt suppressed reason=disabled peer=\(session.logicalID)")
                 return
             }
+            // Same session resuming after the lock: keep its invitation.
+            self.continueInvitation(of: session)
             self.connect(to: target, awaitingWake: true)
         }
         sender.onCaptureStoppedByUser = { [weak self, weak session] in
@@ -2347,6 +2426,11 @@ final class SenderController: ObservableObject {
         sessions.append(session)
         sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
+        }
+        if needsApproval, let peerID = intendedPeerID {
+            sessionApprovalPrompt.request(PendingSessionApproval(
+                id: invitation.id, peerID: peerID, peerName: name, localRole: .sender,
+                mode: invitation.mode, createdAt: Date()))
         }
         let startup = sender.beginStart()
         Task {
@@ -2417,6 +2501,7 @@ final class SenderController: ObservableObject {
         // sessionInputGrant`, which is deallocated with this `MacSender`
         // instance — a brand-new logical session always gets a fresh one.
         inputControlPrompt.cancelForEndedSession(id: session.id)
+        sessionApprovalPrompt.cancel(id: session.invitation.id)
         session.inputControlRequest.reset()
         session.sender.stop()
         if session.applicationAuthenticated {
@@ -2436,6 +2521,7 @@ final class SenderController: ObservableObject {
     func restartAll() {
         guard running else { return }
         let targets = sessions.map(\.target)
+        sessions.filter { !$0.failed }.forEach(continueInvitation(of:))
         sessions.forEach { $0.sender.stop() }
         sessions.removeAll()
         targets.forEach { connect(to: $0) }
@@ -2633,6 +2719,20 @@ final class SenderController: ObservableObject {
     /// Returns whether the change actually took effect — see
     /// `ReceiverInputAuthorizationStore.setPolicy`.
     @discardableResult
+    func sessionPolicy(peerID: String) -> IncomingSessionPeerPolicy? {
+        IncomingSessionPolicyStore.policy(peerID: peerID)
+    }
+
+    /// Same self-authorization guard as `setInputPolicy`: while any device
+    /// controls this Mac, its input could click Always Allow here.
+    @discardableResult
+    func setSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) -> Bool {
+        guard policy != .alwaysAllow || !anySessionHasEffectiveInput else { return false }
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        objectWillChange.send()
+        return true
+    }
+
     func setInputPolicy(_ policy: PeerInputRequestPolicy, peerID: String) -> Bool {
         let applied = ReceiverInputAuthorizationStore.setPolicy(
             policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
@@ -2646,6 +2746,97 @@ final class SenderController: ObservableObject {
     func revokeSessionInput(peerID: String) {
         guard let session = sessions.first(where: { $0.deviceID == peerID && $0.applicationAuthenticated }) else { return }
         session.sender.revokeSessionInput()
+    }
+
+    // MARK: - Session invitations (pv 21)
+
+    /// This Mac's incoming policy for a paired receiver's explicit Connect
+    /// request. Nil means drop it (blocked); otherwise whether this Mac's
+    /// user must approve before capture starts.
+    private func incomingRequestNeedsApproval(peerID: String) -> Bool? {
+        switch IncomingSessionPolicyStore.decision(peerID: peerID, intent: .manual) {
+        case .accept:
+            return false
+        case .askUser:
+            return true
+        case .block, .decline:
+            Log.info("sessionInvite: receiver request dropped peer=\(peerID) reason=policy")
+            return nil
+        }
+    }
+
+    private func handleInvitationProgress(_ progress: SessionInvitationProgress, session: DeviceSession) {
+        switch progress {
+        case .waitingForReceiver, .waitingForSender:
+            session.invitationProgress = progress
+        case .admitted:
+            session.invitationProgress = nil
+            session.awaitingLocalApproval = false
+            session.invitationAdmitted = true
+        case .refused(let result):
+            session.invitationProgress = nil
+            sessionApprovalPrompt.cancel(id: session.invitation.id)
+            Log.info("sessionInvite: session \(session.id) refused result=\(result.rawValue)")
+            // Never retry automatically after a refusal — an explicit
+            // Connect clears this suppression like any other.
+            autoConnectPolicy.suppress(identifiers(for: session))
+            session.failed = true
+            session.status = switch result {
+            case .blocked: String(localized: "\(session.name) isn't accepting connections from this Mac.")
+            case .cancelled: String(localized: "\(session.name) cancelled the request.")
+            default: String(localized: "\(session.name) declined the connection.")
+            }
+            session.sender.stop()
+        }
+    }
+
+    /// Carries `session`'s invitation to the pipeline that replaces it (a
+    /// Mac-wide rebuild, or the wait-for-wake session after a lock). Once
+    /// admitted, the re-sent invitation is a background attempt, so a
+    /// receiver that lost its memory of it declines quietly rather than
+    /// prompting.
+    private func continueInvitation(of session: DeviceSession) {
+        var invitation = session.invitation
+        if session.invitationAdmitted { invitation.intent = .automatic }
+        continuingInvitations[session.logicalID] = (invitation, session.awaitingLocalApproval)
+    }
+
+    /// Cancel on the Mac's waiting state for an invitation (or its own
+    /// pending approval).
+    func cancelInvitation(_ session: DeviceSession) {
+        session.sender.cancelSessionInvitation()
+        disconnect(session)
+    }
+
+    private func resolveSessionApproval(_ approval: PendingSessionApproval, decision: SenderApprovalDecision) {
+        guard let session = sessions.first(where: { $0.invitation.id == approval.id && !$0.failed }),
+              owns(session) else {
+            Log.info("sessionInvite: approval for ended session ignored id=\(approval.id)")
+            return
+        }
+        let plan = SessionApprovalPlan.plan(for: decision)
+        if let policy = plan.persistPolicy, !setSessionPolicy(policy, peerID: approval.peerID) {
+            // Connection policy only — never a display mode, never input.
+            // Refused only while another device controls this Mac; this
+            // request is still approved.
+            Log.info("sessionInvite: refused to persist Always Allow for peer \(approval.peerID) — a session has effective input")
+        }
+        guard plan.accept else {
+            session.sender.resolveSenderApproval(accept: false)
+            disconnect(session)
+            return
+        }
+        if let requested = plan.mode.map(CaptureMode.init), requested != mode, canEnterMode(requested) {
+            // Mirror/Extend is Mac-wide: switching rebuilds every pipeline.
+            // Capture has not started for this session, so carry it across
+            // the rebuild already approved.
+            continuingInvitations[session.logicalID] = (session.invitation, false)
+            session.awaitingLocalApproval = false
+            requestMode(requested)
+            return
+        }
+        session.awaitingLocalApproval = false
+        session.sender.resolveSenderApproval(accept: true)
     }
 
     // MARK: - Input control-request consent flow

@@ -15,6 +15,9 @@
         }
       }
     },
+    "%@ wants to share its display with this device." : {
+
+    },
     "%lld" : {
 
     },
@@ -45,7 +48,16 @@
     "Adjust if sound plays slightly before or after the picture." : {
 
     },
+    "Allow" : {
+
+    },
+    "Allow Permanently" : {
+
+    },
     "Allowed for this session" : {
+
+    },
+    "Always Allow" : {
 
     },
     "Always uses H.264, the universal compatibility codec." : {
@@ -78,6 +90,9 @@
     "Automatic" : {
 
     },
+    "Automatically Allow Connections" : {
+
+    },
     "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen." : {
 
     },
@@ -89,6 +104,9 @@
     },
     "Balanced default." : {
 
+    },
+    "Block" : {
+      "comment" : "Per-device connection policy option: refuse session requests from this device."
     },
     "Bottom Left" : {
 
@@ -172,6 +190,12 @@
 
     },
     "Connection Lost" : {
+
+    },
+    "Connection Requests" : {
+
+    },
+    "Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired." : {
 
     },
     "Connection failed" : {
@@ -361,6 +385,12 @@
 
     },
     "Invalid pairing message" : {
+
+    },
+    "It will connect using Extend." : {
+
+    },
+    "It will connect using Mirror." : {
 
     },
     "Keep this app open — streaming starts automatically" : {
@@ -650,6 +680,12 @@
 
     },
     "Reconnecting…" : {
+
+    },
+    "Reject Permanently" : {
+
+    },
+    "Reject for This Session" : {
 
     },
     "Remote Access" : {
@@ -964,6 +1000,9 @@
     "Viewport" : {
       "comment" : "Gesture target: zoom or rotate the displayed picture."
     },
+    "Waiting for %@ to accept…" : {
+
+    },
     "Waiting for Mac" : {
 
     },
@@ -995,6 +1034,9 @@
         }
       }
     },
+    "When a paired Mac starts sharing with this device, connect without asking. Blocked Macs are never connected." : {
+
+    },
     "WiFi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it." : {
 
     },
@@ -1008,6 +1050,9 @@
 
     },
     "You'll need to pair with this Mac again before connecting." : {
+
+    },
+    "Your Mac" : {
 
     },
     "Zoom" : {

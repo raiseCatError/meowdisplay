@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 20
+    static let version = 21
 
     /// The pairing protocol's own version, decoupled from `version` (the
     /// media/streaming wire protocol above). Pairing and media evolve on
@@ -179,6 +179,14 @@ enum WireProtocol {
     /// as before.
     static let smartTouchWireVersion = 20
 
+    /// Protocol version that introduced trusted-device session invitations:
+    /// `sessionInvite` / `sessionInviteCancel` (Mac -> receiver) and
+    /// `sessionInviteResponse` (receiver -> Mac). A Mac MUST NOT start capture
+    /// for a pv 21+ receiver until it answers `accepted`; below this version
+    /// no invitation is sent and the receiver applies its policy to the
+    /// legacy sender itself (see `ReceiverSessionAdmission`).
+    static let sessionInvitationWireVersion = 21
+
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
     /// raises it — raising this is what turns "peer too old" into a hard gate.
@@ -282,6 +290,13 @@ enum WireMessage {
     // `windowDrag` — a title bar / empty toolbar hit. Any failure (no
     // Accessibility permission, no element, timeout) answers false.
     static let smartTouchProbeResult = "smartTouchProbeResult"
+    // Mac -> receiver: session invitation (`id`, `initiator`, `intent`,
+    // `mode`, `awaitingSender`) — see `SessionInvitation`.
+    static let sessionInvite = "sessionInvite"
+    // receiver -> Mac: `id` + `result` — see `SessionInvitationResponse`.
+    static let sessionInviteResponse = "sessionInviteResponse"
+    // Mac -> receiver: `id` — the Mac withdrew or declined this invitation.
+    static let sessionInviteCancel = "sessionInviteCancel"
 }
 
 enum WireCrypto {

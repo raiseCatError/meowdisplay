@@ -43,6 +43,7 @@ private struct ReceiverDevicesPage: View {
                 if pairedMacs.isEmpty {
                     ReceiverCaption("No paired Macs")
                 } else {
+                    AutomaticallyAllowConnectionsToggle()
                     ForEach(pairedMacs, id: \.peerID) { mac in
                         ReceiverPairedMacRow(receiver: receiver, wakeConnect: wakeConnect,
                                              peerID: mac.peerID, name: mac.displayName) {
@@ -51,12 +52,14 @@ private struct ReceiverDevicesPage: View {
                             }
                             .controlSize(.small)
                         }
+                        IncomingSessionPolicyPicker(peerID: mac.peerID)
+                            .controlSize(.small)
                     }
                 }
             } header: {
                 Text("Paired Macs")
             } footer: {
-                ReceiverCaption("Connect asks that Mac to start streaming to this one. Forgetting a Mac removes its pairing; you'll need to pair again before connecting.")
+                ReceiverCaption("Connect asks that Mac to start streaming to this one. Connection Requests: Default follows Automatically Allow Connections; blocking keeps the Mac paired. Forgetting a Mac removes its pairing; you'll need to pair again before connecting.")
             }
 
             Section {

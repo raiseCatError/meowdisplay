@@ -199,6 +199,7 @@ targets:
       - Shared/RemoteEndpointStore.swift
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift
+      - Shared/SessionInvitation.swift
       - Shared/SessionStabilizationPolicy.swift
       - Shared/WakeOnLAN.swift
       - Shared/StreamListenerRestartState.swift

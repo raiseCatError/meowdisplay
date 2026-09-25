@@ -89,6 +89,22 @@ struct ReceiverDeviceDetailView: View {
             }
 
             Section {
+                Picker("Connection Requests", selection: Binding(
+                    get: { controller.sessionPolicy(peerID: peerID) },
+                    set: { controller.setSessionPolicy($0, peerID: peerID) })) {
+                    Text("Default").tag(IncomingSessionPeerPolicy?.none)
+                    Text("Always Allow").tag(IncomingSessionPeerPolicy?.some(.alwaysAllow))
+                    Text("Block").tag(IncomingSessionPeerPolicy?.some(.blocked))
+                }
+            } header: {
+                Text("Connections")
+            } footer: {
+                Text("Default follows Automatically Allow Connections on the Devices page. Blocking keeps the device paired. Neither choice allows input.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Button("Forget Device…", role: .destructive) {
                     controller.requestForget(peerID: peerID, name: name)
                 }

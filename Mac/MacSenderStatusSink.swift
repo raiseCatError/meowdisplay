@@ -67,6 +67,9 @@ final class MacSenderStatusSink: Sendable {
     /// (`ReceiverDeviceDetailView`'s "Current session" row). The
     /// authoritative bit lives in `sessionInputGrant`, not here.
     var onSessionInputGrantChanged: ((Bool) -> Void)?
+    /// Session-invitation negotiation progress (pv 21) — see
+    /// `MacSender.awaitSessionAdmission`.
+    var onInvitationProgress: ((SessionInvitationProgress) -> Void)?
     // Fired when the device's display identity had to be abandoned (macOS
     // saved hostile state for it — see setupExtend) and a bumped identity
     // came online instead: carries the validated TOTAL offset from the
@@ -122,6 +125,10 @@ final class MacSenderStatusSink: Sendable {
 
     func publishMaxFPSChanged(_ preference: ReceiverMaxFPSPreference) {
         onMaxFPSChanged?(preference)
+    }
+
+    func publishInvitationProgress(_ progress: SessionInvitationProgress) {
+        onInvitationProgress?(progress)
     }
 
     func publishSessionInputGrantChanged(_ granted: Bool) {

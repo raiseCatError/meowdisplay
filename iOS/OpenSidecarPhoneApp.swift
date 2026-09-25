@@ -242,6 +242,7 @@ struct ReceiverScreen: View {
                onDismiss: { model.receiver.pairingPrompt.notePresentationDismissed() }) {
             PairingConfirmationSheet(prompt: model.receiver.pairingPrompt)
         }
+        .sessionInvitationPrompt(receiver: model.receiver)
         .onChange(of: model.receiver.pairingSuccessCount) { _ in
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             withAnimation { showPairedToast = true }
@@ -1216,11 +1217,12 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Paired Macs") {
+                Section {
                     let peers = TrustStore.shared.pinnedPeers()
                     if peers.isEmpty {
                         Text("No paired Macs").foregroundStyle(.secondary)
                     } else {
+                        AutomaticallyAllowConnectionsToggle()
                         ForEach(peers, id: \.peerID) { peer in
                             HStack {
                                 Text(peer.displayName)
@@ -1229,8 +1231,14 @@ struct SettingsView: View {
                                     forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
                                 }
                             }
+                            IncomingSessionPolicyPicker(peerID: peer.peerID)
+                                .font(.subheadline)
                         }
                     }
+                } header: {
+                    Text("Paired Macs")
+                } footer: {
+                    Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired.")
                 }
                 .id(trustRefresh)
                 .alert("Forget \u{201C}\(forgetConfirmation.candidate?.name ?? "This Mac")\u{201D}?",

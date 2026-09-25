@@ -363,6 +363,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// purely so `DeviceSession` can mirror it for display
     /// (`ReceiverDeviceDetailView`'s "Current session" row). The
     /// authoritative bit lives in `sessionInputGrant`, not here.
+    @MainActor var onInvitationProgress: ((SessionInvitationProgress) -> Void)? {
+        get { statusSink.onInvitationProgress }
+        set { statusSink.onInvitationProgress = newValue }
+    }
     @MainActor var onSessionInputGrantChanged: ((Bool) -> Void)? {
         get { statusSink.onSessionInputGrantChanged }
         set { statusSink.onSessionInputGrantChanged = newValue }
@@ -731,6 +735,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Gates only `scheduleReconnect`'s automatic in-place retry — see
     /// `ReconnectPolicy`.
     var autoReconnectEnabled = true
+    /// This logical session's invitation (pv 21). Set by `SenderController`
+    /// before `beginStart()`, then `queue`-confined like the rest of the
+    /// connection state. Its `id` is reused on every re-hello/in-place
+    /// reconnect so the receiver recognizes a session it already accepted.
+    var sessionInvitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
+    /// A receiver-initiated request this Mac's own user has not yet approved.
+    var needsSenderApproval = false
+    private var senderRejectedSession = false
+    /// Capture waits on this gate (see `awaitSessionAdmission`). Created on
+    /// the first hello, when the receiver's protocol version is known.
+    private var admissionGate: SessionAdmissionGate?
+    private var admissionContinuation: CheckedContinuation<Void, Error>?
+    private var lastPublishedInvitationProgress: SessionInvitationProgress?
 
     private var lastHello: PhoneInfo?
     private struct ApplicationReadySession {
@@ -1533,6 +1550,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
             throw CancellationError()
         }
+        // No virtual display, capture or media until the receiver accepted
+        // this session's invitation (and this Mac's user approved a
+        // receiver-initiated request that needed it).
+        try await awaitSessionAdmission()
 
         switch mode {
         case .mirror:
@@ -2529,6 +2550,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             self.helloContinuation?.resume(throwing: CancellationError())
             self.helloContinuation = nil
+            self.admissionContinuation?.resume(throwing: CancellationError())
+            self.admissionContinuation = nil
         }
     }
 
@@ -4373,6 +4396,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
+                sendSessionInviteIfSupported(info)
                 sendStreamingProfileState()
                 sendStreamingPriorityState()
                 sendWakeInfo()
@@ -4582,7 +4606,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.onDisplayModeRequest?(requestedMode)
                 }
             }
+        case WireMessage.sessionInviteResponse:
+            guard let response = SessionInvitationResponse(message: obj),
+                  response.id == sessionInvitation.id else {
+                Log.info("sessionInvite: ignored stale or unknown response")
+                return
+            }
+            Log.info("sessionInvite: response id=\(response.id) result=\(response.result.rawValue)")
+            admissionGate?.receiverResponded(response.result)
+            evaluateSessionAdmission()
         case WireMessage.allowInputRequest:
+            // A session still being negotiated has nothing to control.
+            guard admissionGate?.state == .admitted else { return }
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.allowInputWireVersion,
                   let requested = obj["allowed"] as? Bool else { return }
@@ -4765,6 +4800,93 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             case .none:
                 break
             }
+        }
+    }
+
+    // MARK: - Session invitation (pv 21)
+
+    /// Suspends startup until `admissionGate` admits or refuses the session.
+    private func awaitSessionAdmission() async throws {
+        let selfBox = self.selfBox
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                guard let self = selfBox.currentOnQueue(), !self.stopped, self.admissionGate != nil else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                self.admissionContinuation?.resume(throwing: CancellationError())
+                self.admissionContinuation = continuation
+                self.evaluateSessionAdmission()
+            }
+        }
+    }
+
+    /// Called on `queue` for every hello: creates the gate once the
+    /// receiver's version is known and (re)sends the invitation. A re-send
+    /// for an already-admitted session is marked automatic, so an in-place
+    /// reconnect can never raise a new prompt on the receiver.
+    private func sendSessionInviteIfSupported(_ info: PhoneInfo) {
+        let supportsInvitations = info.protocolVersion >= WireProtocol.sessionInvitationWireVersion
+        if admissionGate == nil {
+            var gate = SessionAdmissionGate(
+                receiverSupportsInvitations: supportsInvitations, needsSenderApproval: needsSenderApproval)
+            if senderRejectedSession { gate.senderDecided(accept: false) }
+            admissionGate = gate
+        }
+        guard supportsInvitations, let gate = admissionGate else { return }
+        if gate.state == .admitted { sessionInvitation.intent = .automatic }
+        var invitation = sessionInvitation
+        invitation.mode = mode.receiverMode
+        invitation.awaitingSenderApproval = !gate.senderApproved
+        sendJSONObject(invitation.message)
+    }
+
+    private func evaluateSessionAdmission() {
+        guard let gate = admissionGate else { return }
+        if let progress = gate.progress, progress != lastPublishedInvitationProgress {
+            lastPublishedInvitationProgress = progress
+            let sink = statusSink
+            Task { @MainActor in sink.publishInvitationProgress(progress) }
+        }
+        switch gate.state {
+        case .waiting:
+            break
+        case .admitted:
+            admissionContinuation?.resume()
+            admissionContinuation = nil
+        case .refused(let result):
+            Log.info("sessionInvite: refused id=\(sessionInvitation.id) result=\(result.rawValue)")
+            admissionContinuation?.resume(throwing: CancellationError())
+            admissionContinuation = nil
+        }
+    }
+
+    /// This Mac's user decided a receiver-initiated request (main-actor
+    /// approval flow in `SenderController`). Safe before the first hello.
+    func resolveSenderApproval(accept: Bool) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            if accept {
+                self.needsSenderApproval = false
+            } else {
+                self.senderRejectedSession = true
+                self.sendJSONObject(["type": WireMessage.sessionInviteCancel, "id": self.sessionInvitation.id])
+            }
+            self.admissionGate?.senderDecided(accept: accept)
+            // Re-send so the receiver's "Waiting for the Mac" state clears.
+            if accept, let info = self.lastHello { self.sendSessionInviteIfSupported(info) }
+            self.evaluateSessionAdmission()
+        }
+    }
+
+    /// This Mac's user cancelled a pending invitation. The caller ends the
+    /// session right after; this only tells the receiver to drop its prompt.
+    func cancelSessionInvitation() {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.sendJSONObject(["type": WireMessage.sessionInviteCancel, "id": self.sessionInvitation.id])
         }
     }
 

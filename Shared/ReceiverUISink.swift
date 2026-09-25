@@ -130,6 +130,10 @@ final class ReceiverUISink: Sendable {
     // takes only Sendable payloads and forwards to a matching `apply*`
     // method on `StreamReceiver`, mirroring the shape of the methods above.
 
+    func publishSessionNegotiation(pendingApproval: PendingSessionApproval?, awaitingSenderName: String?) {
+        target?.applySessionNegotiationUpdate(pendingApproval: pendingApproval, awaitingSenderName: awaitingSenderName)
+    }
+
     func publishLastForgottenPeerID(_ peerID: String) {
         target?.applyLastForgottenPeerIDUpdate(peerID)
     }

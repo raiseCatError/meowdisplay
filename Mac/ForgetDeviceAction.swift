@@ -8,7 +8,8 @@ enum ForgetDeviceAction {
         forgetTrust: (String) -> Void,
         removeRemoteEndpoint: (String) -> Void,
         removeWakeMetadata: (String) -> Void,
-        removeInputAuthorization: (String) -> Void = { _ in }
+        removeInputAuthorization: (String) -> Void = { _ in },
+        removeSessionPolicy: (String) -> Void = { _ in }
     ) {
         forgetTrust(peerID)
         removeRemoteEndpoint(peerID)
@@ -17,5 +18,8 @@ enum ForgetDeviceAction {
         // never survive trust removal — a different device (or the same
         // one re-paired with a new key) must re-earn it explicitly.
         removeInputAuthorization(peerID)
+        // A Block or Always Allow for session invitations belongs to this
+        // trust relationship only.
+        removeSessionPolicy(peerID)
     }
 }

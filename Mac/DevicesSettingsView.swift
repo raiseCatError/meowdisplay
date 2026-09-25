@@ -39,6 +39,12 @@ struct DevicesSettingsView: View {
             }
 
             Section("Known Devices") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Automatically Allow Connections", isOn: $controller.automaticallyAllowConnections)
+                    Text("When a paired device asks to connect, start sharing without asking. Remote input always starts off.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let message = controller.pairingMessage {
                     Text(message).font(.caption).foregroundStyle(.secondary)
                 }
@@ -61,9 +67,16 @@ struct DevicesSettingsView: View {
                         }
                         Spacer()
                         if entry.activeSessionID == nil, let target = entry.resolvedTarget {
-                            Button("Connect") {
+                            Menu {
+                                Button("Connect with Mirror") { controller.connect(to: target, mode: .mirror) }
+                                Button("Connect with Extend") { controller.connect(to: target, mode: .extend) }
+                            } label: {
+                                Text("Connect")
+                            } primaryAction: {
                                 controller.connect(to: target, userInitiated: true)
                             }
+                            .menuStyle(.button)
+                            .fixedSize()
                             .controlSize(.small)
                         }
                         NavigationLink {
@@ -167,6 +180,32 @@ struct SessionRow: View {
     }
 
     var body: some View {
+        if let progress = session.invitationProgress {
+            invitationRow(progress)
+        } else {
+            sessionRow
+        }
+    }
+
+    /// Waiting for the other device (or this Mac's own approval panel).
+    private func invitationRow(_ progress: SessionInvitationProgress) -> some View {
+        HStack(alignment: .center) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(progress == .waitingForSender
+                     ? String(localized: "Waiting for your approval…")
+                     : String(localized: "Waiting for \(title) to accept…"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Cancel") { controller.cancelInvitation(session) }
+                .controlSize(.small)
+        }
+    }
+
+    private var sessionRow: some View {
         HStack(alignment: .firstTextBaseline) {
             Circle()
                 .fill(statusColor)

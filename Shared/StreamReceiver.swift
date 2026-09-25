@@ -694,6 +694,12 @@ final class StreamReceiver: ObservableObject {
     /// late/stale authentication complete it (P13).
     @MainActor @Published private(set) var lastForgottenPeerID: String?
 
+    /// A Mac's session invitation waiting for this device's user (pv 21).
+    @MainActor @Published private(set) var pendingSessionApproval: PendingSessionApproval?
+    /// Set while this device's own Connect request waits for the Mac's user
+    /// to approve it; the Mac's display name.
+    @MainActor @Published private(set) var awaitingSenderApprovalName: String?
+
     /// Coarse, interruption-aware connection headline — "Connected", an
     /// interruption title ("Reconnecting…", "Display Paused", …), or
     /// "Waiting for a Mac…". Every receiver surface (iOS and Mac Receiver)
@@ -944,6 +950,17 @@ final class StreamReceiver: ObservableObject {
     // acts on it for an already-trusted/pinned peer, and the resulting
     // connection still runs the full pinned-TLS + hello handshake.
     private var connectRequestClearWorkItem: DispatchWorkItem?
+
+    // Session invitations (pv 21) — all `queue`-confined. See
+    // `Shared/SessionInvitation.swift`.
+    private var sessionAdmission = ReceiverSessionAdmission()
+    private var incomingSessionApprovals = PendingSessionApprovals()
+    /// The invitation on the current connection, for Cancel while waiting.
+    private var currentSessionInvitationID: String?
+    /// This device's own explicit Connect request, so the Mac's resulting
+    /// receiver-initiated invitation is accepted without a second prompt.
+    private var outgoingSessionRequest: (peerID: String?, until: Date)?
+    private static let outgoingSessionRequestWindow: TimeInterval = 30
     /// Narrow, lock-backed owner for `disconnect()`'s in-flight `finish`
     /// closure — same `NSLock`-protected `@unchecked Sendable` idiom as
     /// `TLSListenerState`/`SendTargetBox` above. Exists so `finish` can be a
@@ -1466,6 +1483,7 @@ final class StreamReceiver: ObservableObject {
 
     func forgetPeer(_ peerID: String) {
         TrustStore.shared.forget(peerID: peerID)
+        IncomingSessionPolicyStore.removePolicy(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
         let pipeline = self.pipeline
@@ -2152,6 +2170,7 @@ final class StreamReceiver: ObservableObject {
     /// `framePipeline.beginAdoption` — sequenced by `ReceiverPipelineActor.
     /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
+        resetSessionNegotiation()
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
@@ -2375,6 +2394,9 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
+            if macPV < WireProtocol.sessionInvitationWireVersion {
+                admitLegacySenderOrClose()
+            }
             if macPV < WireProtocol.minSupportedPeer {
                 reconnectContext.update { $0.peerIsIncompatible = true }
                 let msg = "The MeowDisplay app on your Mac is too old for this \(deviceKind) app. Update MeowDisplay on your Mac to reconnect."
@@ -2389,6 +2411,19 @@ final class StreamReceiver: ObservableObject {
                 sendControl(["type": WireMessage.audioRequest, "enabled": audioPreferredBox.get()])
             } else {
                 DispatchQueue.main.async { uiSink.publishAudioEnabled(false) }
+            }
+        case WireMessage.sessionInvite:
+            guard let invitation = SessionInvitation(message: obj) else { return }
+            handleSessionInvitation(invitation)
+        case WireMessage.sessionInviteCancel:
+            guard let id = obj["id"] as? String else { return }
+            if incomingSessionApprovals.resolve(id: id) != nil || id == currentSessionInvitationID {
+                Log.info("sessionInvite: withdrawn by Mac id=\(id)")
+                if id == currentSessionInvitationID {
+                    outgoingSessionRequest = nil
+                    sessionAdmission.revoke()
+                }
+                publishSessionNegotiation(awaitingSenderName: nil)
             }
         case WireMessage.closing:
             // The Mac explicitly ended this session. Do not treat it as a transport failure.
@@ -3185,6 +3220,7 @@ final class StreamReceiver: ObservableObject {
     // MARK: - Mac system audio (PROTOCOL.md section 5A)
 
     private func handleAudioMediaFrame(_ payload: Data) {
+        guard sessionAdmission.admitted else { return }
         guard let frame = AudioMediaFrame.decode(payload) else {
             #if DEBUG
             audioFrameDecodeFailureCount += 1
@@ -3728,6 +3764,8 @@ final class StreamReceiver: ObservableObject {
     /// see `ReceiverVideoDecoder`'s `decode`/`probeDecodedLuma` — since this
     /// class no longer keeps a copy of its own.
     private func presentDecodedSample(_ sample: CMSampleBuffer, captureMs: Double?, sendMs: Double?) {
+        // Nothing is shown for a session this device has not admitted.
+        guard sessionAdmission.admitted else { return }
         // Backgrounded linger is already gated in `framePipeline` before it
         // builds a sample at all; `renderingPaused` itself stays host-owned
         // since C4/D (decode/presentation) still read it below.
@@ -3962,6 +4000,136 @@ final class StreamReceiver: ObservableObject {
     // the reconnect timer/`armReconnect`, and `cancelAutomaticRecoveryIfNeeded`
     // all moved into `pipeline` (`ReceiverPipelineActor`) — see that file.
 
+    // MARK: - Session invitations (pv 21)
+
+    /// This device's answer to a Mac's invitation, by its own incoming
+    /// policy. Every path answers the Mac exactly once per invitation
+    /// packet; a manual prompt answers `pending` first.
+    private func handleSessionInvitation(_ invitation: SessionInvitation) {
+        let peerID = reconnectContext.current().authenticatedPeerIDHint
+        currentSessionInvitationID = invitation.id
+        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent)
+        let decision: IncomingSessionDecision
+        if policy == .block {
+            decision = .block
+        } else if sessionAdmission.isContinuation(of: invitation, peerID: peerID) {
+            // Same session after a reconnect or pipeline rebuild.
+            decision = .accept
+        } else if invitation.initiator == .receiver, let request = outgoingSessionRequest,
+                  Date() < request.until, request.peerID == nil || request.peerID == peerID {
+            // This device asked for exactly this.
+            decision = .accept
+        } else {
+            decision = policy
+        }
+        Log.info("sessionInvite: id=\(invitation.id) initiator=\(invitation.initiator.rawValue) intent=\(invitation.intent.rawValue) decision=\(decision)")
+        switch decision {
+        case .accept:
+            admitSession(invitationID: invitation.id, peerID: peerID)
+            if let peerID { incomingSessionApprovals.removeAll(peerID: peerID) }
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .accepted).message)
+            publishSessionNegotiation(
+                awaitingSenderName: invitation.awaitingSenderApproval ? peerName(peerID) : nil)
+        case .askUser:
+            guard let peerID else { return }
+            let approval = PendingSessionApproval(
+                id: invitation.id, peerID: peerID, peerName: peerName(peerID),
+                localRole: .receiver, mode: invitation.mode, createdAt: Date())
+            if incomingSessionApprovals.begin(approval).started {
+                let selfBox = self.selfBox
+                queue.asyncAfter(deadline: .now() + PendingSessionApprovals.timeout) {
+                    selfBox.currentOnQueue()?.resolveSessionApproval(id: approval.id, decision: .rejectForSession)
+                }
+            }
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .pending).message)
+            publishSessionNegotiation(awaitingSenderName: nil)
+        case .decline:
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .declined).message)
+        case .block:
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .blocked).message)
+        }
+    }
+
+    /// The user answered this device's invitation prompt.
+    func respondToSessionInvitation(id: String, decision: ReceiverApprovalDecision) {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.resolveSessionApproval(id: id, decision: decision) }
+    }
+
+    private func resolveSessionApproval(id: String, decision: ReceiverApprovalDecision) {
+        // Stale (answered, withdrawn, timed out, or from a connection that
+        // has since been replaced): never acts.
+        guard let approval = incomingSessionApprovals.resolve(id: id) else { return }
+        let plan = SessionApprovalPlan.plan(for: decision)
+        if let policy = plan.persistPolicy {
+            // Connection policy only; never a display mode or input.
+            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID)
+        }
+        if plan.accept {
+            admitSession(invitationID: approval.id, peerID: approval.peerID)
+        }
+        sendControl(SessionInvitationResponse(id: approval.id, result: plan.result).message)
+        publishSessionNegotiation(awaitingSenderName: nil)
+    }
+
+    /// Cancel on the "Waiting for the Mac to accept" state.
+    func cancelOutgoingSessionRequest() {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.outgoingSessionRequest = nil
+            if let id = self.currentSessionInvitationID {
+                self.sendControl(SessionInvitationResponse(id: id, result: .cancelled).message)
+            }
+            self.sessionAdmission.revoke()
+            self.publishSessionNegotiation(awaitingSenderName: nil)
+        }
+    }
+
+    /// A pre-pv 21 Mac cannot be asked or declined in-band. It is admitted
+    /// only when this device would accept a background attempt from it
+    /// anyway; otherwise the connection is closed (fail closed).
+    private func admitLegacySenderOrClose() {
+        let peerID = reconnectContext.current().authenticatedPeerIDHint
+        if ReceiverSessionAdmission.admitsLegacySender(peerID: peerID) {
+            admitSession(invitationID: nil, peerID: peerID)
+        } else {
+            Log.info("sessionInvite: closing legacy sender peer=\(peerID ?? "unknown") reason=policy")
+            let pipeline = self.pipeline
+            Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
+        }
+    }
+
+    /// Frames that arrived before admission were decoded but never shown;
+    /// ask for a keyframe so a static screen still appears immediately.
+    private func admitSession(invitationID: String?, peerID: String?) {
+        let wasAdmitted = sessionAdmission.admitted
+        sessionAdmission.admit(invitationID: invitationID, peerID: peerID)
+        if !wasAdmitted { sendControl(["type": "kf"]) }
+    }
+
+    /// New connection: nothing on it is admitted yet, and prompts raised by
+    /// the previous connection can no longer be answered.
+    private func resetSessionNegotiation() {
+        sessionAdmission.beginConnection()
+        incomingSessionApprovals = PendingSessionApprovals()
+        currentSessionInvitationID = nil
+        publishSessionNegotiation(awaitingSenderName: nil)
+    }
+
+    private func publishSessionNegotiation(awaitingSenderName: String?) {
+        let pending = incomingSessionApprovals.first
+        let uiSink = self.uiSink
+        DispatchQueue.main.async {
+            uiSink.publishSessionNegotiation(pendingApproval: pending, awaitingSenderName: awaitingSenderName)
+        }
+    }
+
+    private func peerName(_ peerID: String?) -> String {
+        peerID.flatMap { id in TrustStore.shared.pinnedPeers().first { $0.peerID == id }?.displayName }
+            ?? String(localized: "Your Mac")
+    }
+
     /// The user tapped Reconnect on the Connection Lost presentation. Runs
     /// one clean recovery run through exactly the same path as automatic
     /// recovery — no second flow, no stacked attempts.
@@ -3996,6 +4164,9 @@ final class StreamReceiver: ObservableObject {
     /// clears it after a short window so a stale token can't re-trigger a
     /// connect on a later, unrelated browse update.
     private func signalConnectRequest() {
+        if outgoingSessionRequest.map({ Date() >= $0.until }) ?? true {
+            outgoingSessionRequest = (nil, Date().addingTimeInterval(Self.outgoingSessionRequestWindow))
+        }
         let token = advertisementState.beginConnectRequest()
         connectRequestClearWorkItem?.cancel()
         if let tlsListener = tlsListenerState.currentListener() { tlsListener.service = advertisedService }
@@ -4038,6 +4209,10 @@ final class StreamReceiver: ObservableObject {
     /// duplicate session from racing routes.
     func connectPrimary(peerID: String) {
         reconnectContext.update { $0.manualConnectPeerID = peerID }
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.outgoingSessionRequest = (peerID, Date().addingTimeInterval(Self.outgoingSessionRequestWindow))
+        }
         requestConnect()
     }
 
@@ -4752,6 +4927,11 @@ final class StreamReceiver: ObservableObject {
     /// `private(set)`-admitting shape as `applyUISessionSnapshot` above.
     @MainActor func applyAuthenticatedPeerIDUpdate(_ peerID: String?) {
         authenticatedPeerID = peerID
+    }
+
+    @MainActor func applySessionNegotiationUpdate(pendingApproval: PendingSessionApproval?, awaitingSenderName: String?) {
+        if pendingSessionApproval != pendingApproval { pendingSessionApproval = pendingApproval }
+        if awaitingSenderApprovalName != awaitingSenderName { awaitingSenderApprovalName = awaitingSenderName }
     }
 
     /// `discoveredMacs`'s only external mutator — see `ReceiverUISink.

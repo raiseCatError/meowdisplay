@@ -109,6 +109,42 @@ enum SecurityPresentationCoordinator {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
+
+    private static var sessionApprovalPanel: NSPanel?
+    private static var sessionApprovalPanelDelegate: SessionApprovalPanelWindowDelegate?
+
+    static func presentSessionApproval(prompt: SessionApprovalPromptModel) {
+        guard prompt.current != nil else { return }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let panel: NSPanel
+        if let existing = sessionApprovalPanel {
+            panel = existing
+        } else {
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
+                styleMask: [.titled, .closable, .nonactivatingPanel],
+                backing: .buffered, defer: false)
+            panel.title = String(localized: "Display Request")
+            panel.isFloatingPanel = true
+            panel.level = .modalPanel
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            sessionApprovalPanel = panel
+        }
+        let delegate = SessionApprovalPanelWindowDelegate(prompt: prompt)
+        sessionApprovalPanelDelegate = delegate
+        panel.delegate = delegate
+        let hostingController = NSHostingController(rootView: SessionApprovalPanelView(prompt: prompt, onResolved: {
+            panel.orderOut(nil)
+        }))
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Forget Device
 
     // Guards against a double-presentation if requestForget is somehow
@@ -305,6 +341,77 @@ private struct InputControlRequestPanelView: View {
             }
         }
         .onChange(of: prompt.pending) { _, newValue in
+            if newValue == nil { onResolved() }
+        }
+    }
+}
+
+/// Closing the session-request panel is Reject for This Session.
+@MainActor
+private final class SessionApprovalPanelWindowDelegate: NSObject, NSWindowDelegate {
+    private weak var prompt: SessionApprovalPromptModel?
+
+    init(prompt: SessionApprovalPromptModel) {
+        self.prompt = prompt
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        prompt?.windowClosedByUser()
+    }
+}
+
+/// A paired receiver asked this Mac to start sharing. Allow & Extend / Allow
+/// & Mirror approve this request only; Allow Permanently skips this prompt
+/// for future requests from the device (never input, never a mode); the
+/// reject choices are set apart below.
+private struct SessionApprovalPanelView: View {
+    @ObservedObject var prompt: SessionApprovalPromptModel
+    let onResolved: () -> Void
+
+    var body: some View {
+        Group {
+            if let pending = prompt.current {
+                VStack(spacing: 20) {
+                    VStack(spacing: 6) {
+                        Text("\(pending.peerName) wants to use this Mac as a display source")
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                        Text("Remote input stays off until you allow it.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                    }
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            Button("Allow & Mirror") { prompt.decide(.allowMirror, for: pending.id) }
+                                .keyboardShortcut(pending.mode == .mirror ? .defaultAction : nil)
+                            Button("Allow & Extend") { prompt.decide(.allowExtend, for: pending.id) }
+                                .keyboardShortcut(pending.mode == .extend ? .defaultAction : nil)
+                        }
+                        Button("Allow Permanently") { prompt.decide(.allowPermanently, for: pending.id) }
+                        Text("Future requests from this device connect automatically. Change anytime in Settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
+                    }
+                    Divider()
+                    HStack(spacing: 8) {
+                        Button("Reject for This Session") { prompt.decide(.rejectForSession, for: pending.id) }
+                            .keyboardShortcut(.cancelAction)
+                        Button("Reject Permanently") { prompt.decide(.rejectPermanently, for: pending.id) }
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(24)
+                .frame(width: 360)
+            } else {
+                Color.clear.frame(width: 1, height: 1)
+            }
+        }
+        .onChange(of: prompt.current) { _, newValue in
             if newValue == nil { onResolved() }
         }
     }
