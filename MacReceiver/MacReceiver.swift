@@ -50,6 +50,8 @@ final class ReceiverController: ObservableObject {
     private var sleepActivity: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
     private var screenSleepObservers: [NSObjectProtocol] = []
+    private var windowLifecycle = ReceiverWindowLifecycle()
+    private var windowObservers: [NSObjectProtocol] = []
 
     private var fallbackName: String { Host.current().localizedName ?? "Mac" }
 
@@ -106,7 +108,7 @@ final class ReceiverController: ObservableObject {
             .sink { [weak self] streaming in
                 self?.streaming = streaming
                 self?.updateSleepAssertion(streaming)
-                if streaming { self?.showWindow() } else { self?.closeWindow() }
+                if streaming { self?.showWindow() } else { self?.scheduleCloseWindow() }
             }
             .store(in: &cancellables)
 
@@ -224,6 +226,10 @@ final class ReceiverController: ObservableObject {
     /// when the user closed the window while the stream keeps running.
     func showWindow() {
         guard let receiver, streaming || window != nil else { return }
+        // Streaming again within the grace period keeps this window, in
+        // whatever full screen state it's already in.
+        if streaming { windowLifecycle.cancelPendingClose() }
+        var enterFullscreen = false
         if window == nil {
             let w = NSWindow(contentRect: initialContentRect(video: receiver.videoSize),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -234,21 +240,70 @@ final class ReceiverController: ObservableObject {
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.center()
             window = w
+            observeWindow(w)
+            enterFullscreen = windowLifecycle.windowCreated()
         }
         // Resizes keep the stream's shape; re-set on every show because a
         // reconnect can arrive with new dimensions in the same window.
         if receiver.videoSize != .zero { window?.contentAspectRatio = receiver.videoSize }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Only a freshly built window takes the preference, so a reused
+        // window is never toggled mid-transition.
+        if enterFullscreen { window?.toggleFullScreen(nil) }
+    }
+
+    /// Streaming stopped: take the window down after a short grace, in case
+    /// the sender is only moving the session to another transport.
+    private func scheduleCloseWindow() {
+        guard window != nil else { return }
+        let token = windowLifecycle.scheduleClose()
+        DispatchQueue.main.asyncAfter(deadline: .now() + ReceiverWindowLifecycle.closeGrace) { [weak self] in
+            guard let self, self.windowLifecycle.consumeClose(token) else { return }
+            self.closeWindow()
+        }
     }
 
     private func closeWindow() {
+        // Our own teardown is not the user's choice: stop recording before
+        // closing a full screen window reports its exit.
+        windowLifecycle.windowClosing()
+        stopObservingWindow()
         window?.close()
         window = nil
     }
 
-    /// Windowed at ~70% of the screen to start — the green button (native
-    /// full screen) is the "use the whole panel" gesture.
+    /// Records the user's green-button choice, and forgets the window when
+    /// the user closes it; Show Window (or the next stream) then builds a
+    /// fresh one with the preference.
+    private func observeWindow(_ window: NSWindow) {
+        let center = NotificationCenter.default
+        // Synchronous on .main: a close must stop recording before the full
+        // screen exit it causes is delivered.
+        func observe(_ name: Notification.Name,
+                     _ apply: @escaping @MainActor (ReceiverController) -> Void) -> NSObjectProtocol {
+            center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { if let self { apply(self) } }
+            }
+        }
+        windowObservers = [
+            observe(NSWindow.didEnterFullScreenNotification) { $0.windowLifecycle.fullscreenChanged(entered: true) },
+            observe(NSWindow.didExitFullScreenNotification) { $0.windowLifecycle.fullscreenChanged(entered: false) },
+            observe(NSWindow.willCloseNotification) {
+                $0.windowLifecycle.windowClosing()
+                $0.stopObservingWindow()
+                $0.window = nil
+            },
+        ]
+    }
+
+    private func stopObservingWindow() {
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        windowObservers = []
+    }
+
+    /// Windowed at ~70% of the screen; full screen returns here when the
+    /// user leaves it.
     private func initialContentRect(video: CGSize) -> NSRect {
         let visible = NSScreen.screens.first?.visibleFrame.size
             ?? CGSize(width: 1440, height: 900)

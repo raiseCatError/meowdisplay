@@ -160,6 +160,7 @@ targets:
       - Mac/DisplayArrangement.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
+      - MacReceiver/ReceiverWindowLifecycle.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift

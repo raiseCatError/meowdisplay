@@ -31,6 +31,8 @@ struct ReceiverSections: View {
             Text("How this Mac appears in the other Mac's Devices list.")
         }
 
+        WindowSection()
+
         SystemSection()
 
         Section("How to connect") {
@@ -38,7 +40,7 @@ struct ReceiverSections: View {
                   systemImage: "macbook.and.macbook")
             Label("With both Macs on the same network, this Mac appears in its Devices list — click Connect there.",
                   systemImage: "wifi")
-            Label("The stream opens in a window here — use the green traffic light for full screen.",
+            Label("The stream opens here in full screen. The green traffic light switches to a window, and MeowDisplay remembers your choice.",
                   systemImage: "arrow.up.left.and.arrow.down.right")
         }
         .font(.subheadline)
@@ -301,6 +303,22 @@ private struct ReceiverAudioSection: View {
             Text("Audio")
         } footer: {
             Text("Plays a copy of what the other Mac is playing. It keeps playing there too.")
+        }
+    }
+}
+
+/// Receiver window behavior. The green button writes the same preference,
+/// so the toggle always shows what the next window will do.
+private struct WindowSection: View {
+    @AppStorage(FullscreenPreference.key) private var openInFullScreen = true
+
+    var body: some View {
+        Section {
+            Toggle("Open in Full Screen", isOn: $openInFullScreen)
+        } header: {
+            Text("Window")
+        } footer: {
+            Text("Automatically open the receiver window in native macOS full screen when a stream starts.")
         }
     }
 }
