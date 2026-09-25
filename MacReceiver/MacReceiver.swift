@@ -30,22 +30,33 @@ final class ReceiverController: ObservableObject {
     // The one canonical status presentation — republished from the
     // receiver's `session` (phase/interruption), the same state iOS's
     // interruption overlay already reads. Every status-bearing surface in
-    // this app (the panel's own status row and the bottom status strip)
+    // this app (the toolbar status badge and the Overview status row)
     // reads this pair instead of each independently re-deriving "Connected"/
     // "Waiting for a Mac…" from `connected`, which could otherwise drift.
     @Published private(set) var statusTitle = "Waiting for a Mac…"
     @Published private(set) var statusColor: Color = .secondary
     // The sender has no usable physical display for Mirror (pv 17). Mirrors
-    // `receiver.mirrorUnavailable` so the panel can present the Cancel /
+    // `receiver.mirrorUnavailable` so Settings can present the Cancel /
     // Use Extend alert; the sender stays authoritative for the actual mode.
     @Published private(set) var mirrorUnavailableOffer = false
-    /// Fired when something needs the user's answer while the panel may be
-    /// closed (the headless-Mirror offer) — the app delegate brings it up.
+    /// Wake & Connect for a paired Mac (the same shared coordinator the
+    /// iPhone app drives). Lives exactly as long as `receiver`.
+    @Published private(set) var wakeConnect: WakeConnectCoordinator?
+    /// The receiver-local manual A/V Sync offset (`AVSyncOffset.range`),
+    /// persisted here and applied to the shared receiver's
+    /// `avSyncPreference` — the one value its audio scheduling and video
+    /// delay read. Never sent to the other Mac.
+    @Published private(set) var avSyncOffsetMs = AVSyncOffset.clamped(
+        UserDefaults.standard.integer(forKey: ReceiverController.avSyncOffsetKey))
+    /// Fired when something needs the user's answer while the Settings
+    /// window may be closed (the headless-Mirror offer) — the app delegate
+    /// brings it up.
     var onNeedsAttention: (() -> Void)?
 
     var active: Bool { receiver != nil }
 
     private var window: NSWindow?
+    private var retiringReceiver: StreamReceiver?
     private var cancellables = Set<AnyCancellable>()
     private var sleepActivity: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
@@ -73,7 +84,9 @@ final class ReceiverController: ObservableObject {
         // Audio stays a per-receiver opt-in; the shared receiver resends it on
         // every welcome, so reconnects and migrations restore it.
         receiver.primeAudioPreference(UserDefaults.standard.bool(forKey: Self.audioPreferredKey))
+        receiver.avSyncPreference.set(avSyncOffsetMs)
         self.receiver = receiver
+        wakeConnect = WakeConnectCoordinator(receiver: receiver)
         receiver.start()
 
         receiver.$connected
@@ -97,6 +110,17 @@ final class ReceiverController: ObservableObject {
             .sink { [weak self] offered in
                 self?.mirrorUnavailableOffer = offered
                 if offered { self?.onNeedsAttention?() }
+            }
+            .store(in: &cancellables)
+        // A sender asking to pair (or this Mac pairing with a nearby one)
+        // needs the code confirmed here before any trust is written.
+        receiver.pairingPrompt.$pending
+            .map { $0 != nil }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak receiver] pending in
+                guard pending, let prompt = receiver?.pairingPrompt else { return }
+                ReceiverPairingPanel.present(prompt: prompt)
             }
             .store(in: &cancellables)
         // Streaming = connected and the video format is known — that's when
@@ -156,7 +180,16 @@ final class ReceiverController: ObservableObject {
         let workspace = NSWorkspace.shared.notificationCenter
         screenSleepObservers.forEach { workspace.removeObserver($0) }
         screenSleepObservers = []
-        receiver.stop(completion: completion)
+        wakeConnect?.cancel()
+        wakeConnect = nil
+        // The receiver finishes its teardown on its own queue and only calls
+        // back while it still exists, so keep it alive until it has — views
+        // observing it are released as soon as `receiver` goes nil below.
+        retiringReceiver = receiver
+        receiver.stop { [weak self] in
+            Task { @MainActor in self?.retiringReceiver = nil }
+            completion?()
+        }
         self.receiver = nil
         connected = false
         streaming = false
@@ -175,6 +208,19 @@ final class ReceiverController: ObservableObject {
         receiver?.requestAudioEnabled(enabled)
     }
 
+    static let avSyncOffsetKey = "avSyncOffsetMs"
+
+    /// Snaps to `AVSyncOffset.stepMs` and clamps, exactly like the iPhone
+    /// app's A/V Sync slider, then applies it to the live receiver.
+    func setAVSyncOffset(_ milliseconds: Int) {
+        let step = AVSyncOffset.stepMs
+        let snapped = AVSyncOffset.clamped(Int((Double(milliseconds) / Double(step)).rounded()) * step)
+        guard snapped != avSyncOffsetMs else { return }
+        avSyncOffsetMs = snapped
+        UserDefaults.standard.set(snapped, forKey: Self.avSyncOffsetKey)
+        receiver?.avSyncPreference.set(snapped)
+    }
+
     /// "Use Extend" on the Mirror-unavailable alert — the shared receiver
     /// sends the existing `displayModeRequest`; nothing is faked locally.
     func acceptMirrorUnavailableOffer() { receiver?.acceptMirrorUnavailableOffer() }
@@ -182,7 +228,7 @@ final class ReceiverController: ObservableObject {
     /// "Cancel" — ends this attempt exactly like Disconnect (trust stays).
     func declineMirrorUnavailableOffer() { receiver?.declineMirrorUnavailableOffer() }
 
-    /// Re-published name from the panel's text field. Empty falls back to the
+    /// Re-published name from the System page's name field. Empty falls back to the
     /// computer name (mirrors the iOS Settings behavior).
     func setAdvertisedName(_ name: String) {
         UserDefaults.standard.set(name, forKey: "receiverName")
@@ -222,7 +268,7 @@ final class ReceiverController: ObservableObject {
 
     // MARK: - Video window
 
-    /// Bring the video window (back) up — also bound to the panel button for
+    /// Bring the video window (back) up — also bound to Show Window in Settings for
     /// when the user closed the window while the stream keeps running.
     func showWindow() {
         guard let receiver, streaming || window != nil else { return }
@@ -491,7 +537,7 @@ final class ReceiverVideoView: NSView {
 }()
 
 /// The shared PerfOverlay pinned to the bottom of the video, driven by the
-/// same "showAnalytics" default the iOS app uses (toggled in the panel).
+/// same "showAnalytics" default the iOS app uses (Settings → System).
 struct ReceiverPerfOverlay: View {
     @ObservedObject var receiver: StreamReceiver
     @AppStorage("showAnalytics") private var showAnalytics = false

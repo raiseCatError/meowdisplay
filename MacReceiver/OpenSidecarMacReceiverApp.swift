@@ -5,17 +5,16 @@
 // deployment floor and old Macs can serve as screens (issue #241).
 //
 // The receiver starts at launch and stays up for the app's lifetime; the
-// window is just the control panel (name, status, HUD toggle). The video
-// window itself is managed by ReceiverController.
+// Settings window (ReceiverSettingsWindow) only shows and changes it. The
+// video window itself is managed by ReceiverController.
 
 import AppKit
 import SwiftUI
 import Sparkle
 
 // Plain AppKit lifecycle rather than a SwiftUI `App`: a `WindowGroup` sizes
-// its window itself (it opened at ~850×550 regardless of the content frame)
-// and hands out File > New; the panel here is one fixed-size window built
-// like the sender's control window (NSHostingView in an NSWindow).
+// its window itself and hands out File > New; the Settings window here is
+// one AppKit split-view window built like the sender's.
 @main
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -33,28 +32,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updater = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
-    private var panel: NSWindow?
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
         ReceiverController.shared.onNeedsAttention = { [weak self] in
-            self?.showPanel()
-            NSApp.activate(ignoringOtherApps: true)
+            self?.showSettings()
         }
         ReceiverController.shared.start()
-        showPanel()
-        NSApp.activate(ignoringOtherApps: true)
+        showSettings()
     }
 
-    // Reopening (Dock click) with the panel closed brings it back; the
+    // Reopening (Dock click) with Settings closed brings it back; the
     // receiver itself never stopped.
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows: Bool) -> Bool {
-        showPanel()
+        showSettings()
         return false
     }
 
-    // Closing the panel is not quitting: a spare Mac sits there as a display
+    // Closing Settings is not quitting: a spare Mac sits there as a display
     // with nothing but the video window (or nothing at all) on screen.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -71,28 +66,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    private func showPanel() {
-        if panel == nil {
-            // AppKit delegate callbacks and the onNeedsAttention hook run on the main thread.
-            let controller = MainActor.assumeIsolated { ReceiverController.shared }
-            let content = ReceiverContentView(controller: controller,
-                                              updater: updater)
-            let hosting = NSHostingView(rootView: content)
-            let w = NSWindow(contentRect: NSRect(origin: .zero, size: ReceiverContentView.size),
-                             styleMask: [.titled, .closable, .miniaturizable],
-                             backing: .buffered, defer: false)
-            w.title = "MeowDisplay Receiver"
-            w.contentView = hosting
-            w.isReleasedWhenClosed = false
-            w.setFrameAutosaveName("ReceiverPanel")
-            w.center()
-            panel = w
-        }
-        panel?.makeKeyAndOrderFront(nil)
+    @objc private func showSettings() {
+        // AppKit delegate callbacks and the onNeedsAttention hook run on the main thread.
+        let controller = MainActor.assumeIsolated { ReceiverController.shared }
+        ReceiverSettingsWindow.show(controller: controller, updater: updater)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// The minimum a windowed app needs: an app menu with Quit, Edit for the
-    /// name field's copy/paste and undo, and a Window menu for Close/Minimize.
+    /// The minimum a windowed app needs: an app menu with Settings and Quit,
+    /// Edit for the text fields' copy/paste and undo, and a Window menu for
+    /// Close/Minimize.
     private func makeMainMenu() -> NSMenu {
         let main = NSMenu()
 
@@ -101,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About MeowDisplay Receiver",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: String(localized: "Settings…"),
+                        action: #selector(showSettings), keyEquivalent: ",").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Check for Updates…",
                         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -136,84 +122,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = window
 
         return main
-    }
-}
-
-struct ReceiverContentView: View {
-    /// Fixed panel size; the window is built to it and is not resizable.
-    static let size = CGSize(width: 440, height: 640)
-
-    @ObservedObject var controller: ReceiverController
-    let updater: SPUStandardUpdaterController?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: 44, height: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("MeowDisplay Receiver", comment: "App title in the receiver's about panel. \"MeowDisplay\" is the product name and must stay untranslated; only \"Receiver\" (this Mac acting as a display for another Mac) is translatable.")
-                        .font(.title3.bold())
-                    Text("This Mac as an extra display for another Mac")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(16)
-
-            Divider()
-
-            Form {
-                ReceiverSections(controller: controller)
-            }
-            .groupedFormStyle()
-
-            Divider()
-
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(controller.statusColor)
-                    .frame(width: 9, height: 9)
-                Text(controller.statusTitle)
-                    .font(.callout)
-                    .lineLimit(1)
-                Spacer()
-                Button("Logs") { Log.revealInFinder() }
-                    .controlSize(.small)
-                    .help("Reveal the MeowDisplay Receiver log files in Finder")
-                if let updater {
-                    CheckForUpdatesView(updater: updater)
-                }
-                Button("Quit") { NSApp.terminate(nil) }
-                    .controlSize(.small)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-        .frame(width: Self.size.width, height: Self.size.height)
-        // The sender is headless, so Mirror has nothing to capture. "Use
-        // Extend" sends the existing displayModeRequest; the sender decides.
-        .alert("Mirror isn’t available",
-               isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
-            Button("Cancel", role: .cancel) { controller.declineMirrorUnavailableOffer() }
-            Button("Use Extend") { controller.acceptMirrorUnavailableOffer() }
-        } message: {
-            Text("The other Mac has no active physical display, for example its lid is closed. Use Extend to create a virtual display instead?")
-        }
-    }
-}
-
-extension View {
-    /// `.formStyle(.grouped)` where it exists (macOS 13); the default form on
-    /// macOS 12 is the same content in the older flat layout.
-    @ViewBuilder
-    func groupedFormStyle() -> some View {
-        if #available(macOS 13, *) {
-            formStyle(.grouped)
-        } else {
-            self
-        }
     }
 }

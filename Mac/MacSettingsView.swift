@@ -294,48 +294,6 @@ struct DetailToolbarStatusView: View {
     }
 }
 
-/// AppKit NSSearchField bridged to SwiftUI for authentic macOS System Settings search behavior.
-struct NativeSearchField: NSViewRepresentable {
-    @Binding var text: String
-    var placeholder: String = "Search"
-
-    func makeNSView(context: Context) -> NSSearchField {
-        let field = NSSearchField()
-        field.placeholderString = placeholder
-        field.bezelStyle = .roundedBezel
-        field.controlSize = .small
-        field.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
-        field.delegate = context.coordinator
-        field.sendsWholeSearchString = false
-        field.sendsSearchStringImmediately = true
-        return field
-    }
-
-    func updateNSView(_ nsView: NSSearchField, context: Context) {
-        if nsView.stringValue != text {
-            nsView.stringValue = text
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
-    }
-
-    final class Coordinator: NSObject, NSSearchFieldDelegate {
-        @Binding var text: String
-
-        init(text: Binding<String>) {
-            _text = text
-        }
-
-        func controlTextDidChange(_ obj: Notification) {
-            if let field = obj.object as? NSSearchField {
-                text = field.stringValue
-            }
-        }
-    }
-}
-
 /// The sidebar view hosting search, category rows, and the bottom Quit button.
 struct MacSettingsSidebarView: View {
     @ObservedObject var navigationModel: SettingsNavigationModel

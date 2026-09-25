@@ -120,6 +120,7 @@ targets:
       - Mac/Log.swift
       - Mac/LogPolicies.swift
       - Mac/CheckForUpdatesView.swift
+      - Mac/NativeSearchField.swift
     dependencies:
       - package: Sparkle
       - package: SwiftCertificates
@@ -165,6 +166,7 @@ targets:
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
+      - MacReceiver/ReceiverSettingsCategory.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
