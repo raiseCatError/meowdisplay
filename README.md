@@ -72,13 +72,25 @@ receiver's Settings:
   and multi-finger gestures keep working.
 
 **Smart Touch (Experimental)** is an optional add-on to Direct Touch, off by
-default. When the Mac's Accessibility information shows that you touched a
-scrollable area, such as a list, table, document or web page, a one-finger
-swipe scrolls instead of moving the pointer. Anywhere else, or when the Mac
-can't identify the interface reliably, Direct Touch behaves exactly as normal.
-Taps, tap-then-hold drags, two-finger scroll, pinch, rotate and system
-gestures are unchanged. It works best in apps that expose standard macOS
-accessibility information, and it has no effect in Trackpad mode.
+default. It uses the Mac's Accessibility information to decide what a
+one-finger drag should do:
+
+- **Scrollable areas** — lists, tables, documents, spreadsheets and web
+  pages scroll with one finger, with momentum. Scrolling follows the swipe
+  vertically or horizontally, and locks to one axis when the swipe is
+  clearly up/down or left/right.
+- **Window title bars** — dragging a standard window's title bar or empty
+  toolbar space moves the window.
+- **Touch and hold** — holding still briefly before moving switches that
+  touch to normal Direct Touch. An optional haptic (**Smart Touch
+  Long-Press Haptic**, on by default, and off whenever Haptics is off)
+  confirms the switch.
+
+Anywhere else, or when the Mac can't identify the interface reliably, Direct
+Touch behaves exactly as normal. Taps, tap-then-hold drags, two-finger
+scroll, pinch, rotate and system gestures are unchanged. It works best in
+apps that expose standard macOS accessibility information, and it has no
+effect in Trackpad mode.
 
 | Gesture | On your Mac |
 |---|---|

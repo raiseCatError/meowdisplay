@@ -4495,11 +4495,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case WireMessage.smartTouchProbe:
             // Smart Touch (Experimental). Always answers, so the receiver
             // never waits out its fallback window for a probe the Mac saw;
-            // anything but a confident classification is `false`.
+            // anything but a confident classification is `false` for both
+            // `scrollable` and the additive `windowDrag`.
             guard let id = obj["id"] as? Int else { return }
             guard receiverInputIsAllowed(), let injector = inputInjector,
                   let x = obj["x"] as? Double, let y = obj["y"] as? Double else {
-                sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id, "scrollable": false])
+                sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id,
+                                "scrollable": false, "windowDrag": false])
                 return
             }
             let point = injector.globalPoint(x: x, y: y)
@@ -4512,7 +4514,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let scrollable: Bool
                 if case .scrollable = decision { scrollable = true } else { scrollable = false }
                 selfBox.resolve()?.sendJSONObject(
-                    ["type": WireMessage.smartTouchProbeResult, "id": id, "scrollable": scrollable])
+                    ["type": WireMessage.smartTouchProbeResult, "id": id,
+                     "scrollable": scrollable, "windowDrag": decision == .windowDrag])
             }
         case "proximity":
             guard receiverInputIsAllowed() else { return }

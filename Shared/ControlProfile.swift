@@ -540,6 +540,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults off.
     var smartTouchEnabled = false
+    /// Haptic confirming a Smart Touch long press switched the touch into
+    /// plain Direct Touch. Also silenced whenever `hapticsEnabled` is off.
+    /// Defaults on.
+    var smartTouchLongPressHapticEnabled = true
     var profiles: [ControlProfile]
     /// Independent second tray of immediate-fire shortcut buttons (Undo/
     /// Redo initially) — see `FunctionTrayProfile`. Its own
@@ -651,6 +655,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Absent (schema < 14) means "written before Smart Touch existed" —
         // default off, matching a brand-new install.
         smartTouchEnabled = try value(.smartTouchEnabled, fallback.smartTouchEnabled)
+        smartTouchLongPressHapticEnabled = try value(.smartTouchLongPressHapticEnabled,
+                                                     fallback.smartTouchLongPressHapticEnabled)
     }
 
     /// Restores only the four App Gesture Commands to their canonical

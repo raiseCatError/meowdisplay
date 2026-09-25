@@ -194,8 +194,8 @@ final class ReceiverUISink: Sendable {
         target?.applyReceiverUIPreferencesUpdate(update)
     }
 
-    func publishSmartTouchProbeResult(id: Int, scrollable: Bool) {
-        target?.applySmartTouchProbeResult(id: id, scrollable: scrollable)
+    func publishSmartTouchProbeResult(id: Int, target smartTouchTarget: SmartTouchTarget?) {
+        target?.applySmartTouchProbeResult(id: id, target: smartTouchTarget)
     }
 
     func publishInputResetBump() {

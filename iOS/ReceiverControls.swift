@@ -150,6 +150,8 @@ final class ReceiverHaptics {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .confirmation, .reset:
             UINotificationFeedbackGenerator().notificationOccurred(.success)
+        case .smartTouchOverride:
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 }

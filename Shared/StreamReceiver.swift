@@ -790,10 +790,11 @@ final class StreamReceiver: ObservableObject {
     /// True when the connected Mac answers Smart Touch probes (pv 20).
     @MainActor var macSupportsSmartTouch: Bool { macProtocolVersion >= WireProtocol.smartTouchWireVersion }
 
-    /// Smart Touch (Experimental): the Mac's answer to `sendSmartTouchProbe`.
-    /// Delivered on the main actor; the probe `id` lets the caller drop
-    /// replies for touches that are already over.
-    @MainActor var onSmartTouchProbeResult: ((_ id: Int, _ scrollable: Bool) -> Void)?
+    /// Smart Touch (Experimental): the Mac's answer to `sendSmartTouchProbe`
+    /// (`nil`: nothing Smart Touch acts on). Delivered on the main actor;
+    /// the probe `id` lets the caller drop replies for touches that are
+    /// already over.
+    @MainActor var onSmartTouchProbeResult: ((_ id: Int, _ target: SmartTouchTarget?) -> Void)?
 
     /// True when the connected Mac understands Mac system audio (`pv` 12).
     /// No legacy fallback, same as keyboard: below this, Audio simply stays
@@ -2430,8 +2431,17 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishInputResetBump() }
         case WireMessage.smartTouchProbeResult:
             guard let id = obj["id"] as? Int else { return }
-            let scrollable = obj["scrollable"] as? Bool ?? false
-            DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, scrollable: scrollable) }
+            // `windowDrag` is additive: a Mac that never sends it simply
+            // never offers Smart Touch window dragging.
+            let target: SmartTouchTarget?
+            if obj["scrollable"] as? Bool == true {
+                target = .scroll
+            } else if obj["windowDrag"] as? Bool == true {
+                target = .windowDrag
+            } else {
+                target = nil
+            }
+            DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -4879,8 +4889,8 @@ final class StreamReceiver: ObservableObject {
         onReceiverUIPreferences?(update)
     }
 
-    @MainActor func applySmartTouchProbeResult(id: Int, scrollable: Bool) {
-        onSmartTouchProbeResult?(id, scrollable)
+    @MainActor func applySmartTouchProbeResult(id: Int, target: SmartTouchTarget?) {
+        onSmartTouchProbeResult?(id, target)
     }
 
     @MainActor func applyInputResetBump() {

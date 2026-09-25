@@ -24,6 +24,8 @@ enum ControlHapticEvent: String, Equatable {
     case profileChange
     case reset
     case settings
+    /// Smart Touch long press dropped a touch into plain Direct Touch.
+    case smartTouchOverride
 }
 
 enum ControlHapticPolicy {

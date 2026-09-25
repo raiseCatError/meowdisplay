@@ -278,8 +278,9 @@ enum WireMessage {
     // receiver -> Mac: Smart Touch (Experimental) probe — `id`, normalized
     // `x`/`y`. See `smartTouchWireVersion`.
     static let smartTouchProbe = "smartTouchProbe"
-    // Mac -> receiver: `id` echoed back plus `scrollable`. Any failure
-    // (no Accessibility permission, no element, timeout) answers false.
+    // Mac -> receiver: `id` echoed back plus `scrollable` and (additive)
+    // `windowDrag` — a title bar / empty toolbar hit. Any failure (no
+    // Accessibility permission, no element, timeout) answers false.
     static let smartTouchProbeResult = "smartTouchProbeResult"
 }
 

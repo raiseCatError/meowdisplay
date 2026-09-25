@@ -3,13 +3,15 @@ import CoreGraphics
 import Foundation
 
 /// Smart Touch (Experimental): decides whether the Accessibility element
-/// under a touch-down point sits inside a standard scrollable container.
+/// under a touch-down point sits inside a standard scrollable container,
+/// or on a standard window's title bar / empty toolbar space.
 ///
-/// Conservative by design — anything short of a clear scroll container
-/// answers "not scrollable", and the receiver keeps ordinary Direct Touch.
+/// Conservative by design — anything short of a clear match answers "not
+/// scrollable", and the receiver keeps ordinary Direct Touch.
 enum SmartTouchTargetClassifier {
     enum Decision: Equatable {
         case scrollable(container: String)
+        case windowDrag
         case notScrollable(reason: String)
     }
 
@@ -60,6 +62,32 @@ enum SmartTouchTargetClassifier {
         return .notScrollable(reason: "depthLimit")
     }
 
+    /// Whether a role chain that found no scroll container could be a
+    /// window's drag region: the window itself (its bare title bar), its
+    /// title text, or empty toolbar space — nothing deeper, so any real
+    /// control or content view keeps Direct Touch.
+    static func isWindowDragCandidate(roles: [String]) -> Bool {
+        guard roles.last == kAXWindowRole as String else { return false }
+        switch roles.count {
+        case 1: return true
+        case 2: return roles[0] == kAXToolbarRole as String || roles[0] == kAXStaticTextRole as String
+        default: return false
+        }
+    }
+
+    /// Title bar band from the window's close button: the traffic lights
+    /// sit vertically centered in the title bar (or unified toolbar), so
+    /// the band reaches twice the button's center offset from the window
+    /// top. Only consulted for a bare-window or title-text hit.
+    static func isInTitleBar(pointY: CGFloat, windowTop: CGFloat, closeButtonMidY: CGFloat) -> Bool {
+        let bandHeight = 2 * (closeButtonMidY - windowTop)
+        guard bandHeight > 0, bandHeight <= maxTitleBarHeight else { return false }
+        return pointY >= windowTop && pointY <= windowTop + bandHeight
+    }
+
+    /// Tallest title bar + unified toolbar the band check accepts.
+    static let maxTitleBarHeight: CGFloat = 96
+
     /// Off the network/input queues: AX calls are synchronous IPC into the
     /// target app. One lookup per Smart Touch touch-down, never per move.
     static let queue = DispatchQueue(label: "smartTouch.classifier", qos: .userInteractive)
@@ -80,7 +108,50 @@ enum SmartTouchTargetClassifier {
               let element = hit else {
             return .notScrollable(reason: "noElement")
         }
-        return classify(roles: roleChain(from: element))
+        let roles = roleChain(from: element)
+        let decision = classify(roles: roles)
+        guard case .notScrollable = decision, isWindowDragCandidate(roles: roles),
+              isWindowDragRegion(leaf: element, leafRole: roles[0], point: point) else { return decision }
+        return .windowDrag
+    }
+
+    /// Live half of the window-drag check: a standard, movable window, and
+    /// — unless the hit is empty toolbar space, which AppKit always lets
+    /// drag the window — a point inside the title bar band.
+    private static func isWindowDragRegion(leaf: AXUIElement, leafRole: String, point: CGPoint) -> Bool {
+        let window: AXUIElement
+        if leafRole == kAXWindowRole as String {
+            window = leaf
+        } else if let parent = copyAttribute(leaf, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() {
+            window = parent as! AXUIElement
+        } else {
+            return false
+        }
+        AXUIElementSetMessagingTimeout(window, messagingTimeout)
+        guard copyAttribute(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole as String,
+              let windowPosition = pointValue(copyAttribute(window, kAXPositionAttribute)) else { return false }
+        if leafRole == kAXToolbarRole as String { return true }
+        guard let closeValue = copyAttribute(window, kAXCloseButtonAttribute),
+              CFGetTypeID(closeValue) == AXUIElementGetTypeID() else { return false }
+        let closeButton = closeValue as! AXUIElement
+        AXUIElementSetMessagingTimeout(closeButton, messagingTimeout)
+        guard let closePosition = pointValue(copyAttribute(closeButton, kAXPositionAttribute)),
+              let closeSize = sizeValue(copyAttribute(closeButton, kAXSizeAttribute)) else { return false }
+        return isInTitleBar(pointY: point.y, windowTop: windowPosition.y,
+                            closeButtonMidY: closePosition.y + closeSize.height / 2)
+    }
+
+    private static func pointValue(_ value: CFTypeRef?) -> CGPoint? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        return AXValueGetValue(value as! AXValue, .cgPoint, &point) ? point : nil
+    }
+
+    private static func sizeValue(_ value: CFTypeRef?) -> CGSize? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var size = CGSize.zero
+        return AXValueGetValue(value as! AXValue, .cgSize, &size) ? size : nil
     }
 
     private static func roleChain(from leaf: AXUIElement) -> [String] {

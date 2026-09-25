@@ -489,8 +489,11 @@ is up is a hover move.
 element under normalized `x`, `y`. The sender MUST answer every probe it
 receives with `smartTouchProbeResult` echoing `id`; any failure (no
 Accessibility permission, no element, input not allowed) answers
-`scrollable: false`. A receiver MUST NOT send it to a sender below pv 20,
-and MUST treat a missing or late reply as `false`.
+`scrollable: false`. The reply may also carry `windowDrag: true` when the
+point is on a standard window's title bar or empty toolbar space; a
+receiver MUST treat a missing `windowDrag` as `false`. A receiver MUST NOT
+send it to a sender below pv 20, and MUST treat a missing or late reply as
+`false`.
 
 **Pencil fallback (normative):** a receiver MUST NOT send `pencil` or
 `proximity` to a sender whose `pv` is below 3; it MUST degrade the stylus
@@ -620,7 +623,7 @@ section 4.
 | `audioState` | pv 12 | `enabled` (bool) | Mac-authoritative confirmed system-audio production state |
 | `mirrorDisplayState` | pv 13 | `selectedUUID`?, `displays` (array) | Mac-authoritative confirmed Mirror capture-source selection + display inventory |
 | `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool) | Mac-authoritative confirmed active Extend shape (section 6.7) |
-| `smartTouchProbeResult` | pv 20 | `id` (int), `scrollable` (bool) | Reply to `smartTouchProbe` |
+| `smartTouchProbeResult` | pv 20 | `id` (int), `scrollable` (bool), `windowDrag` (bool, optional) | Reply to `smartTouchProbe` |
 | `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
 
