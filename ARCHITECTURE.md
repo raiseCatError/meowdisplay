@@ -233,7 +233,9 @@ Sender's per-session Allow Input consent turns it on.
 - Mac Sender: `MacSender.awaitSessionAdmission` holds capture until the
   receiver accepts (and, for a receiver's request that needs it, until the
   Mac's user approves in `SessionApprovalPromptModel`). `SenderController`
-  applies the Mac's policy to receiver Connect requests and carries a
+  applies the Mac's policy to receiver Connect requests (their desired
+  Mirror/Extend arrives as `hello.requestedMode`; the Mac decides via
+  `SessionModePlanning`) and carries a
   session's invitation across `restartAll()` and wait-for-wake sessions.
 - Receivers: `StreamReceiver` answers invitations on its control queue and
   presents no media until admitted; prompts are

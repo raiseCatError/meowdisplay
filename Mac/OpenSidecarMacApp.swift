@@ -243,7 +243,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     var invitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
     /// A receiver-initiated request still waiting for this Mac's user.
     var awaitingLocalApproval = false
-    var invitationAdmitted = false
+    @Published var invitationAdmitted = false
     /// Nil once admitted (or before there is anything visible to wait on).
     @Published var invitationProgress: SessionInvitationProgress?
     // This session's current media activity/geometry, refreshed on the same
@@ -2275,6 +2275,7 @@ final class SenderController: ObservableObject {
             session.applicationAuthenticated = true
             Log.info("deviceUI: activeSession added peerID=\(info.id ?? "unknown") route=\(session.route?.rawValue ?? "pending")")
             session.receiverProtocolVersion = info.protocolVersion
+            self.applyReceiverRequestedMode(info.requestedMode, session: session)
             session.receiverMaxFPS = info.maxFPS
             if let value = info.trayEnabled { session.receiverTrayEnabled = value }
             if let value = info.keyboardButtonEnabled {
@@ -2632,9 +2633,13 @@ final class SenderController: ObservableObject {
         // `CanonicalConnectionPhase` instead of guessing from `statusText`.
         let capturePhase: CaptureLifecyclePhase
         let failed: Bool
+        /// Typed invitation state (`DeviceSession.invitationAdmitted`), so a
+        /// pending session is never presented as connected.
+        let awaitingApproval: Bool
 
         var phase: CanonicalConnectionPhase {
-            CanonicalRuntimeStatus.phase(capturePhase: capturePhase, failed: failed)
+            CanonicalRuntimeStatus.phase(capturePhase: capturePhase, failed: failed,
+                                         awaitingApproval: awaitingApproval)
         }
     }
 
@@ -2651,7 +2656,7 @@ final class SenderController: ObservableObject {
                                    videoWidth: session.videoWidth, videoHeight: session.videoHeight,
                                    videoFPS: session.videoFPS,
                                    bitrateBps: quality.bitrate, capturePhase: session.capturePhase,
-                                   failed: session.failed)
+                                   failed: session.failed, awaitingApproval: !session.invitationAdmitted)
             }
     }
 
@@ -2801,6 +2806,27 @@ final class SenderController: ObservableObject {
         continuingInvitations[session.logicalID] = (invitation, session.awaitingLocalApproval)
     }
 
+    /// A receiver-initiated request named a display mode in its hello. With
+    /// manual approval it only becomes the panel's default (Allow & Mirror /
+    /// Allow & Extend still decide); when auto-approved it is used if this
+    /// Mac can enter it. Mirror/Extend is Mac-wide, so a different mode
+    /// rebuilds the pipelines, carrying this session's invitation across.
+    private func applyReceiverRequestedMode(_ raw: String?, session: DeviceSession) {
+        guard session.invitation.initiator == .receiver, !session.invitationAdmitted,
+              let requested = SessionModePlanning.requestedMode(raw) else { return }
+        if session.awaitingLocalApproval {
+            sessionApprovalPrompt.updateRequestedMode(id: session.invitation.id, mode: requested)
+            return
+        }
+        let planned = CaptureMode(SessionModePlanning.mode(
+            senderChoice: nil, receiverRequested: requested, current: mode.receiverMode))
+        guard planned != mode, canEnterMode(planned) else { return }
+        Log.info("sessionInvite: honoring receiver-requested mode \(planned.rawValue) for \(session.logicalID)")
+        session.invitation.mode = planned.receiverMode
+        continueInvitation(of: session)
+        requestMode(planned)
+    }
+
     /// Cancel on the Mac's waiting state for an invitation (or its own
     /// pending approval).
     func cancelInvitation(_ session: DeviceSession) {
@@ -2826,10 +2852,15 @@ final class SenderController: ObservableObject {
             disconnect(session)
             return
         }
-        if let requested = plan.mode.map(CaptureMode.init), requested != mode, canEnterMode(requested) {
+        // Allow & Mirror / Allow & Extend override the receiver's request;
+        // Allow Permanently keeps the requested (or current) mode.
+        let requested = CaptureMode(SessionModePlanning.mode(
+            senderChoice: plan.mode, receiverRequested: approval.mode, current: mode.receiverMode))
+        if requested != mode, canEnterMode(requested) {
             // Mirror/Extend is Mac-wide: switching rebuilds every pipeline.
             // Capture has not started for this session, so carry it across
             // the rebuild already approved.
+            session.invitation.mode = requested.receiverMode
             continuingInvitations[session.logicalID] = (session.invitation, false)
             session.awaitingLocalApproval = false
             requestMode(requested)

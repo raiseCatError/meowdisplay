@@ -1,6 +1,6 @@
 # OpenDisplay Wire Protocol
 
-**Protocol version (`pv`): 15** &nbsp;|&nbsp; Status: **normative** for `pv <= 15`
+**Protocol version (`pv`): 21** &nbsp;|&nbsp; Status: **normative** for `pv <= 21`
 
 This document specifies the wire protocol spoken between an OpenDisplay
 *sender* (the machine whose desktop is extended, the Mac app today) and an
@@ -420,6 +420,8 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
 * `cursorPort` (int, optional, **removed**): formerly advertised the UDP
   cursor side channel. Current receivers never send it; current senders
   ignore it. Cursor positions always travel over the main transport.
+* `requestedMode` (string, optional, pv 21): `mirror` or `extend`, the mode
+  the receiver asked for with its own pending Connect (section 6.9).
 * `addrs` (array of strings, optional): every IP address the receiver is
   reachable on (section 6.4). Link-local IPv6 entries carry no zone id.
   The receiver SHOULD re-send `hello` when this set changes (a cable
@@ -943,7 +945,14 @@ remains the only way to turn it on.
   request (Bonjour TXT `cr` token, or the authenticated knock on
   `remoteRequestPort`). The sender applies its own incoming policy before
   dialing: blocked → no dial; manual approval → dial, but hold capture
-  until its user decides.
+  until its user decides. Neither request carries data; a desired mode
+  travels as `hello.requestedMode` (`mirror` or `extend`, optional), sent
+  only inside the authenticated session and only while the receiver's own
+  request is outstanding (30 s). The sender uses it when auto-approving if
+  it can enter that mode; with manual approval it is the prompt's default,
+  and the sender's Allow & Mirror / Allow & Extend choice overrides it.
+  Absent (older receivers, or no choice) means the sender's current mode.
+  It is never stored with Always Allow.
 * Sender-initiated: the sender dials as before, with the display mode its
   user chose.
 
@@ -1104,7 +1113,7 @@ Rules already stated elsewhere, gathered:
 Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 
 * `pv` is a single integer, bumped **only when the wire changes**, never
-  per release. Current: **14**.
+  per release. Current: **21**.
 * A peer that advertises no `pv` anywhere (TXT, `hello`, `welcome`) **is**
   protocol 1.
 * Each side declares the oldest peer it supports (`welcome.min` on the

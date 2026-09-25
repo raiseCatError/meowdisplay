@@ -290,4 +290,56 @@ final class SessionInvitationTests: XCTestCase {
     func testProtocolVersionAdvertisesInvitations() {
         XCTAssertGreaterThanOrEqual(WireProtocol.version, WireProtocol.sessionInvitationWireVersion)
     }
+
+    // MARK: - Receiver-requested mode
+
+    func testReceiverRequestedModeSurvivesPlanning() {
+        for requested in [ReceiverDisplayMode.mirror, .extend] {
+            let parsed = SessionModePlanning.requestedMode(requested.rawValue)
+            XCTAssertEqual(parsed, requested)
+            // Auto-approved: the request wins over the Mac's current mode.
+            XCTAssertEqual(SessionModePlanning.mode(senderChoice: nil, receiverRequested: parsed,
+                                                    current: requested == .mirror ? .extend : .mirror), requested)
+        }
+    }
+
+    func testManualApprovalOverridesRequestedMode() {
+        let choice = SessionApprovalPlan.plan(for: SenderApprovalDecision.allowMirror).mode
+        XCTAssertEqual(SessionModePlanning.mode(senderChoice: choice, receiverRequested: .extend, current: .extend), .mirror)
+        let permanent = SessionApprovalPlan.plan(for: SenderApprovalDecision.allowPermanently).mode
+        XCTAssertEqual(SessionModePlanning.mode(senderChoice: permanent, receiverRequested: .mirror, current: .extend), .mirror)
+    }
+
+    func testMissingOrUnknownRequestedModeFallsBackToCurrent() {
+        XCTAssertNil(SessionModePlanning.requestedMode(nil))
+        XCTAssertNil(SessionModePlanning.requestedMode("sideways"))
+        XCTAssertEqual(SessionModePlanning.mode(senderChoice: nil, receiverRequested: nil, current: .extend), .extend)
+    }
+
+    func testPromptDefaultFollowsLateRequestedMode() {
+        var approvals = PendingSessionApprovals()
+        approvals.begin(approval("1", peer: "a"))
+        approvals.updateMode(id: "1", mode: .mirror)
+        XCTAssertEqual(approvals.first?.mode, .mirror)
+        approvals.updateMode(id: "stale", mode: .extend)
+        XCTAssertEqual(approvals.first?.mode, .mirror)
+    }
+
+    func testAllowPermanentlyDoesNotPersistMode() {
+        let plan = SessionApprovalPlan.plan(for: SenderApprovalDecision.allowPermanently)
+        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", defaults: defaults) }
+        let domain = defaults.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertEqual(domain.count, 1, "only the connection policy is stored")
+        XCTAssertEqual(domain.values.first as? [String: String], ["a": "alwaysAllow"])
+    }
+
+    func testHelloRequestedModeExpiresWithOutgoingRequest() {
+        let state = ReceiverHelloState()
+        let now = Date()
+        state.setRequestedMode(.mirror, until: now.addingTimeInterval(30))
+        XCTAssertEqual(state.requestedMode(now: now), .mirror)
+        XCTAssertNil(state.requestedMode(now: now.addingTimeInterval(30)))
+        state.setRequestedMode(nil, until: .distantPast)
+        XCTAssertNil(state.requestedMode(now: now))
+    }
 }

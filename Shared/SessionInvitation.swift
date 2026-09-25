@@ -266,6 +266,24 @@ struct SessionApprovalPlan: Equatable, Sendable {
     }
 }
 
+// MARK: - Display mode planning
+
+/// Which Mirror/Extend a session uses. The Mac Sender is the final authority:
+/// its user's explicit approval choice wins, then the receiver's requested
+/// mode, then the Mac's current mode (older receivers never send one). Never
+/// persisted with Always Allow.
+enum SessionModePlanning {
+    static func mode(senderChoice: ReceiverDisplayMode?, receiverRequested: ReceiverDisplayMode?,
+                     current: ReceiverDisplayMode) -> ReceiverDisplayMode {
+        senderChoice ?? receiverRequested ?? current
+    }
+
+    /// Parses `hello.requestedMode`; anything unknown is ignored.
+    static func requestedMode(_ raw: String?) -> ReceiverDisplayMode? {
+        raw.flatMap(ReceiverDisplayMode.init(rawValue:))
+    }
+}
+
 // MARK: - Pending lifecycle
 
 /// A prompt waiting on this endpoint's user.
@@ -276,7 +294,8 @@ struct PendingSessionApproval: Identifiable, Equatable, Sendable {
     let peerName: String
     /// The role of this endpoint in the requested session.
     let localRole: SessionRole
-    let mode: ReceiverDisplayMode
+    /// Requested/intended mode — context and the prompt's default choice.
+    var mode: ReceiverDisplayMode
     let createdAt: Date
 }
 
@@ -308,6 +327,12 @@ struct PendingSessionApprovals: Equatable, Sendable {
     mutating func resolve(id: String) -> PendingSessionApproval? {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
         return entries.remove(at: index)
+    }
+
+    /// The receiver's requested mode arrived after the prompt was raised.
+    mutating func updateMode(id: String, mode: ReceiverDisplayMode) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].mode = mode
     }
 
     /// Peer disconnected or was forgotten.

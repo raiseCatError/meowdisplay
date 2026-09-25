@@ -24,6 +24,10 @@ final class SessionApprovalPromptModel: ObservableObject {
         onPending?()
     }
 
+    func updateRequestedMode(id: String, mode: ReceiverDisplayMode) {
+        approvals.updateMode(id: id, mode: mode)
+    }
+
     func decide(_ decision: SenderApprovalDecision, for id: String) {
         guard let approval = approvals.resolve(id: id) else {
             Log.info("sessionInvite: ignored stale approval id=\(id)")

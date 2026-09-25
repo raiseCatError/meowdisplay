@@ -134,6 +134,21 @@ final class ReceiverHelloState: @unchecked Sendable {
     private let lock = NSLock()
     private var current = Snapshot()
     private var lastAdvertisedAddrs: [String] = []
+    /// Display mode this device asked for with its own pending Connect
+    /// request (pv 21 `hello.requestedMode`), until it expires or the Mac's
+    /// resulting invitation is accepted.
+    private var requestedMode: (mode: ReceiverDisplayMode, until: Date)?
+
+    func setRequestedMode(_ mode: ReceiverDisplayMode?, until: Date) {
+        lock.lock(); defer { lock.unlock() }
+        requestedMode = mode.map { ($0, until) }
+    }
+
+    func requestedMode(now: Date = Date()) -> ReceiverDisplayMode? {
+        lock.lock(); defer { lock.unlock() }
+        guard let requestedMode, now < requestedMode.until else { return nil }
+        return requestedMode.mode
+    }
 
     func snapshot() -> Snapshot {
         lock.lock(); defer { lock.unlock() }
@@ -2612,6 +2627,12 @@ final class StreamReceiver: ObservableObject {
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
         ]
+        // Sent only inside the authenticated session, never in Bonjour TXT:
+        // the mode this device asked for with its own Connect (pv 21). The
+        // Mac stays the final authority.
+        if let requestedMode = helloState.requestedMode() {
+            hello["requestedMode"] = requestedMode.rawValue
+        }
         if deviceKind != "Mac" {
             // Receiver Swift6-Hello-2: the 11 announced preference mirrors
             // now come from `helloState`'s snapshot — the sole authoritative
@@ -4019,6 +4040,8 @@ final class StreamReceiver: ObservableObject {
                   Date() < request.until, request.peerID == nil || request.peerID == peerID {
             // This device asked for exactly this.
             decision = .accept
+            outgoingSessionRequest = nil
+            helloState.setRequestedMode(nil, until: .distantPast)
         } else {
             decision = policy
         }
@@ -4078,6 +4101,7 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
             self.outgoingSessionRequest = nil
+            self.helloState.setRequestedMode(nil, until: .distantPast)
             if let id = self.currentSessionInvitationID {
                 self.sendControl(SessionInvitationResponse(id: id, result: .cancelled).message)
             }
@@ -4207,8 +4231,9 @@ final class StreamReceiver: ObservableObject {
     /// route's dial completes first simply becomes the session — `adopt(_:)`
     /// already replaces any in-flight connection, so there is no risk of a
     /// duplicate session from racing routes.
-    func connectPrimary(peerID: String) {
+    func connectPrimary(peerID: String, mode: ReceiverDisplayMode? = nil) {
         reconnectContext.update { $0.manualConnectPeerID = peerID }
+        helloState.setRequestedMode(mode, until: Date().addingTimeInterval(Self.outgoingSessionRequestWindow))
         let selfBox = self.selfBox
         queue.async {
             selfBox.currentOnQueue()?.outgoingSessionRequest = (peerID, Date().addingTimeInterval(Self.outgoingSessionRequestWindow))

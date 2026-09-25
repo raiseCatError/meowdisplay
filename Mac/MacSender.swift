@@ -87,6 +87,10 @@ struct PhoneInfo: Decodable {
                           // Early UX only; the in-band v13 ceremony is the
                           // real pairing-compatibility decision and fails
                           // closed regardless of this field.
+    /// pv 21: the display mode a receiver asked for with its own Connect
+    /// request. Authenticated (inside the pinned session) but only a
+    /// preference — the Mac decides.
+    let requestedMode: String?
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
@@ -4832,6 +4836,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 receiverSupportsInvitations: supportsInvitations, needsSenderApproval: needsSenderApproval)
             if senderRejectedSession { gate.senderDecided(accept: false) }
             admissionGate = gate
+            // Publish at once (e.g. `.admitted` for a pre-pv 21 receiver),
+            // not only when startup reaches its gate.
+            evaluateSessionAdmission()
         }
         guard supportsInvitations, let gate = admissionGate else { return }
         if gate.state == .admitted { sessionInvitation.intent = .automatic }

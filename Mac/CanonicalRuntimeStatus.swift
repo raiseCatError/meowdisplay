@@ -7,6 +7,9 @@ import Foundation
 enum CanonicalConnectionPhase: Equatable {
     case idle
     case connected
+    /// Authenticated, but the session invitation is not yet admitted
+    /// (either side's user may still be deciding). Never "connected".
+    case awaitingApproval
     case paused
     case reconnecting
     case lost
@@ -58,8 +61,10 @@ enum CanonicalRuntimeStatus {
     /// naming what's already tracked so the toolbar stops reading
     /// authenticated-count alone (which can't distinguish a healthy session
     /// from one that's mid-recovery or has failed outright).
-    static func phase(capturePhase: CaptureLifecyclePhase, failed: Bool) -> CanonicalConnectionPhase {
+    static func phase(capturePhase: CaptureLifecyclePhase, failed: Bool,
+                      awaitingApproval: Bool = false) -> CanonicalConnectionPhase {
         if failed { return .lost }
+        if awaitingApproval { return .awaitingApproval }
         switch capturePhase {
         case .recovering: return .reconnecting
         case .paused, .pausing: return .paused
@@ -75,6 +80,7 @@ enum CanonicalRuntimeStatus {
         guard !entryPhases.isEmpty else { return .idle }
         if entryPhases.contains(.lost) { return .lost }
         if entryPhases.contains(.reconnecting) { return .reconnecting }
+        if entryPhases.contains(.awaitingApproval) { return .awaitingApproval }
         if entryPhases.allSatisfy({ $0 == .paused }) { return .paused }
         return .connected
     }
@@ -88,6 +94,7 @@ enum CanonicalRuntimeStatus {
         case .connected: return headline(mode: mode, route: route)
         case .paused: return headline(verb: String(localized: "Paused"), route: route)
         case .reconnecting: return String(localized: "Reconnecting…")
+        case .awaitingApproval: return String(localized: "Waiting for approval…")
         case .lost: return String(localized: "Connection Lost")
         case .idle: return String(localized: "Idle")
         }
@@ -106,6 +113,7 @@ enum CanonicalRuntimeStatus {
         switch aggregatePhase(entryPhases: entries.map(\.phase)) {
         case .lost: return String(localized: "Connection Lost")
         case .reconnecting: return String(localized: "Reconnecting…")
+        case .awaitingApproval: return String(localized: "Waiting for approval…")
         case .paused: return String(localized: "\(entries.count) devices paused",
                                                   comment: "Toolbar status; the count is always 2 or more.")
         case .connected, .idle: return statusText(activeDisplayCount: entries.count)

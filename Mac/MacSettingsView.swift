@@ -500,6 +500,7 @@ struct StatusBadge: View {
         case .connected: return .green
         case .paused: return .secondary
         case .reconnecting: return .yellow
+        case .awaitingApproval: return .orange
         case .lost: return .red
         case .idle: return .secondary.opacity(0.5)
         }
@@ -547,7 +548,8 @@ struct ToolbarQuickActions: View {
     let controller: SenderController
 
     private var phase: CanonicalConnectionPhase {
-        CanonicalRuntimeStatus.phase(capturePhase: session.capturePhase, failed: session.failed)
+        CanonicalRuntimeStatus.phase(capturePhase: session.capturePhase, failed: session.failed,
+                                     awaitingApproval: !session.invitationAdmitted)
     }
 
     var body: some View {

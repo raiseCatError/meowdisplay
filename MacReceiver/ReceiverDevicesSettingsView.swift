@@ -281,10 +281,16 @@ struct ReceiverPairedMacRow<Trailing: View>: View {
             } else if !receiver.connected {
                 // Wake & Connect only when a local-network wake hint was
                 // learned from this Mac; it never claims remote wake.
-                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again"
-                       : canWake ? "Wake & Connect" : "Connect") {
+                Menu {
+                    Button("Connect with Mirror") { wakeConnect.begin(peerID: peerID, mode: .mirror) }
+                    Button("Connect with Extend") { wakeConnect.begin(peerID: peerID, mode: .extend) }
+                } label: {
+                    Text(wakeConnect.failed(forPeerID: peerID) ? "Try Again"
+                         : canWake ? "Wake & Connect" : "Connect")
+                } primaryAction: {
                     wakeConnect.begin(peerID: peerID)
                 }
+                .fixedSize()
                 .controlSize(.small)
             }
             trailing

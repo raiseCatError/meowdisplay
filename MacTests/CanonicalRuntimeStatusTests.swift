@@ -132,4 +132,26 @@ final class CanonicalRuntimeStatusTests: XCTestCase {
             [(mode: .mirror, route: .lan, phase: .connected), (mode: .extend, route: nil, phase: .lost)]
         XCTAssertEqual(CanonicalRuntimeStatus.aggregateStatusText(entries: entries), "Connection Lost")
     }
+
+    // MARK: - Session invitation pending (pv 21)
+
+    func testPendingInvitationIsNeverConnected() {
+        let phase = CanonicalRuntimeStatus.phase(capturePhase: .running, failed: false, awaitingApproval: true)
+        XCTAssertEqual(phase, .awaitingApproval)
+        XCTAssertEqual(CanonicalRuntimeStatus.entryStatusText(mode: .extend, route: .lan, phase: phase),
+                       "Waiting for approval…")
+        XCTAssertEqual(CanonicalRuntimeStatus.aggregateStatusText(
+            entries: [(mode: .extend, route: .lan, phase: phase)]), "Waiting for approval…")
+        XCTAssertNotEqual(CanonicalRuntimeStatus.aggregatePhase(entryPhases: [.connected, phase]), .connected)
+    }
+
+    func testAdmittedSessionReturnsToConnected() {
+        let phase = CanonicalRuntimeStatus.phase(capturePhase: .running, failed: false, awaitingApproval: false)
+        XCTAssertEqual(phase, .connected)
+        XCTAssertEqual(CanonicalRuntimeStatus.entryStatusText(mode: .extend, route: nil, phase: phase), "Extending")
+    }
+
+    func testRefusedPendingSessionIsLostNotWaiting() {
+        XCTAssertEqual(CanonicalRuntimeStatus.phase(capturePhase: .running, failed: true, awaitingApproval: true), .lost)
+    }
 }

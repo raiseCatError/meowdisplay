@@ -180,28 +180,34 @@ struct SessionRow: View {
     }
 
     var body: some View {
-        if let progress = session.invitationProgress {
-            invitationRow(progress)
+        if session.invitationProgress != nil || (!session.invitationAdmitted && !session.failed) {
+            invitationRow(session.invitationProgress)
         } else {
             sessionRow
         }
     }
 
     /// Waiting for the other device (or this Mac's own approval panel).
-    private func invitationRow(_ progress: SessionInvitationProgress) -> some View {
+    private func invitationRow(_ progress: SessionInvitationProgress?) -> some View {
         HStack(alignment: .center) {
             ProgressView().controlSize(.small)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                Text(progress == .waitingForSender
-                     ? String(localized: "Waiting for your approval…")
-                     : String(localized: "Waiting for \(title) to accept…"))
+                Text(invitationText(progress))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Button("Cancel") { controller.cancelInvitation(session) }
                 .controlSize(.small)
+        }
+    }
+
+    private func invitationText(_ progress: SessionInvitationProgress?) -> String {
+        switch progress {
+        case .waitingForSender: return String(localized: "Waiting for your approval…")
+        case .waitingForReceiver: return String(localized: "Waiting for \(title) to accept…")
+        default: return String(localized: "Waiting for approval…")
         }
     }
 

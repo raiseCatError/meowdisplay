@@ -84,7 +84,9 @@ final class WakeConnectCoordinator: ObservableObject {
 
     // MARK: - Entry points
 
-    func begin(peerID: String) {
+    /// `mode` is the display mode this device asks the Mac for (pv 21
+    /// `hello.requestedMode`); nil leaves the choice to the Mac.
+    func begin(peerID: String, mode: ReceiverDisplayMode? = nil) {
         guard !receiver.connected else { return }
         guard !isRunning(forPeerID: peerID) else { return }   // no duplicate concurrent attempts
         stopAllTimers()
@@ -98,7 +100,7 @@ final class WakeConnectCoordinator: ObservableObject {
         // plaintext listener, publishes the first one-shot token) and also
         // clears explicit-disconnect suppression — exactly what "IDLE AFTER
         // EXPLICIT DISCONNECT" needs. It also sends the first remote knock.
-        receiver.connectPrimary(peerID: peerID)
+        receiver.connectPrimary(peerID: peerID, mode: mode)
         Log.info("wakeConnect: listenerReady")
         if attempt.connectRequestPublished() {
             Log.info("wakeConnect: connectRequestPublished token=pending")

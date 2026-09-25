@@ -1073,8 +1073,15 @@ struct IdleView: View {
                 }
                 .buttonStyle(.borderedProminent)
             } else {
-                Button("Connect") { receiver.requestConnect() }
-                    .buttonStyle(.borderedProminent)
+                Menu {
+                    Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
+                    Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
+                } label: {
+                    Text("Connect")
+                } primaryAction: {
+                    receiver.requestConnect()
+                }
+                .buttonStyle(.borderedProminent)
             }
         } else {
             Button("Connect") { receiver.requestConnect() }
