@@ -16,8 +16,12 @@ enum WakeForNetworkAccessStatus: String {
 enum WakeInspector {
     /// Parses `pmset -g` output for the `womp` (Wake on Magic Packet) line.
     /// Read-only: never invoked with `-a` or any writing subcommand.
-    static func wakeForNetworkAccessStatus() -> WakeForNetworkAccessStatus {
-        guard let output = runReadOnly("/usr/bin/pmset", args: ["-g"]) else { return .unknown }
+    static func wakeForNetworkAccessStatus() async -> WakeForNetworkAccessStatus {
+        guard let output = await runReadOnly("/usr/bin/pmset", args: ["-g"]) else { return .unknown }
+        return parseWakeForNetworkAccess(output)
+    }
+
+    static func parseWakeForNetworkAccess(_ output: String) -> WakeForNetworkAccessStatus {
         for line in output.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard trimmed.hasPrefix("womp") else { continue }
@@ -31,7 +35,7 @@ enum WakeInspector {
     /// Settings' "Sleep Now" affordance uses — no IOKit privilege escalation,
     /// no custom power-management state changes.
     static func sleepNow() {
-        _ = runReadOnly("/usr/bin/pmset", args: ["sleepnow"])
+        processQueue.async { _ = runOnProcessQueue("/usr/bin/pmset", args: ["sleepnow"]) }
     }
 
     /// This Mac's own current wake metadata (Wake-on-LAN packets target the
@@ -111,15 +115,33 @@ enum WakeInspector {
         return String(decoding: buffer[..<nullTerminatorIndex].map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
+    /// Every subprocess runs here, one at a time. `Process.waitUntilExit()`
+    /// spins the calling thread's run loop until the child exits; on the main
+    /// thread — where these used to run, from SwiftUI `@State` initializers
+    /// re-evaluated on every view rebuild — that re-entered AppKit/SwiftUI in
+    /// the middle of a view update and aborted. The process is created, run
+    /// and waited on entirely on this queue and never escapes it.
+    private static let processQueue = DispatchQueue(label: "WakeInspector.process", qos: .utility)
+
+    private static func runReadOnly(_ executable: String, args: [String]) async -> String? {
+        await withCheckedContinuation { continuation in
+            processQueue.async {
+                continuation.resume(returning: runOnProcessQueue(executable, args: args))
+            }
+        }
+    }
+
     /// The one and only place a subprocess is launched from this file — a
     /// fixed executable path and a fixed, non-caller-supplied argument list.
-    private static func runReadOnly(_ executable: String, args: [String]) -> String? {
+    private static func runOnProcessQueue(_ executable: String, args: [String]) -> String? {
+        dispatchPrecondition(condition: .onQueue(processQueue))
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        // Never read; a pipe here could fill and block the child.
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {

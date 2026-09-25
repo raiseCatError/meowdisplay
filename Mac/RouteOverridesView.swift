@@ -77,7 +77,7 @@ struct RemoteEndpointDebugView: View {
 /// the follow-up wake attempt is on record.
 struct WakeTestingDebugView: View {
     @State private var metadata = WakeInspector.currentInterfaceWakeMetadata()
-    @State private var wakeStatus = WakeInspector.wakeForNetworkAccessStatus()
+    @State private var wakeStatus = WakeForNetworkAccessStatus.unknown
     @State private var promotionResult: String?
 
     var body: some View {
@@ -91,10 +91,11 @@ struct WakeTestingDebugView: View {
             Text("No active LAN interface found").foregroundStyle(.secondary)
         }
         LabeledContent("Wake for Network Access", value: wakeStatus.rawValue)
+            .task { wakeStatus = await WakeInspector.wakeForNetworkAccessStatus() }
         HStack {
             Button("Recheck") {
                 metadata = WakeInspector.currentInterfaceWakeMetadata()
-                wakeStatus = WakeInspector.wakeForNetworkAccessStatus()
+                Task { wakeStatus = await WakeInspector.wakeForNetworkAccessStatus() }
             }
             Button("Sleep This Mac for WoL Test") {
                 if let metadata {

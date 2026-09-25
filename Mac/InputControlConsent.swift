@@ -120,6 +120,12 @@ enum EffectiveInputAuthorization {
     static func allowed(masterEnabled: Bool, sessionGranted: Bool) -> Bool {
         masterEnabled && sessionGranted
     }
+
+    /// The `MacSender` control-message gate: a session whose invitation is
+    /// not admitted (pv 21) has nothing to control, whatever its grant says.
+    static func allowed(masterEnabled: Bool, sessionGranted: Bool, sessionAdmitted: Bool) -> Bool {
+        sessionAdmitted && allowed(masterEnabled: masterEnabled, sessionGranted: sessionGranted)
+    }
 }
 
 /// Thread-safe box for one session's ephemeral input grant, shared between

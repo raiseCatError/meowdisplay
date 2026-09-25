@@ -4036,7 +4036,8 @@ final class StreamReceiver: ObservableObject {
         } else if sessionAdmission.isContinuation(of: invitation, peerID: peerID) {
             // Same session after a reconnect or pipeline rebuild.
             decision = .accept
-        } else if invitation.initiator == .receiver, let request = outgoingSessionRequest,
+        } else if invitation.initiator == .receiver, invitation.intent == .manual,
+                  let request = outgoingSessionRequest,
                   Date() < request.until, request.peerID == nil || request.peerID == peerID {
             // This device asked for exactly this.
             decision = .accept

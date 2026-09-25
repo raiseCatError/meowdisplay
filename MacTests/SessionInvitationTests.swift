@@ -342,4 +342,121 @@ final class SessionInvitationTests: XCTestCase {
         state.setRequestedMode(nil, until: .distantPast)
         XCTAssertNil(state.requestedMode(now: now))
     }
+
+    // MARK: - Admission boundary (regressions from the first manual test)
+
+    private func existing(_ invitation: SessionInvitation, admitted: Bool = false) -> ReceiverRequestAdmission.ExistingSession {
+        .init(admitted: admitted, invitation: invitation)
+    }
+
+    /// The reported race: the Mac's own auto-connect attempt for the receiver
+    /// was already dialing when the receiver's explicit Connect arrived and
+    /// absorbed it, so the Mac's manual-approval policy never applied.
+    func testReceiverRequestReplacesUnadmittedAutomaticAttemptAndStillNeedsApproval() {
+        let auto = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
+        let action = ReceiverRequestAdmission.decide(policy: .askUser, existing: existing(auto))
+        XCTAssertEqual(action, .replace(needsSenderApproval: true))
+    }
+
+    func testReceiverRequestMatrixOnMacSender() {
+        func decide(_ peer: IncomingSessionPeerPolicy?, global: Bool) -> ReceiverRequestAdmission.Action {
+            ReceiverRequestAdmission.decide(
+                policy: IncomingSessionPolicy.resolve(peerPolicy: peer, automaticallyAllow: global, intent: .manual),
+                existing: nil)
+        }
+        for global in [true, false] {
+            XCTAssertEqual(decide(.blocked, global: global), .drop)
+            XCTAssertEqual(decide(.alwaysAllow, global: global), .start(needsSenderApproval: false))
+        }
+        XCTAssertEqual(decide(nil, global: true), .start(needsSenderApproval: false))
+        XCTAssertEqual(decide(nil, global: false), .start(needsSenderApproval: true))
+    }
+
+    func testExistingSessionsThatAlreadyCoverTheRequestAreKept() {
+        let admittedAuto = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
+        XCTAssertEqual(ReceiverRequestAdmission.decide(policy: .askUser, existing: existing(admittedAuto, admitted: true)),
+                       .alreadyHandled)
+        let duplicateKnock = SessionInvitation(initiator: .receiver, intent: .manual, mode: .extend)
+        XCTAssertEqual(ReceiverRequestAdmission.decide(policy: .askUser, existing: existing(duplicateKnock)), .alreadyHandled)
+        let macInvite = SessionInvitation(initiator: .sender, intent: .manual, mode: .mirror)
+        XCTAssertEqual(ReceiverRequestAdmission.decide(policy: .accept, existing: existing(macInvite)), .alreadyHandled)
+        XCTAssertEqual(ReceiverRequestAdmission.decide(policy: .block, existing: existing(admittedAuto)), .drop)
+    }
+
+    /// Global OFF + explicit receiver Connect: the receiver accepting its own
+    /// returning invitation must not admit the session, nor allow input,
+    /// until the Mac's user approves.
+    func testExplicitReceiverRequestCannotBeAdmittedBeforeMacApproval() {
+        guard case .start(let needsApproval) = ReceiverRequestAdmission.decide(
+            policy: IncomingSessionPolicy.resolve(peerPolicy: nil, automaticallyAllow: false, intent: .manual),
+            existing: nil) else { return XCTFail("expected a start") }
+        let planned = SessionStartPlanning.plan(continuation: nil, initiator: .receiver, userInitiated: true,
+                                                needsSenderApproval: needsApproval, mode: .extend)
+        var gate = SessionAdmissionGate(receiverSupportsInvitations: true,
+                                        needsSenderApproval: planned.needsSenderApproval)
+        gate.receiverResponded(.accepted)   // receiver's own-request correlation
+        XCTAssertEqual(gate.state, .waiting)
+        XCTAssertEqual(gate.progress, .waitingForSender)
+        XCTAssertFalse(EffectiveInputAuthorization.allowed(masterEnabled: true, sessionGranted: true,
+                                                           sessionAdmitted: gate.state == .admitted))
+        gate.senderDecided(accept: true)
+        XCTAssertEqual(gate.state, .admitted)
+    }
+
+    func testLegacyReceiverRequestStillWaitsForMacApproval() {
+        var gate = SessionAdmissionGate(receiverSupportsInvitations: false, needsSenderApproval: true)
+        XCTAssertEqual(gate.state, .waiting)
+        gate.senderDecided(accept: false)
+        XCTAssertEqual(gate.state, .refused(.declined))
+    }
+
+    func testSenderInviteWaitsForReceiverPrompt() {
+        var gate = SessionAdmissionGate(receiverSupportsInvitations: true, needsSenderApproval: false)
+        gate.receiverResponded(.pending)
+        XCTAssertNotEqual(gate.state, .admitted)
+        gate.receiverResponded(.declined)
+        gate.receiverResponded(.accepted)
+        XCTAssertEqual(gate.state, .refused(.declined))
+    }
+
+    func testAutomaticAttemptUnderManualPolicyIsNeverAdmitted() {
+        let decision = IncomingSessionPolicy.resolve(peerPolicy: nil, automaticallyAllow: false, intent: .automatic)
+        XCTAssertEqual(decision, .decline)
+        var gate = SessionAdmissionGate(receiverSupportsInvitations: true, needsSenderApproval: false)
+        gate.receiverResponded(.declined)
+        XCTAssertEqual(gate.state, .refused(.declined))
+    }
+
+    func testPendingSessionRejectsInputWhateverTheGrant() {
+        XCTAssertFalse(EffectiveInputAuthorization.allowed(masterEnabled: true, sessionGranted: true, sessionAdmitted: false))
+        XCTAssertFalse(EffectiveInputAuthorization.allowed(masterEnabled: true, sessionGranted: false, sessionAdmitted: true))
+        XCTAssertTrue(EffectiveInputAuthorization.allowed(masterEnabled: true, sessionGranted: true, sessionAdmitted: true))
+    }
+
+    // MARK: - Continuations
+
+    func testExplicitOrUnrelatedAttemptsNeverInheritAContinuation() {
+        let approved = SessionContinuation.carrying(
+            SessionInvitation(initiator: .receiver, intent: .manual, mode: .extend),
+            admitted: true, awaitingLocalApproval: false)
+        let explicit = SessionStartPlanning.plan(continuation: approved, initiator: .sender, userInitiated: true,
+                                                 needsSenderApproval: false, mode: .mirror)
+        XCTAssertNotEqual(explicit.invitation.id, approved.invitation.id)
+        let autoConnect = SessionStartPlanning.plan(continuation: nil, initiator: .sender, userInitiated: false,
+                                                    needsSenderApproval: false, mode: .mirror)
+        XCTAssertEqual(autoConnect.invitation.initiator, .sender)
+        XCTAssertEqual(autoConnect.invitation.intent, .automatic)
+        XCTAssertNotEqual(autoConnect.invitation.id, approved.invitation.id)
+    }
+
+    func testRebuildCarriesPendingApprovalUnchanged() {
+        let pending = SessionInvitation(initiator: .receiver, intent: .manual, mode: .extend)
+        let carried = SessionContinuation.carrying(pending, admitted: false, awaitingLocalApproval: true)
+        let rebuilt = SessionStartPlanning.plan(continuation: carried, initiator: .sender, userInitiated: false,
+                                                needsSenderApproval: false, mode: .mirror)
+        XCTAssertEqual(rebuilt.invitation, pending)
+        XCTAssertTrue(rebuilt.needsSenderApproval, "a mode rebuild must never admit a pending request")
+        let admitted = SessionContinuation.carrying(pending, admitted: true, awaitingLocalApproval: false)
+        XCTAssertEqual(admitted.invitation.intent, .automatic)
+    }
 }

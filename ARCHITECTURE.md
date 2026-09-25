@@ -235,8 +235,12 @@ Sender's per-session Allow Input consent turns it on.
   Mac's user approves in `SessionApprovalPromptModel`). `SenderController`
   applies the Mac's policy to receiver Connect requests (their desired
   Mirror/Extend arrives as `hello.requestedMode`; the Mac decides via
-  `SessionModePlanning`) and carries a
-  session's invitation across `restartAll()` and wait-for-wake sessions.
+  `SessionModePlanning`) and hands a
+  session's invitation only to the pipeline that replaces it
+  (`restartAll()`, wait-for-wake). A receiver's request is never absorbed
+  by an unadmitted auto-connect attempt of the Mac's own
+  (`ReceiverRequestAdmission`), and remote input also requires the session
+  to be admitted.
 - Receivers: `StreamReceiver` answers invitations on its control queue and
   presents no media until admitted; prompts are
   `Shared/SessionInvitationViews.swift` (iOS) and

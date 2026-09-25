@@ -2666,7 +2666,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// even while the Mac master is fully on.
     private func receiverInputIsAllowed() -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                   sessionGranted: sessionInputGrant.get()),
+                                                   sessionGranted: sessionInputGrant.get(),
+                                                   sessionAdmitted: admissionGate?.state == .admitted),
               captureStateSnapshot().allowsInput else {
             inputInjector?.cancelActiveInput()
             return false
@@ -2681,7 +2682,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// allowsKeyboardInput`), without touching that shared policy.
     private func receiverKeyboardInputIsAllowed() -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                   sessionGranted: sessionInputGrant.get()),
+                                                   sessionGranted: sessionInputGrant.get(),
+                                                   sessionAdmitted: admissionGate?.state == .admitted),
               captureStateSnapshot().allowsKeyboardInput else {
             inputInjector?.cancelActiveInput()
             return false

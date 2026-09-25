@@ -4,7 +4,9 @@ import SwiftUI
 /// `pmset -g`, never required for ordinary MEOW usage, only for Wake
 /// functionality once the Tailscale wake relay exists.
 struct WakeForNetworkAccessRow: View {
-    @State private var status = WakeInspector.wakeForNetworkAccessStatus()
+    // Loaded in `.task`, never in the initializer: a view initializer runs
+    // on every parent rebuild, during SwiftUI's update.
+    @State private var status = WakeForNetworkAccessStatus.unknown
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -28,9 +30,10 @@ struct WakeForNetworkAccessRow: View {
                 }
             }
             .controlSize(.small)
-            Button("Recheck") { status = WakeInspector.wakeForNetworkAccessStatus() }
+            Button("Recheck") { Task { status = await WakeInspector.wakeForNetworkAccessStatus() } }
                 .controlSize(.small)
         }
+        .task { status = await WakeInspector.wakeForNetworkAccessStatus() }
     }
 
     private var iconName: String {

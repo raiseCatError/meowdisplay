@@ -383,10 +383,6 @@ final class SenderController: ObservableObject {
     let inputControlPrompt = InputControlRequestPromptModel()
     /// Receiver-initiated session requests awaiting this Mac's approval.
     let sessionApprovalPrompt = SessionApprovalPromptModel()
-    /// Invitations carried across `restartAll()` (a Mac-wide mode/quality
-    /// change rebuilds every pipeline) so receivers recognize the same
-    /// session instead of being asked again. Keyed by logical ID.
-    private var continuingInvitations: [String: (invitation: SessionInvitation, needsSenderApproval: Bool)] = [:]
     private var pairingObservation: AnyCancellable?
     // `-mode mirror` / `-mode extend` launch argument also works.
     // Mode/quality apply per-pipeline at construction, so a change rebuilds
@@ -1276,10 +1272,9 @@ final class SenderController: ObservableObject {
             }
             Log.info("connectDebug: receiverConnectRequestAccepted peer=\(peerID)")
             let target = ConnectionTarget.wifi(result)
-            if let existing = session(for: target.sessionID), !existing.failed {
-                Log.info("connectDebug: senderStartRequested peer=\(peerID) alreadyConnecting=true")
-                continue
-            }
+            // Policy and any existing session are judged together — a
+            // session this Mac started on its own must not absorb the
+            // request (see `ReceiverRequestAdmission`).
             guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID) else { continue }
             let localStarted = connect(to: target, userInitiated: true, initiator: .receiver,
                                        needsSenderApproval: needsApproval)
@@ -1990,7 +1985,7 @@ final class SenderController: ObservableObject {
     @discardableResult
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
                  awaitingWake: Bool = false, initiator: SessionRole = .sender,
-                 needsSenderApproval: Bool = false) -> Bool {
+                 needsSenderApproval: Bool = false, continuation: SessionContinuation? = nil) -> Bool {
         if let existing = session(for: target.sessionID), !existing.failed { return true }
         let logicalID = logicalID(for: target)
         let targetIdentifiers = identifiers(for: target)
@@ -2007,7 +2002,8 @@ final class SenderController: ObservableObject {
         }
         return startSession(to: target, logicalID: logicalID, attempt: attempt,
                             userInitiated: userInitiated, awaitingWake: awaitingWake,
-                            initiator: initiator, needsSenderApproval: needsSenderApproval)
+                            initiator: initiator, needsSenderApproval: needsSenderApproval,
+                            continuation: continuation)
     }
 
     /// The live session (any route) that already owns this logical peer, if
@@ -2086,7 +2082,8 @@ final class SenderController: ObservableObject {
                               userInitiated: Bool = false,
                               awaitingWake: Bool = false,
                               initiator: SessionRole = .sender,
-                              needsSenderApproval: Bool = false) -> Bool {
+                              needsSenderApproval: Bool = false,
+                              continuation: SessionContinuation? = nil) -> Bool {
         let targetIdentifiers = identifiers(for: target)
         guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
             Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
@@ -2182,17 +2179,11 @@ final class SenderController: ObservableObject {
         // Explicit actions start a fresh invitation; a pipeline rebuilt by
         // `restartAll()` keeps its session's invitation so the receiver
         // recognizes it.
-        let continuing = continuingInvitations.removeValue(forKey: logicalID)
-        let invitation: SessionInvitation
-        let needsApproval: Bool
-        if let continuing, !userInitiated {
-            invitation = continuing.invitation
-            needsApproval = continuing.needsSenderApproval
-        } else {
-            invitation = SessionInvitation(
-                initiator: initiator, intent: userInitiated ? .manual : .automatic, mode: mode.receiverMode)
-            needsApproval = needsSenderApproval
-        }
+        let started = SessionStartPlanning.plan(
+            continuation: continuation, initiator: initiator, userInitiated: userInitiated,
+            needsSenderApproval: needsSenderApproval, mode: mode.receiverMode)
+        let invitation = started.invitation
+        let needsApproval = started.needsSenderApproval
         sender.sessionInvitation = invitation
         sender.needsSenderApproval = needsApproval
         let intendedPeerID: String? = {
@@ -2384,8 +2375,7 @@ final class SenderController: ObservableObject {
                 return
             }
             // Same session resuming after the lock: keep its invitation.
-            self.continueInvitation(of: session)
-            self.connect(to: target, awaitingWake: true)
+            self.connect(to: target, awaitingWake: true, continuation: self.continuation(of: session))
         }
         sender.onCaptureStoppedByUser = { [weak self, weak session] in
             // The user stopped the capture in the system UI — same intent as
@@ -2521,11 +2511,10 @@ final class SenderController: ObservableObject {
     /// Mode/quality apply per-pipeline at construction — rebuild every session.
     func restartAll() {
         guard running else { return }
-        let targets = sessions.map(\.target)
-        sessions.filter { !$0.failed }.forEach(continueInvitation(of:))
+        let rebuilds = sessions.map { ($0.target, $0.failed ? nil : continuation(of: $0)) }
         sessions.forEach { $0.sender.stop() }
         sessions.removeAll()
-        targets.forEach { connect(to: $0) }
+        rebuilds.forEach { connect(to: $0.0, continuation: $0.1) }
         autoConnect()   // a rebuilt WiFi session may deserve its cable back
     }
 
@@ -2756,17 +2745,29 @@ final class SenderController: ObservableObject {
     // MARK: - Session invitations (pv 21)
 
     /// This Mac's incoming policy for a paired receiver's explicit Connect
-    /// request. Nil means drop it (blocked); otherwise whether this Mac's
-    /// user must approve before capture starts.
+    /// request. Nil means nothing to start (blocked, or a session for this
+    /// receiver already covers it); otherwise whether this Mac's user must
+    /// approve before capture starts. An unadmitted auto-connect attempt of
+    /// this Mac's own is replaced — left alone, it would absorb the request
+    /// and skip the Mac's approval.
     private func incomingRequestNeedsApproval(peerID: String) -> Bool? {
-        switch IncomingSessionPolicyStore.decision(peerID: peerID, intent: .manual) {
-        case .accept:
-            return false
-        case .askUser:
-            return true
-        case .block, .decline:
+        let existing = sessions.first { !$0.failed && ($0.deviceID == peerID || $0.intendedPeerID == peerID) }
+        let action = ReceiverRequestAdmission.decide(
+            policy: IncomingSessionPolicyStore.decision(peerID: peerID, intent: .manual),
+            existing: existing.map { .init(admitted: $0.invitationAdmitted, invitation: $0.invitation) })
+        switch action {
+        case .drop:
             Log.info("sessionInvite: receiver request dropped peer=\(peerID) reason=policy")
             return nil
+        case .alreadyHandled:
+            Log.info("connectDebug: senderStartRequested peer=\(peerID) alreadyConnecting=true")
+            return nil
+        case .start(let needsApproval):
+            return needsApproval
+        case .replace(let needsApproval):
+            Log.info("sessionInvite: replacing unadmitted automatic session for peer=\(peerID) with its explicit request")
+            if let existing { end(existing) }
+            return needsApproval
         }
     }
 
@@ -2800,10 +2801,9 @@ final class SenderController: ObservableObject {
     /// admitted, the re-sent invitation is a background attempt, so a
     /// receiver that lost its memory of it declines quietly rather than
     /// prompting.
-    private func continueInvitation(of session: DeviceSession) {
-        var invitation = session.invitation
-        if session.invitationAdmitted { invitation.intent = .automatic }
-        continuingInvitations[session.logicalID] = (invitation, session.awaitingLocalApproval)
+    private func continuation(of session: DeviceSession) -> SessionContinuation {
+        .carrying(session.invitation, admitted: session.invitationAdmitted,
+                  awaitingLocalApproval: session.awaitingLocalApproval)
     }
 
     /// A receiver-initiated request named a display mode in its hello. With
@@ -2822,8 +2822,8 @@ final class SenderController: ObservableObject {
             senderChoice: nil, receiverRequested: requested, current: mode.receiverMode))
         guard planned != mode, canEnterMode(planned) else { return }
         Log.info("sessionInvite: honoring receiver-requested mode \(planned.rawValue) for \(session.logicalID)")
+        // `restartAll()` carries the updated invitation to the rebuilt pipeline.
         session.invitation.mode = planned.receiverMode
-        continueInvitation(of: session)
         requestMode(planned)
     }
 
@@ -2861,7 +2861,6 @@ final class SenderController: ObservableObject {
             // Capture has not started for this session, so carry it across
             // the rebuild already approved.
             session.invitation.mode = requested.receiverMode
-            continuingInvitations[session.logicalID] = (session.invitation, false)
             session.awaitingLocalApproval = false
             requestMode(requested)
             return

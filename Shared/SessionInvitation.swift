@@ -266,6 +266,71 @@ struct SessionApprovalPlan: Equatable, Sendable {
     }
 }
 
+// MARK: - Session start planning (Mac Sender)
+
+/// An invitation handed from a session to the one pipeline that replaces it
+/// (a Mac-wide rebuild, or the wait-for-wake session after a lock). Passed
+/// explicitly to that replacement only — never parked where an unrelated
+/// later attempt could pick it up and inherit its admission.
+struct SessionContinuation: Equatable, Sendable {
+    let invitation: SessionInvitation
+    let needsSenderApproval: Bool
+
+    /// Once admitted, a re-sent invitation is a background attempt: a
+    /// receiver that lost its memory of it declines quietly, never prompts.
+    static func carrying(_ invitation: SessionInvitation, admitted: Bool,
+                         awaitingLocalApproval: Bool) -> SessionContinuation {
+        var invitation = invitation
+        if admitted { invitation.intent = .automatic }
+        return SessionContinuation(invitation: invitation, needsSenderApproval: awaitingLocalApproval)
+    }
+}
+
+enum SessionStartPlanning {
+    /// The invitation and Sender-approval requirement for a new pipeline.
+    static func plan(continuation: SessionContinuation?, initiator: SessionRole, userInitiated: Bool,
+                     needsSenderApproval: Bool, mode: ReceiverDisplayMode) -> SessionContinuation {
+        if let continuation, !userInitiated { return continuation }
+        return SessionContinuation(
+            invitation: SessionInvitation(initiator: initiator, intent: userInitiated ? .manual : .automatic, mode: mode),
+            needsSenderApproval: needsSenderApproval)
+    }
+}
+
+/// What the Mac Sender does with a paired receiver's explicit Connect
+/// request, given its own incoming policy and any session it already has
+/// for that receiver. The Mac's policy always applies: an attempt the Mac
+/// started on its own (auto-connect) must never absorb the request, or the
+/// Mac's manual-approval requirement would be skipped.
+enum ReceiverRequestAdmission {
+    struct ExistingSession: Equatable, Sendable {
+        let admitted: Bool
+        let invitation: SessionInvitation
+    }
+
+    enum Action: Equatable, Sendable {
+        case drop
+        case alreadyHandled
+        case start(needsSenderApproval: Bool)
+        /// End the existing, unadmitted automatic attempt first.
+        case replace(needsSenderApproval: Bool)
+    }
+
+    static func decide(policy: IncomingSessionDecision, existing: ExistingSession?) -> Action {
+        let needsApproval: Bool
+        switch policy {
+        case .block, .decline: return .drop
+        case .accept: needsApproval = false
+        case .askUser: needsApproval = true
+        }
+        guard let existing else { return .start(needsSenderApproval: needsApproval) }
+        if !existing.admitted, existing.invitation.initiator == .sender, existing.invitation.intent == .automatic {
+            return .replace(needsSenderApproval: needsApproval)
+        }
+        return .alreadyHandled
+    }
+}
+
 // MARK: - Display mode planning
 
 /// Which Mirror/Extend a session uses. The Mac Sender is the final authority:
