@@ -2727,10 +2727,17 @@ final class SenderController: ObservableObject {
         return true
     }
 
+    /// Returns whether the change was applied: widening to Always Allow is
+    /// refused while any session has effective input (see
+    /// `ReceiverInputAuthorizationStore`). Pickers need no result — they read
+    /// the stored policy back, and the publish below runs on refusal too so
+    /// a refused choice snaps back instead of lingering on screen. Callers
+    /// that must react (the control-request prompt) check it.
+    @discardableResult
     func setInputPolicy(_ policy: PeerInputRequestPolicy, peerID: String) -> Bool {
         let applied = ReceiverInputAuthorizationStore.setPolicy(
             policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
-        if applied { objectWillChange.send() }
+        objectWillChange.send()
         return applied
     }
 

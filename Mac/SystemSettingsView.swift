@@ -179,7 +179,10 @@ struct SystemSettingsView: View {
     }
 
     @ViewBuilder
-    private func permissionRow(_ title: LocalizedStringKey, granted: Bool, uncertain: Bool = false,
+    // `LocalizedStringResource`, not `LocalizedStringKey`: the title is also
+    // interpolated into the localized help text below, and only a resource
+    // interpolates as localized text (a key would appear as its debug form).
+    private func permissionRow(_ title: LocalizedStringResource, granted: Bool, uncertain: Bool = false,
                                help: LocalizedStringKey, anchor: String,
                                request: (() -> Void)? = nil) -> some View {
         HStack(alignment: .firstTextBaseline) {
