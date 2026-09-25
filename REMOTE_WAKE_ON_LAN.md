@@ -1,9 +1,23 @@
-# Remote wake-on-LAN — design (not yet implemented)
+# Remote wake-on-LAN — relay design (relay not yet implemented)
 
 This is a local design note for the Tailscale Remote milestone. It is
-intentionally not an upstream project document. No code in this milestone
-implements the relay described below; Remote connectivity to an
-already-awake Mac ships independently of this.
+intentionally not an upstream project document.
+
+## Current status
+
+**Wake & Connect ships, but only on the Mac's local network.** The receiver
+learns a paired Mac's MAC and broadcast address over an already-authenticated
+session (`WakeMetadata` in `Shared/WakeOnLAN.swift`), then
+`Shared/WakeConnectCoordinator.swift` sends a standard Wake-on-LAN UDP
+broadcast, asks the Mac to connect, and requests Promote Interactive Wake.
+The attempt only succeeds once the pinned, mutually authenticated TLS peer
+matches the target Mac. It requires Wake for Network Access on the Mac, is
+for a logged-in Mac that is asleep or locked, and does not cover cold boot.
+
+**The relay described below is still not implemented.** The magic packet is
+never routed over Remote/Tailscale, so a Mac asleep on another network
+cannot be woken from outside it. Remote connectivity to an already-awake Mac
+works independently of this.
 
 ## Why this is hard
 
@@ -52,13 +66,13 @@ Asleep/wakeable   → Wake
 Offline/no relay  → Offline
 ```
 
-These states are not wired up in this milestone. `ConnectionRoute` and the
+These relay-backed states are not wired up. `ConnectionRoute` and the
 Remote candidate/connect path have no dependency on wake state; they simply
 fail with a clear "peer unreachable" / "Mac asleep" diagnostic (see Phase 7
 of the Remote milestone) when the Mac isn't reachable, exactly as they
 would for any other unreachable route.
 
-## Why nothing is implemented yet
+## Why the relay is not implemented yet
 
 Building the relay (protocol, enrollment, auth, and where it runs) is a
 separate piece of always-on infrastructure with its own security surface.
