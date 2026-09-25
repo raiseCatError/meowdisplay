@@ -147,7 +147,9 @@ private struct ReceiverRemoteEndpointEditor: View {
         if pairedMacs.isEmpty {
             ReceiverCaption("Pair with a Mac first — Remote Access uses the same secure pairing as local connections.")
         } else {
-            Picker("Paired Mac", selection: $peerID) {
+            Picker("Paired Mac", selection: Binding(
+                get: { PickerSelection.valid(peerID, among: pairedMacs.map(\.peerID), fallback: "") },
+                set: { peerID = $0 })) {
                 Text("Select…").tag("")
                 ForEach(pairedMacs, id: \.peerID) { peer in
                     Text(peer.displayName).tag(peer.peerID)

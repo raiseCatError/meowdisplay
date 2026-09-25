@@ -16,6 +16,13 @@ struct ReceiverDeviceDetailView: View {
     @ObservedObject var controller: SenderController
     let peerID: String
     let name: String
+    @Environment(\.dismiss) private var dismiss
+
+    /// The paired record (not discovery) decides whether this page is
+    /// meaningful: a device that is merely offline keeps its page.
+    private var isPaired: Bool {
+        controller.knownDeviceEntries.contains { $0.id == peerID }
+    }
 
     private var session: DeviceSession? {
         controller.sessions.first { $0.deviceID == peerID && $0.applicationAuthenticated }
@@ -112,6 +119,10 @@ struct ReceiverDeviceDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(name)
+        // Forgotten while open: return to the Devices page.
+        .onChange(of: isPaired) { _, paired in
+            if !paired { dismiss() }
+        }
     }
 
     /// This device's own Extend shape (PROTOCOL.md 6.7) — Mac-authoritative,

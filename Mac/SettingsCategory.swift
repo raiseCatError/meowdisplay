@@ -422,6 +422,10 @@ final class SettingsNavigationModel: ObservableObject {
     @Published private(set) var current: SettingsCategory
     @Published private(set) var backStack: [SettingsCategory]
     @Published private(set) var forwardStack: [SettingsCategory]
+    /// Bumped when the user explicitly re-selects the current category, so
+    /// the detail pane can drop any page pushed within it (e.g. Device
+    /// Settings…) and show that category's root again. Not history.
+    @Published private(set) var rootGeneration = 0
 
     init(initialCategory: SettingsCategory = .overview) {
         self.current = initialCategory
@@ -446,6 +450,13 @@ final class SettingsNavigationModel: ObservableObject {
         backStack.append(current)
         forwardStack.removeAll()
         current = category
+    }
+
+    /// The user clicked the already-current category: return to its root.
+    /// Any other category is a normal selection, handled by `navigateTo`.
+    func showRoot(of category: SettingsCategory) {
+        guard category == current else { return }
+        rootGeneration &+= 1
     }
 
     /// Steps back one entry in navigation history.
@@ -502,4 +513,12 @@ enum SidebarSelection {
         case nil: return nil
         }
     }
+}
+
+/// Identity of the Settings detail pane's navigation stack: a new category,
+/// or an explicit re-selection of the current one, starts a fresh stack so
+/// no pushed page can outlive the navigation that left it.
+struct SettingsDetailIdentity: Hashable {
+    let category: SettingsCategory
+    let rootGeneration: Int
 }

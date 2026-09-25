@@ -91,7 +91,9 @@ struct RemoteEndpointEditorView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            Picker("Paired device", selection: $peerID) {
+            Picker("Paired device", selection: Binding(
+                get: { PickerSelection.valid(peerID, among: pairedPeers.map(\.peerID), fallback: "") },
+                set: { peerID = $0 })) {
                 Text("Select…").tag("")
                 ForEach(pairedPeers, id: \.peerID) { peer in
                     Text(peer.displayName).tag(peer.peerID)

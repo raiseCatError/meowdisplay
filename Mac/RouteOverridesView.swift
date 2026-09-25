@@ -31,7 +31,9 @@ struct RemoteEndpointDebugView: View {
 
     var body: some View {
         if !TrustStore.shared.pinnedPeers().isEmpty {
-            Picker("Paired device", selection: $peerID) {
+            Picker("Paired device", selection: Binding(
+                get: { PickerSelection.valid(peerID, among: TrustStore.shared.pinnedPeers().map(\.peerID), fallback: "") },
+                set: { peerID = $0 })) {
                 Text("Select…").tag("")
                 ForEach(TrustStore.shared.pinnedPeers(), id: \.peerID) { peer in
                     Text(peer.displayName).tag(peer.peerID)

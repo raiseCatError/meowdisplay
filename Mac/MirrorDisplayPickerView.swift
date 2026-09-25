@@ -15,7 +15,13 @@ struct MirrorDisplayPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Picker("Mirror Display", selection: Binding(
-                get: { controller.mirrorDisplayUUID ?? "" },
+                // A remembered display that is disconnected (or not loaded
+                // yet) has no tag; it shows as Automatic, which is what
+                // capture uses meanwhile. The stored choice is kept.
+                get: {
+                    PickerSelection.valid(controller.mirrorDisplayUUID ?? "",
+                                          among: candidates.compactMap(\.persistentID), fallback: "")
+                },
                 set: { controller.mirrorDisplayUUID = $0.isEmpty ? nil : $0 })) {
                 Text("Automatic").tag("")
                 ForEach(candidates) { candidate in

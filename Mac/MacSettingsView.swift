@@ -367,6 +367,11 @@ struct MacSettingsSidebarView: View {
                     ForEach(SettingsCategory.allCases) { category in
                         Label(category.label, systemImage: category.systemImage)
                             .tag(SidebarItem.category(category))
+                            // Re-clicking the selected row is no selection
+                            // change; this lets it leave a pushed page.
+                            .simultaneousGesture(TapGesture().onEnded {
+                                navigationModel.showRoot(of: category)
+                            })
                     }
                 }
             }
@@ -453,6 +458,11 @@ struct MacSettingsDetailView: View {
                 }
             }
         }
+        // A pushed page (Devices → Device Settings…) lives on this stack, not
+        // in `navigationModel`. Changing category swaps only the stack's
+        // root, so without a fresh stack per category the pushed page stayed
+        // on top and every sidebar click appeared to do nothing.
+        .id(SettingsDetailIdentity(category: navigationModel.current, rootGeneration: navigationModel.rootGeneration))
         .frame(minWidth: 500, minHeight: 450)
         .background(DetailNavigationKeyboardShortcuts(navigationModel: navigationModel))
     }

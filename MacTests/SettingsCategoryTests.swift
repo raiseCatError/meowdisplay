@@ -292,4 +292,62 @@ final class SettingsCategoryTests: XCTestCase {
         XCTAssertEqual(nav.forwardStack, [])
         XCTAssertEqual(nav.current, .devices)
     }
+
+    // MARK: - Pushed pages (Device Settings…) cannot trap navigation
+
+    @MainActor
+    private func identity(_ nav: SettingsNavigationModel) -> SettingsDetailIdentity {
+        SettingsDetailIdentity(category: nav.current, rootGeneration: nav.rootGeneration)
+    }
+
+    @MainActor
+    func testLeavingDevicesForAnyCategoryStartsAFreshDetailStack() {
+        for destination in [SettingsCategory.overview, .displays, .input, .system] {
+            let nav = SettingsNavigationModel()
+            nav.navigateTo(.devices)
+            let onDeviceDetail = identity(nav)   // detail pushed on this stack
+            nav.navigateTo(destination)
+            XCTAssertEqual(nav.current, destination)
+            XCTAssertNotEqual(identity(nav), onDeviceDetail)
+        }
+    }
+
+    @MainActor
+    func testReselectingDevicesReturnsToItsRootWithoutTouchingHistory() {
+        let nav = SettingsNavigationModel()
+        nav.navigateTo(.devices)
+        let onDeviceDetail = identity(nav)
+        nav.showRoot(of: .devices)
+        XCTAssertNotEqual(identity(nav), onDeviceDetail)
+        XCTAssertEqual(nav.current, .devices)
+        XCTAssertEqual(nav.backStack, [.overview])
+        XCTAssertEqual(nav.forwardStack, [])
+        let unchanged = identity(nav)
+        nav.showRoot(of: .displays)   // not current: a normal selection handles it
+        XCTAssertEqual(identity(nav), unchanged)
+    }
+
+    @MainActor
+    func testBackAndForwardFromDeviceDetailLeaveThePushedPage() {
+        let nav = SettingsNavigationModel()
+        nav.navigateTo(.devices)
+        let onDeviceDetail = identity(nav)
+        nav.goBack()
+        XCTAssertEqual(nav.current, .overview)
+        nav.goForward()
+        XCTAssertEqual(nav.current, .devices)
+        XCTAssertEqual(identity(nav), onDeviceDetail, "same identity is the Devices root; the old stack is gone")
+    }
+
+    /// While a device page is pushed the sidebar still highlights Devices;
+    /// a click on another row navigates normally.
+    @MainActor
+    func testSidebarSelectionFromDeviceDetailNavigates() {
+        let nav = SettingsNavigationModel()
+        nav.navigateTo(.devices)
+        XCTAssertEqual(SidebarSelection.derived(current: nav.current, isSearching: false, results: [],
+                                                selectedSearchItemID: nil), .category(.devices))
+        if let destination = SidebarSelection.destination(of: .category(.overview)) { nav.navigateTo(destination) }
+        XCTAssertEqual(nav.current, .overview)
+    }
 }
