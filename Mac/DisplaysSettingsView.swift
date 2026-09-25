@@ -12,9 +12,11 @@ struct DisplaysSettingsView: View {
                 Picker("Mode", selection: Binding(
                     get: { controller.mode },
                     set: { controller.requestMode($0) })) {
-                    Text("Extend").tag(CaptureMode.extend)
+                    Text("Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+                        .tag(CaptureMode.extend)
                         .disabled(!controller.videoEnabled)
-                    Text("Mirror").tag(CaptureMode.mirror)
+                    Text("Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
+                        .tag(CaptureMode.mirror)
                         .disabled(!controller.hasUsablePhysicalDisplay)
                 }
                 .pickerStyle(.segmented)

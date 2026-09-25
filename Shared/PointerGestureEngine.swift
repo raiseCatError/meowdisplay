@@ -201,14 +201,14 @@ enum PointerInputMode: String, Codable, CaseIterable, Identifiable {
     var seedsAbsoluteScrollTarget: Bool { self == .direct }
     var title: String {
         switch self {
-        case .direct: return "Direct Touch"
-        case .trackpad: return "Trackpad"
+        case .direct: return String(localized: "Direct Touch", comment: "Input mode: touch where you want the pointer to go.")
+        case .trackpad: return String(localized: "Trackpad", comment: "Input mode: relative pointer control like a laptop trackpad, not the physical accessory.")
         }
     }
     var explanation: String {
         switch self {
-        case .direct: return "Touch where you want the pointer."
-        case .trackpad: return "Move the pointer relative to your finger."
+        case .direct: return String(localized: "Touch where you want the pointer.")
+        case .trackpad: return String(localized: "Move the pointer relative to your finger.")
         }
     }
 }

@@ -286,6 +286,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities
 privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
+**Want to translate MeowDisplay?** Community translations are welcome.
+Human-written translations only, please — no AI or machine-generated
+localization. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Prefer something simpler?
 
 MeowDisplay builds on OpenDisplay but adds a broader set of input, control,

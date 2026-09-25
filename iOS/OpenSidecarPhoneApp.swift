@@ -763,7 +763,7 @@ struct IdleView: View {
 
     private func brandTitle(font: Font) -> some View {
         HStack(spacing: 6) {
-            Text("MeowDisplay").font(font)
+            Text(verbatim: "MeowDisplay").font(font)
             if catModeEnabled {
                 Image(systemName: "pawprint.fill")
                     .font(.title3)
@@ -1428,7 +1428,7 @@ struct SettingsView: View {
                         Toggle(isOn: preferenceBinding(\.smartTouchEnabled)) {
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 6) {
-                                    Text("Smart Touch")
+                                    Text(verbatim: "Smart Touch")
                                     Text("Experimental")
                                         .font(.caption2.weight(.semibold))
                                         .padding(.horizontal, 6)
@@ -1444,7 +1444,7 @@ struct SettingsView: View {
                         if controlStore.preferences.smartTouchEnabled {
                             Toggle(isOn: preferenceBinding(\.smartTouchLongPressHapticEnabled)) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Smart Touch Haptics")
+                                    Text("Smart Touch Haptics", comment: "Toggle label. \"Smart Touch\" is the feature's brand name and must stay untranslated; only \"Haptics\" is translatable.")
                                     Text(controlStore.preferences.hapticsEnabled
                                          ? "Builds while you hold a title bar, then ticks when the window can move. Also confirms switching to Direct Touch."
                                          : "Off while Haptics is turned off.")

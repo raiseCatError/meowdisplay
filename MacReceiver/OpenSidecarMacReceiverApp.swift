@@ -153,7 +153,7 @@ struct ReceiverContentView: View {
                     .resizable()
                     .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("MeowDisplay Receiver")
+                    Text("MeowDisplay Receiver", comment: "App title in the receiver's about panel. \"MeowDisplay\" is the product name and must stay untranslated; only \"Receiver\" (this Mac acting as a display for another Mac) is translatable.")
                         .font(.title3.bold())
                     Text("This Mac as an extra display for another Mac")
                         .font(.caption)

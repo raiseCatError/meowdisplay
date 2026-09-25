@@ -33,7 +33,7 @@ enum SecurityPresentationCoordinator {
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
                 styleMask: [.titled, .closable, .nonactivatingPanel],
                 backing: .buffered, defer: false)
-            panel.title = "Pairing Request"
+            panel.title = String(localized: "Pairing Request")
             panel.isFloatingPanel = true
             panel.level = .modalPanel
             // A security decision must stay visible even if the user clicks
@@ -80,7 +80,7 @@ enum SecurityPresentationCoordinator {
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
                 styleMask: [.titled, .closable, .nonactivatingPanel],
                 backing: .buffered, defer: false)
-            panel.title = "Control Request"
+            panel.title = String(localized: "Control Request")
             panel.isFloatingPanel = true
             panel.level = .modalPanel
             // Same rationale as the pairing panel: a security decision must
@@ -125,11 +125,11 @@ enum SecurityPresentationCoordinator {
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
-        alert.messageText = "Forget \(request.name)?"
-        alert.informativeText = "This removes trust, connection hints, and wake metadata for this device. It must be re-paired to connect again."
+        alert.messageText = String(localized: "Forget \(request.name)?", comment: "Confirmation alert title; request.name is the paired device's name.")
+        alert.informativeText = String(localized: "This removes trust, connection hints, and wake metadata for this device. It must be re-paired to connect again.")
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Forget Device")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "Forget Device", comment: "Destructive button: removes a paired device's trust."))
+        alert.addButton(withTitle: String(localized: "Cancel"))
         Log.info("uiDebug: forget panel visible=true")
         // NSAlert.runModal is synchronous and does not require Dock
         // presence — it works in accessory (menu-bar-only) apps exactly

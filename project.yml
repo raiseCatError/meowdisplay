@@ -40,6 +40,10 @@ settings:
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6"
+    # Lets Xcode auto-extract new user-facing strings into each target's
+    # Localizable.xcstrings on every build, so the String Catalog stays in
+    # sync with the source without a manual export step.
+    SWIFT_EMIT_LOC_STRINGS: YES
     # Version defaults for local builds. CI overrides both via xcargs:
     # MARKETING_VERSION from the release tag, CURRENT_PROJECT_VERSION from
     # the GitHub Actions run number (monotonic, keeps TestFlight builds unique).

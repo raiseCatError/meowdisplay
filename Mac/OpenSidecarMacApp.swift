@@ -102,7 +102,7 @@ enum MacSettingsWindow {
                 contentRect: NSRect(x: 0, y: 0, width: 840, height: 600),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered, defer: false)
-            w.title = "MeowDisplay Settings"
+            w.title = String(localized: "MeowDisplay Settings", comment: "Settings window title. \"MeowDisplay\" is the product name and must stay untranslated; only \"Settings\" is translatable.")
             w.minSize = NSSize(width: 720, height: 500)
             w.contentViewController = splitVC
             splitVC.configureWindowAndToolbar(for: w)

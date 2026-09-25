@@ -40,6 +40,29 @@ Do not commit secrets, credentials, signing identities, provisioning profiles,
 private endpoints or personal logs. Keep local signing overrides out of tracked
 files.
 
+## Translations
+
+MeowDisplay welcomes community translations. If you speak another language
+and would like to help localize the app, contributions are welcome. English
+is currently the only source language; additional languages will be added as
+real contributors provide and review them, one at a time — this list isn't a
+wishlist to fill in advance.
+
+Translations should be written or reviewed by a person who understands the
+language well enough to judge natural wording, tone and context. **Please do
+not submit AI-generated or machine-translated localization** — that includes
+translations produced with ChatGPT, Claude, Gemini, Google Translate or
+similar automatic translation systems. Good localization is more than word
+substitution, and we'd rather support fewer languages well than ship many
+awkward or incorrect translations. Minor tooling assistance for file
+formatting or working with `.xcstrings` files is fine; the translated text
+itself must be human-written and human-reviewed.
+
+User-facing strings live in `Localizable.xcstrings` String Catalogs (one per
+app target: `Mac/`, `iOS/`, `MacReceiver/`). If the meaning or context of a
+string is unclear, please open an issue or ask before translating it rather
+than guessing.
+
 ## License
 
 MeowDisplay is licensed under [GPL-3.0](LICENSE). By contributing, you agree

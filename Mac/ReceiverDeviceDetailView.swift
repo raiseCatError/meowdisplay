@@ -213,7 +213,7 @@ struct ReceiverDeviceDetailView: View {
                     session.sender.setReceiverControlOverrides(inputMode: value)
                 })) {
                 Text("Direct").tag("direct")
-                Text("Trackpad").tag("trackpad")
+                Text("Trackpad", comment: "Input mode: relative pointer control like a laptop trackpad, not the physical accessory.").tag("trackpad")
             }
             .pickerStyle(.segmented)
 
