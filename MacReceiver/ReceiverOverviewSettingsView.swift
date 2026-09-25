@@ -19,6 +19,9 @@ private struct ReceiverOverviewPage: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var controller: ReceiverController
     let navigationModel: ReceiverSettingsNavigationModel
+    /// Remembered like the iPhone app's Connection Instructions, but
+    /// collapsed until opened.
+    @AppStorage("overview.connectionInstructionsExpanded") private var instructionsExpanded = false
 
     private var connectedMacName: String? {
         guard receiver.connected, let peerID = receiver.authenticatedPeerID else { return nil }
@@ -78,6 +81,37 @@ private struct ReceiverOverviewPage: View {
                         .foregroundStyle(.orange)
                 }
                 actions
+                // The receiver's own published preference — the same state
+                // System → Connection binds, so the two always agree.
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
+                    ReceiverCaption("Automatically reconnect after connection interruptions.")
+                }
+            }
+
+            if !receiver.connected, let wakeConnect = controller.wakeConnect {
+                ReceiverOverviewMacsSection(receiver: receiver, wakeConnect: wakeConnect,
+                                            navigationModel: navigationModel)
+            }
+
+            if !receiver.connected {
+                Section {
+                    DisclosureGroup("How to Connect", isExpanded: $instructionsExpanded) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Install and open MeowDisplay on the Mac whose screen you want to extend.",
+                                  systemImage: "laptopcomputer")
+                            Label("With both Macs on the same network, this Mac appears in its Devices list — click Connect there.",
+                                  systemImage: "wifi")
+                            Label("The stream opens here in full screen. The green traffic light switches to a window, and MeowDisplay remembers your choice.",
+                                  systemImage: "arrow.up.left.and.arrow.down.right")
+                            Button("Open Devices…") { navigationModel.navigateTo(.devices) }
+                                .controlSize(.small)
+                        }
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                    }
+                }
             }
 
             if receiver.connected {
@@ -99,23 +133,6 @@ private struct ReceiverOverviewPage: View {
                     ReceiverValueRow("Codec", value: ReceiverStreamingPresentation.codecLabel(receiver.activeStreamCodec))
                     ReceiverValueRow("Audio", value: receiver.audioEnabled
                                      ? String(localized: "Playing") : String(localized: "Off"))
-                }
-            } else {
-                Section("How to Connect") {
-                    Group {
-                        Label("Install and open MeowDisplay on the Mac whose screen you want to extend.",
-                              systemImage: "laptopcomputer")
-                        Label("With both Macs on the same network, this Mac appears in its Devices list — click Connect there.",
-                              systemImage: "wifi")
-                        Label("The stream opens here in full screen. The green traffic light switches to a window, and MeowDisplay remembers your choice.",
-                              systemImage: "arrow.up.left.and.arrow.down.right")
-                    }
-                    .font(.subheadline)
-                    HStack {
-                        Button("Open Devices…") { navigationModel.navigateTo(.devices) }
-                            .controlSize(.small)
-                        Spacer()
-                    }
                 }
             }
 
@@ -150,6 +167,36 @@ private struct ReceiverOverviewPage: View {
                 Button("Open Displays…") { navigationModel.navigateTo(.displays) }
                     .controlSize(.small)
                 Spacer()
+            }
+        }
+    }
+}
+
+/// Paired and nearby Macs while disconnected — a compact view of the Devices
+/// page using its shared rows, so status and actions are identical there.
+/// Hidden when there is nothing to show; Forget stays on Devices.
+private struct ReceiverOverviewMacsSection: View {
+    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var wakeConnect: WakeConnectCoordinator
+    let navigationModel: ReceiverSettingsNavigationModel
+
+    var body: some View {
+        let paired = ReceiverMacList.paired()
+        let nearby = ReceiverMacList.unpairedNearby(receiver)
+        if !paired.isEmpty || !nearby.isEmpty {
+            Section("Macs") {
+                ForEach(paired, id: \.peerID) { mac in
+                    ReceiverPairedMacRow(receiver: receiver, wakeConnect: wakeConnect,
+                                         peerID: mac.peerID, name: mac.displayName)
+                }
+                ForEach(nearby, id: \.endpoint) { result in
+                    ReceiverNearbyMacRow(receiver: receiver, result: result)
+                }
+                HStack {
+                    Button("Open Devices…") { navigationModel.navigateTo(.devices) }
+                        .controlSize(.small)
+                    Spacer()
+                }
             }
         }
     }

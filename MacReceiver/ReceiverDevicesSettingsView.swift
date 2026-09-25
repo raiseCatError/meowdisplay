@@ -27,11 +27,11 @@ private struct ReceiverDevicesPage: View {
 
     private var pairedMacs: [(peerID: String, displayName: String)] {
         _ = trustRefresh
-        return TrustStore.shared.pinnedPeers()
+        return ReceiverMacList.paired()
     }
 
     private var unpairedNearby: [NWBrowser.Result] {
-        receiver.discoveredMacs.filter { !receiver.pairingMacIsPaired($0) }
+        ReceiverMacList.unpairedNearby(receiver)
     }
 
     var body: some View {
@@ -44,7 +44,13 @@ private struct ReceiverDevicesPage: View {
                     ReceiverCaption("No paired Macs")
                 } else {
                     ForEach(pairedMacs, id: \.peerID) { mac in
-                        pairedRow(peerID: mac.peerID, name: mac.displayName)
+                        ReceiverPairedMacRow(receiver: receiver, wakeConnect: wakeConnect,
+                                             peerID: mac.peerID, name: mac.displayName) {
+                            Button("Forget…", role: .destructive) {
+                                forgetConfirmation.request(peerID: mac.peerID, name: mac.displayName)
+                            }
+                            .controlSize(.small)
+                        }
                     }
                 }
             } header: {
@@ -58,12 +64,7 @@ private struct ReceiverDevicesPage: View {
                     ReceiverCaption("No unpaired Macs nearby")
                 } else {
                     ForEach(unpairedNearby, id: \.endpoint) { result in
-                        HStack {
-                            Text(receiver.pairingMacName(result)).lineLimit(1)
-                            Spacer()
-                            Button("Pair") { receiver.pairWithMac(result) }
-                                .controlSize(.small)
-                        }
+                        ReceiverNearbyMacRow(receiver: receiver, result: result)
                     }
                 }
             } header: {
@@ -86,60 +87,6 @@ private struct ReceiverDevicesPage: View {
         } message: {
             Text("You'll need to pair with this Mac again before connecting.")
         }
-    }
-
-    @ViewBuilder
-    private func pairedRow(peerID: String, name: String) -> some View {
-        let isConnected = receiver.connected && receiver.authenticatedPeerID == peerID
-        let isNearby = receiver.discoveredMacs.contains { receiver.pairingMacPeerID($0) == peerID }
-        let canWake = WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil
-        HStack(alignment: .firstTextBaseline) {
-            Circle()
-                .fill(isConnected ? Color.green : Color.secondary.opacity(0.5))
-                .frame(width: 9, height: 9)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                Text(status(peerID: peerID, isConnected: isConnected, isNearby: isNearby))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if wakeConnect.isRunning(forPeerID: peerID) {
-                ProgressView().controlSize(.small)
-                Button("Cancel") { wakeConnect.cancel() }
-                    .controlSize(.small)
-            } else if !receiver.connected {
-                // Wake & Connect only when a local-network wake hint was
-                // learned from this Mac; it never claims remote wake.
-                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again"
-                       : canWake ? "Wake & Connect" : "Connect") {
-                    wakeConnect.begin(peerID: peerID)
-                }
-                .controlSize(.small)
-            }
-            Button("Forget…", role: .destructive) {
-                forgetConfirmation.request(peerID: peerID, name: name)
-            }
-            .controlSize(.small)
-        }
-    }
-
-    private func status(peerID: String, isConnected: Bool, isNearby: Bool) -> String {
-        if isConnected { return String(localized: "Connected") }
-        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
-        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
-            switch reason {
-            case "timedOut": return String(localized: "Connection timed out")
-            case "cancelled": return String(localized: "Cancelled")
-            case "protocolIncompatible": return String(localized: "Mac requires app update")
-            case "peerForgotten": return String(localized: "Mac pairing removed")
-            default: return String(localized: "Connection failed")
-            }
-        }
-        if isNearby { return String(localized: "Paired · Nearby") }
-        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil { return String(localized: "Paired · Remote Access") }
-        return String(localized: "Paired · Not nearby")
     }
 }
 
@@ -272,5 +219,115 @@ private struct ReceiverRemoteEndpointEditor: View {
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil
         savedConfirmation = false
+    }
+}
+
+// MARK: - Mac rows shared by Devices and Overview
+
+/// Which Macs to list — one definition for Devices and Overview.
+@MainActor
+enum ReceiverMacList {
+    static func paired() -> [(peerID: String, displayName: String)] {
+        TrustStore.shared.pinnedPeers()
+    }
+
+    static func unpairedNearby(_ receiver: StreamReceiver) -> [NWBrowser.Result] {
+        receiver.discoveredMacs.filter { !receiver.pairingMacIsPaired($0) }
+    }
+}
+
+/// One paired Mac: live status plus Connect / Wake & Connect through the
+/// shared `WakeConnectCoordinator`. `trailing` adds page-specific actions
+/// (Devices adds Forget…).
+struct ReceiverPairedMacRow<Trailing: View>: View {
+    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var wakeConnect: WakeConnectCoordinator
+    let peerID: String
+    let name: String
+    private let trailing: Trailing
+
+    init(receiver: StreamReceiver, wakeConnect: WakeConnectCoordinator, peerID: String, name: String,
+         @ViewBuilder trailing: () -> Trailing) {
+        self.receiver = receiver
+        self.wakeConnect = wakeConnect
+        self.peerID = peerID
+        self.name = name
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        let isConnected = receiver.connected && receiver.authenticatedPeerID == peerID
+        let isNearby = receiver.discoveredMacs.contains { receiver.pairingMacPeerID($0) == peerID }
+        let canWake = WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil
+        HStack(alignment: .firstTextBaseline) {
+            Circle()
+                .fill(isConnected ? Color.green : Color.secondary.opacity(0.5))
+                .frame(width: 9, height: 9)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                Text(status(isConnected: isConnected, isNearby: isNearby))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if wakeConnect.isRunning(forPeerID: peerID) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { wakeConnect.cancel() }
+                    .controlSize(.small)
+            } else if !receiver.connected {
+                // Wake & Connect only when a local-network wake hint was
+                // learned from this Mac; it never claims remote wake.
+                Button(wakeConnect.failed(forPeerID: peerID) ? "Try Again"
+                       : canWake ? "Wake & Connect" : "Connect") {
+                    wakeConnect.begin(peerID: peerID)
+                }
+                .controlSize(.small)
+            }
+            trailing
+        }
+    }
+
+    private func status(isConnected: Bool, isNearby: Bool) -> String {
+        if isConnected { return String(localized: "Connected") }
+        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
+        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
+            switch reason {
+            case "timedOut": return String(localized: "Connection timed out")
+            case "cancelled": return String(localized: "Cancelled")
+            case "protocolIncompatible": return String(localized: "Mac requires app update")
+            case "peerForgotten": return String(localized: "Mac pairing removed")
+            default: return String(localized: "Connection failed")
+            }
+        }
+        if isNearby { return String(localized: "Paired · Nearby") }
+        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil { return String(localized: "Paired · Remote Access") }
+        return String(localized: "Paired · Not nearby")
+    }
+}
+
+extension ReceiverPairedMacRow where Trailing == EmptyView {
+    init(receiver: StreamReceiver, wakeConnect: WakeConnectCoordinator, peerID: String, name: String) {
+        self.init(receiver: receiver, wakeConnect: wakeConnect, peerID: peerID, name: name) { EmptyView() }
+    }
+}
+
+/// One unpaired Mac seen nearby, with Pair (confirmed by the pairing panel).
+struct ReceiverNearbyMacRow: View {
+    @ObservedObject var receiver: StreamReceiver
+    let result: NWBrowser.Result
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(receiver.pairingMacName(result)).lineLimit(1)
+                Text("Nearby")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Pair") { receiver.pairWithMac(result) }
+                .controlSize(.small)
+        }
     }
 }
