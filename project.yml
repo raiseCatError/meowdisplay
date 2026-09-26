@@ -1,10 +1,11 @@
 name: MeowDisplay
 options:
   createIntermediateGroups: true
-# Swift Package Manager dependencies. Sparkle powers the macOS app's
-# out-of-store auto-update (issue #52); it's an embedded open-source
-# framework + CLI tooling, not a hosted service — the appcast feed and the
-# DMG are served from infrastructure we already own (GitHub Pages + Releases).
+# Swift Package Manager dependencies. Sparkle is the macOS apps' out-of-store
+# auto-update framework (issue #52): embedded open-source code + CLI tooling,
+# not a hosted service. Its checks are currently switched off — MeowDisplay
+# has no appcast or signing key of its own yet (see SUEnableAutomaticChecks
+# on the Mac targets below).
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
@@ -279,6 +280,12 @@ targets:
     sources:
       - iOS
       - Shared
+      # The App Store privacy manifest must land in Copy Bundle Resources.
+      # Current XcodeGen already puts an unknown `.xcprivacy` there, but
+      # 2.40.0 put it in no build phase at all, so say it explicitly (the
+      # `iOS` entry above and this one resolve to a single build file).
+      - path: iOS/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: SwiftCertificates
         product: X509

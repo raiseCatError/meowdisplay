@@ -7,8 +7,8 @@ listing. Update when the situation changes.
 > documents a real App Review exchange for the **upstream OpenDisplay** app
 > (submission ID, dates, and the linked demo video all belong to that submission).
 > It's kept for context on how the "OpenSidecar → OpenDisplay" name issue was
-> resolved. MeowDisplay is its own App Store Connect app (see
-> `APP_STORE_LISTING.md`'s "Fork rebrand" note) and will need its **own** App
+> resolved. MeowDisplay is its own App Store Connect app (see the "Fork" note
+> under `APP_STORE_LISTING.md`'s "Notes for future edits") and will need its **own** App
 > Review Information, demo video, and Resolution Center replies if it hits a
 > similar review question — do not paste this verbatim into a MeowDisplay
 > submission.

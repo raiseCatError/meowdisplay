@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest for the iPhone/iPad receiver (OpenSidecariOS). Copied into
+  the app bundle by project.yml. Declares exactly the required-reason APIs the
+  iOS target's own sources (iOS/, Shared/) call; MacTests/PrivacyManifestTests
+  keeps it in step with them. Linked packages report their own use:
+  swift-crypto ships its own manifest, swift-certificates and swift-asn1 call
+  none of these APIs.
+
+  - UserDefaults, CA92.1: settings, control-tray profiles, per-peer
+    preferences and Remote Access endpoints the app reads and writes for
+    itself only (UserDefaults.standard / @AppStorage; no App Group).
+  - FileTimestamp, C617.1: iOS/Log.swift reads its own connection log's size
+    with FileManager.attributesOfItem(atPath:) (which also returns the file's
+    dates) to trim it; the log lives in the app container's Documents.
+
+  No tracking, no tracking domains, and no data collected: nothing leaves the
+  device except the user's own session with their own Mac, and the connection
+  log only when the user shares it themselves.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

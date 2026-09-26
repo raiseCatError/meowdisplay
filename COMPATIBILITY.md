@@ -23,7 +23,7 @@ We cut Mac and iOS from one release tag, but distribution is not simultaneous:
 
 | | Update channel | Time to reach a user |
 |---|---|---|
-| **Mac** | Sparkle appcast (`opendisplay.app/appcast.xml`) | hours — auto, silent |
+| **Mac** | Sparkle appcast (upstream: `opendisplay.app/appcast.xml`; MeowDisplay's Sparkle checks are off until it hosts its own) | hours — auto, silent |
 | **iOS** | App Store (review + user tapping Update) | days → weeks, with a **long tail** |
 
 So at any moment the field holds many version pairings. The dominant one is
@@ -121,23 +121,34 @@ direction and owns the offline/never-connect case.
 ## 5. The remote-config force lever (iOS) — issue #135
 
 Connection-independent. On launch the iPhone fetches a small static file we host
-next to the Sparkle appcast:
+next to the Sparkle appcast.
 
-- **URL:** `https://opendisplay.app/ios-version.json` (source of truth:
-  `public/ios-version.json`; Vite copies it into `docs/` and Pages serves it).
+> **MeowDisplay status: disabled.** `VersionGate.manifestURL` is `nil`, so no
+> request is made: MeowDisplay hosts no policy file yet and must not follow
+> upstream OpenDisplay's. The design below is upstream's, kept for when a
+> MeowDisplay-owned file exists.
+
+- **URL:** upstream used `https://opendisplay.app/ios-version.json` (source of
+  truth: `public/ios-version.json`; Vite copies it into `docs/` and Pages
+  serves it). This repository has no `public/ios-version.json`.
 - **Shape:**
   ```json
   {
     "ios": {
       "hardMinimumVersion": "0.0.0",
       "recommendedVersion": "1.12.0",
-      "storeURL": "itms-apps://apps.apple.com/app/id6780264891",
+      "storeURL": "https://github.com/raiseCatError/MeowDisplay",
       "message": "…"
     }
   }
   ```
-- `version < hardMinimumVersion` → **blocking** update screen (App Store deep
-  link, non-dismissible). This is the force.
+- `storeURL` is optional. The app opens it only if it is an `https` link or
+  MeowDisplay's own App Store listing (`AppStore.iOSAppID`); anything else,
+  including another app's listing, is replaced by `AppStore.receiverUpdateURL`
+  — the listing once it exists, the project page until then. The Mac's
+  `updateRequired.store` goes through the same check.
+- `version < hardMinimumVersion` → **blocking** update screen (update link as
+  above, non-dismissible). This is the force.
 - `hardMinimumVersion ≤ version < recommendedVersion` → **soft, dismissible** nag.
 - **`hardMinimumVersion` is the force floor: hand-edited via PR, deliberately and
   rarely.** It must _not_ auto-track "latest" or every release would force an

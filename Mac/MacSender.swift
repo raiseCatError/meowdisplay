@@ -5853,10 +5853,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let dict: [String: Any] = [
             "type": WireMessage.updateRequired,
             "target": isMac ? "mac" : "ios",
-            "store": isMac ? "https://github.com/raiseCatError/MeowDisplay" : AppStore.updateURL.absoluteString,
+            // Always present: an older receiver without it falls back to the
+            // App Store link it was built with (upstream's listing).
+            "store": (isMac ? AppStore.projectURL : AppStore.receiverUpdateURL).absoluteString,
             "message": isMac
-                ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Use Check for Updates… there to reconnect."
-                : "This \(kind) app is too old for this Mac. Update MeowDisplay from the App Store to reconnect.",
+                ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Update it from the MeowDisplay GitHub page to reconnect."
+                : "This \(kind) app is too old for this Mac. Update MeowDisplay on it to reconnect.",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let json = String(data: data, encoding: .utf8) {

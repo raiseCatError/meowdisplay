@@ -127,6 +127,7 @@ Work through this before pressing **Submit for Review**.
 | Content-rights declaration | Draft above — confirm |
 | Age-rating questionnaire | **[MAINTAINER INPUT]** — the app shows only the user's own Mac screen; no built-in web browsing, user-generated content, or purchases |
 | App Privacy questionnaire | See [App Privacy](#app-privacy) — confirm |
+| Privacy manifest | `iOS/PrivacyInfo.xcprivacy`, bundled by `project.yml` — see [App Privacy](#app-privacy) |
 | Export-compliance questionnaire | See [Export compliance](#export-compliance) — **needs a maintainer/legal determination** |
 | App Review contact (name, email, phone) | **[MAINTAINER INPUT]** — enter in App Store Connect only |
 | App Review notes | See [App Review notes](#app-review-notes) |
@@ -137,10 +138,13 @@ Work through this before pressing **Submit for Review**.
 
 ### Before the first submission
 
-- [ ] **Update `AppStore.iOSAppID`** in `Shared/AppStore.swift`. It still holds
-      upstream OpenDisplay's App Store ID (`6780264891`), which the iOS update
-      prompt and the Mac's `updateRequired` message link to. Replace it with
-      this app's Apple ID from App Store Connect, then build the candidate.
+- [ ] **Set `AppStore.iOSAppID`** in `Shared/AppStore.swift` to this app's
+      Apple ID from App Store Connect (the digits only). It is `nil` until
+      then, so the iOS update screen and the Mac's `updateRequired` message
+      link to the GitHub project page instead of any App Store listing. It
+      must never be upstream OpenDisplay's ID — `AppStoreTests` fails if that
+      appears anywhere in the repository. Set it in the build that ships, or
+      the first release still points users at GitHub to update.
 - [ ] **Provide a Mac build App Review can install.** There is no public
       notarized Mac download yet. Publish one (for example an unlisted or
       pre-release GitHub Release asset) or attach a download link in the review
@@ -182,7 +186,16 @@ Draft for the App Privacy questionnaire, from an inspection of the iOS target
 
 - **No third-party analytics, crash-reporting, or advertising SDKs.** The iOS
   target links only Apple frameworks plus `swift-certificates` (X509) and
-  `swift-asn1` (`project.yml`). Sparkle is linked into the Mac apps only.
+  `swift-asn1` (`project.yml`), and through them Apple's `swift-crypto`.
+  Sparkle is linked into the Mac apps only.
+- **Privacy manifest.** `iOS/PrivacyInfo.xcprivacy` declares no tracking, no
+  tracking domains and no collected data, and the two required-reason API
+  categories the app's own code uses: `UserDefaults` (`CA92.1`, the app's own
+  settings) and file timestamps (`C617.1`, `iOS/Log.swift` checking the size
+  of its connection log in the app container). `swift-crypto` ships its own
+  manifest; `swift-certificates` and `swift-asn1` use none of these APIs.
+  `PrivacyManifestTests` fails if the iOS sources start using a category the
+  manifest does not declare.
 - **No accounts.** Pairing is device-to-device; there is no sign-in.
 - **No tracking and no advertising.** No `AdSupport` /
   `AppTrackingTransparency` use, no `identifierForVendor` use, no ads.
@@ -196,7 +209,9 @@ Draft for the App Privacy questionnaire, from an inspection of the iOS target
   with no identifiers.
 - **Stored on-device only:** device name, pairing trust records and the
   device's own certificate identity (Keychain), Remote Access endpoints, and
-  control/display preferences (`UserDefaults`).
+  control/display preferences (`UserDefaults`), plus a size-capped connection
+  log in the app's Documents folder that leaves the device only if the user
+  shares it from Settings & Help.
 - The Performance overlay labelled "Analytics" in Settings is a local
   on-screen diagnostic; it sends nothing.
 
