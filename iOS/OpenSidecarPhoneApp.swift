@@ -122,6 +122,9 @@ struct ReceiverScreen: View {
                 trailing: geo.safeAreaInsets.trailing)
             let effectiveSafeInsets = ControlSafeInsets.resolved(
                 proxy: proxySafeInsets, runtime: runtimeSafeInsets)
+            // Re-read from the proxy on every pass: a fold or resize yields a
+            // complete new snapshot, never an update to the previous one.
+            let reservedRegions = ControlReservedRegion.active(in: geo)
             ZStack {
                 if showsReceiverSurface {
                     ReceiverSafeAreaProbe { insets, notchSide in
@@ -149,6 +152,8 @@ struct ReceiverScreen: View {
                                    appGestureCommands: controlStore.preferences.appGestureCommands,
                                    safeInsets: effectiveSafeInsets,
                                    occupiedControlFrames: occupiedControlFrames,
+                                   reservedDivisions: ControlReservedRegion.frames(of: .division,
+                                                                                   in: reservedRegions),
                                    onRotationSnap: { haptics.play(.selection) },
                                    smartTouchHapticsEnabled: SmartTouchHapticPolicy.isEnabled(
                                        haptics: controlStore.preferences.hapticsEnabled,
@@ -209,6 +214,7 @@ struct ReceiverScreen: View {
                         containerSize: geo.size,
                         safeInsets: effectiveSafeInsets,
                         notchSide: physicalNotchSide,
+                        reservedRegions: reservedRegions,
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 })
                 } else {
@@ -468,6 +474,26 @@ private struct ReceiverSafeAreaProbe: UIViewRepresentable {
                      + "notchSide=\(notchSide.map(String.init(describing:)) ?? "none")")
             #endif
         }
+    }
+}
+
+extension ControlReservedRegion {
+    /// The system's currently active reserved regions for `proxy`'s view,
+    /// in that view's coordinate space (mirrored for right-to-left like the
+    /// rest of the SwiftUI layout, which is the default the controls are
+    /// positioned in). iOS 27.1 introduced them; earlier systems report none,
+    /// which leaves the safe-area/notch fallback as the only input.
+    static func active(in proxy: GeometryProxy) -> [ControlReservedRegion] {
+        guard #available(iOS 27.1, *) else { return [] }
+        // The default query already omits inactive regions (a fold while
+        // the device lies flat); filtering again keeps that explicit.
+        let divisions = proxy.reservedRegions(kind: .division)
+            .filter(\.isActive)
+            .map { ControlReservedRegion(kind: .division, frame: $0.frame) }
+        let occlusions = proxy.reservedRegions(kind: .occlusion)
+            .filter(\.isActive)
+            .map { ControlReservedRegion(kind: .occlusion, frame: $0.frame) }
+        return divisions + occlusions
     }
 }
 
@@ -2215,6 +2241,8 @@ struct VideoLayerView: UIViewRepresentable {
     let appGestureCommands: AppGestureCommands
     let safeInsets: ControlSafeInsets
     let occupiedControlFrames: [CGRect]
+    /// Active fold/division frames — see `VideoOffSurfaceGeometry.usablePiece`.
+    let reservedDivisions: [CGRect]
     let onRotationSnap: () -> Void
     /// Whether Smart Touch hold feedback plays — see `SmartTouchHapticPolicy`.
     let smartTouchHapticsEnabled: Bool
@@ -2236,7 +2264,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.setSmartTouchEnabled(smartTouchEnabled)
         view.setAllowInput(allowInput)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
-        view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
+        view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
+                               reservedDivisions: reservedDivisions)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
@@ -2357,7 +2386,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setSmartTouchEnabled(smartTouchEnabled)
         uiView.setAllowInput(allowInput)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
-        uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames)
+        uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
+                                 reservedDivisions: reservedDivisions)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
@@ -2403,6 +2433,7 @@ struct VideoLayerView: UIViewRepresentable {
         private var showSurfaceGrid = true
         private var surfaceSafeInsets = ControlSafeInsets.zero
         private var occupiedControlFrames: [CGRect] = []
+        private var reservedDivisions: [CGRect] = []
         #if DEBUG
         private var lastLoggedTrackpadRect: CGRect?
         #endif
@@ -2628,10 +2659,13 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         func setSurfaceContext(safeInsets: ControlSafeInsets,
-                               occupiedControlFrames: [CGRect]) {
-            guard safeInsets != surfaceSafeInsets || occupiedControlFrames != self.occupiedControlFrames else { return }
+                               occupiedControlFrames: [CGRect],
+                               reservedDivisions: [CGRect]) {
+            guard safeInsets != surfaceSafeInsets || occupiedControlFrames != self.occupiedControlFrames
+                    || reservedDivisions != self.reservedDivisions else { return }
             surfaceSafeInsets = safeInsets
             self.occupiedControlFrames = occupiedControlFrames
+            self.reservedDivisions = reservedDivisions
             setNeedsLayout()
         }
 
@@ -2839,7 +2873,8 @@ struct VideoLayerView: UIViewRepresentable {
                     occupiedControlFrames: occupiedControlFrames,
                     portrait: portrait,
                     inputMode: pointerEngine.inputMode,
-                    remoteAspectSize: video)
+                    remoteAspectSize: video,
+                    divisions: reservedDivisions)
                 #if DEBUG
                 // TRACKPAD REGRESSION forensics: this is the ONE call site
                 // that decides between Trackpad's tall free-form portrait

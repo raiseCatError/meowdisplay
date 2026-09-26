@@ -1399,3 +1399,338 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertNil(PhysicalNotchSide.forLandscape(nil))
     }
 }
+
+/// Adaptive layout against system-reserved regions (iOS 27.1 `ReservedRegion`,
+/// converted to `ControlReservedRegion` at the SwiftUI boundary). Every
+/// container and region below is a representative fixture exercising the
+/// pure geometry — none of it is a device identifier or a runtime constant.
+final class ReservedRegionLayoutTests: XCTestCase {
+    private let landscape = CGRect(x: 0, y: 0, width: 844, height: 390)
+    private let portrait = CGRect(x: 0, y: 0, width: 390, height: 844)
+    private let verticalTray = CGSize(width: 44, height: 300)
+    private let verticalPalette = CGSize(width: 42, height: 260)
+    private let horizontalTray = CGSize(width: 300, height: 44)
+    private let horizontalPalette = CGSize(width: 260, height: 42)
+
+    private func division(x: CGFloat, width: CGFloat = 24, in container: CGRect) -> ControlReservedRegion {
+        ControlReservedRegion(kind: .division,
+                              frame: CGRect(x: x, y: container.minY, width: width, height: container.height))
+    }
+
+    private func division(y: CGFloat, height: CGFloat = 24, in container: CGRect) -> ControlReservedRegion {
+        ControlReservedRegion(kind: .division,
+                              frame: CGRect(x: container.minX, y: y, width: container.width, height: height))
+    }
+
+    private func layout(_ container: CGRect, portrait: Bool = false, side: LandscapeTraySide = .trailing,
+                        safeInsets: ControlSafeInsets = .zero, avoidNotch: Bool = true,
+                        notchSide: LandscapeTraySide? = nil,
+                        regions: [ControlReservedRegion] = [],
+                        traySize: CGSize? = nil, paletteSize: CGSize? = nil) -> ControlTrayLayout {
+        ControlTrayGeometry.layout(
+            container: container, safeInsets: safeInsets, keyboardVisibleRect: nil, portrait: portrait,
+            side: side, traySize: traySize ?? (portrait ? horizontalTray : verticalTray),
+            paletteSize: paletteSize ?? (portrait ? horizontalPalette : verticalPalette),
+            avoidNotch: avoidNotch, notchSide: notchSide, reservedRegions: regions)
+    }
+
+    private func functionFrames(_ container: CGRect, main: ControlTrayLayout, portrait: Bool = false,
+                                position: FunctionTrayPosition,
+                                regions: [ControlReservedRegion]) -> [CGRect] {
+        let sizes = portrait
+            ? [CGSize(width: 92, height: 44), CGSize(width: 92, height: 44)]
+            : [CGSize(width: 44, height: 92), CGSize(width: 44, height: 92)]
+        return ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: portrait,
+            mainSide: main.side, position: position, mainTrayFrame: main.trayFrame,
+            groupSizes: sizes, avoiding: nil, avoidNotch: true, reservedRegions: regions)
+    }
+
+    // MARK: A. Existing-device compatibility
+
+    func testOrdinaryPortraitTrayKeepsItsExactBottomCenteredFrame() {
+        let insets = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        let result = layout(portrait, portrait: true, safeInsets: insets)
+        // Bottom-centered, lifted just clear of the home-indicator band.
+        XCTAssertEqual(result.trayFrame, CGRect(x: 45, y: 810 - 44, width: 300, height: 44))
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.side, .trailing)
+    }
+
+    func testOrdinaryLandscapeTrailingAndLeadingFramesAreUnchanged() {
+        let trailing = layout(landscape, side: .trailing)
+        let leading = layout(landscape, side: .leading)
+        XCTAssertEqual(trailing.trayFrame, CGRect(x: 844 - 12 - 44, y: 45, width: 44, height: 300))
+        XCTAssertEqual(leading.trayFrame, CGRect(x: 12, y: 45, width: 44, height: 300))
+        XCTAssertEqual(trailing.side, .trailing)
+        XCTAssertEqual(leading.side, .leading)
+        XCTAssertEqual(trailing.axis, .vertical)
+    }
+
+    /// A normal notched iPhone on a system that reports its camera as an
+    /// occlusion region: no control touches the region, so nothing moves.
+    func testNonCollidingOcclusionLeavesEveryFrameBitForBitUnchanged() {
+        let island = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 0, y: 140, width: 50, height: 110))
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 59)
+        for side in LandscapeTraySide.allCases {
+            let legacy = layout(landscape, side: side, safeInsets: insets, notchSide: .leading)
+            let adaptive = layout(landscape, side: side, safeInsets: insets, notchSide: .leading, regions: [island])
+            XCTAssertEqual(adaptive, legacy)
+        }
+        let portraitIsland = ControlReservedRegion(kind: .occlusion,
+                                                   frame: CGRect(x: 140, y: 11, width: 110, height: 37))
+        let portraitInsets = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        XCTAssertEqual(layout(portrait, portrait: true, safeInsets: portraitInsets, regions: [portraitIsland]),
+                       layout(portrait, portrait: true, safeInsets: portraitInsets))
+    }
+
+    func testFunctionTrayWithoutRegionsMatchesLegacyCallExactly() {
+        let main = layout(landscape)
+        for position in FunctionTrayPosition.allCases {
+            let legacy = ControlTrayGeometry.functionTrayLayout(
+                container: landscape, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: position, mainTrayFrame: main.trayFrame,
+                groupSizes: [CGSize(width: 44, height: 92), CGSize(width: 44, height: 92)],
+                avoiding: nil, avoidNotch: true)
+            XCTAssertEqual(functionFrames(landscape, main: main, position: position, regions: []), legacy)
+        }
+    }
+
+    // MARK: B. Duo-like outer/full-width geometry
+
+    func testCornerOcclusionAndAsymmetricInsetsNeverCoverTrailingControls() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 20, trailing: 40)
+        let result = layout(container, safeInsets: insets, regions: [camera])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertFalse(result.trayFrame.intersects(camera.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(camera.frame))
+        XCTAssertTrue(container.insetBy(dx: 12, dy: 12).contains(result.trayFrame))
+        // The palette still opens inward, away from the reserved edge.
+        XCTAssertLessThan(result.paletteFrame.maxX, result.trayFrame.minX)
+        XCTAssertGreaterThan(result.trayFrame.midX, container.midX)
+    }
+
+    func testAvoidNotchOffKeepsItsMeaningForOcclusionsButNeverForDivisions() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let off = layout(container, avoidNotch: false, regions: [camera])
+        XCTAssertEqual(off, layout(container, avoidNotch: false))
+
+        let fold = division(x: 700, in: landscape)
+        let offWithFold = layout(landscape, avoidNotch: false, regions: [fold])
+        XCTAssertEqual(offWithFold.side, .leading)
+        XCTAssertFalse(offWithFold.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(offWithFold.paletteFrame.intersects(fold.frame))
+    }
+
+    // MARK: C. Division / fold
+
+    func testDivisionNearTrailingEdgeMovesTrayToLeadingOuterEdge() {
+        let fold = division(x: 700, in: landscape)
+        let result = layout(landscape, side: .trailing, regions: [fold])
+        XCTAssertEqual(result.side, .leading)
+        XCTAssertEqual(result.trayFrame.minX, 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        XCTAssertGreaterThan(result.paletteFrame.minX, result.trayFrame.maxX)
+    }
+
+    func testDivisionNearLeadingEdgeMovesTrayToTrailingOuterEdge() {
+        let fold = division(x: 120, in: landscape)
+        let result = layout(landscape, side: .leading, regions: [fold])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertEqual(result.trayFrame.maxX, 844 - 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+    }
+
+    /// Split View style: the app's view ends at the fold, so the division
+    /// (with its margins) sits on — and partly beyond — one edge.
+    func testDivisionOnAnEdgeSendsControlsToTheOppositeOuterEdge() {
+        let atTrailing = division(x: 830, width: 30, in: landscape)
+        XCTAssertEqual(layout(landscape, side: .trailing, regions: [atTrailing]).side, .leading)
+        let atLeading = division(x: -16, width: 30, in: landscape)
+        let result = layout(landscape, side: .leading, regions: [atLeading])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertEqual(result.trayFrame.maxX, 844 - 12)
+    }
+
+    func testCenteredDivisionKeepsTheStoredPreferenceOnEitherSide() {
+        let fold = division(x: 410, in: landscape)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(landscape, side: side, regions: [fold])
+            XCTAssertEqual(result.side, side)
+            XCTAssertEqual(result.trayFrame, layout(landscape, side: side).trayFrame)
+            XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        }
+    }
+
+    func testPaletteOpensInsideTheTraysUsablePieceOfACenteredDivision() {
+        let fold = division(x: 410, in: landscape)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(landscape, side: side, regions: [fold])
+            XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+            XCTAssertFalse(result.paletteFrame.intersects(result.trayFrame))
+            if side == .trailing {
+                XCTAssertGreaterThanOrEqual(result.paletteFrame.minX, fold.frame.maxX)
+            } else {
+                XCTAssertLessThanOrEqual(result.paletteFrame.maxX, fold.frame.minX)
+            }
+        }
+    }
+
+    func testPaletteMovesWithATrayDisplacedByAnOcclusion() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let plain = layout(container)
+        let result = layout(container, regions: [camera])
+        XCTAssertNotEqual(result.trayFrame, plain.trayFrame)
+        XCTAssertFalse(result.paletteFrame.intersects(result.trayFrame))
+        XCTAssertEqual(result.trayFrame.minX - result.paletteFrame.maxX,
+                       plain.trayFrame.minX - plain.paletteFrame.maxX, accuracy: 0.5)
+    }
+
+    func testFunctionTraySameSideFollowsEffectiveMainTraySide() {
+        let fold = division(x: 700, in: landscape)
+        // A tray short enough to leave room above and below it, so Same Side
+        // groups keep their outer-edge anchors.
+        let main = layout(landscape, side: .trailing, regions: [fold], traySize: CGSize(width: 44, height: 150))
+        XCTAssertEqual(main.side, .leading)
+        let frames = functionFrames(landscape, main: main, position: .sameSide, regions: [fold])
+        XCTAssertEqual(frames.count, 2)
+        for frame in frames {
+            XCTAssertEqual(frame.minX, 12)
+            XCTAssertFalse(frame.intersects(fold.frame))
+            XCTAssertFalse(frame.intersects(main.trayFrame))
+        }
+    }
+
+    func testFunctionTrayOppositeSideIsOppositeTheEffectiveSideAndNeverCrossesTheDivision() {
+        // Fold at the trailing edge (Split View style): the trailing outer
+        // edge has no usable space, so Opposite Side groups settle at the far
+        // edge of the usable piece, just before the fold.
+        let atEdge = division(x: 830, width: 30, in: landscape)
+        let edgeMain = layout(landscape, side: .trailing, regions: [atEdge])
+        XCTAssertEqual(edgeMain.side, .leading)
+        for frame in functionFrames(landscape, main: edgeMain, position: .oppositeSide, regions: [atEdge]) {
+            XCTAssertFalse(frame.intersects(atEdge.frame))
+            XCTAssertLessThanOrEqual(frame.maxX, atEdge.frame.minX)
+            XCTAssertGreaterThan(frame.midX, landscape.midX)
+        }
+        // Centered fold: each side keeps a full half; Opposite Side uses the
+        // other half's outer edge.
+        let centered = division(x: 410, in: landscape)
+        let centeredMain = layout(landscape, side: .trailing, regions: [centered])
+        for frame in functionFrames(landscape, main: centeredMain, position: .oppositeSide, regions: [centered]) {
+            XCTAssertEqual(frame.minX, 12)
+            XCTAssertFalse(frame.intersects(centered.frame))
+        }
+    }
+
+    func testVideoOffSurfaceNeverBridgesAnActiveDivision() {
+        let fold = division(x: 410, in: landscape)
+        let tray = layout(landscape, regions: [fold]).trayFrame
+        for mode in [PointerInputMode.trackpad, .direct] {
+            let surface = VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10), divisions: [fold.frame])
+            XCTAssertFalse(surface.isEmpty)
+            XCTAssertFalse(surface.intersects(fold.frame.insetBy(dx: -VideoOffSurfaceGeometry.controlGap, dy: 0)))
+            XCTAssertFalse(surface.intersects(tray))
+            if mode == .direct {
+                XCTAssertEqual(surface.width / surface.height, 1.6, accuracy: 0.001)
+            }
+        }
+        // Portrait with a horizontal fold: the tall Trackpad surface keeps
+        // one side of it.
+        let horizontalFold = division(y: 410, in: portrait)
+        let portraitTray = layout(portrait, portrait: true, regions: [horizontalFold]).trayFrame
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: portrait, safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [portraitTray], portrait: true, inputMode: .trackpad,
+            remoteAspectSize: CGSize(width: 16, height: 10), divisions: [horizontalFold.frame])
+        XCTAssertFalse(surface.isEmpty)
+        XCTAssertFalse(surface.intersects(horizontalFold.frame))
+    }
+
+    func testVideoOffSurfaceWithoutDivisionsIsUnchanged() {
+        let tray = layout(landscape).trayFrame
+        for mode in [PointerInputMode.trackpad, .direct] {
+            let legacy = VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10))
+            let away = CGRect(x: 2000, y: 0, width: 24, height: 390)
+            XCTAssertEqual(VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10), divisions: [away]), legacy)
+        }
+    }
+
+    // MARK: D. Portrait inner layout
+
+    func testPortraitStaysHorizontalAndBottomAnchoredBesideAVerticalFold() {
+        let inner = CGRect(x: 0, y: 0, width: 700, height: 800)
+        let fold = division(x: 338, in: inner)
+        let result = layout(inner, portrait: true, side: .trailing, regions: [fold])
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.trayFrame.maxY, inner.maxY - 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        // Centered within the usable half on the preferred side.
+        XCTAssertEqual(result.trayFrame.midX, (362 + 700) / 2, accuracy: 0.5)
+        let leading = layout(inner, portrait: true, side: .leading, regions: [fold])
+        XCTAssertEqual(leading.trayFrame.midX, 338 / 2, accuracy: 0.5)
+        for frame in functionFrames(inner, main: result, portrait: true, position: .sameSide, regions: [fold]) {
+            XCTAssertFalse(frame.intersects(fold.frame))
+            XCTAssertLessThan(frame.maxY, result.trayFrame.minY)
+        }
+    }
+
+    func testPortraitHorizontalFoldLeavesTheBottomCenteredTrayExactlyInPlace() {
+        let inner = CGRect(x: 0, y: 0, width: 700, height: 800)
+        let fold = division(y: 388, in: inner)
+        let result = layout(inner, portrait: true, regions: [fold])
+        XCTAssertEqual(result.trayFrame, layout(inner, portrait: true).trayFrame)
+        XCTAssertEqual(result.paletteFrame, layout(inner, portrait: true).paletteFrame)
+        XCTAssertEqual(result.axis, .horizontal)
+    }
+
+    // MARK: E. Dynamic changes
+
+    func testFoldingAndUnfoldingRecomputesFromEachSnapshotWithoutStaleState() {
+        let flat = layout(landscape, side: .trailing)
+        let fold = division(x: 700, in: landscape)
+        let folded = layout(landscape, side: .trailing, regions: [fold])
+        XCTAssertNotEqual(folded, flat)
+        XCTAssertEqual(layout(landscape, side: .trailing, regions: [fold]), folded)
+        // The region disappears: nothing of it survives.
+        XCTAssertEqual(layout(landscape, side: .trailing), flat)
+        // Rotation to a new container is a fresh snapshot as well.
+        XCTAssertEqual(layout(portrait, portrait: true), layout(portrait, portrait: true, regions: []))
+    }
+
+    func testRuntimePlacementNeverRewritesStoredPreferences() {
+        let preferences = ReceiverControlPreferences()
+        XCTAssertEqual(preferences.preferredLandscapeSide, .trailing)
+        let before = preferences
+        let main = layout(landscape, side: preferences.preferredLandscapeSide,
+                          regions: [division(x: 700, in: landscape)])
+        _ = functionFrames(landscape, main: main, position: preferences.functionTrayPosition,
+                           regions: [division(x: 700, in: landscape)])
+        XCTAssertEqual(main.side, .leading)
+        XCTAssertEqual(preferences, before)
+        XCTAssertEqual(preferences.preferredLandscapeSide, .trailing)
+    }
+
+    func testSegmentsSplitAroundDivisionsInOrder() {
+        let area = CGRect(x: 0, y: 0, width: 100, height: 50)
+        let pieces = ControlPlacementArea.segments(
+            of: area, removing: [CGRect(x: 60, y: 0, width: 10, height: 50),
+                                 CGRect(x: 20, y: 0, width: 10, height: 50)], horizontal: true)
+        XCTAssertEqual(pieces, [CGRect(x: 0, y: 0, width: 20, height: 50),
+                                CGRect(x: 30, y: 0, width: 30, height: 50),
+                                CGRect(x: 70, y: 0, width: 30, height: 50)])
+    }
+}
