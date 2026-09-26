@@ -6,8 +6,9 @@ current capabilities.
 
 ## Requirements
 
-- **Xcode 15+** (the Mac sender target's deployment target is macOS 14; the
-  Mac Receiver target is macOS 12; the iOS target is iOS/iPadOS 16.4).
+- **Xcode 16+** (the project builds in Swift 6 language mode; CI uses the
+  `macos-26` runner). The Mac sender target's deployment target is macOS 14;
+  the Mac Receiver target is macOS 12; the iOS target is iOS/iPadOS 16.4.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
 - A free or paid Apple Developer account, to sign the iOS build for your
   device (a free account is enough for local sideloading).
@@ -22,13 +23,11 @@ cd MeowDisplay
 ## Project generation
 
 This project is generated with `xcodegen`, not committed as a `.xcodeproj`.
-There are two YAML specs:
-
-- `project.yml` — tracked, upstream-compatible. Uses upstream-style bundle
-  IDs and no personal signing team.
-- `project.local.yml` — **local-only**, ignored via `.git/info/exclude` in
-  this checkout. Carries this fork's own bundle IDs
-  (`com.raisecaterror.meowdisplay.*`) and reads your signing team from `.env`.
+The spec is the tracked `project.yml`: it carries MeowDisplay's bundle IDs
+(`com.raisecaterror.meowdisplay.*`; the two Mac apps' Debug builds add a
+`.debug` suffix) and takes the signing team from the `DEVELOPMENT_TEAM`
+environment variable, so no personal team ID lives in the repo. CI runs the
+same spec.
 
 Create `.env` in the repo root with your Apple Developer Team ID:
 
@@ -44,15 +43,12 @@ project.
 Generate the project:
 
 ```sh
-./generate-local.sh
+./generate.sh
 ```
 
-This loads `.env` and runs `xcodegen generate --spec project.local.yml`,
-producing `MeowDisplay.xcodeproj`.
-
-**Do not** run bare `xcodegen generate` or `./generate.sh` in this checkout —
-they read the tracked `project.yml`, which carries upstream's bundle IDs and
-no local signing team.
+This loads `.env` and runs `xcodegen generate`, producing
+`MeowDisplay.xcodeproj`. A bare `xcodegen generate` works too, but leaves the
+signing team empty unless `DEVELOPMENT_TEAM` is set in your environment.
 
 ## Opening the project
 
@@ -148,7 +144,7 @@ sign in to [Tailscale](https://tailscale.com) on both the Mac and the
 receiving device, then add the Mac's Tailscale address as a remote endpoint
 in the app's connection/endpoint settings. The endpoint address is only a
 routing hint — the same pairing-derived encrypted session still authenticates
-the connection; see [README.md § Architecture & security summary](README.md#architecture--security-summary).
+the connection; see [README.md § Security](README.md#security).
 
 ## Using MeowDisplay
 
@@ -171,8 +167,11 @@ have more than one.
 
 ### Audio
 
-System audio streams from the Mac to the connected device automatically
-once a session is active — there's no separate audio toggle to enable it.
+Audio is off by default and started from the receiving device: turn on
+**Audio** in the receiver's settings (iPhone/iPad app or Mac Receiver) and
+the Mac's system audio plays there too, while the Mac keeps playing it
+locally. The Mac app has no audio toggle of its own. **A/V Sync** and
+**Resync** sit next to that toggle.
 
 ### Input
 
@@ -191,8 +190,8 @@ permission — see [Required permissions](#required-permissions) above.
   packet and requests interactive wake, then connects automatically once
   the Mac responds. Requires Wake for Network Access enabled on the Mac and
   Wake-on-LAN–capable hardware/firmware; currently local-network only (see
-  the README's [Remote Access](README.md#remote-access) section for the
-  Tailscale/remote-wake limitation).
+  the [current status](REMOTE_WAKE_ON_LAN.md#current-status) of Wake &
+  Connect for the Tailscale/remote-wake limitation).
 - **Auto-Reconnect** (toggle in Mac Settings) keeps a previously connected
   device reconnecting automatically after a drop; turning it off only stops
   *automatic* connecting — Connect, Reconnect, and Wake & Connect still work
@@ -245,19 +244,21 @@ automatically after you log in.
 - **Input does nothing**: grant the Mac's Accessibility permission (see
   [Required permissions](#required-permissions)) — input injection silently
   does nothing without it.
-- **No audio**: audio streams automatically once connected; if it's silent,
-  confirm the session is actually connected (not just displaying a stale
-  frame) and check the Mac's system output/volume isn't muted.
+- **No audio**: audio is off until you turn on **Audio** in the receiver's
+  settings (see [Audio](#audio)). If it's on and still silent, confirm the
+  session is actually connected (not just displaying a stale frame), that
+  the Mac's MeowDisplay version supports audio (the toggle is disabled
+  otherwise), and that the Mac's system output/volume isn't muted.
 - **USB connection problems**: see USB device doesn't appear, above — a
   charge-only cable is the most common cause.
 - **Remote Access doesn't connect**: confirm Tailscale (or your private
   network) is signed in and shows both devices as online, that the Mac's
   Tailscale address entered in the app's Remote Access settings is current,
   and that the Mac isn't asleep (Remote Access wake has the local-only
-  limitation described in the README's
-  [Remote Access](README.md#remote-access) section).
+  limitation described in the
+  [current status](REMOTE_WAKE_ON_LAN.md#current-status) of Wake & Connect).
 - **Wake & Connect doesn't work**: confirm Wake for Network Access is
   enabled on the Mac (System Settings → Energy) and that the Mac's
   hardware/firmware supports Wake-on-LAN; this currently only works over
-  the local network, not through Remote Access — see the README's
-  [Remote Access](README.md#remote-access) section.
+  the local network, not through Remote Access — see the
+  [current status](REMOTE_WAKE_ON_LAN.md#current-status) of Wake & Connect.

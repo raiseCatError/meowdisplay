@@ -254,7 +254,7 @@ pairing, USB & Wi-Fi, Remote Access and troubleshooting.
 git clone https://github.com/raiseCatError/meowdisplay.git
 cd meowdisplay
 echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
-./generate-local.sh
+./generate.sh
 ```
 
 Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac) and

@@ -61,6 +61,37 @@ screens cannot pass this check unnoticed. See
 - No account, email, or personal identifier is required or collected to use
   MeowDisplay.
 
+## Sessions, input and revocation
+
+A pinned, authenticated connection proves which paired device is on the
+other end. It does not by itself admit a session:
+
+- **Admission is per connection.** Before the Mac sends any video, audio or
+  cursor data, creates a virtual display, or acts on a receiver's input or
+  settings requests, the receiver must have accepted the session on that
+  exact connection, and a receiver-initiated request that needs the Mac
+  owner's approval must have it. After a reconnect or a route change the new
+  connection is admitted again before anything flows
+  (`Mac/SenderSessionAuthorization.swift`).
+- **Every connection re-proves identity, on every route.** The receiver's
+  announced ID must be the device the Mac dialed, and its key must be that
+  device's *current* pin — USB is held to exactly the same rule as the
+  network.
+- **Connection approval never grants input.** Remote input needs the Mac's
+  Allow Input master switch, an admitted session, and a grant for the
+  current connection. Grants never carry over to a new connection; the
+  receiver asks again.
+- **Forget and Block revoke.** They withdraw approval prompts still waiting
+  for that device, end connections that are waiting to take over the
+  session, and drop remembered acceptances; answering a prompt afterwards
+  does nothing. Forget also removes the pin, so a stale in-memory copy of the
+  trust store can't bring it back.
+- **Automatic reconnection never becomes a user request.** Remote Access
+  recovery tells the Mac it is automatic, so it can never raise an approval
+  prompt; only an explicit Connect can. Discovery metadata (Bonjour names
+  and IDs) is never used to put a trusted-looking prompt on screen before
+  the connection is authenticated.
+
 ## Network paths and what leaves the local network
 
 - **USB**: local only, over macOS's `usbmuxd`. Nothing leaves the device

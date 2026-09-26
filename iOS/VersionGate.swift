@@ -1,7 +1,9 @@
 import SwiftUI
 
-// `AppStore` (the App Store identity + deep link) lives in Shared/AppStore.swift
-// so the Mac can reference the same link when it asks the phone to update.
+// `AppStore` (the App Store identity + update link) lives in
+// Shared/AppStore.swift so the Mac can reference the same link when it asks
+// the phone to update. Every URL this gate opens goes through it, so no
+// update screen can ever point at another app's listing.
 
 // `PeerUpdateSignal` (what the connected Mac tells us about compatibility)
 // lives with the receiver core in Shared/StreamReceiver.swift — the Mac app's
@@ -73,7 +75,7 @@ final class VersionGate: ObservableObject {
         else { return }   // fail open
 
         let policy = manifest.ios
-        let url = policy.storeURL.flatMap { URL(string: $0) } ?? AppStore.updateURL
+        let url = AppStore.resolveReceiverUpdateURL(policy.storeURL)
 
         if let floor = policy.hardMinimumVersion, isVersion(current, olderThan: floor) {
             remoteStatus = .required(Update(message: policy.message ?? Self.requiredFallback, url: url))
@@ -92,7 +94,10 @@ final class VersionGate: ObservableObject {
     func applyPeer(_ signal: PeerUpdateSignal?) {
         switch signal {
         case let .updateReceiver(message, storeURL):
-            peerStatus = .required(Update(message: message, url: storeURL))
+            // Re-resolved here too: whatever the Mac (or an older build of
+            // it) sent, this screen only ever opens an allowed link.
+            let url = AppStore.resolveReceiverUpdateURL(storeURL.absoluteString)
+            peerStatus = .required(Update(message: message, url: url))
         case let .updateMac(message):
             peerStatus = .recommended(Update(message: message, url: macAppURL))
         case nil:
@@ -175,10 +180,18 @@ struct UpdateRequiredView: View {
             Button {
                 UIApplication.shared.open(update.url)
             } label: {
-                Label("Update on the App Store", systemImage: "arrow.down.circle")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                // Until MeowDisplay has its own listing the link is the
+                // project page, so only promise the App Store when it is one.
+                Group {
+                    if AppStore.isAppStoreLink(update.url) {
+                        Label("Update on the App Store", systemImage: "arrow.down.circle")
+                    } else {
+                        Label("Get the Latest Version", systemImage: "arrow.down.circle")
+                    }
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
 

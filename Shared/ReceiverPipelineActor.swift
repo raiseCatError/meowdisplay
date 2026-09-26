@@ -55,6 +55,11 @@ final class ReconnectContext: @unchecked Sendable {
         /// `TrustStore`/SPKI pinning/identity-change rejection are
         /// untouched and remain the only source of truth for trust.
         var authenticatedPeerIDHint: String?
+        /// This device's own explicit Connect request, while it stands —
+        /// see `ManualConnectRequest`. Written synchronously at the moment
+        /// the user acts or withdraws, so a request `Task` that reaches
+        /// `ReceiverPipelineActor` after its own withdrawal sees it gone.
+        var manualConnectRequest: ManualConnectRequest?
     }
 
     private let lock = NSLock()
@@ -68,6 +73,33 @@ final class ReconnectContext: @unchecked Sendable {
     func current() -> Snapshot {
         lock.lock(); defer { lock.unlock() }
         return snapshot
+    }
+}
+
+/// This device's own explicit Connect request (Connect, Connect with
+/// Mirror/Extend, Reconnect, Wake & Connect) — the only thing that may make
+/// a remote connect-request knock declare `.manual` (see
+/// `RemoteConnectRequestIntent`). `StreamReceiver` records it in
+/// `ReconnectContext` when the user acts and clears it when it is withdrawn
+/// (Wake & Connect's Cancel, Forget, Block) or answered by a connected Mac
+/// it covers.
+struct ManualConnectRequest: Sendable {
+    /// Same window as `hello.requestedMode` (PROTOCOL.md §6.9).
+    static let lifetime: TimeInterval = 30
+
+    let id = UUID()
+    /// The Mac the user asked for; nil for a Connect that names none.
+    let peerID: String?
+    var until: Date
+
+    init(peerID: String?, now: Date = Date()) {
+        self.peerID = peerID
+        until = now.addingTimeInterval(Self.lifetime)
+    }
+
+    /// Whether a session with `peerID` would answer this request.
+    func covers(_ peerID: String) -> Bool {
+        self.peerID == nil || self.peerID == peerID
     }
 }
 
@@ -87,6 +119,13 @@ actor ReceiverPipelineActor {
     /// cleared. Moved verbatim from `StreamReceiver` — it exists only to
     /// serve this cluster's own reconnect targeting.
     private var recoveryPeerID: String?
+    /// The explicit user request (`ManualConnectRequest.id`) behind the
+    /// current recovery run, bound to that run by generation: any adoption
+    /// or loss bumps the generation and so ends the binding, which is what
+    /// keeps later automatic recovery `.automatic` (see `knockIntent`).
+    /// `startedRun` is false when the request joined an automatic run that
+    /// was already under way.
+    private var manualRun: (requestID: UUID, generation: Int, startedRun: Bool)?
 
     // MARK: - Dependencies
 
@@ -160,7 +199,15 @@ actor ReceiverPipelineActor {
         // Reconnect targeting/listener control (unrelated network concerns
         // that stay host-owned; C2 territory, not duplicated here).
         var ensureTLSListening: @Sendable () -> Void
-        var requestRemoteConnect: @Sendable (String) -> Void
+        /// One authenticated knock at `peerID`, declaring `intent` — see
+        /// `knockIntent(for:request:)` for when that may be `.manual`.
+        var requestRemoteConnect: @Sendable (_ peerID: String, _ intent: SessionInvitationIntent) -> Void
+        /// The pinned peer a connection's own certificate resolves to NOW
+        /// (`TrustStore.peerID(forSPKI:)`), or nil — its pin was removed
+        /// after the handshake, or it has not finished TLS yet. Read-only
+        /// and thread-safe: it touches only the connection's TLS metadata
+        /// and `TrustStore`'s lock-protected snapshot.
+        var resolvePinnedPeerID: @Sendable (NWConnection) -> String?
 
         // `lastDataReceived` and the active receive generation are read
         // together, as ONE atomic pair, synchronously, from inside the
@@ -293,6 +340,31 @@ actor ReceiverPipelineActor {
         pendingConnections.removeAll()
     }
 
+    /// Forget (`trustRemoved`) or Block of `peerID` — see `StreamReceiver.
+    /// revokeSessionAuthority`. A parked candidate is authority captured
+    /// before the user acted: one that belongs to that Mac, or that no
+    /// longer resolves to a pinned peer at all, is cancelled here instead of
+    /// being left to prove itself and replace the session. The Mac stops
+    /// being a recovery target, and the current connection ends when it is
+    /// that Mac's — after Forget always, since it may have authenticated
+    /// before the pin was removed.
+    func revokePeer(_ peerID: String, trustRemoved: Bool) {
+        let revoked = pendingConnections.filter { candidate in
+            let owner = hostEffects.resolvePinnedPeerID(candidate)
+            return owner == nil || owner == peerID
+        }
+        revoked.forEach { $0.cancel() }
+        pendingConnections.removeAll { candidate in revoked.contains { $0 === candidate } }
+        if !revoked.isEmpty {
+            Log.info("reconnectDebug: cancelled \(revoked.count) parked candidate(s) for revoked peer=\(peerID)")
+        }
+        if recoveryPeerID == peerID { recoveryPeerID = nil }
+        let currentIsPeer = connection.map { hostEffects.resolvePinnedPeerID($0) == peerID } ?? false
+        if trustRemoved || currentIsPeer {
+            disconnectCurrentConnection(reason: .explicitDisconnect)
+        }
+    }
+
     private static func isFailed(_ state: NWConnection.State) -> Bool {
         if case .failed = state { return true }
         return false
@@ -335,6 +407,14 @@ actor ReceiverPipelineActor {
             return
         }
         pendingConnections.removeAll { $0 === pending }
+        // Re-checked here, not only at the handshake: Forget may have
+        // removed its pin while it waited, and an unpinned peer must never
+        // replace the session.
+        guard hostEffects.resolvePinnedPeerID(pending) != nil else {
+            Log.info("reconnectDebug: parked candidate no longer resolves to a pinned peer — not adopting it")
+            pending.cancel()
+            return
+        }
         if let data, !data.isEmpty {
             adopt(pending, greeted: true, initialData: data)
         } else {
@@ -497,7 +577,9 @@ actor ReceiverPipelineActor {
         hostEffects.ensureTLSListening()
         let reconnect = reconnectContext.current()
         if let peerID = reconnect.manualConnectPeerID ?? reconnect.authenticatedPeerIDHint ?? recoveryPeerID {
-            hostEffects.requestRemoteConnect(peerID)
+            let intent = knockIntent(for: peerID, request: reconnect.manualConnectRequest)
+            Log.info("reconnectDebug: knock peer=\(peerID) intent=\(intent.rawValue)")
+            hostEffects.requestRemoteConnect(peerID, intent)
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
@@ -509,17 +591,66 @@ actor ReceiverPipelineActor {
         Log.info("reconnectDebug: retryScheduled generation=\(generation) in \(delay)s")
     }
 
+    /// What a knock at `peerID` from this attempt declares. `.manual` only
+    /// while this very run is still the one the user's own request started
+    /// or joined (same generation), that request still stands (not
+    /// withdrawn, answered or expired), and it names this Mac or none.
+    /// Everything else — above all, automatic recovery after a lost
+    /// connection, however recent the user's last tap — is `.automatic`,
+    /// which can never raise an approval prompt on the Mac.
+    private func knockIntent(for peerID: String, request: ManualConnectRequest?,
+                             now: Date = Date()) -> SessionInvitationIntent {
+        guard let manualRun, manualRun.generation == sessionState.generation,
+              let request, request.id == manualRun.requestID,
+              now < request.until, request.covers(peerID) else { return .automatic }
+        return .manual
+    }
+
     private func reconnectAttemptTimedOut(generation: Int) {
         guard sessionState.generation == generation else { return }
         _ = sessionState.endReconnectAttempt()
         armReconnect()
     }
 
-    /// The user tapped Reconnect, or `requestConnect()`'s receiver-originated
-    /// Connect signal. Runs one clean recovery run through exactly the same
-    /// path as automatic recovery.
-    func requestManualReconnectTransition() {
-        mutateSession { $0.requestManualReconnect() }
+    /// The user tapped Connect or Reconnect (`StreamReceiver.requestConnect`,
+    /// `connectPrimary`, `reconnectNow`, Wake & Connect). Runs one clean
+    /// recovery run through exactly the same path as automatic recovery,
+    /// bound to `requestID` — the request `StreamReceiver` recorded in
+    /// `reconnectContext` — so its knocks can say `.manual`. A request
+    /// already withdrawn by the time this runs starts nothing.
+    func requestManualReconnectTransition(requestID: UUID) {
+        guard reconnectContext.current().manualConnectRequest?.id == requestID else {
+            Log.info("connectDebug: manual connect request withdrawn before it started")
+            return
+        }
+        mutateSession { state in
+            let started = state.requestManualReconnect()
+            // Bound before `mutateSession` arms the run's first attempt:
+            // the run this request just started, or the one it joined. A run
+            // an earlier explicit request started stays a manual run, now
+            // this request's to end.
+            if state.phase == .reconnecting {
+                let ownsRun = started
+                    || (manualRun?.generation == state.generation && manualRun?.startedRun == true)
+                manualRun = (requestID, state.generation, ownsRun)
+            }
+            return started
+        }
+    }
+
+    /// The user withdrew their own request (Wake & Connect's Cancel,
+    /// Forget, Block): drop its claim on the current run, and end the run
+    /// if that request is what started it. Automatic recovery it merely
+    /// joined, and any connection adopted since (which bumped the
+    /// generation), are left alone — withdrawing never tears down a live
+    /// session.
+    func endManualRun(requestID: UUID) {
+        guard let run = manualRun, run.requestID == requestID else { return }
+        manualRun = nil
+        guard run.startedRun, run.generation == sessionState.generation,
+              sessionState.phase == .reconnecting else { return }
+        Log.info("connectDebug: manual connect request withdrawn — ending its recovery run generation=\(run.generation)")
+        setConnected(false, reason: .explicitDisconnect)
     }
 
     /// The Mac's `displayState` pause/resume — a later-stage (control-

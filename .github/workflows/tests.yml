@@ -51,3 +51,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+
+      # The iPhone/iPad receiver shares Shared/ with both Mac apps but was
+      # never compiled here, so an iOS-only break (or an API that exists only
+      # on macOS) could reach main unnoticed. A generic-device build needs no
+      # simulator runtime and no signing.
+      - name: Build iOS receiver app
+        run: |
+          xcodebuild build \
+            -project MeowDisplay.xcodeproj \
+            -scheme OpenSidecariOS \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""

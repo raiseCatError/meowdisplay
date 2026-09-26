@@ -146,6 +146,24 @@ struct ForgetConfirmation: Identifiable, Equatable {
     var id: String { peerID }
 }
 
+/// One knock's intent read (`SenderController.readRemoteConnectRequestIntent`):
+/// whichever of the frame, an error, or the time bound comes first decides,
+/// exactly once.
+@MainActor
+private final class RemoteConnectRequestIntentRead {
+    private var completion: (@MainActor (SessionInvitationIntent) -> Void)?
+
+    init(completion: @escaping @MainActor (SessionInvitationIntent) -> Void) {
+        self.completion = completion
+    }
+
+    func finish(_ frame: Data?) {
+        guard let completion else { return }
+        self.completion = nil
+        completion(RemoteConnectRequestIntent.intent(fromFrame: frame))
+    }
+}
+
 /// One connected (or connecting) device: its target, its sender pipeline,
 /// and the per-device status the UI shows. Each session owns a full pipeline
 /// — virtual display, capture, encoder, socket — so devices are independent:
@@ -243,6 +261,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     var invitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
     /// A receiver-initiated request still waiting for this Mac's user.
     var awaitingLocalApproval = false
+    /// Whether this session's approval prompt is up. It is raised only once
+    /// the live connection's hello proved the intended pinned peer.
+    var approvalPromptPresented = false
     @Published var invitationAdmitted = false
     /// Nil once admitted (or before there is anything visible to wait on).
     @Published var invitationProgress: SessionInvitationProgress?
@@ -1105,21 +1126,34 @@ final class SenderController: ObservableObject {
     /// `TLSConfigurator`'s verify block), so failure to resolve a peerID
     /// here only happens if the pin set changed between handshake and
     /// resolution — treated as a reject, never a crash.
+    ///
+    /// The one frame a current receiver sends on the knock declares its
+    /// intent (`RemoteConnectRequestIntent`); it is read with a short bound
+    /// and anything missing or malformed counts as `automatic`, so a
+    /// receiver's background recovery can never surface as a manual request.
+    /// The peer is resolved again after that read, so a Forget landing in
+    /// between rejects the knock.
     private func acceptRemoteConnectRequest(_ connection: NWConnection) {
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
                 guard let self else { connection.cancel(); return }
                 switch state {
                 case .ready:
-                    let observedHost = Self.hostString(from: connection.currentPath?.remoteEndpoint ?? connection.endpoint)
-                    let peerID = Self.resolvePinnedPeerID(from: connection)
                     connection.stateUpdateHandler = nil
-                    connection.cancel()
-                    guard let peerID else {
-                        Log.info("SECURITY: remote connect-request from unresolvable/unpinned peer rejected")
-                        return
+                    let observedHost = Self.hostString(from: connection.currentPath?.remoteEndpoint ?? connection.endpoint)
+                    self.readRemoteConnectRequestIntent(from: connection) { [weak self] intent in
+                        // Resolved against the pins current NOW (after the
+                        // read), and before cancelling, while the
+                        // handshake's metadata is certainly still there.
+                        let peerID = Self.resolvePinnedPeerID(from: connection)
+                        connection.cancel()
+                        guard let self else { return }
+                        guard let peerID else {
+                            Log.info("SECURITY: remote connect-request from unresolvable/unpinned peer rejected")
+                            return
+                        }
+                        self.handleRemoteConnectRequest(peerID: peerID, observedHost: observedHost, intent: intent)
                     }
-                    self.handleRemoteConnectRequest(peerID: peerID, observedHost: observedHost)
                 case .failed, .cancelled:
                     connection.stateUpdateHandler = nil
                 default: break
@@ -1127,6 +1161,34 @@ final class SenderController: ObservableObject {
             }
         }
         connection.start(queue: .main)
+    }
+
+    /// Reads the knock's intent frame (4-byte length + JSON), bounded in
+    /// size and time. `completion` runs exactly once, on the main actor.
+    private func readRemoteConnectRequestIntent(from connection: NWConnection,
+                                                completion: @escaping @MainActor (SessionInvitationIntent) -> Void) {
+        let read = RemoteConnectRequestIntentRead(completion: completion)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            read.finish(nil)
+        }
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { header, _, _, error in
+            guard error == nil, let header, header.count == 4 else {
+                Task { @MainActor in read.finish(nil) }
+                return
+            }
+            let length = header.reduce(0) { ($0 << 8) | Int($1) }
+            guard length > 0, length <= RemoteConnectRequestIntent.maximumFrameBytes - 4 else {
+                Task { @MainActor in read.finish(nil) }
+                return
+            }
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { body, _, _, error in
+                var frame: Data?
+                if error == nil, let body, body.count == length { frame = header + body }
+                let received = frame
+                Task { @MainActor in read.finish(received) }
+            }
+        }
     }
 
     /// Extracts the completed handshake's leaf certificate SPKI (same
@@ -1167,7 +1229,13 @@ final class SenderController: ObservableObject {
     /// that has already passed pinned mutual TLS, never a claimed or
     /// unauthenticated value. `RemoteConnectRequestPolicy` bounds how often
     /// repeated knocks from the same peer can trigger a fresh dial.
-    private func handleRemoteConnectRequest(peerID: String, observedHost: String?) {
+    ///
+    /// `intent` is what the knock itself declared. An `automatic` knock (the
+    /// receiver's own recovery) is judged as a background attempt: it never
+    /// raises an approval prompt, never clears this Mac's own disconnect
+    /// suppression, and follows the Auto-Reconnect preference.
+    private func handleRemoteConnectRequest(peerID: String, observedHost: String?,
+                                            intent: SessionInvitationIntent) {
         let now = Date()
         guard RemoteConnectRequestPolicy.shouldHandle(
             peerID: peerID, now: now, lastAccepted: remoteConnectRequestAccepted) else {
@@ -1175,7 +1243,15 @@ final class SenderController: ObservableObject {
             return
         }
         remoteConnectRequestAccepted[peerID] = now
-        guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID) else { return }
+        Log.info("routeDebug: remote connect-request peer=\(peerID) intent=\(intent.rawValue)")
+        if intent == .automatic {
+            guard autoReconnectEnabled,
+                  autoConnectPolicy.suppressedIdentifiers.isDisjoint(with: ["install:\(peerID)"]) else {
+                Log.info("routeDebug: automatic remote connect-request peer=\(peerID) ignored (suppressed or Auto-Reconnect off)")
+                return
+            }
+        }
+        guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID, intent: intent) else { return }
 
         func dial(_ target: ConnectionTarget, via routeDescription: String) -> Bool {
             if let existing = session(for: target.sessionID), !existing.failed {
@@ -1183,7 +1259,7 @@ final class SenderController: ObservableObject {
                 return true
             }
             Log.info("routeDebug: remote connect-request peer=\(peerID) resolved via \(routeDescription)")
-            return connect(to: target, userInitiated: true, initiator: .receiver,
+            return connect(to: target, userInitiated: intent == .manual, initiator: .receiver,
                            needsSenderApproval: needsApproval)
         }
 
@@ -1275,7 +1351,10 @@ final class SenderController: ObservableObject {
             // Policy and any existing session are judged together — a
             // session this Mac started on its own must not absorb the
             // request (see `ReceiverRequestAdmission`).
-            guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID) else { continue }
+            // The `cr` token is only ever published for an explicit
+            // Connect on the receiver; spoofing one gets a dial that must
+            // still pass pinned TLS and the hello before any prompt shows.
+            guard let needsApproval = incomingRequestNeedsApproval(peerID: peerID, intent: .manual) else { continue }
             let localStarted = connect(to: target, userInitiated: true, initiator: .receiver,
                                        needsSenderApproval: needsApproval)
             if localStarted { continue }
@@ -2217,16 +2296,23 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestMode(CaptureMode(requestedMode))
         }
-        sender.onAllowInputRequest = { [weak self, weak session] requested in
-            // Only ever fires for `requested == true` — see the closure's
-            // doc comment on `MacSender.onAllowInputRequest`; a release
-            // (`false`) is applied immediately by `MacSender` itself and
+        sender.onAllowInputRequest = { [weak self, weak session] generation in
+            // A request for control, from the connection with this
+            // generation; a release is applied by `MacSender` itself and
             // never reaches here.
-            guard requested, let self, let session, self.owns(session) else { return }
-            self.handleInputControlRequested(session: session)
+            guard let self, let session, self.owns(session) else { return }
+            self.handleInputControlRequested(session: session, connectionGeneration: generation)
         }
         sender.onSessionInputGrantChanged = { [weak session] granted in
             session?.sessionInputGranted = granted
+        }
+        sender.onInputAuthorityReset = { [weak self, weak session] in
+            // The connection changed: a request still waiting on the Mac
+            // owner belonged to the old one. Retire it first so dismissing
+            // the prompt can neither grant nor start a Not Now cooldown.
+            guard let self, let session, self.owns(session) else { return }
+            session.inputControlRequest.invalidatePending()
+            self.inputControlPrompt.cancelForEndedSession(id: session.id)
         }
         sender.onVideoEnabledRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }
@@ -2265,6 +2351,18 @@ final class SenderController: ObservableObject {
             // what makes the device an Active Display.
             session.applicationAuthenticated = true
             Log.info("deviceUI: activeSession added peerID=\(info.id ?? "unknown") route=\(session.route?.rawValue ?? "pending")")
+            // `MacSender` fires this only for a hello that proved the
+            // intended peer against its current pin, on any route.
+            if let approval = SenderApprovalPrompting.approval(
+                invitation: session.invitation, awaitingLocalApproval: session.awaitingLocalApproval,
+                alreadyPresented: session.approvalPromptPresented,
+                intendedPeerID: session.intendedPeerID, authenticatedPeerID: info.id,
+                pinnedName: session.intendedPeerID.flatMap { peerID in
+                    TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }?.displayName
+                }) {
+                session.approvalPromptPresented = true
+                self.sessionApprovalPrompt.request(approval)
+            }
             session.receiverProtocolVersion = info.protocolVersion
             self.applyReceiverRequestedMode(info.requestedMode, session: session)
             session.receiverMaxFPS = info.maxFPS
@@ -2418,11 +2516,10 @@ final class SenderController: ObservableObject {
         sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
         }
-        if needsApproval, let peerID = intendedPeerID {
-            sessionApprovalPrompt.request(PendingSessionApproval(
-                id: invitation.id, peerID: peerID, peerName: name, localRole: .sender,
-                mode: invitation.mode, createdAt: Date()))
-        }
+        // A request that needs this Mac's approval gets its prompt from
+        // `onHello`, once the connection proved who is asking — never here,
+        // where the only name for the peer is unauthenticated discovery
+        // metadata.
         let startup = sender.beginStart()
         Task {
             do {
@@ -2723,8 +2820,27 @@ final class SenderController: ObservableObject {
     func setSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) -> Bool {
         guard policy != .alwaysAllow || !anySessionHasEffectiveInput else { return false }
         IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        if policy == .blocked { revokeIncomingSessionAuthority(peerID: peerID) }
         objectWillChange.send()
         return true
+    }
+
+    /// Block is a revocation, like Forget minus the trust removal: an
+    /// approval prompt still waiting for this peer is withdrawn, and every
+    /// session this peer asked for — admitted or still negotiating — ends,
+    /// since its authority came from the policy the user just revoked.
+    /// Sessions this Mac started on its own are not incoming requests and
+    /// stay.
+    private func revokeIncomingSessionAuthority(peerID: String) {
+        sessionApprovalPrompt.cancelAll(peerID: peerID)
+        let requested = sessions.filter {
+            ($0.deviceID == peerID || $0.intendedPeerID == peerID) && $0.invitation.initiator == .receiver
+        }
+        for session in requested {
+            Log.info("sessionInvite: peer \(peerID) blocked — ending its session \(session.id)")
+            if session.awaitingLocalApproval { session.sender.resolveSenderApproval(accept: false) }
+            disconnect(session)
+        }
     }
 
     /// Returns whether the change was applied: widening to Always Allow is
@@ -2757,10 +2873,10 @@ final class SenderController: ObservableObject {
     /// approve before capture starts. An unadmitted auto-connect attempt of
     /// this Mac's own is replaced — left alone, it would absorb the request
     /// and skip the Mac's approval.
-    private func incomingRequestNeedsApproval(peerID: String) -> Bool? {
+    private func incomingRequestNeedsApproval(peerID: String, intent: SessionInvitationIntent) -> Bool? {
         let existing = sessions.first { !$0.failed && ($0.deviceID == peerID || $0.intendedPeerID == peerID) }
         let action = ReceiverRequestAdmission.decide(
-            policy: IncomingSessionPolicyStore.decision(peerID: peerID, intent: .manual),
+            peerID: peerID, intent: intent,
             existing: existing.map { .init(admitted: $0.invitationAdmitted, invitation: $0.invitation) })
         switch action {
         case .drop:
@@ -2847,6 +2963,16 @@ final class SenderController: ObservableObject {
             Log.info("sessionInvite: approval for ended session ignored id=\(approval.id)")
             return
         }
+        // The prompt's authority ended if the peer was forgotten or blocked
+        // after it was raised: a late answer neither admits nor persists.
+        guard PendingApprovalRevalidation.isStillAuthorized(
+            isPinned: TrustStore.shared.hasPin(peerID: approval.peerID),
+            currentPolicy: IncomingSessionPolicyStore.policy(peerID: approval.peerID)) else {
+            Log.info("sessionInvite: late answer for revoked peer \(approval.peerID) ignored id=\(approval.id)")
+            session.sender.resolveSenderApproval(accept: false)
+            disconnect(session)
+            return
+        }
         let plan = SessionApprovalPlan.plan(for: decision)
         if let policy = plan.persistPolicy, !setSessionPolicy(policy, peerID: approval.peerID) {
             // Connection policy only — never a display mode, never input.
@@ -2882,7 +3008,10 @@ final class SenderController: ObservableObject {
     /// starts input OFF regardless of trust/pairing (the milestone's core
     /// invariant) — this is the ONLY path that can turn it on, and it never
     /// widens anything beyond `session` itself.
-    func handleInputControlRequested(session: DeviceSession) {
+    /// `connectionGeneration` is the connection that asked; any grant this
+    /// decides applies to that connection only (see
+    /// `MacSender.grantSessionInput(generation:)`).
+    func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64) {
         guard let peerID = session.deviceID else { return }
         guard allowInput else {
             // Mac-wide master is off — the owner already said no globally;
@@ -2894,13 +3023,13 @@ final class SenderController: ObservableObject {
         case .neverAllow:
             session.sender.denySessionInput(state: .requestsDisabled)
         case .alwaysAllow:
-            session.sender.grantSessionInput()
+            session.sender.grantSessionInput(generation: connectionGeneration)
         case .ask:
-            presentInputControlPrompt(session: session, peerID: peerID)
+            presentInputControlPrompt(session: session, peerID: peerID, connectionGeneration: connectionGeneration)
         }
     }
 
-    private func presentInputControlPrompt(session: DeviceSession, peerID: String) {
+    private func presentInputControlPrompt(session: DeviceSession, peerID: String, connectionGeneration: UInt64) {
         guard let generation = session.inputControlRequest.beginRequest() else {
             // Duplicate while pending (coalesced into the existing prompt)
             // or within the post-decision cooldown — no new prompt, no
@@ -2913,11 +3042,13 @@ final class SenderController: ObservableObject {
         Task { [weak self, weak session] in
             let decision = await self?.inputControlPrompt.request(request) ?? .notNow
             guard let self, let session else { return }
-            self.resolveInputControlRequest(session: session, peerID: peerID, generation: generation, decision: decision)
+            self.resolveInputControlRequest(session: session, peerID: peerID, generation: generation,
+                                            connectionGeneration: connectionGeneration, decision: decision)
         }
     }
 
     private func resolveInputControlRequest(session: DeviceSession, peerID: String, generation: Int,
+                                             connectionGeneration: UInt64,
                                              decision: InputControlRequestDecision) {
         guard session.inputControlRequest.resolve(generation: generation, decision: decision) else {
             // Stale: this generation was already superseded (session ended
@@ -2945,7 +3076,7 @@ final class SenderController: ObservableObject {
             }
         }
         if plan.grantSession {
-            session.sender.grantSessionInput()
+            session.sender.grantSessionInput(generation: connectionGeneration)
         } else if let denyState = plan.denyState {
             session.sender.denySessionInput(state: denyState)
         }

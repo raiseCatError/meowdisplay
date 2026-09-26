@@ -100,7 +100,11 @@ Once a release build exists:
 - `spctl -a -vv MeowDisplay.dmg` (Gatekeeper assessment — should say "accepted")
 - Mount the DMG and launch the app on a non-development Mac account.
 - For iOS, confirm the build processes in App Store Connect and shows the
-  expected version and build number before submitting it for review.
+  expected version and build number before submitting it for review. The
+  archive must contain `PrivacyInfo.xcprivacy` at the app bundle's root
+  (Xcode Organizer → Generate Privacy Report lists it); App Store Connect
+  does not accept a build that uses a required-reason API no manifest
+  declares.
 
 ## Rollback / recovery
 

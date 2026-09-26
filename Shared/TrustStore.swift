@@ -12,7 +12,7 @@ import SwiftASN1
 ///
 /// All Keychain access uses the data-protection keychain (TN3137) under the
 /// `WireCrypto.*` namespace. Thread-safe: every public method is internally
-/// synchronized (private `NSLock`); `allPinnedPeerSPKIs()` reads ONLY the
+/// synchronized (private `NSLock`s); `allPinnedPeerSPKIs()` reads ONLY the
 /// in-memory snapshot (no Keychain I/O) so it is safe to call from a TLS
 /// verify block.
 ///
@@ -22,29 +22,42 @@ import SwiftASN1
 /// unsigned build (`DEVELOPMENT_TEAM` unset, as in CI) will get
 /// `errSecMissingEntitlement` at runtime. Every method below fails soft
 /// (nil / false / empty, logged) in that case — never crashes.
-/// `@unchecked Sendable`: the only mutable stored property is `snapshot`.
+/// `@unchecked Sendable`: the only mutable stored property is `pinState`.
 /// Every read (`allPinnedPeerSPKIs`, `peerID(forSPKI:)`) and write
-/// (`refreshSnapshot`, `purgeAll`) of it is bracketed by `lock.lock()` /
-/// `lock.unlock()`, and both reads copy out value types (`Data`, `String`
-/// tuples) rather than handing out a reference into `snapshot` itself, so
-/// nothing protected escapes the lock. All Keychain-facing helpers
-/// (`queryIdentity`, `queryInstallID`, `generateAndStoreIdentity`,
+/// (`refreshSnapshot`, `finishPinMutation`) of it is bracketed by
+/// `snapshotLock.lock()` / `snapshotLock.unlock()`, never held across
+/// Keychain I/O, and both reads copy out value types (`[Data]`, `String?`),
+/// so nothing protected escapes the lock. `pinWriteLock` protects no stored
+/// state: it serializes Keychain pin mutations (`setPin`, `forget`,
+/// `purgeAll`) against each other, each through its snapshot commit, while
+/// `PinSnapshotState`'s revision stops an older lock-free refresh read from
+/// overwriting a newer mutation's commit. All Keychain-facing identity
+/// helpers (`queryIdentity`, `queryInstallID`, `generateAndStoreIdentity`,
 /// `deletePartialIdentityItems`, `spkiFromCertificate`) touch only local
-/// state and the Keychain APIs — never `snapshot` — so their lock-held
-/// contract (documented at each call site) exists only to serialize
-/// Keychain generation, not to protect additional shared state. `lock`
-/// itself and `shared` are `let`s; `shared`'s one-time initialization is
-/// guaranteed by Swift's `static let` semantics. No trust/pinning/Keychain
-/// behavior was changed — this is an annotation only.
+/// state and the Keychain APIs — never `pinState` — so their
+/// `identityLock`-held contract (documented at each call site) exists only
+/// to serialize Keychain generation, not to protect additional shared state.
+/// Lock order: `pinWriteLock` → `snapshotLock`; `identityLock` is never held
+/// together with either. All three locks and `shared` are `let`s; `shared`'s
+/// one-time initialization is guaranteed by Swift's `static let` semantics.
 final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     static let shared = TrustStore()
 
-    private let lock = NSLock()
-    /// In-memory snapshot of all pinned peers as (peerID, SPKI DER) pairs.
-    /// Refreshed from the Keychain by `refreshSnapshot()`; read lock-only
-    /// everywhere else, so both the TLS verify block (SPKI membership) and
-    /// resolvePeerID (SPKI → peerID) run with zero Keychain I/O on the queue.
-    private var snapshot: [(peerID: String, spki: Data)] = []
+    /// Serializes own-identity lookup + generation (`ownIdentity`,
+    /// `installID`). Held across Keychain I/O.
+    private let identityLock = NSLock()
+    /// Serializes Keychain pin mutations. Held across Keychain I/O, so the
+    /// TLS verify path never takes it.
+    private let pinWriteLock = NSLock()
+    /// Guards `pinState` only; never held across Keychain I/O.
+    private let snapshotLock = NSLock()
+    /// In-memory snapshot of all pinned peers as (peerID, SPKI DER) pairs,
+    /// plus the revision that orders Keychain reads against mutations.
+    /// Refreshed from the Keychain by `refreshSnapshot()` and after every pin
+    /// mutation; read lock-only everywhere else, so both the TLS verify block
+    /// (SPKI membership) and resolvePeerID (SPKI → peerID) run with zero
+    /// Keychain I/O on the queue.
+    private var pinState = PinSnapshotState()
 
     private init() {
         refreshSnapshot()
@@ -55,8 +68,8 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     /// Fetch the stored identity, generating and persisting a fresh one on
     /// first call. nil = keychain unusable (logged, never crashes).
     func ownIdentity() -> SecIdentity? {
-        lock.lock()
-        defer { lock.unlock() }
+        identityLock.lock()
+        defer { identityLock.unlock() }
         if let existing = queryIdentity() {
             return existing
         }
@@ -83,8 +96,8 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     /// identity. Never called on iOS — the phone's wire id is
     /// PhoneReceiver.installID (UserDefaults-backed).
     func installID() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
+        identityLock.lock()
+        defer { identityLock.unlock() }
         if let existing = queryInstallID() {
             return existing
         }
@@ -124,9 +137,13 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
 
     /// Persist a new pin, or accept an exact existing match. A changed key is
     /// never overwritten; recovery requires an explicit forget first.
+    /// The existing-pin check, delete+add and snapshot commit run as one unit
+    /// under `pinWriteLock`, so no other pin mutation interleaves with them.
     @discardableResult
     func setPin(peerID: String, spki: Data, displayName: String,
                 allowIdentityChange: Bool) -> Bool {
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
         switch TrustPinPolicy.decision(existing: pin(peerID: peerID), presented: spki) {
         case .match:
             return true
@@ -154,16 +171,20 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
             kSecUseDataProtectionKeychain: true,
         ]
         let status = SecItemAdd(addQuery as CFDictionary, nil)
+        // Read back even when the add failed: the delete above may already
+        // have removed the old pin, and the snapshot must not keep it.
+        finishPinMutation()
         guard status == errSecSuccess else {
             Log.info("ERROR: setPin failed for peer \(peerID) (status \(status))")
             return false
         }
-        refreshSnapshot()
         return true
     }
 
     /// Remove one peer's pin and refresh the snapshot.
     func forget(peerID: String) {
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: WireCrypto.pinKeychainService,
@@ -174,13 +195,15 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         if status != errSecSuccess, status != errSecItemNotFound {
             Log.info("ERROR: forget(peerID:) failed for \(peerID) (status \(status))")
         }
-        refreshSnapshot()
+        finishPinMutation()
     }
 
     /// Nuke everything in both namespaces: all pins, identity key+cert,
     /// install-ID row; empty the snapshot. (Reinstall cleanup and
     /// "Reset identity" both land here.)
     func purgeAll() {
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
         let deletions: [[CFString: Any]] = [
             [
                 kSecClass: kSecClassGenericPassword,
@@ -209,9 +232,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
                 Log.info("ERROR: purgeAll deletion failed for class \(query[kSecClass] ?? "?") (status \(status))")
             }
         }
-        lock.lock()
-        snapshot = []
-        lock.unlock()
+        finishPinMutation(purged: true)
     }
 
     /// (peerID, displayName) rows for the "Paired Macs"/forget UI
@@ -245,23 +266,53 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     /// Lock-protected copy of the snapshot. NEVER touches the Keychain —
     /// this is what TLS verify blocks read via the `pinnedSPKIs` closure.
     func allPinnedPeerSPKIs() -> [Data] {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshot.map { $0.spki }
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pinState.allSPKIs
     }
 
     /// Which pinned peerID owns this leaf SPKI, from the in-memory snapshot
     /// ONLY — no Keychain I/O, so it is safe on the TLS/video queue right after
     /// a handshake (resolvePeerID). nil if the SPKI matches no current pin.
     func peerID(forSPKI spki: Data) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshot.first { $0.spki == spki }?.peerID
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pinState.peerID(forSPKI: spki)
     }
 
-    /// Re-read all pins from the Keychain into the snapshot. Called by
-    /// init, setPin, forget, purgeAll; listeners also call it on start.
+    /// Re-read all pins from the Keychain into the snapshot. Called by init;
+    /// listeners also call it on start. The read runs with no lock held, so
+    /// it is committed only if no pin mutation happened since it began —
+    /// otherwise it may predate that mutation's write, and it is dropped:
+    /// the mutation commits its own, later read-back.
     func refreshSnapshot() {
+        snapshotLock.lock()
+        let ticket = pinState.beginRefresh()
+        snapshotLock.unlock()
+        let fresh = readPinsFromKeychain()
+        snapshotLock.lock()
+        pinState.commit(fresh, readAt: ticket)
+        snapshotLock.unlock()
+    }
+
+    /// Tail of every Keychain pin mutation. Must be called with
+    /// `pinWriteLock` held and only AFTER the mutation's Keychain writes:
+    /// the revision bump invalidates any refresh that may have read the
+    /// Keychain before those writes, then this mutation's read-back (empty
+    /// after `purgeAll`) commits.
+    private func finishPinMutation(purged: Bool = false) {
+        snapshotLock.lock()
+        let ticket = pinState.keychainDidMutate()
+        snapshotLock.unlock()
+        let fresh = purged ? [] : readPinsFromKeychain()
+        snapshotLock.lock()
+        pinState.commit(fresh, readAt: ticket)
+        snapshotLock.unlock()
+    }
+
+    /// All pins currently in the Keychain. Takes no lock; must never be
+    /// called with `snapshotLock` held.
+    private func readPinsFromKeychain() -> [PinSnapshotState.Pin] {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: WireCrypto.pinKeychainService,
@@ -272,7 +323,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         ]
         var out: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &out)
-        var fresh: [(peerID: String, spki: Data)] = []
+        var fresh: [PinSnapshotState.Pin] = []
         // kSecReturnAttributes + kSecReturnData + kSecMatchLimitAll returns an
         // array of attribute dictionaries, each carrying the pin bytes under
         // kSecValueData and the peerID under kSecAttrAccount. (With
@@ -283,14 +334,12 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
             fresh = items.compactMap { item in
                 guard let spki = item[kSecValueData] as? Data,
                       let peerID = item[kSecAttrAccount] as? String else { return nil }
-                return (peerID: peerID, spki: spki)
+                return PinSnapshotState.Pin(peerID: peerID, spki: spki)
             }
         } else if status != errSecItemNotFound {
-            Log.info("ERROR: refreshSnapshot lookup failed (status \(status))")
+            Log.info("ERROR: pin snapshot lookup failed (status \(status))")
         }
-        lock.lock()
-        snapshot = fresh
-        lock.unlock()
+        return fresh
     }
 
     // MARK: - Fingerprint
@@ -320,7 +369,8 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     // MARK: - Private helpers
 
     /// The ONLY sanctioned identity retrieval path — never
-    /// `SecIdentityCreateWithCertificate`. Must be called with `lock` held.
+    /// `SecIdentityCreateWithCertificate`. Must be called with `identityLock`
+    /// held.
     private func queryIdentity() -> SecIdentity? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassIdentity,
@@ -338,7 +388,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         return (out as! SecIdentity)
     }
 
-    /// Must be called with `lock` held.
+    /// Must be called with `identityLock` held.
     private func queryInstallID() -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -354,9 +404,9 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Frozen identity-generation call sequence. Must be called
-    /// with `lock` held. On any failure, deletes whatever partial items were
-    /// added and returns nil — no orphans, no crash.
+    /// Frozen identity-generation call sequence. Must be called with
+    /// `identityLock` held. On any failure, deletes whatever partial items
+    /// were added and returns nil — no orphans, no crash.
     private func generateAndStoreIdentity() -> SecIdentity? {
         // 1. CryptoKit key — we own the SPKI bytes end to end.
         let priv = P256.Signing.PrivateKey()

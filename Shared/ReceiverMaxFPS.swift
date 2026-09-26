@@ -46,6 +46,29 @@ struct ReceiverMaxFPSPreference: Codable, Equatable {
     }
 }
 
+/// What every Maximum FPS picker offers and shows: the Mac's own per-device
+/// control, the iPhone app and the Mac receiver. The offered tiers are
+/// filtered to what the device can reach right now, while the preference
+/// keeps whatever was chosen — 120 stays stored after an Extend shape
+/// change makes 120 unreachable, and a value from the wire need not be a
+/// tier at all — so the picker's selection is derived, never the raw value.
+enum MaxFPSPicker {
+    /// The tiers a receiver-side picker offers: the Mac's `maxFPSState`
+    /// `availableTiers`, or every tier until it reports some (an empty
+    /// report would leave a picker with nothing to select).
+    static func tiers(reported: [Int]?) -> [Int] {
+        guard let reported, !reported.isEmpty else { return EncoderCapability.supportedFPSTiers }
+        return reported
+    }
+
+    /// The tag a picker over `tiers` shows for `preference` — always one of
+    /// `tiers` when there are any. Display only: the preference itself is
+    /// untouched until the user actually picks a tier.
+    static func selection(_ preference: ReceiverMaxFPSPreference, among tiers: [Int]) -> Int {
+        PickerSelection.ceiling(preference.maxFPS, among: tiers)
+    }
+}
+
 /// Receiver-side request bookkeeping for max-FPS changes — identical shape
 /// to `ExtendShapeRequestState`/`DisplayModeRequestState`: the Mac's state
 /// message always wins, and the boolean `confirm` return identifies the

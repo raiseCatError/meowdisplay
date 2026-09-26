@@ -151,17 +151,22 @@
     </table>
     <p>Every permission is used solely for the function above, on your own machines.</p>
 
-    <h2>An honest caveat: WiFi transport is not yet encrypted</h2>
+    <h2>How the connection is protected</h2>
     <div class="note">
-      <p>USB streaming is point-to-point over your cable. WiFi streaming, however,
-      currently travels <strong>unencrypted across your local network</strong> —
-      someone with access to the same network could in principle observe the video
-      stream. On a trusted home or office network this is rarely a concern, but on
-      shared or public WiFi we recommend USB mode. Encrypted WiFi transport with
-      device pairing is on the roadmap
-      (see the upstream OpenDisplay project's
-      <a href="https://github.com/peetzweg/opendisplay/issues/16">issue&nbsp;#16</a>).
-      A privacy page that didn't tell you this wouldn't be worth linking to.</p>
+      <p>Everything MeowDisplay sends between your Mac and your device — the
+      video, audio and your input — travels over an <strong>encrypted
+      connection (TLS&nbsp;1.3)</strong>, whether over WiFi or a USB cable. If
+      that encrypted connection can't be set up, MeowDisplay doesn't fall back to
+      an unencrypted one; it doesn't connect.</p>
+      <p>The first time you connect two devices, both show a short code. You
+      confirm the codes match, and from then on each device only accepts the
+      other one it was paired with. Forgetting a device removes that pairing.</p>
+      <p>What this does not cover: encryption protects the connection, not the
+      devices at either end. Anyone who can use your unlocked Mac or device can
+      see what's on its screen, and on a shared network others can still see that
+      two devices are talking, just not what they're sending. The technical
+      details are in the <code>SECURITY.md</code> file in the
+      <a href="https://github.com/raiseCatError/MeowDisplay">source code</a>.</p>
     </div>
 
     <h2>This website</h2>

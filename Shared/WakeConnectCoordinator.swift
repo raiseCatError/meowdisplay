@@ -11,8 +11,9 @@
 // `ReceiverSessionState` connection state machine — it never dials, never
 // authenticates, and never replaces any transport/reconnect logic. It only
 // watches `StreamReceiver`'s already-published state and calls its already-
-// public request methods (`requestConnect`, `refreshConnectRequest`,
-// `requestPromoteInteractiveWake`) at the right moments.
+// public request methods (`connectPrimary`, `refreshConnectRequest`,
+// `requestPromoteInteractiveWake`, and `cancelConnectRequest` when the
+// attempt is cancelled or times out) at the right moments.
 //
 // AUTHENTICATED TARGET-PEER BINDING: `applicationAuthenticated` below is
 // called with `receiver.authenticatedPeerID` — the pinned peerID that
@@ -25,9 +26,9 @@
 // already-paired Mac dialing in mid-attempt, a stale previous-peer session
 // still settling, a Bonjour peerID, a hostname, or wake metadata are all
 // insufficient on their own — only the cryptographically-verified identity
-// counts. A `nil` `authenticatedPeerID` (no TLS metadata — the loopback-only
-// USB path) can never satisfy an attempt either, since `nil` cannot equal a
-// non-nil target peerID.
+// counts. A `nil` `authenticatedPeerID` (a certificate that no longer
+// resolves to a pinned peer) can never satisfy an attempt either, since
+// `nil` cannot equal a non-nil target peerID.
 //
 // TRUST REVOCATION (P13): if `Forget` is pressed against the peer this
 // attempt is targeting, `receiver.lastForgottenPeerID` fires and the attempt
@@ -117,6 +118,17 @@ final class WakeConnectCoordinator: ObservableObject {
             Log.info("wakeConnect: cancelled")
         }
         stopAllTimers()
+        withdrawConnectRequest()
+    }
+
+    /// The attempt's own Connect request (`connectPrimary` in `begin`) must
+    /// not outlive the attempt: its `cr` token, "asked for exactly this"
+    /// window, requested mode and manual recovery run are withdrawn, so a
+    /// Mac that dials in afterwards meets the normal incoming policy. Never
+    /// touches a live session.
+    private func withdrawConnectRequest() {
+        guard let peerID = activePeerID else { return }
+        receiver.cancelConnectRequest(peerID: peerID)
     }
 
     // MARK: - WoL
@@ -311,6 +323,7 @@ final class WakeConnectCoordinator: ObservableObject {
                 Log.info("wakeConnect: timedOut stage=\(stageAtTimeout)")
             }
             self.stopAllTimers()
+            self.withdrawConnectRequest()
         }
         timer.resume()
         overallTimeoutTimer = timer

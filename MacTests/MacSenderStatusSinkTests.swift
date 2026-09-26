@@ -128,6 +128,15 @@ final class MacSenderStatusSinkTests: XCTestCase {
         XCTAssertEqual(got, [true, false])
     }
 
+    func testPublishInputAuthorityResetFiresOncePerPublish() {
+        let sink = MacSenderStatusSink()
+        var count = 0
+        sink.onInputAuthorityReset = { count += 1 }
+        sink.publishInputAuthorityReset()
+        sink.publishInputAuthorityReset()
+        XCTAssertEqual(count, 2)
+    }
+
     func testPublishDisplayIdentityBumpedForwardsOffset() {
         let sink = MacSenderStatusSink()
         var got: UInt32?

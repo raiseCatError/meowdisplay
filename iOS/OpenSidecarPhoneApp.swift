@@ -1238,7 +1238,7 @@ struct SettingsView: View {
                                     forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
                                 }
                             }
-                            IncomingSessionPolicyPicker(peerID: peer.peerID)
+                            IncomingSessionPolicyPicker(peerID: peer.peerID, receiver: receiver)
                                 .font(.subheadline)
                         }
                     }
@@ -1946,9 +1946,9 @@ struct SettingsView: View {
                         }))
                         .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
                     if current.enabled {
-                        let tiers = receiver.lastMaxFPSState?.availableTiers ?? EncoderCapability.supportedFPSTiers
+                        let tiers = MaxFPSPicker.tiers(reported: receiver.lastMaxFPSState?.availableTiers)
                         Picker("Maximum FPS", selection: Binding(
-                            get: { current.maxFPS },
+                            get: { MaxFPSPicker.selection(current, among: tiers) },
                             set: { fps in
                                 var preference = current
                                 preference.maxFPS = fps
