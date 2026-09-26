@@ -44,7 +44,7 @@ tracked — edit `project.yml`, never the generated project.
 | Target | Sources | Role |
 | --- | --- | --- |
 | `OpenSidecarMac` | `Mac/`, `Shared/` | Mac Sender app |
-| `OpenSidecariOS` | `iOS/`, `Shared/` | iPhone/iPad Receiver app |
+| `OpenSidecariOS` | `iOS/`, `Shared/` (bundles `iOS/PrivacyInfo.xcprivacy`) | iPhone/iPad Receiver app |
 | `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Mac Receiver app |
 | `OpenSidecarMacTests` | `MacTests/` plus selected pure-logic files | Hostless unit tests (run by `.github/workflows/tests.yml`) |
 
@@ -230,21 +230,35 @@ Sender's per-session Allow Input consent turns it on.
   "Automatically Allow Connections" (default on) plus a per-peer
   Default / Always Allow / Block keyed by the pinned peer ID. Forget
   removes the per-peer entry. Background attempts never prompt.
-- Mac Sender: `MacSender.awaitSessionAdmission` holds capture until the
-  receiver accepts (and, for a receiver's request that needs it, until the
-  Mac's user approves in `SessionApprovalPromptModel`). `SenderController`
-  applies the Mac's policy to receiver Connect requests (their desired
+- Mac Sender: `MacSender` asks `SenderSessionAuthorization`
+  (`Mac/SenderSessionAuthorization.swift`) at every choke point — hello
+  verification (same identity/current-pin rule on USB and TCP), capture and
+  virtual-display starts, every media and cursor frame, input, and every
+  receiver request that changes Mac state. **Admission and input grants
+  belong to one connection**: a reconnect or route migration must be
+  accepted again before anything flows, and never inherits the previous
+  connection's input grant. `MacSender.awaitSessionAdmission` holds capture
+  until the receiver accepts (and, for a receiver's request that needs it,
+  until the Mac's user approves in `SessionApprovalPromptModel`, whose
+  prompt appears only after the connection's hello proved the peer).
+  `SenderController` applies the Mac's policy to receiver Connect requests
+  (a Remote Access knock declares `manual` or `automatic`; their desired
   Mirror/Extend arrives as `hello.requestedMode`; the Mac decides via
-  `SessionModePlanning`) and hands a
-  session's invitation only to the pipeline that replaces it
-  (`restartAll()`, wait-for-wake). A receiver's request is never absorbed
-  by an unadmitted auto-connect attempt of the Mac's own
-  (`ReceiverRequestAdmission`), and remote input also requires the session
-  to be admitted.
+  `SessionModePlanning`) and hands a session's invitation only to the
+  pipeline that replaces it (`restartAll()`, wait-for-wake) — never its
+  admission or input grant. A receiver's request is never absorbed by an
+  unadmitted auto-connect attempt of the Mac's own
+  (`ReceiverRequestAdmission`). Forget and Block withdraw pending approvals
+  and end the sessions they authorized.
 - Receivers: `StreamReceiver` answers invitations on its control queue and
   presents no media until admitted; prompts are
   `Shared/SessionInvitationViews.swift` (iOS) and
-  `MacReceiver/ReceiverSessionInvitationPanel.swift`.
+  `MacReceiver/ReceiverSessionInvitationPanel.swift`. Forget (`forgetPeer`)
+  and Block (`setIncomingSessionPolicy`, used by
+  `IncomingSessionPolicyPicker`) both run `revokeSessionAuthority`; Wake &
+  Connect's Cancel calls `cancelConnectRequest`. A Remote Access knock is
+  `manual` only while the user's own request drives the recovery run
+  (`ReceiverPipelineActor.knockIntent`).
 
 ## Connections, Remote Access, Wake & Connect
 
@@ -302,7 +316,7 @@ Sender's per-session Allow Input consent turns it on.
 | Input injection on the Mac | `Mac/InputInjector.swift`, `Mac/InputRouting.swift`, `Mac/SystemGestureInvoker.swift` |
 | Smart Touch | `Mac/SmartTouchTargetClassifier.swift` |
 | Audio / A/V sync | `Mac/AudioCaptureEncoder.swift`, `Shared/ReceiverAudioPresenter.swift`, `Shared/PCMPlaybackEngine.swift` |
-| Session invitations / connection approval | `Shared/SessionInvitation.swift`, `Mac/SessionApprovalPromptModel.swift` |
+| Session invitations / connection approval | `Shared/SessionInvitation.swift`, `Mac/SenderSessionAuthorization.swift`, `Mac/SessionApprovalPromptModel.swift` |
 | Pairing, trust, TLS | `Shared/Pairing.swift`, `Shared/PairingSession.swift`, `Shared/TrustStore.swift`, `Shared/TLSConfigurator.swift` |
 | Remote Access / Wake & Connect | `Shared/RemoteEndpointStore.swift`, `Shared/WakeConnectCoordinator.swift`, `Mac/RemoteAccessSettingsView.swift`, `iOS/RemoteAccessSettingsView.swift` |
 | Mac Receiver | `MacReceiver/MacReceiver.swift` |

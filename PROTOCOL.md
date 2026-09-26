@@ -130,7 +130,10 @@ this has no protocol significance.
 USB is only a route: the same pinned mutual TLS runs inside the usbmux pipe,
 and there is no plaintext USB path. Port 9002 can be
 reached through the same tunnel to create exactly the same peer pins without
-manual SAS comparison. There is no separate USB trust record.
+manual SAS comparison. There is no separate USB trust record. A USB `hello`
+is held to exactly the same identity rule as any other route (section 6.9,
+"Admission is per connection"): its `id` must be the peer the sender dialed
+and its certificate must present that peer's current pin.
 
 ### 2.3 First pairing (pv 11)
 
@@ -776,9 +779,16 @@ update the sender. A receiver that never gets a `welcome` at all is talking
 to a pre-pv-2 sender and MUST assume sender `pv` 1.
 
 **`updateRequired`**: the sender declares the pairing unsupported until the
-receiver updates. `target` names the end that must act (`"ios"` today),
-`store` is a platform-appropriate update URL, `message` is user-facing
-prose. Receivers SHOULD surface it prominently and stop expecting video —
+receiver updates. `target` names the end that must act (`"ios"` for the
+iPhone/iPad app, `"mac"` for the Mac receiver), `store` is a
+platform-appropriate update URL, `message` is user-facing prose. The sender
+always includes `store`, because older receivers fall back to a built-in
+App Store link without it: for `"ios"` it is MeowDisplay's own App Store
+listing once one is configured (`AppStore.iOSAppID`), otherwise the project
+page; for `"mac"` it is the project page. A receiver opens `store` only if
+it is an `https` link or its own configured listing, and otherwise
+substitutes its own update link (`AppStore.resolveReceiverUpdateURL`), so
+another app's listing is never opened. Receivers SHOULD surface it prominently and stop expecting video —
 but MUST NOT depend on the video actually stopping: the official sender
 currently keeps streaming after sending it and relies on the receiver to
 block its own UI. At `pv` 3 this is only sent when
@@ -945,8 +955,18 @@ remains the only way to turn it on.
   request (Bonjour TXT `cr` token, or the authenticated knock on
   `remoteRequestPort`). The sender applies its own incoming policy before
   dialing: blocked → no dial; manual approval → dial, but hold capture
-  until its user decides. Neither request carries data; a desired mode
-  travels as `hello.requestedMode` (`mirror` or `extend`, optional), sent
+  until its user decides, and show its own prompt only once the dialed
+  connection's `hello` has proved the pinned peer (a `cr` token and the
+  rest of the TXT record are unauthenticated). A `cr` token carries no
+  data and is published only for an explicit user action. The knock
+  carries one frame on the already pinned connection, framed like the
+  control channel: `{"type":"remoteConnectRequest","intent":"manual"}` or
+  `"automatic"`. A receiver sends `manual` only while its user's explicit
+  request for that sender is outstanding; its own automatic recovery sends
+  `automatic`. A knock with no frame (older receivers), a malformed frame
+  or an unknown value is `automatic`, and an `automatic` knock is judged as
+  a background attempt: it never raises a prompt on the sender. A desired
+  mode travels as `hello.requestedMode` (`mirror` or `extend`, optional), sent
   only inside the authenticated session and only while the receiver's own
   request is outstanding (30 s). The sender uses it when auto-approving if
   it can enter that mode; with manual approval it is the prompt's default,
@@ -991,6 +1011,46 @@ session and does not retry automatically.
 **`sessionInviteCancel`** (Mac -> receiver): the sender's user cancelled
 the invitation or rejected the receiver's request; the receiver dismisses
 any prompt for that `id`.
+
+**Admission is per connection.** An authenticated connection is not an
+admitted session. On every new connection (reconnect, route migration,
+cable upgrade) the sender first checks the `hello` — on every route,
+including USB: `id` must be the peer it dialed, and the certificate's key
+must be that peer's current pin; otherwise it closes the connection. It
+then re-sends the session's invitation (`intent: automatic` once the
+session was ever admitted) and treats the connection as admitted only
+after `accepted` arrives on that same connection; the receiver recognizes
+the `id` and answers without a prompt. Until then the sender sends no
+video, audio or cursor frames on it, starts no capture or virtual display
+for it, and ignores every receiver message except `hello`, `ping`,
+`stats`, `kf`, `sessionInviteResponse`, `sleeping`, `closing`,
+`smartTouchProbe` (answered "not scrollable") and `audioRequest` (recorded
+as a preference only); a `promoteInteractiveWake` is held until that
+connection is admitted. A response read off an earlier connection never
+admits a later one. The sender's own approval of a receiver-initiated
+request, and any refusal, belong to the logical session and carry over.
+
+**Input is granted per connection.** Admission never grants input. An
+`allowInputState` grant applies only to the connection the
+`allowInputRequest` arrived on: every new connection starts with input off
+(the sender says so with `allowInputState` after its `hello`), and a
+decision the Mac's owner makes for an earlier connection is ignored. The
+receiver asks again with `allowInputRequest`.
+
+Forget and Block are revocations on both ends: they end any prompt still
+waiting for that peer, and a late answer to one neither admits the session
+nor stores a policy. A receiver also drops its memory of invitations it
+accepted from that peer, so a later invitation with the same `id` is
+judged afresh.
+
+A receiver declines an invitation (and closes a pre-21 sender) on a
+connection whose certificate no longer resolves to a pinned peer, whatever
+"Automatically Allow Connections" says. A receiver's Block also ends the
+current connection when it is that sender's, and cancels that sender's
+parked replacement connections. Withdrawing its own Connect request (for
+example Cancel on Wake & Connect) removes the `cr` token and stops sending
+`hello.requestedMode`; a sender that dials afterwards is judged by the
+normal incoming policy.
 
 Compatibility: a sender never sends `sessionInvite` below pv 21 and admits
 such receivers as before. A receiver facing a pre-21 sender (known from
@@ -1075,8 +1135,11 @@ sequenceDiagram
     Note over S: discover via Bonjour, or pick a USB device
     S->>R: TCP connect
     R->>S: hello (panel, scale, id, pv)
-    Note over S: size and create the display, start capture
+    Note over S: check id and current pin (every route)
     S->>R: welcome (pv, min) [pv 2+]
+    S->>R: sessionInvite [pv 21+]
+    R->>S: sessionInviteResponse (accepted) [pv 21+]
+    Note over S: admitted: size and create the display, start capture
     alt hello.pv below welcome.min
         S->>R: updateRequired (target, store, message)
         Note over R: blocking update screen, ignore any video
@@ -1101,7 +1164,9 @@ sequenceDiagram
 
 Rules already stated elsewhere, gathered:
 
-* `hello` first, on every connection (6.1). Video starts only after it.
+* `hello` first, on every connection (6.1). Video starts only after it,
+  and for a pv 21+ receiver only after `accepted` on that same connection
+  (6.9).
 * First frame after (re)connect is an IDR (5.3).
 * Rotation is a re-`hello` on the live connection, not a reconnect (6.1).
 * A new inbound connection replaces the current one (section 1).
@@ -1240,3 +1305,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-17 | `pv` 13: Mac-authoritative Mirror capture-source selection (`mirrorDisplayRequest` / `mirrorDisplayState`) |
 | 2026-09-18 | `pv` 14: Mac-authoritative Extend display shape (`extendShapeRequest` / `extendShapeState`, section 6.7); additive `hello.maxEncodeWide`/`maxEncodeHigh` now advertised by the official iOS receiver |
 | 2026-09-18 | `pv` 15: encoder-safe FPS ceiling and receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`, section 6.8) |
+| 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
