@@ -227,6 +227,7 @@ targets:
       - Shared/ReceiverPipelineActor.swift
       - Shared/ReceiverAudioDecoder.swift
       - Shared/TrustStore.swift
+      - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/PairingNetwork.swift
       - Shared/LocalOwnerAuthenticator.swift
