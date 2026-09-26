@@ -187,8 +187,10 @@ struct ReceiverDeviceDetailView: View {
                     session.sender.requestMaxFPS(preference)
                 }))
             if session.maxFPSPreference.enabled {
+                // A stored ceiling the filter now hides (120 on a 60 Hz
+                // device) shows as the tier that actually applies.
                 Picker("Maximum FPS", selection: Binding(
-                    get: { session.maxFPSPreference.maxFPS },
+                    get: { MaxFPSPicker.selection(session.maxFPSPreference, among: availableTiers) },
                     set: { fps in
                         var preference = session.maxFPSPreference
                         preference.maxFPS = fps

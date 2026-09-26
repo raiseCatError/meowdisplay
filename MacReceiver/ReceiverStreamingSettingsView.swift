@@ -96,9 +96,9 @@ private struct ReceiverStreamingPage: View {
                 }))
                 .disabled(locked)
             if current.enabled {
-                let tiers = receiver.lastMaxFPSState?.availableTiers ?? EncoderCapability.supportedFPSTiers
+                let tiers = MaxFPSPicker.tiers(reported: receiver.lastMaxFPSState?.availableTiers)
                 Picker("Maximum FPS", selection: Binding(
-                    get: { current.maxFPS },
+                    get: { MaxFPSPicker.selection(current, among: tiers) },
                     set: { fps in
                         var preference = current
                         preference.maxFPS = fps
