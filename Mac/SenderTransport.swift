@@ -33,4 +33,12 @@ enum SenderTransport: Sendable {
     // the target is always the receiver's existing trusted TLS listener
     // (WireCrypto.tlsPort), never the legacy plaintext media port.
     case usb(udid: String?, tls: TLSSessionConfig)
+
+    /// The pinned identity this dial must reach. Every route carries one, so
+    /// the application hello is verified the same way on USB as on TCP.
+    var tls: TLSSessionConfig {
+        switch self {
+        case .tcp(_, let tls), .usb(_, let tls): return tls
+        }
+    }
 }

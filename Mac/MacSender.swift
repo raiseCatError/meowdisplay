@@ -354,15 +354,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver requests are handed to SenderController, which owns the
     /// existing authoritative session-rebuild mode-switch path.
     @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
-    /// A receiver requested (`true`) or released (`false`) control of THIS
-    /// session. Handed to `SenderController.handleInputControlRequested`,
-    /// which owns the per-peer policy lookup, the Mac owner prompt, and the
-    /// session-grant decision — this instance never grants itself. `false`
-    /// (release) is applied immediately, with no callback needed, by
-    /// `denySessionInput` at the call site in `handleControl` — this
-    /// closure only ever fires for `true` (a request that needs a policy
-    /// decision).
-    @MainActor var onAllowInputRequest: ((Bool) -> Void)?
+    /// The receiver requested control on the connection with this
+    /// transport generation. Handed to `SenderController.
+    /// handleInputControlRequested`, which owns the per-peer policy lookup,
+    /// the Mac owner prompt, and the session-grant decision — this instance
+    /// never grants itself, and `grantSessionInput(generation:)` ignores a
+    /// decision for any connection but the live admitted one. A release is
+    /// applied immediately by `denySessionInput` at the call site in
+    /// `handleControl` and never reaches here.
+    @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
+    /// Fires when the connection changes, so a pending control-request
+    /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
+    @MainActor var onInputAuthorityReset: (() -> Void)? {
+        get { statusSink.onInputAuthorityReset }
+        set { statusSink.onInputAuthorityReset = newValue }
+    }
     /// Fires whenever this session's own ephemeral input grant changes —
     /// purely so `DeviceSession` can mirror it for display
     /// (`ReceiverDeviceDetailView`'s "Current session" row). The
@@ -746,12 +752,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     var sessionInvitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
     /// A receiver-initiated request this Mac's own user has not yet approved.
     var needsSenderApproval = false
-    private var senderRejectedSession = false
-    /// Capture waits on this gate (see `awaitSessionAdmission`). Created on
-    /// the first hello, when the receiver's protocol version is known.
-    private var admissionGate: SessionAdmissionGate?
-    private var admissionContinuation: CheckedContinuation<Void, Error>?
+    /// Which connection is verified and admitted, and which one holds the
+    /// input grant (see SenderSessionAuthorization.swift). Capture waits on
+    /// its admission (`awaitSessionAdmission`); media, cursor, capture
+    /// starts, input and Mac-wide receiver requests all check it for the
+    /// LIVE connection, never for an earlier one.
+    private let sessionAuthorization = SenderSessionAuthorization()
+    private var admissionContinuation: CheckedContinuation<UInt64, Error>?
     private var lastPublishedInvitationProgress: SessionInvitationProgress?
+    /// A `promoteInteractiveWake` that arrived before its connection was
+    /// admitted; performed on admission of that same connection.
+    private var pendingPromoteGeneration: UInt64?
+    /// A rotation re-hello that arrived while its connection was not yet
+    /// admitted: the rebuild runs once that connection is admitted.
+    private var deferredRotationRebuild = false
 
     private var lastHello: PhoneInfo?
     private struct ApplicationReadySession {
@@ -760,16 +774,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
     private var inputInjector: InputInjector?
-    // This logical session's ephemeral input grant (per-device/per-session
-    // consent milestone). Lives here — not on `DeviceSession` — because
-    // every input-gate choke point already runs on `queue`/under
-    // `InputInjector`'s own lock, never on the main actor; `DeviceSession`
-    // only ever mirrors this for display via `onSessionInputGrantChanged`.
-    // Never persisted: this instance is recreated for every fresh logical
-    // session (see `SenderController.startSession`), so a brand-new session
-    // always starts at `false`, and transport migration (`switchTransport`)
-    // never replaces this `MacSender` instance, so the grant survives it for
-    // free.
+    // Lock-guarded mirror of `sessionAuthorization`'s input grant for
+    // `InputInjector`, which re-checks it under its own lock at injection
+    // time; `DeviceSession` only ever mirrors it for display via
+    // `onSessionInputGrantChanged`. Never persisted, and never carried from
+    // one connection to the next: it is cleared whenever the transport
+    // generation changes (reconnect, `switchTransport`, the transport
+    // controller's own migration), so the receiver must ask again on the
+    // new connection.
     private let sessionInputGrant = SessionInputGrantBox()
     private var nativeAppGestureState = NativeAppGestureSessionState()
     private var loggedNativeGestureLimitation = false
@@ -1218,8 +1230,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `WireProtocol.sessionScopedInputConsentWireVersion`); `allowed`
     /// alone remains a correct summary for every older peer.
     private func sendAllowInputState(state: SessionInputWireState? = nil) {
-        let allowed = EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                            sessionGranted: sessionInputGrant.get())
+        let allowed = sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
         let resolvedState = state ?? (allowed ? .allowed : .off)
         sendJSONObject(["type": WireMessage.allowInputState,
                         "allowed": allowed,
@@ -1233,14 +1244,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { selfBox.currentOnQueue()?.sendAllowInputState(state: .requesting) }
     }
 
-    /// A Mac-owner (or auto-policy) decision granted this session control.
+    /// A Mac-owner (or auto-policy) decision granted control to the
+    /// connection that asked (`generation`, from `onAllowInputRequest`).
     /// Only ever called from the main-actor consent flow
     /// (`SenderController.handleInputControlRequested`/
     /// `resolveInputControlRequest`), never directly from a wire handler.
-    func grantSessionInput() {
+    /// Inert when that connection is no longer the live admitted one — a
+    /// decision made for connection A never grants connection B.
+    func grantSessionInput(generation: UInt64) {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
+            guard self.sessionAuthorization.grantInput(generation: generation) else {
+                Log.info("inputConsent: ignored grant for superseded connection generation=\(generation)")
+                return
+            }
             self.sessionInputGrant.set(true)
             self.sendAllowInputState(state: .allowed)
             let sink = self.statusSink
@@ -1257,6 +1275,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
             let wasGranted = self.sessionInputGrant.get()
+            self.sessionAuthorization.revokeInput()
             self.sessionInputGrant.set(false)
             if wasGranted {
                 // Held-input cleanup: an ON -> OFF transition must never
@@ -1555,16 +1574,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CancellationError()
         }
         // No virtual display, capture or media until the receiver accepted
-        // this session's invitation (and this Mac's user approved a
-        // receiver-initiated request that needed it).
-        try await awaitSessionAdmission()
+        // this session's invitation on the live connection (and this Mac's
+        // user approved a receiver-initiated request that needed it).
+        // Capture belongs to the connection that was admitted, which a
+        // reconnect during the wait can make a later one than `ready`'s.
+        let admittedGeneration = try await awaitSessionAdmission()
+        let admitted = try await waitForHello()
+        guard admitted.generation == admittedGeneration,
+              sessionAuthorization.isAdmitted(generation: admittedGeneration) else {
+            Log.info("sessionDebug: ignored stale capture start generation=\(admittedGeneration)")
+            throw CancellationError()
+        }
 
         switch mode {
         case .mirror:
             if DisplayHealth.hasUsablePhysicalDisplay(excluding: nil) {
-                try await startMirrorCaptureUsingPreference(sessionGeneration: ready.generation)
+                try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
             } else {
-                try await offerExtendOrFailMirror(info: ready.info, sessionGeneration: ready.generation)
+                try await offerExtendOrFailMirror(info: admitted.info, sessionGeneration: admittedGeneration)
             }
 
         case .extend:
@@ -1578,7 +1605,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let sink = self.statusSink
                 Task { @MainActor in sink.publishStatus(text) }
             }
-            try await setupExtend(ready.info, sessionGeneration: ready.generation)
+            try await setupExtend(admitted.info, sessionGeneration: admittedGeneration)
 
             // Touch back-channel (Milestone 3). Needs Accessibility trust;
             // streaming works without it, so don't interrupt with a prompt —
@@ -1725,14 +1752,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Whether an in-flight `setupExtend` probe/attempt should abort rather
     /// than create, adopt, or keep waiting on a virtual display: `stopped`,
-    /// or the authenticated session this setup belongs to is no longer the
-    /// live one (disconnect, reconnect, or a newer session mid-setup).
-    /// Reuses `AuthenticatedSessionState` — the existing session-generation
-    /// gate every other stale-callback check in this file already relies on
-    /// — rather than a new generation counter.
+    /// or the connection this setup belongs to is no longer the live,
+    /// admitted one (disconnect, reconnect, a newer session mid-setup, or a
+    /// connection that was never admitted — no virtual display exists for a
+    /// session the receiver hasn't accepted on that connection). Reuses the
+    /// `AuthenticatedSessionState` generations every other stale-callback
+    /// check in this file already relies on — not a new counter.
     private func isExtendSetupStale(ownerGeneration: UInt64?) -> Bool {
         guard !stopped, let ownerGeneration else { return true }
         return !authenticatedSession.isLive(generation: ownerGeneration)
+            || sessionAuthorization.captureOwner(requested: ownerGeneration) == nil
     }
 
     /// Bounded topology diagnostics — called only at headless creation/
@@ -1895,7 +1924,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // generation (see `isExtendSetupStale`) — a disconnect or a newer
         // authenticated session mid-probe must abort the whole setup rather
         // than resurrect a display for a session that no longer exists.
-        let ownerGeneration = sessionGeneration ?? authenticatedSession.liveGeneration
+        let ownerGeneration = sessionGeneration ?? sessionAuthorization.admittedGeneration
         // Only a created-but-never-surfaced display proves the identity is
         // poisoned. Creation refusing outright usually means a twin still
         // holds the serial (just-quit instance, parallel debug build) —
@@ -2306,7 +2335,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int,
                               sessionGeneration requestedGeneration: UInt64? = nil) async throws {
-        guard let sessionGeneration = requestedGeneration ?? authenticatedSession.liveGeneration,
+        // Capture is owned by one ADMITTED connection: the one that asked
+        // for it, or — for Video On, resume and recovery, which act for the
+        // session — the connection admitted right now. Never a connection
+        // that is merely authenticated (a pending session, or a reconnect
+        // the receiver hasn't accepted again yet), and never a later
+        // connection it wasn't started for.
+        guard let sessionGeneration = sessionAuthorization.captureOwner(requested: requestedGeneration),
               authenticatedSession.isLive(generation: sessionGeneration) else {
             Log.info("sessionDebug: ignored stale capture start generation=\(requestedGeneration.map(String.init) ?? "none")")
             throw CancellationError()
@@ -2419,6 +2454,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw error
         }
         guard authenticatedSession.isLive(generation: sessionGeneration),
+              sessionAuthorization.captureOwner(requested: sessionGeneration) != nil,
               self.stream === stream, videoEnabled || desiredAudioEnabled,
               updateCaptureState({ state in state.captureStarted() }) else {
             if self.stream === stream { self.stream = nil }
@@ -2503,6 +2539,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         stopped = true
         authenticatedSession.invalidate()
+        // A stopped pipeline holds no admission and no grant: a late
+        // decision (e.g. for a session `restartAll()` just replaced) can
+        // never land on it.
+        sessionAuthorization.transportEnded()
+        sessionInputGrant.set(false)
         mirrorUnavailableOfferGeneration = nil
         wakeStabilizationAssertion?.release()
         inputInjector?.cancelActiveInput()
@@ -2660,14 +2701,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// The one authoritative control-message-level gate: effectiveInput =
-    /// Mac master ON AND this logical session's own grant ON (see
-    /// `EffectiveInputAuthorization`) — never the master alone. A receiver
-    /// that never requested/was never granted control stays gated out here
-    /// even while the Mac master is fully on.
+    /// Mac master ON AND the live connection admitted AND that same
+    /// connection's own grant ON (see `EffectiveInputAuthorization` and
+    /// `SenderSessionAuthorization`) — never the master alone, and never a
+    /// grant an earlier connection held. A receiver that never requested/was
+    /// never granted control stays gated out here even while the Mac master
+    /// is fully on.
     private func receiverInputIsAllowed() -> Bool {
-        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                   sessionGranted: sessionInputGrant.get(),
-                                                   sessionAdmitted: admissionGate?.state == .admitted),
+        guard sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
               captureStateSnapshot().allowsInput else {
             inputInjector?.cancelActiveInput()
             return false
@@ -2681,9 +2722,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// lifecycle to be fully `.running` (see `CaptureLifecycleState.
     /// allowsKeyboardInput`), without touching that shared policy.
     private func receiverKeyboardInputIsAllowed() -> Bool {
-        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                   sessionGranted: sessionInputGrant.get(),
-                                                   sessionAdmitted: admissionGate?.state == .admitted),
+        guard sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
               captureStateSnapshot().allowsKeyboardInput else {
             inputInjector?.cancelActiveInput()
             return false
@@ -2757,7 +2796,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendVideoState()
         if !enabled {
             let phase = captureStateSnapshot().phase
-            if phase != .pausing, phase != .paused, phase != .stopped {
+            // Before admission there is no capture to call running; the
+            // admitted start (`awaitStartup`/`startCapture`) settles it.
+            if sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped {
                 _ = updateCaptureState { $0.captureStarted() }
             }
             invalidateCapturePipeline(discardingLastFrame: true)
@@ -2803,6 +2844,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return
         }
+        // Video On for a connection that is not admitted (the session is
+        // still pending, or a reconnect waits for the receiver to accept
+        // again) is recorded above and nothing more: capture starts when
+        // that connection is admitted (`awaitStartup`, or
+        // `reconcileCaptureAfterReadmission`), never before.
+        guard sessionAuthorization.isAdmitted else { return }
         let selfBox = self.selfBox
         Task {
             guard let self = selfBox.resolve() else { return }
@@ -3602,7 +3649,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         Log.info("wakeCapture: resolvedDisplay id=\(display.displayID)")
 
-        guard let sessionGeneration = authenticatedSession.liveGeneration,
+        // Wake recovery acts for the admitted connection only; one that is
+        // still pending (or not yet re-accepted) resumes capture on its own
+        // admission (`reconcileCaptureAfterReadmission`).
+        guard let sessionGeneration = sessionAuthorization.admittedGeneration,
               authenticatedSession.isLive(generation: sessionGeneration) else {
             Log.info("wakeCapture: noLiveSession")
             return
@@ -3788,6 +3838,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func invalidateApplicationSession(reason: String) {
         let generation = activeConnectionGeneration
         authenticatedSession.invalidate(generation: generation == 0 ? nil : generation)
+        // Nothing stays admitted or granted across the gap: the next
+        // connection re-proves identity and is admitted on its own.
+        connectionAuthorityEnded(dropped: sessionAuthorization.transportEnded())
         transportController.markNotReady()
         // A same-peer transport migration is not a session end — the
         // stabilization window must survive the redial/re-handshake gap,
@@ -4023,8 +4076,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.reportGone("device gone for >\(Int(self.disconnectGraceSeconds))s — ending session")
             }
             // A reconnect on a static screen produces no capture frames, so
-            // the receiver would stay black — replay the last frame as IDR.
-            if self.transportController.isReady, self.needsKeyframe,
+            // the receiver would stay black — replay the last frame as IDR
+            // once the connection is admitted (nothing is encoded for it
+            // before that anyway).
+            if self.transportController.isReady, self.needsKeyframe, self.sessionAuthorization.isAdmitted,
                Date().timeIntervalSince(self.lastCaptureAt) > 1,
                 let pixelBuffer = self.lastPixelBuffer {
                 Log.info("static screen after reconnect to \(self.endpointName) — replaying last frame as keyframe")
@@ -4070,7 +4125,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func pollCursorPosition() {
-        guard transportController.isReady, captureDisplayID != 0,
+        // Pointer position is screen content: admitted connections only.
+        guard transportController.isReady, sessionAuthorization.isAdmitted, captureDisplayID != 0,
               let loc = CGEvent(source: nil)?.location else {
             #if DEBUG
             logCursorTraceIfDue(reason: "gated: connectionReady=\(transportController.isReady) captureDisplayID=\(captureDisplayID)")
@@ -4142,8 +4198,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Skipping this check only means an occasional wasted sprite
         // encode while disconnected — `transportSessionBecameReady` resets
         // `lastCursorPNGHash` to 0 on every reconnect, so the fresh peer
-        // still gets a sprite the moment it's ready.
-        guard captureDisplayID != 0,
+        // still gets a sprite the moment it's ready. The admission check is
+        // lock-guarded and safe here: the sprite is screen content, and a
+        // sprite dropped before admission must not count as sent
+        // (`connectionAdmitted` resets the dedup state).
+        guard captureDisplayID != 0, sessionAuthorization.isAdmitted,
               let cursor = NSCursor.currentSystem else {
             #if DEBUG
             logCursorTraceIfDue(reason: "cursorImg gated: captureDisplayID=\(captureDisplayID) "
@@ -4285,6 +4344,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             )
             return
         }
+        // An authenticated connection is not an admitted session. Until the
+        // live connection is admitted, only handshake, liveness and teardown
+        // traffic is acted on (`SenderControlAuthority`); input, display
+        // mode, video, streaming settings, Mirror source, Extend shape and
+        // frame-rate requests from a pending or not-yet-re-accepted
+        // connection are dropped. A wake promotion is held for that same
+        // connection's admission instead (`connectionAdmitted`).
+        if SenderControlAuthority.requirement(for: type) == .admittedSession, !sessionAuthorization.isAdmitted {
+            if type == WireMessage.promoteInteractiveWake,
+               sessionAuthorization.snapshot.verifiedGeneration == activeConnectionGeneration {
+                pendingPromoteGeneration = activeConnectionGeneration
+                Log.info("wakeDebug: promoteInteractiveWake held until the session is admitted")
+            }
+            return
+        }
         switch type {
         case "ping":
             // Echo with our clock so the phone can estimate the offset
@@ -4317,35 +4391,42 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     return result
                 }()
-                if case .tcp(_, let tls) = transport,
-                   !SenderApplicationAuthorization.isAllowed(
-                       intendedPeerID: tls.peerID, authenticatedPeerID: info.id ?? "",
-                       authenticatedSPKI: authenticatedSPKI,
-                       currentPinnedSPKI: TrustStore.shared.pin(peerID: tls.peerID)) {
-                    Log.info("SECURITY: current trust no longer authorizes application session")
-                    invalidateApplicationSession(reason: "trustRevokedOrChanged")
-                    stopped = true
-                    transportController.cancelConnectionWithoutClearing()
-                    let selfBox = self.selfBox
-                    Task { @MainActor in
-                        guard let self = selfBox.resolve() else { return }
-                        self.onTrustFailure?("This device is no longer trusted. Pair it again if needed.")
-                    }
-                    return
-                }
-                if case .tcp(_, let tls) = transport, info.id != tls.peerID {
-                    Log.info("SECURITY: authenticated key claimed unexpected peer id")
-                    invalidateApplicationSession(reason: "applicationIdentityMismatch")
-                    stopped = true
-                    transportController.cancelConnectionWithoutClearing()
-                    let selfBox = self.selfBox
-                    Task { @MainActor in
-                        guard let self = selfBox.resolve() else { return }
-                        self.onTrustFailure?("Device identity changed. Forget the device and pair again if you intentionally reset it.")
-                    }
-                    return
-                }
+                // Identity first, identically for every route: USB is only a
+                // route, so a USB hello meets exactly the TCP rule — the
+                // claimed install ID must be the peer this pipeline was built
+                // for, and the authenticated key must be that peer's CURRENT
+                // pin. Nothing below (readiness, stored per-peer preferences,
+                // `onHello`'s policy lookups) runs for a hello that fails it.
+                let tls = transport.tls
                 let generation = activeConnectionGeneration
+                let outcome = sessionAuthorization.acceptHello(
+                    generation: generation, intendedPeerID: tls.peerID, claimedPeerID: info.id,
+                    authenticatedSPKI: authenticatedSPKI,
+                    currentPinnedSPKI: TrustStore.shared.pin(peerID: tls.peerID),
+                    receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                    needsSenderApproval: needsSenderApproval)
+                switch outcome {
+                case .rejected(let verdict):
+                    let reason = verdict == .identityMismatch ? "applicationIdentityMismatch" : "trustRevokedOrChanged"
+                    let message = verdict == .identityMismatch
+                        ? "Device identity changed. Forget the device and pair again if you intentionally reset it."
+                        : "This device is no longer trusted. Pair it again if needed."
+                    Log.info("SECURITY: application hello rejected reason=\(reason)")
+                    invalidateApplicationSession(reason: reason)
+                    stopped = true
+                    transportController.cancelConnectionWithoutClearing()
+                    let selfBox = self.selfBox
+                    Task { @MainActor in
+                        guard let self = selfBox.resolve() else { return }
+                        self.onTrustFailure?(message)
+                    }
+                    return
+                case .stale:
+                    Log.info("sessionDebug: ignored stale application handshake generation=\(generation)")
+                    return
+                case .firstConnection, .newConnection, .sameConnection:
+                    break
+                }
                 guard authenticatedSession.markApplicationReady(generation: generation) else {
                     Log.info("sessionDebug: ignored stale application handshake generation=\(generation)")
                     return
@@ -4403,6 +4484,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // phone dedupes by content.
                 sendWelcome()
                 sendSessionInviteIfSupported(info)
+                if outcome == .newConnection {
+                    // Any grant belonged to the previous connection; tell
+                    // this one input is off until it asks again.
+                    sendAllowInputState()
+                }
                 sendStreamingProfileState()
                 sendStreamingPriorityState()
                 sendWakeInfo()
@@ -4449,6 +4535,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                           || previous.pixelsHigh != info.pixelsHigh {
                     // Phone rotated — rebuild after a short debounce so a
                     // flurry of orientation flips settles into one rebuild.
+                    // A connection that isn't admitted gets no new display
+                    // or capture: the rebuild waits for its admission.
+                    guard sessionAuthorization.isAdmitted else {
+                        deferredRotationRebuild = true
+                        return
+                    }
                     let rotationSelfBox = self.selfBox
                     Task {
                         try? await Task.sleep(for: .milliseconds(300))
@@ -4619,16 +4711,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
             Log.info("sessionInvite: response id=\(response.id) result=\(response.result.rawValue)")
-            admissionGate?.receiverResponded(response.result)
+            // Counts only for the live, verified connection it arrived on.
+            sessionAuthorization.receiverResponded(response.result, generation: activeConnectionGeneration)
             evaluateSessionAdmission()
         case WireMessage.allowInputRequest:
-            // A session still being negotiated has nothing to control.
-            guard admissionGate?.state == .admitted else { return }
+            // Reached only for an admitted connection (see the gate above):
+            // a session still being negotiated has nothing to control.
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.allowInputWireVersion,
                   let requested = obj["allowed"] as? Bool else { return }
             if requested {
-                if sessionInputGrant.get() {
+                if sessionAuthorization.hasInputGrant {
                     // Already granted — just re-confirm, covering a
                     // receiver that missed an earlier push (e.g. it
                     // connected mid-flight).
@@ -4638,10 +4731,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // handleInputControlRequested` decides (policy lookup +
                     // Mac prompt), keeping the Mac authoritative and this
                     // session's grant independent of every other session's.
+                    // The decision is bound to THIS connection's generation.
                     let allowInputSelfBox = self.selfBox
+                    let requestGeneration = activeConnectionGeneration
                     Task { @MainActor in
                         guard let self = allowInputSelfBox.resolve() else { return }
-                        self.onAllowInputRequest?(true)
+                        self.onAllowInputRequest?(requestGeneration)
                     }
                 }
             } else {
@@ -4684,9 +4779,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.onStreamingPriorityRequest?(priority)
             }
         case WireMessage.mirrorDisplayRequest:
-            // Same construction as `promoteInteractiveWake` above: this only
-            // ever runs on data read off an already pinned-TLS/loopback
-            // `connection`, so it is authenticated by construction.
+            // Like every Mac-wide request, reached only for an admitted
+            // connection (see the gate at the top of `handleControl`).
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String
@@ -4696,44 +4790,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.onMirrorDisplayRequest?(requestedUUID)
             }
         case WireMessage.extendShapeRequest:
-            // Same construction as `mirrorDisplayRequest` above: only ever
-            // read off an already-authenticated `connection`.
+            // Same gate as `mirrorDisplayRequest` above: admitted only.
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.extendShapeWireVersion,
                   let preference = ExtendDisplayShapePreference(message: obj) else { return }
             applyExtendShape(preference, info: info)
         case WireMessage.maxFPSRequest:
-            // Same construction as `extendShapeRequest` above: only ever
-            // read off an already-authenticated `connection`.
+            // Same gate as `extendShapeRequest` above: admitted only.
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.maxFPSWireVersion,
                   let preference = ReceiverMaxFPSPreference(message: obj) else { return }
             applyMaxFPS(preference, info: info)
         case WireMessage.promoteInteractiveWake:
-            // `handleControl` only ever runs on data read off `connection`,
-            // which for wireless media is always the pinned-mutual-TLS
-            // secure transport (TLSConfigurator) and for USB is loopback —
-            // there is no other path into this switch, so this is already
-            // gated to an authenticated session by construction.
-            let peerID = lastHello?.id ?? "unknown"
-            Log.info("wakeDebug: remote promoteInteractiveWake requested")
-            Log.info("wakeDebug: peerID=\(peerID)")
-            Log.info("wakeDebug: userActivityType=remote")
-            let attempt = InteractiveWakePromotion.promote()
-            var result: [String: Any] = ["type": WireMessage.promoteInteractiveWakeResult]
-            if attempt.result == kIOReturnSuccess, let assertionID = attempt.assertionID {
-                result["success"] = true
-                result["assertionID"] = Int(assertionID)
-                // Only after a successful Promote — see
-                // WakeStabilizationAssertion's doc comment for why this is a
-                // separate, longer hold from the one-shot declaration above.
-                if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
-                wakeStabilizationAssertion?.begin(generation: activeConnectionGeneration, route: transportController.route?.rawValue)
-            } else {
-                result["success"] = false
-                result["code"] = Int(attempt.result)
-            }
-            sendJSONObject(result)
+            // Reached only for an admitted connection (the gate above holds
+            // an earlier request for admission): pinned mutual TLS proves
+            // who asked, admission proves this Mac agreed to the session.
+            performInteractiveWakePromotion()
         case WireMessage.audioRequest:
             // Per-receiver, unlike Video/Allow Input: no Mac-wide policy to
             // check, so this applies directly rather than bouncing through
@@ -4809,14 +4881,42 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// On `queue`, for the live admitted connection only.
+    private func performInteractiveWakePromotion() {
+        let peerID = lastHello?.id ?? "unknown"
+        Log.info("wakeDebug: remote promoteInteractiveWake requested")
+        Log.info("wakeDebug: peerID=\(peerID)")
+        Log.info("wakeDebug: userActivityType=remote")
+        let attempt = InteractiveWakePromotion.promote()
+        var result: [String: Any] = ["type": WireMessage.promoteInteractiveWakeResult]
+        if attempt.result == kIOReturnSuccess, let assertionID = attempt.assertionID {
+            result["success"] = true
+            result["assertionID"] = Int(assertionID)
+            // Only after a successful Promote — see
+            // WakeStabilizationAssertion's doc comment for why this is a
+            // separate, longer hold from the one-shot declaration above.
+            if wakeStabilizationAssertion == nil { wakeStabilizationAssertion = WakeStabilizationAssertion() }
+            wakeStabilizationAssertion?.begin(generation: activeConnectionGeneration, route: transportController.route?.rawValue)
+        } else {
+            result["success"] = false
+            result["code"] = Int(attempt.result)
+        }
+        sendJSONObject(result)
+    }
+
     // MARK: - Session invitation (pv 21)
 
-    /// Suspends startup until `admissionGate` admits or refuses the session.
-    private func awaitSessionAdmission() async throws {
+    /// Suspends startup until the live connection is admitted (or the
+    /// session is refused), returning the generation that was admitted —
+    /// the one capture then belongs to, which is not necessarily the
+    /// generation whose hello `waitForHello` returned (a reconnect can land
+    /// while the Mac's user or the receiver is still deciding).
+    private func awaitSessionAdmission() async throws -> UInt64 {
         let selfBox = self.selfBox
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt64, Error>) in
             queue.async {
-                guard let self = selfBox.currentOnQueue(), !self.stopped, self.admissionGate != nil else {
+                guard let self = selfBox.currentOnQueue(), !self.stopped,
+                      self.sessionAuthorization.snapshot.gate != nil else {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
@@ -4827,23 +4927,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Called on `queue` for every hello: creates the gate once the
-    /// receiver's version is known and (re)sends the invitation. A re-send
-    /// for an already-admitted session is marked automatic, so an in-place
-    /// reconnect can never raise a new prompt on the receiver.
+    /// Called on `queue` for every verified hello: (re)sends the invitation.
+    /// A re-send once the session was admitted on any connection is marked
+    /// automatic, so an in-place reconnect can never raise a new prompt on
+    /// the receiver — but the receiver still has to accept it on THIS
+    /// connection before anything is admitted again.
     private func sendSessionInviteIfSupported(_ info: PhoneInfo) {
-        let supportsInvitations = info.protocolVersion >= WireProtocol.sessionInvitationWireVersion
-        if admissionGate == nil {
-            var gate = SessionAdmissionGate(
-                receiverSupportsInvitations: supportsInvitations, needsSenderApproval: needsSenderApproval)
-            if senderRejectedSession { gate.senderDecided(accept: false) }
-            admissionGate = gate
-            // Publish at once (e.g. `.admitted` for a pre-pv 21 receiver),
-            // not only when startup reaches its gate.
-            evaluateSessionAdmission()
-        }
-        guard supportsInvitations, let gate = admissionGate else { return }
-        if gate.state == .admitted { sessionInvitation.intent = .automatic }
+        let authorization = sessionAuthorization.snapshot
+        // Publish at once (e.g. `.admitted` for a pre-pv 21 receiver), not
+        // only when startup reaches its gate.
+        defer { evaluateSessionAdmission() }
+        guard info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+              let gate = authorization.gate else { return }
+        if authorization.everAdmitted { sessionInvitation.intent = .automatic }
         var invitation = sessionInvitation
         invitation.mode = mode.receiverMode
         invitation.awaitingSenderApproval = !gate.senderApproved
@@ -4851,23 +4947,89 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func evaluateSessionAdmission() {
-        guard let gate = admissionGate else { return }
+        guard let gate = sessionAuthorization.snapshot.gate else { return }
         if let progress = gate.progress, progress != lastPublishedInvitationProgress {
             lastPublishedInvitationProgress = progress
             let sink = statusSink
             Task { @MainActor in sink.publishInvitationProgress(progress) }
         }
-        switch gate.state {
-        case .waiting:
-            break
-        case .admitted:
-            admissionContinuation?.resume()
-            admissionContinuation = nil
-        case .refused(let result):
+        if case .refused(let result) = gate.state {
             Log.info("sessionInvite: refused id=\(sessionInvitation.id) result=\(result.rawValue)")
             admissionContinuation?.resume(throwing: CancellationError())
             admissionContinuation = nil
+            return
         }
+        if let admission = sessionAuthorization.consumeNewAdmission() {
+            connectionAdmitted(generation: admission.generation, first: admission.first)
+        }
+        if let generation = sessionAuthorization.admittedGeneration, let continuation = admissionContinuation {
+            admissionContinuation = nil
+            continuation.resume(returning: generation)
+        }
+    }
+
+    /// On `queue`: `generation` just became the admitted connection. The
+    /// first admission of the session is picked up by `awaitStartup`; a
+    /// later one (reconnect, route migration) resumes what the unadmitted
+    /// gap held back, on this connection only.
+    private func connectionAdmitted(generation: UInt64, first: Bool) {
+        Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
+        if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
+            sendMirrorDisplayState()
+        }
+        if !first {
+            // Nothing reached this connection while it waited: start it on
+            // a fresh keyframe and a fresh audio timeline, and tell it where
+            // input stands (off until it asks again).
+            needsKeyframe = true
+            if audioEnabled { beginAudioGeneration() }
+            lastCursorPNGHash = 0
+            lastCursorSent = (-1, -1, false)
+            sendAllowInputState()
+            if deferredRotationRebuild, let info = lastHello {
+                deferredRotationRebuild = false
+                let selfBox = self.selfBox
+                Task { await selfBox.resolve()?.reconfigure(info) }
+            } else {
+                reconcileCaptureAfterReadmission()
+            }
+        }
+        let promote = pendingPromoteGeneration == generation
+        pendingPromoteGeneration = nil
+        if promote { performInteractiveWakePromotion() }
+    }
+
+    /// On `queue`: capture that could not start while the connection was
+    /// unadmitted (a deferred Video On, a resume, or a recovery that found
+    /// no admitted owner) starts now that one is admitted again.
+    private func reconcileCaptureAfterReadmission() {
+        guard !stopped, stream == nil else { return }
+        let selfBox = self.selfBox
+        switch captureStateSnapshot().phase {
+        case .resuming:
+            Task { await selfBox.resolve()?.resumeCapture() }
+        case .recovering:
+            scheduleCaptureRecovery()
+        case .running:
+            guard videoEnabled || desiredAudioEnabled else { return }
+            Task { await selfBox.resolve()?.restartVideoCapture() }
+        case .pausing, .paused, .stopped:
+            break
+        }
+    }
+
+    /// On `queue`: the transport generation changed (or ended). Whatever
+    /// input the old connection held — a grant, or a request still waiting
+    /// on the Mac owner — belonged to that connection and is gone.
+    private func connectionAuthorityEnded(dropped: Bool) {
+        if dropped {
+            sessionInputGrant.set(false)
+            inputInjector?.cancelActiveInput()
+            let sink = statusSink
+            Task { @MainActor in sink.publishSessionInputGrantChanged(false) }
+        }
+        let sink = statusSink
+        Task { @MainActor in sink.publishInputAuthorityReset() }
     }
 
     /// This Mac's user decided a receiver-initiated request (main-actor
@@ -4879,12 +5041,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if accept {
                 self.needsSenderApproval = false
             } else {
-                self.senderRejectedSession = true
                 self.sendJSONObject(["type": WireMessage.sessionInviteCancel, "id": self.sessionInvitation.id])
             }
-            self.admissionGate?.senderDecided(accept: accept)
+            self.sessionAuthorization.senderDecided(accept: accept)
             // Re-send so the receiver's "Waiting for the Mac" state clears.
-            if accept, let info = self.lastHello { self.sendSessionInviteIfSupported(info) }
+            if accept, let info = self.lastHello, self.sessionAuthorization.snapshot.verifiedGeneration != nil {
+                self.sendSessionInviteIfSupported(info)
+            }
             self.evaluateSessionAdmission()
         }
     }
@@ -5106,11 +5269,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             #endif
 
-            // No receiver, video off, or a pipeline stage is backed up: skip
-            // this frame. Video off never tears down an audio-only stream
-            // (see startCapture), so this guard — not stream teardown — is
-            // what makes "no encoding, no network video packets" true then.
-            guard transportController.isReady, videoEnabled else { return }
+            // No receiver, video off, a connection that isn't admitted (a
+            // reconnect the receiver hasn't accepted again yet), or a
+            // pipeline stage is backed up: skip this frame. The pixels are
+            // kept above, so admission can replay them as a keyframe. Video
+            // off never tears down an audio-only stream (see startCapture),
+            // so this guard — not stream teardown — is what makes "no
+            // encoding, no network video packets" true then.
+            guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
             // Rate-gate BEFORE backpressure: SCK's capture headroom means
             // frames can arrive up to ~2x the target rate, and neither
             // `minimumFrameInterval` nor `kVTCompressionPropertyKey_
@@ -5131,7 +5297,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation, connectionGeneration: activeConnectionGeneration)
 
         case .audio:
-            guard transportController.isReady, audioEnabled else { return }
+            guard transportController.isReady, audioEnabled, sessionAuthorization.isAdmitted else { return }
             let generation = captureGenerationNow
             let audioGen = audioGenerationNow
             let encoder = audioCaptureEncoder
@@ -5236,7 +5402,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64) {
-        guard generation == captureGenerationNow, videoEncoder.isActive else { return }
+        // Every video path (capture, drop replay, the reconnect replay)
+        // funnels through here: nothing is encoded for a connection that is
+        // not admitted, and a pending keyframe request stays pending for it.
+        guard generation == captureGenerationNow, videoEncoder.isActive,
+              sessionAuthorization.mayEmitMedia(on: connectionGeneration) else { return }
         pipelineState.incrementPendingEncodes()
         let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
         // Latched here, on `queue`, and handed to the encoder as an immutable
@@ -5622,13 +5792,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `SCShareableContent` is: hops back onto `queue` before touching any
     /// sender state or sending, exactly like `runWakeCaptureRecovery` does.
     private func sendMirrorDisplayState() {
-        guard mode == .mirror else { return }
+        // This Mac's display list is for an admitted session only; it is
+        // (re)sent on admission (`connectionAdmitted`).
+        guard mode == .mirror, sessionAuthorization.isAdmitted else { return }
         let selfBox = self.selfBox
         Task {
             guard selfBox.resolve() != nil else { return }
             let candidates = await MirrorDisplayCandidate.listCandidates()
             selfBox.resolve()?.queue.async {
-                guard let self = selfBox.currentOnQueue(), self.mode == .mirror, !self.stopped else { return }
+                guard let self = selfBox.currentOnQueue(), self.mode == .mirror, !self.stopped,
+                      self.sessionAuthorization.isAdmitted else { return }
                 let displays = candidates.compactMap { candidate -> [String: Any]? in
                     guard let uuid = candidate.persistentID else { return nil }
                     return [
@@ -5724,7 +5897,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// inside a `queue.async`/on-queue callback, so reading `currentConnection`/
     /// `isReady` directly here is safe — no change needed.
     private func sendFramed(_ payload: Data, kind: String = "video") {
-        guard transportController.currentConnection != nil, transportController.isReady else { return }
+        // Last line for every media frame, video and audio alike: only the
+        // live admitted connection receives any.
+        guard transportController.currentConnection != nil, transportController.isReady,
+              sessionAuthorization.isAdmitted else { return }
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
@@ -5852,6 +6028,10 @@ extension MacSender: MacSenderTransportDelegate {
     /// relative ordering the pre-Phase-1 code had.
     func transportSessionBecameReady(on connection: NWConnection) {
         activeConnectionGeneration = authenticatedSession.beginTransport()
+        // A new connection starts unverified and unadmitted, whichever path
+        // replaced the old one (redial, `switchTransport`, or the transport
+        // controller's own migration) — see `SenderSessionAuthorization`.
+        connectionAuthorityEnded(dropped: sessionAuthorization.transportBegan(generation: activeConnectionGeneration))
         Log.info("sessionDebug: generation=\(activeConnectionGeneration)")
         Log.info("sessionDebug: tlsReady")
         Log.info("connectDebug: tlsReady peer=\(endpointName)")

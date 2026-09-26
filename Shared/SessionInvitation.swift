@@ -266,6 +266,18 @@ struct SessionApprovalPlan: Equatable, Sendable {
     }
 }
 
+/// A pending prompt is authority captured when it was raised. Forget (the
+/// peer's pin is gone) and Block (its policy is now `blocked`) withdraw that
+/// authority, so an answer arriving afterwards must be inert: it neither
+/// admits the session nor persists a policy for a peer the user just
+/// removed or blocked. Both endpoints re-check this before acting on a
+/// resolved prompt.
+enum PendingApprovalRevalidation {
+    static func isStillAuthorized(isPinned: Bool, currentPolicy: IncomingSessionPeerPolicy?) -> Bool {
+        isPinned && currentPolicy != .blocked
+    }
+}
+
 // MARK: - Session start planning (Mac Sender)
 
 /// An invitation handed from a session to the one pipeline that replaces it
@@ -316,6 +328,16 @@ enum ReceiverRequestAdmission {
         case replace(needsSenderApproval: Bool)
     }
 
+    /// The Mac's whole decision for a receiver's connect request, with the
+    /// intent that request actually declared: an `automatic` one (the
+    /// receiver's own recovery) can never need this Mac's approval — it is
+    /// started or dropped, never turned into a prompt.
+    static func decide(peerID: String, intent: SessionInvitationIntent, existing: ExistingSession?,
+                       defaults: UserDefaults = .standard) -> Action {
+        decide(policy: IncomingSessionPolicyStore.decision(peerID: peerID, intent: intent, defaults: defaults),
+               existing: existing)
+    }
+
     static func decide(policy: IncomingSessionDecision, existing: ExistingSession?) -> Action {
         let needsApproval: Bool
         switch policy {
@@ -328,6 +350,25 @@ enum ReceiverRequestAdmission {
             return .replace(needsSenderApproval: needsApproval)
         }
         return .alreadyHandled
+    }
+}
+
+/// When the Mac Sender may put its own approval prompt for a
+/// receiver-initiated request on screen. Everything available before the
+/// application hello — the Bonjour TXT `id`, the service name, a `cr`
+/// token — is unauthenticated, so a prompt raised from it could present a
+/// spoofed request as a trusted device's. The prompt appears only once the
+/// live connection proved the intended pinned peer, and names it by its
+/// pinned display name, never by discovery metadata.
+enum SenderApprovalPrompting {
+    static func approval(invitation: SessionInvitation, awaitingLocalApproval: Bool, alreadyPresented: Bool,
+                         intendedPeerID: String?, authenticatedPeerID: String?, pinnedName: String?,
+                         now: Date = Date()) -> PendingSessionApproval? {
+        guard awaitingLocalApproval, !alreadyPresented,
+              let intendedPeerID, authenticatedPeerID == intendedPeerID,
+              let pinnedName else { return nil }
+        return PendingSessionApproval(id: invitation.id, peerID: intendedPeerID, peerName: pinnedName,
+                                      localRole: .sender, mode: invitation.mode, createdAt: now)
     }
 }
 
@@ -475,6 +516,17 @@ struct SessionAdmissionGate: Equatable, Sendable {
         guard refusal == nil else { return }
         if accept { senderApproved = true } else { refusal = .declined }
     }
+
+    /// A new application connection of the same logical session (reconnect,
+    /// route migration): the receiver's acceptance belonged to the old
+    /// connection, so a pv 21+ receiver must accept again on this one. The
+    /// Sender's own decision and any refusal are about the logical session
+    /// and carry over.
+    mutating func beginConnection(receiverSupportsInvitations: Bool) {
+        guard refusal == nil else { return }
+        receiverAccepted = !receiverSupportsInvitations
+        receiverAskingUser = false
+    }
 }
 
 /// What the Mac Sender's UI shows for a session still being negotiated.
@@ -512,6 +564,17 @@ struct ReceiverSessionAdmission: Equatable, Sendable {
         admitted = false
         acceptedInvitationID = nil
         acceptedPeerID = nil
+    }
+
+    /// Forget or Block of `peerID`: drops both the current admission (when
+    /// the current connection is that peer's) and the remembered accepted
+    /// invitation, so neither a continuation nor a late answer can reuse
+    /// authority the user just withdrew. Returns whether anything changed.
+    @discardableResult
+    mutating func revoke(peerID: String, currentPeerID: String?) -> Bool {
+        guard acceptedPeerID == peerID || currentPeerID == peerID else { return false }
+        revoke()
+        return true
     }
 
     func isContinuation(of invitation: SessionInvitation, peerID: String?) -> Bool {

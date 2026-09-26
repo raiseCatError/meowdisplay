@@ -67,6 +67,10 @@ final class MacSenderStatusSink: Sendable {
     /// (`ReceiverDeviceDetailView`'s "Current session" row). The
     /// authoritative bit lives in `sessionInputGrant`, not here.
     var onSessionInputGrantChanged: ((Bool) -> Void)?
+    /// Fires when this session's connection was replaced or lost: any input
+    /// request still waiting on the Mac owner belonged to that connection
+    /// and can no longer be granted (see `SenderSessionAuthorization`).
+    var onInputAuthorityReset: (() -> Void)?
     /// Session-invitation negotiation progress (pv 21) — see
     /// `MacSender.awaitSessionAdmission`.
     var onInvitationProgress: ((SessionInvitationProgress) -> Void)?
@@ -133,6 +137,10 @@ final class MacSenderStatusSink: Sendable {
 
     func publishSessionInputGrantChanged(_ granted: Bool) {
         onSessionInputGrantChanged?(granted)
+    }
+
+    func publishInputAuthorityReset() {
+        onInputAuthorityReset?()
     }
 
     func publishDisplayIdentityBumped(_ totalOffset: UInt32) {

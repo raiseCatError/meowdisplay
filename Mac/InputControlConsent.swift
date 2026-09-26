@@ -100,6 +100,17 @@ struct InputControlRequestLifecycle: Equatable {
         return true
     }
 
+    /// The connection a pending request arrived on was replaced: the Mac
+    /// owner's eventual answer can no longer apply to it (a grant belongs to
+    /// one connection), so the pending generation is retired. Unlike
+    /// `reset()`, an existing Not Now cooldown stands — reconnecting must not
+    /// become a way around it.
+    mutating func invalidatePending() {
+        guard isPending else { return }
+        isPending = false
+        generation &+= 1
+    }
+
     /// True session end (disconnect, Forget, teardown): no stale request or
     /// callback may outlive it, and the very next connection starts clean.
     mutating func reset() {

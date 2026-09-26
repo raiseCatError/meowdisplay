@@ -180,6 +180,7 @@ targets:
       - Mac/AutoConnectPolicy.swift
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
+      - Mac/SenderSessionAuthorization.swift
       - Mac/CanonicalRuntimeStatus.swift
       - Mac/KeepMacAvailable.swift
       - Mac/SettingsCategory.swift
