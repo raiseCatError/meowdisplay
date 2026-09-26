@@ -3,15 +3,20 @@ import SwiftUI
 // Receiver-side SwiftUI pieces for session invitations (pv 21), shared by
 // the iPhone/iPad Receiver and the Mac Receiver.
 
-/// Per-Mac override of "Automatically Allow Connections".
+/// Per-Mac override of "Automatically Allow Connections". Saved through
+/// `StreamReceiver.setIncomingSessionPolicy`, so choosing Block also
+/// revokes what that Mac could still use: an open prompt, a remembered
+/// acceptance, this device's own pending request, its current connection.
 struct IncomingSessionPolicyPicker: View {
     let peerID: String
     let title: LocalizedStringKey
+    let receiver: StreamReceiver
     @State private var policy: IncomingSessionPeerPolicy?
 
-    init(_ title: LocalizedStringKey = "Connection Requests", peerID: String) {
+    init(_ title: LocalizedStringKey = "Connection Requests", peerID: String, receiver: StreamReceiver) {
         self.title = title
         self.peerID = peerID
+        self.receiver = receiver
         _policy = State(initialValue: IncomingSessionPolicyStore.policy(peerID: peerID))
     }
 
@@ -20,7 +25,7 @@ struct IncomingSessionPolicyPicker: View {
             get: { policy },
             set: { newValue in
                 policy = newValue
-                IncomingSessionPolicyStore.setPolicy(newValue, peerID: peerID)
+                receiver.setIncomingSessionPolicy(newValue, peerID: peerID)
             })) {
             Text("Default").tag(IncomingSessionPeerPolicy?.none)
             Text("Always Allow").tag(IncomingSessionPeerPolicy?.some(.alwaysAllow))

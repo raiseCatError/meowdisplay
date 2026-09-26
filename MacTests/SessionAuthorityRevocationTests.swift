@@ -144,11 +144,18 @@ final class SessionAuthorityRevocationTests: XCTestCase {
         XCTAssertFalse(admission.revoke(peerID: "Q", currentPeerID: "P"), "another peer's revocation")
         XCTAssertTrue(admission.admitted)
 
-        // Forget/Block of P while connected to someone else still drops the
-        // remembered acceptance, so a later continuation needs a fresh answer.
+        // Later a pre-pv 21 Mac Q is admitted on a new connection; P's
+        // acceptance is still remembered.
+        admission.beginConnection()
+        admission.admit(invitationID: nil, peerID: "Q")
+        XCTAssertTrue(admission.isContinuation(of: invitation, peerID: "P"))
+
+        // Forget/Block of P drops P's remembered acceptance, so a later
+        // continuation needs a fresh answer — and leaves Q's admission alone.
         XCTAssertTrue(admission.revoke(peerID: "P", currentPeerID: "Q"))
-        XCTAssertFalse(admission.admitted)
+        XCTAssertTrue(admission.admitted, "Q's live admission is not P's to lose")
         XCTAssertFalse(admission.isContinuation(of: invitation, peerID: "P"))
+        XCTAssertFalse(admission.revoke(peerID: "P", currentPeerID: "Q"), "nothing left to revoke")
     }
 
     func testRevokingTheCurrentPeerDropsItsAdmission() {

@@ -504,6 +504,22 @@ final class ReceiverAdvertisementState: @unchecked Sendable {
         return matched
     }
 
+    /// Withdraws whatever token is published, current or not — the user
+    /// cancelled their own request, or revoked the Mac it could be for.
+    /// Returns whether there was one.
+    @discardableResult
+    func clearConnectRequest() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let hadToken = connectRequestToken != nil
+        connectRequestToken = nil
+        return hadToken
+    }
+
+    func currentConnectRequestToken() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return connectRequestToken
+    }
+
     func mediaService(installID: String, protocolVersion: Int) -> NWListener.Service {
         lock.lock()
         let name = serviceName
@@ -696,12 +712,12 @@ final class StreamReceiver: ObservableObject {
     /// `session` — derived from the connection's own certificate (SPKI →
     /// `TrustStore.peerID(forSPKI:)`), exactly like `MacSender`'s
     /// `SenderApplicationAuthorization` binding on the dialer side. `nil`
-    /// while disconnected, or for a connection with no TLS layer (the
-    /// loopback-only USB path). `WakeConnectCoordinator` requires this to
-    /// equal its attempt's target peerID before treating a session as having
-    /// satisfied that specific wake attempt — a Bonjour peerID, a requested
-    /// peerID, a hostname, or wake metadata are never sufficient on their
-    /// own (see `resolveAuthenticatedPeerID`).
+    /// while disconnected, or when the certificate no longer resolves to a
+    /// pinned peer (Forget after the handshake). `WakeConnectCoordinator`
+    /// requires this to equal its attempt's target peerID before treating a
+    /// session as having satisfied that specific wake attempt — a Bonjour
+    /// peerID, a requested peerID, a hostname, or wake metadata are never
+    /// sufficient on their own (see `resolveAuthenticatedPeerID`).
     @Published private(set) var authenticatedPeerID: String?
 
     /// Set by `forgetPeer(_:)` so `WakeConnectCoordinator` can end an attempt
@@ -976,6 +992,11 @@ final class StreamReceiver: ObservableObject {
     /// receiver-initiated invitation is accepted without a second prompt.
     private var outgoingSessionRequest: (peerID: String?, until: Date)?
     private static let outgoingSessionRequestWindow: TimeInterval = 30
+    /// Whether a peer is still pinned, re-checked before a late answer to a
+    /// prompt may act (`PendingApprovalRevalidation`). `TrustStore` in the
+    /// apps; injectable only so the hostless tests can model trust without
+    /// the Keychain.
+    private let isPeerPinned: @Sendable (String) -> Bool
     /// Narrow, lock-backed owner for `disconnect()`'s in-flight `finish`
     /// closure — same `NSLock`-protected `@unchecked Sendable` idiom as
     /// `TLSListenerState`/`SendTargetBox` above. Exists so `finish` can be a
@@ -1417,13 +1438,15 @@ final class StreamReceiver: ObservableObject {
     @MainActor
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
-         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil) {
+         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil,
+         isPeerPinned: @escaping @Sendable (String) -> Bool = { TrustStore.shared.hasPin(peerID: $0) }) {
         self.displayLayer = displayLayer
         self.deviceKind = deviceKind
         self.fallbackServiceName = fallbackServiceName
         self.maxEncodeWide = maxEncodeWide
         self.maxEncodeHigh = maxEncodeHigh
         self.maxFPS = maxFPS
+        self.isPeerPinned = isPeerPinned
         // Seed the box with the real initial preference — `didSet` above
         // only fires on a subsequent change, never for this stored
         // property's own initial value.
@@ -1501,12 +1524,60 @@ final class StreamReceiver: ObservableObject {
         IncomingSessionPolicyStore.removePolicy(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
+        revokeSessionAuthority(peerID: peerID, trustRemoved: true)
+    }
+
+    /// The per-Mac Connection Requests override (`IncomingSessionPolicyPicker`).
+    /// Block is a revocation, not only a preference for next time: it does
+    /// everything Forget does except removing trust (see
+    /// `revokeSessionAuthority`), so a prompt already on screen, a remembered
+    /// acceptance, or this device's own pending request can no longer admit
+    /// that Mac.
+    func setIncomingSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) {
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        guard policy == .blocked else { return }
+        Log.info("sessionInvite: blocked peer=\(peerID)")
+        revokeSessionAuthority(peerID: peerID, trustRemoved: false)
+    }
+
+    /// Forget (`trustRemoved`) or Block of `peerID` withdraws every piece of
+    /// authority or intent captured for it before the user acted: this
+    /// device's own Connect request that could apply to it (with its `cr`
+    /// token, requested mode and manual recovery run), its prompts (answered
+    /// `declined`/`blocked`), its current and remembered admission, its
+    /// parked candidate connections and its place as a recovery target. The
+    /// current connection ends when it is that Mac's — after Forget always,
+    /// since it may have authenticated before the pin was removed.
+    private func revokeSessionAuthority(peerID: String, trustRemoved: Bool) {
+        let withdrawnRequestID = withdrawManualConnectRequest(covering: peerID)
         let pipeline = self.pipeline
+        let selfBox = self.selfBox
         queue.async {
-            // A live TLS session may have authenticated before the pin was
-            // removed. End it immediately so forgetting takes effect now.
-            Task { await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect) }
+            if let receiver = selfBox.currentOnQueue() {
+                receiver.revokeSessionNegotiation(peerID: peerID, answering: trustRemoved ? .declined : .blocked)
+                receiver.withdrawOutgoingSessionRequest(covering: peerID, requestWithdrawn: withdrawnRequestID != nil)
+            }
+            Task {
+                if let withdrawnRequestID { await pipeline.endManualRun(requestID: withdrawnRequestID) }
+                await pipeline.revokePeer(peerID, trustRemoved: trustRemoved)
+            }
         }
+    }
+
+    /// Clears this device's standing Connect request if it could apply to
+    /// `peerID`, and the manual Connect target when it is that Mac.
+    /// Synchronous — a request whose `Task` is still on its way to
+    /// `pipeline` then finds itself withdrawn. Returns the withdrawn
+    /// request's id.
+    private func withdrawManualConnectRequest(covering peerID: String) -> UUID? {
+        var withdrawn: UUID?
+        reconnectContext.update { context in
+            if context.manualConnectPeerID == peerID { context.manualConnectPeerID = nil }
+            guard let request = context.manualConnectRequest, request.covers(peerID) else { return }
+            context.manualConnectRequest = nil
+            withdrawn = request.id
+        }
+        return withdrawn
     }
 
     @MainActor
@@ -2222,7 +2293,15 @@ final class StreamReceiver: ObservableObject {
             updateTransport(for: conn, path: path, transportState: transportState)
         }
         let resolvedPeerID = resolveAuthenticatedPeerID(from: conn)
-        reconnectContext.update { $0.authenticatedPeerIDHint = resolvedPeerID }
+        reconnectContext.update { context in
+            context.authenticatedPeerIDHint = resolvedPeerID
+            // A Mac this device's own Connect request covers is here: the
+            // request is answered, and must not outlive it into a later
+            // recovery (see `ManualConnectRequest`).
+            if let resolvedPeerID, context.manualConnectRequest?.covers(resolvedPeerID) == true {
+                context.manualConnectRequest = nil
+            }
+        }
         DispatchQueue.main.async { uiSink.publishAuthenticatedPeerID(resolvedPeerID) }
     }
 
@@ -2277,10 +2356,12 @@ final class StreamReceiver: ObservableObject {
     /// everywhere else, mirroring `OpenSidecarMacApp.resolvePinnedPeerID`
     /// (the Mac's own remote-connect-request listener) and `MacSender`'s
     /// hello-time SPKI check. `TLSConfigurator`'s verify block already
-    /// refused the handshake for any certificate that isn't currently
-    /// pinned, so a `nil` here only means "no TLS metadata" (the loopback
-    /// USB transport, which never negotiates TLS) — never an unpinned peer
-    /// that somehow still connected.
+    /// refused the handshake for any certificate that wasn't pinned then.
+    /// Every media connection is pinned TLS — USB included, which the Mac
+    /// dials through `USBTLSBridge` into this same listener — so a `nil`
+    /// here means the pin was removed after the handshake (Forget), or the
+    /// connection has not finished TLS yet. Callers treat it as "no pinned
+    /// peer" and fail closed.
     private static func resolveAuthenticatedPeerID(from connection: NWConnection) -> String? {
         guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
             return nil
@@ -2436,6 +2517,7 @@ final class StreamReceiver: ObservableObject {
                 Log.info("sessionInvite: withdrawn by Mac id=\(id)")
                 if id == currentSessionInvitationID {
                     outgoingSessionRequest = nil
+                    helloState.setRequestedMode(nil, until: .distantPast)
                     sessionAdmission.revoke()
                 }
                 publishSessionNegotiation(awaitingSenderName: nil)
@@ -2471,8 +2553,10 @@ final class StreamReceiver: ObservableObject {
             // Retrying cannot fix that, so the eventual loss is terminal.
             reconnectContext.update { $0.peerIsIncompatible = true }
             let message = obj["message"] as? String
-                ?? "Update MeowDisplay from the App Store to keep using your second display."
-            let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
+                ?? "Update MeowDisplay to keep using your second display."
+            // Only an https link or this app's own listing is ever opened —
+            // an older Mac still sends upstream OpenDisplay's listing.
+            let store = AppStore.resolveReceiverUpdateURL(obj["store"] as? String)
             DispatchQueue.main.async { uiSink.publishPeerSignal(.updateReceiver(message: message, storeURL: store)) }
         case WireMessage.receiverUI:
             guard let update = ReceiverUIPreferenceUpdate(message: obj) else { return }
@@ -4027,8 +4111,16 @@ final class StreamReceiver: ObservableObject {
     /// policy. Every path answers the Mac exactly once per invitation
     /// packet; a manual prompt answers `pending` first.
     private func handleSessionInvitation(_ invitation: SessionInvitation) {
-        let peerID = reconnectContext.current().authenticatedPeerIDHint
         currentSessionInvitationID = invitation.id
+        // Every media connection is pinned TLS (USB too), so no resolvable
+        // peer means its pin was removed after the handshake. There is no
+        // per-Mac policy to apply and nobody to name: decline, whatever
+        // "Automatically Allow Connections" says.
+        guard let peerID = reconnectContext.current().authenticatedPeerIDHint else {
+            Log.info("sessionInvite: id=\(invitation.id) declined reason=noPinnedPeer")
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .declined).message)
+            return
+        }
         let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent)
         let decision: IncomingSessionDecision
         if policy == .block {
@@ -4050,12 +4142,11 @@ final class StreamReceiver: ObservableObject {
         switch decision {
         case .accept:
             admitSession(invitationID: invitation.id, peerID: peerID)
-            if let peerID { incomingSessionApprovals.removeAll(peerID: peerID) }
+            incomingSessionApprovals.removeAll(peerID: peerID)
             sendControl(SessionInvitationResponse(id: invitation.id, result: .accepted).message)
             publishSessionNegotiation(
                 awaitingSenderName: invitation.awaitingSenderApproval ? peerName(peerID) : nil)
         case .askUser:
-            guard let peerID else { return }
             let approval = PendingSessionApproval(
                 id: invitation.id, peerID: peerID, peerName: peerName(peerID),
                 localRole: .receiver, mode: invitation.mode, createdAt: Date())
@@ -4084,6 +4175,19 @@ final class StreamReceiver: ObservableObject {
         // Stale (answered, withdrawn, timed out, or from a connection that
         // has since been replaced): never acts.
         guard let approval = incomingSessionApprovals.resolve(id: id) else { return }
+        // The prompt captured authority when it was raised. Forget or Block
+        // since then withdrew it (normally by removing the prompt, but the
+        // pin or policy change can land first): the answer is inert — no
+        // policy persisted, nothing admitted.
+        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID)
+        guard PendingApprovalRevalidation.isStillAuthorized(
+            isPinned: isPeerPinned(approval.peerID), currentPolicy: currentPolicy) else {
+            Log.info("sessionInvite: id=\(approval.id) answer ignored reason=revoked")
+            let result: SessionInvitationResult = currentPolicy == .blocked ? .blocked : .declined
+            sendControl(SessionInvitationResponse(id: approval.id, result: result).message)
+            publishSessionNegotiation(awaitingSenderName: nil)
+            return
+        }
         let plan = SessionApprovalPlan.plan(for: decision)
         if let policy = plan.persistPolicy {
             // Connection policy only; never a display mode or input.
@@ -4116,7 +4220,9 @@ final class StreamReceiver: ObservableObject {
     /// anyway; otherwise the connection is closed (fail closed).
     private func admitLegacySenderOrClose() {
         let peerID = reconnectContext.current().authenticatedPeerIDHint
-        if ReceiverSessionAdmission.admitsLegacySender(peerID: peerID) {
+        // No resolvable pinned peer (see `handleSessionInvitation`): closed,
+        // never admitted on the global preference alone.
+        if let peerID, ReceiverSessionAdmission.admitsLegacySender(peerID: peerID) {
             admitSession(invitationID: nil, peerID: peerID)
         } else {
             Log.info("sessionInvite: closing legacy sender peer=\(peerID ?? "unknown") reason=policy")
@@ -4127,10 +4233,59 @@ final class StreamReceiver: ObservableObject {
 
     /// Frames that arrived before admission were decoded but never shown;
     /// ask for a keyframe so a static screen still appears immediately.
-    private func admitSession(invitationID: String?, peerID: String?) {
+    private func admitSession(invitationID: String?, peerID: String) {
         let wasAdmitted = sessionAdmission.admitted
         sessionAdmission.admit(invitationID: invitationID, peerID: peerID)
-        if !wasAdmitted { sendControl(["type": "kf"]) }
+        guard !wasAdmitted else { return }
+        sendControl(["type": "kf"])
+        // This device's own request, if it covered this Mac, is answered by
+        // the session now admitted: its "asked for exactly this" window and
+        // requested mode must not outlive it into a later reconnect.
+        if let request = outgoingSessionRequest, request.peerID == nil || request.peerID == peerID {
+            outgoingSessionRequest = nil
+            helloState.setRequestedMode(nil, until: .distantPast)
+        }
+    }
+
+    /// `queue`-confined half of Forget/Block of `peerID` (see
+    /// `revokeSessionAuthority`): its prompts are dismissed and, on its own
+    /// connection, answered `result`; its admission — the current one if
+    /// this connection is that Mac's, and the remembered accepted invitation
+    /// that would admit a continuation without a prompt — is revoked.
+    private func revokeSessionNegotiation(peerID: String, answering result: SessionInvitationResult) {
+        let currentPeerID = reconnectContext.current().authenticatedPeerIDHint
+        let dismissed = incomingSessionApprovals.removeAll(peerID: peerID)
+        if currentPeerID == peerID {
+            for approval in dismissed {
+                sendControl(SessionInvitationResponse(id: approval.id, result: result).message)
+            }
+        }
+        // Another Mac's live admission (possible for a pre-pv 21 sender,
+        // which records no invitation of its own) is left alone.
+        let admissionRevoked = sessionAdmission.revoke(peerID: peerID, currentPeerID: currentPeerID)
+        guard !dismissed.isEmpty || admissionRevoked else { return }
+        Log.info("sessionInvite: revoked peer=\(peerID) prompts=\(dismissed.count) admission=\(admissionRevoked)")
+        publishSessionNegotiation(awaitingSenderName: nil)
+    }
+
+    /// `queue`-confined half of withdrawing this device's own request for
+    /// `peerID`: the "asked for exactly this" window when it could apply to
+    /// that Mac, and — whenever anything was withdrawn — its requested mode
+    /// and the Bonjour `cr` token, republished without it at once.
+    private func withdrawOutgoingSessionRequest(covering peerID: String, requestWithdrawn: Bool) {
+        var withdrew = requestWithdrawn
+        if let request = outgoingSessionRequest, request.peerID == nil || request.peerID == peerID {
+            outgoingSessionRequest = nil
+            withdrew = true
+        }
+        guard withdrew else { return }
+        helloState.setRequestedMode(nil, until: .distantPast)
+        connectRequestClearWorkItem?.cancel()
+        connectRequestClearWorkItem = nil
+        if advertisementState.clearConnectRequest(), let tlsListener = tlsListenerState.currentListener() {
+            tlsListener.service = advertisedService
+        }
+        Log.info("connectDebug: connect request withdrawn peer=\(peerID)")
     }
 
     /// New connection: nothing on it is admitted yet, and prompts raised by
@@ -4167,30 +4322,46 @@ final class StreamReceiver: ObservableObject {
     /// Mac already browses; see `signalConnectRequest` and the Mac-side
     /// `receiverConnectRequest` handling in OpenSidecarMacApp.
     func requestConnect() {
+        requestConnect(targeting: nil)
+    }
+
+    /// `peerID` is the Mac the user asked for (`connectPrimary`), nil for a
+    /// Connect that names none.
+    private func requestConnect(targeting peerID: String?) {
         let pendingDisconnectFinishBox = self.pendingDisconnectFinishBox
         let reconnectContext = self.reconnectContext
         let pipeline = self.pipeline
         let queue = self.queue
         let selfBox = self.selfBox
+        // Recorded before any hop, so a Cancel/Forget/Block that follows the
+        // tap is always seen by the steps below, however they interleave.
+        let request = ManualConnectRequest(peerID: peerID)
+        reconnectContext.update { $0.manualConnectRequest = request }
         queue.async {
             Log.info("connectDebug: receiverConnectRequest peer=local")
             pendingDisconnectFinishBox.callIfPresent()
             reconnectContext.update { $0.peerIsIncompatible = false }
             Task {
-                await pipeline.requestManualReconnectTransition()
+                await pipeline.requestManualReconnectTransition(requestID: request.id)
                 queue.async {
-                    selfBox.currentOnQueue()?.signalConnectRequest()
+                    selfBox.currentOnQueue()?.signalConnectRequest(for: request.id)
                 }
             }
         }
     }
 
-    /// Publishes a fresh one-shot token in the advertised TXT record, then
-    /// clears it after a short window so a stale token can't re-trigger a
-    /// connect on a later, unrelated browse update.
-    private func signalConnectRequest() {
+    /// Publishes a fresh one-shot token in the advertised TXT record for
+    /// this device's standing request `requestID`, then clears it after a
+    /// short window so a stale token can't re-trigger a connect on a later,
+    /// unrelated browse update. A request withdrawn or answered in the
+    /// meantime publishes nothing.
+    private func signalConnectRequest(for requestID: UUID) {
+        guard let request = reconnectContext.current().manualConnectRequest, request.id == requestID else {
+            Log.info("connectDebug: connect request no longer standing — token not published")
+            return
+        }
         if outgoingSessionRequest.map({ Date() >= $0.until }) ?? true {
-            outgoingSessionRequest = (nil, Date().addingTimeInterval(Self.outgoingSessionRequestWindow))
+            outgoingSessionRequest = (request.peerID, request.until)
         }
         let token = advertisementState.beginConnectRequest()
         connectRequestClearWorkItem?.cancel()
@@ -4209,12 +4380,44 @@ final class StreamReceiver: ObservableObject {
     /// or resets `automaticReconnectEnabled`. The underlying token expires
     /// after ~8s (see `signalConnectRequest`); a real sleep/wake interval can
     /// easily outlast that, so the coordinator calls this on a bounded
-    /// cadence while a wake attempt is active.
+    /// cadence while a wake attempt is active. Only a request still standing
+    /// is refreshed (its window re-armed for the same Mac) — never one
+    /// already withdrawn (`cancelConnectRequest`, Forget, Block) or answered
+    /// by a connected Mac, so an attempt's refresh can never outlive it.
     func refreshConnectRequest() {
+        let reconnectContext = self.reconnectContext
         let queue = self.queue
         let selfBox = self.selfBox
         queue.async {
-            selfBox.currentOnQueue()?.signalConnectRequest()
+            var renewed: ManualConnectRequest?
+            reconnectContext.update { context in
+                guard var request = context.manualConnectRequest else { return }
+                request.until = Date().addingTimeInterval(ManualConnectRequest.lifetime)
+                context.manualConnectRequest = request
+                renewed = request
+            }
+            guard let renewed else { return }
+            selfBox.currentOnQueue()?.signalConnectRequest(for: renewed.id)
+        }
+    }
+
+    /// Wake & Connect's Cancel (and its timeout): withdraws everything this
+    /// device's own Connect request for `peerID` put in motion — the Bonjour
+    /// `cr` token (republished without it at once), the "this device asked
+    /// for exactly this" window and its requested mode, the manual Connect
+    /// target, and the recovery run the request started. A live session,
+    /// and recovery the request did not start, are left alone. A Mac that
+    /// dials in afterwards is judged by the normal incoming policy.
+    func cancelConnectRequest(peerID: String) {
+        let withdrawnRequestID = withdrawManualConnectRequest(covering: peerID)
+        let pipeline = self.pipeline
+        let selfBox = self.selfBox
+        queue.async {
+            selfBox.currentOnQueue()?.withdrawOutgoingSessionRequest(
+                covering: peerID, requestWithdrawn: withdrawnRequestID != nil)
+        }
+        if let withdrawnRequestID {
+            Task { await pipeline.endManualRun(requestID: withdrawnRequestID) }
         }
     }
 
@@ -4239,20 +4442,23 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             selfBox.currentOnQueue()?.outgoingSessionRequest = (peerID, Date().addingTimeInterval(Self.outgoingSessionRequestWindow))
         }
-        requestConnect()
+        requestConnect(targeting: peerID)
     }
 
     /// Sends one authenticated "please connect" knock to a paired Mac's
-    /// saved Remote Access endpoint (`WireCrypto.remoteRequestPort`). The
-    /// knock carries no payload — completing pinned mutual TLS against the
-    /// Mac's remote connect-request listener, as this device's own already-
-    /// pinned identity, *is* the entire request; the Mac resolves which
-    /// peer knocked from the certificate itself, never from anything sent
-    /// over the wire. This device never claims the Mac's identity and never
-    /// sends host/port information the Mac is expected to trust — it only
-    /// dials a locally-persisted hint the user configured themselves.
-    func requestRemoteConnect(peerID: String) {
-        Self.requestRemoteConnect(peerID: peerID, queue: queue)
+    /// saved Remote Access endpoint (`WireCrypto.remoteRequestPort`).
+    /// Completing pinned mutual TLS against the Mac's remote connect-request
+    /// listener, as this device's own already-pinned identity, *is* the
+    /// request — the Mac resolves which peer knocked from the certificate
+    /// itself. The one frame sent on it (`RemoteConnectRequestIntent`) only
+    /// says what the knock means, and can only narrow what the Mac does:
+    /// `.manual` solely for this device's own explicit request, `.automatic`
+    /// for recovery (see `ReceiverPipelineActor.knockIntent`). This device
+    /// never claims the Mac's identity and never sends host/port information
+    /// the Mac is expected to trust — it only dials a locally-persisted hint
+    /// the user configured themselves.
+    func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent) {
+        Self.requestRemoteConnect(peerID: peerID, intent: intent, queue: queue)
     }
 
     // Receiver Swift6-RC1: self-free helper — `requestRemoteConnect` only
@@ -4260,7 +4466,7 @@ final class StreamReceiver: ObservableObject {
     // `RemoteEndpointStore`) and never mutates `StreamReceiver` state, so it
     // needs no `self` capture, matching the "static helper + stable owner"
     // idiom used by `startTLSListener` above.
-    private static func requestRemoteConnect(peerID: String, queue: DispatchQueue) {
+    private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue) {
         guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
               let port = NWEndpoint.Port(rawValue: hint.port),
               let pin = TrustStore.shared.pin(peerID: peerID),
@@ -4276,18 +4482,22 @@ final class StreamReceiver: ObservableObject {
         let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         params.includePeerToPeer = true
         let connection = NWConnection(to: endpoint, using: params)
-        Log.info("routeDebug: remote connect-request knock peer=\(peerID) endpoint=\(hint.host):\(hint.port)")
+        let frame = RemoteConnectRequestIntent.frame(for: intent)
+        Log.info("routeDebug: remote connect-request knock peer=\(peerID) endpoint=\(hint.host):\(hint.port) intent=\(intent.rawValue)")
         connection.stateUpdateHandler = { state in
             switch state {
-            case .ready, .failed, .cancelled:
+            case .ready:
+                // Exactly one frame, then close once it is out.
+                connection.send(content: frame, completion: .contentProcessed { _ in connection.cancel() })
+            case .failed, .cancelled:
                 connection.cancel()
             default: break
             }
         }
         connection.start(queue: queue)
         // Bounded: never leave a knock connection open waiting on a Mac that
-        // never answers — the handshake either completes or this tears it
-        // down itself.
+        // never answers — the handshake and the one send either complete or
+        // this tears it down itself.
         queue.asyncAfter(deadline: .now() + 8.0) { connection.cancel() }
     }
 
@@ -4312,8 +4522,12 @@ final class StreamReceiver: ObservableObject {
                 }
                 guard phase == .reconnectFailed || phase == .disconnected else { return }
                 Log.info("manual reconnect requested")
-                reconnectContext.update { $0.peerIsIncompatible = false }
-                await pipeline.requestManualReconnectTransition()
+                let request = ManualConnectRequest(peerID: nil)
+                reconnectContext.update {
+                    $0.peerIsIncompatible = false
+                    $0.manualConnectRequest = request
+                }
+                await pipeline.requestManualReconnectTransition(requestID: request.id)
                 // If the listener is healthy, `armReconnect` (fired reactively)
                 // won't rebuild it. A manual retry is explicitly a user asking
                 // to un-stick a broken state, so force a rebind.
@@ -4327,6 +4541,58 @@ final class StreamReceiver: ObservableObject {
     // C1: `suspendReconnectForBackground`/`resumeReconnectIfNeeded` moved
     // into `pipeline` (`ReceiverPipelineActor`) — called directly from
     // `setAppActive` above.
+
+    // MARK: - Test seams
+    //
+    // `internal` solely for the hostless `OpenSidecarMacTests` bundle, which
+    // cannot complete a real pinned-TLS session: one delivers a control
+    // message as if it arrived on a connection authenticated as
+    // `authenticatedPeerID`, the other reads back the invitation and
+    // Connect-request state those tests assert on. No app code calls them.
+
+    struct ConnectRequestTestProbe: Sendable {
+        var admitted: Bool
+        var acceptedInvitationID: String?
+        var pendingApprovalIDs: [String]
+        var hasOutgoingSessionRequest: Bool
+        var outgoingSessionRequestPeerID: String?
+        var requestedMode: ReceiverDisplayMode?
+        var connectRequestToken: String?
+        var manualConnectPeerID: String?
+        var manualConnectRequest: ManualConnectRequest?
+        var phase: ReceiverSessionPhase = .disconnected
+    }
+
+    func receiveControlMessageForTesting(_ data: Data, authenticatedPeerID: String?) {
+        reconnectContext.update { $0.authenticatedPeerIDHint = authenticatedPeerID }
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
+    }
+
+    func probeForTesting(_ completion: @escaping @Sendable (ConnectRequestTestProbe) -> Void) {
+        let reconnectContext = self.reconnectContext
+        let pipeline = self.pipeline
+        let selfBox = self.selfBox
+        queue.async {
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            let context = reconnectContext.current()
+            let probe = ConnectRequestTestProbe(
+                admitted: receiver.sessionAdmission.admitted,
+                acceptedInvitationID: receiver.sessionAdmission.acceptedInvitationID,
+                pendingApprovalIDs: receiver.incomingSessionApprovals.entries.map(\.id),
+                hasOutgoingSessionRequest: receiver.outgoingSessionRequest != nil,
+                outgoingSessionRequestPeerID: receiver.outgoingSessionRequest?.peerID,
+                requestedMode: receiver.helloState.requestedMode(),
+                connectRequestToken: receiver.advertisementState.currentConnectRequestToken(),
+                manualConnectPeerID: context.manualConnectPeerID,
+                manualConnectRequest: context.manualConnectRequest)
+            Task {
+                var withPhase = probe
+                withPhase.phase = await pipeline.currentPhase
+                completion(withPhase)
+            }
+        }
+    }
 
     // MARK: - Helpers
 
@@ -4769,8 +5035,11 @@ final class StreamReceiver: ObservableObject {
                         pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
                 }
             },
-            requestRemoteConnect: { peerID in
-                queue.async { Self.requestRemoteConnect(peerID: peerID, queue: queue) }
+            requestRemoteConnect: { peerID, intent in
+                queue.async { Self.requestRemoteConnect(peerID: peerID, intent: intent, queue: queue) }
+            },
+            resolvePinnedPeerID: { connection in
+                Self.resolveAuthenticatedPeerID(from: connection)
             },
             getReceiveLiveness: {
                 syncState.snapshot()

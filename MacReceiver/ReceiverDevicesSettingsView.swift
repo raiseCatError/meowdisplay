@@ -52,7 +52,7 @@ private struct ReceiverDevicesPage: View {
                             }
                             .controlSize(.small)
                         }
-                        IncomingSessionPolicyPicker(peerID: mac.peerID)
+                        IncomingSessionPolicyPicker(peerID: mac.peerID, receiver: receiver)
                             .controlSize(.small)
                     }
                 }

@@ -1238,7 +1238,7 @@ struct SettingsView: View {
                                     forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
                                 }
                             }
-                            IncomingSessionPolicyPicker(peerID: peer.peerID)
+                            IncomingSessionPolicyPicker(peerID: peer.peerID, receiver: receiver)
                                 .font(.subheadline)
                         }
                     }

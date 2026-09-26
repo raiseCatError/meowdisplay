@@ -566,15 +566,25 @@ struct ReceiverSessionAdmission: Equatable, Sendable {
         acceptedPeerID = nil
     }
 
-    /// Forget or Block of `peerID`: drops both the current admission (when
-    /// the current connection is that peer's) and the remembered accepted
-    /// invitation, so neither a continuation nor a late answer can reuse
-    /// authority the user just withdrew. Returns whether anything changed.
+    /// Forget or Block of `peerID`: drops the current admission when the
+    /// current connection is that peer's, and the remembered accepted
+    /// invitation when it is that peer's, so neither a continuation nor a
+    /// late answer can reuse authority the user just withdrew. Another
+    /// peer's live admission is not touched. Returns whether anything
+    /// changed.
     @discardableResult
     mutating func revoke(peerID: String, currentPeerID: String?) -> Bool {
-        guard acceptedPeerID == peerID || currentPeerID == peerID else { return false }
-        revoke()
-        return true
+        var changed = false
+        if currentPeerID == peerID, admitted {
+            admitted = false
+            changed = true
+        }
+        if acceptedPeerID == peerID {
+            acceptedInvitationID = nil
+            acceptedPeerID = nil
+            changed = true
+        }
+        return changed
     }
 
     func isContinuation(of invitation: SessionInvitation, peerID: String?) -> Bool {
