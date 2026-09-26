@@ -61,7 +61,7 @@ compatibility; the product name is MeowDisplay. `src/`, `public/` and
 | Device discovery, per-device sessions, auto-connect, USB preference/failover | `SenderController`, `DeviceSession` in `Mac/OpenSidecarMacApp.swift`; `Mac/Usbmux.swift`, `Mac/RouteArbitration.swift`, `Mac/AutoConnectPolicy.swift`, `Mac/ReconnectPolicy.swift` |
 | One streaming pipeline per session: dial, capture, encode, send, receive input | `MacSender` in `Mac/MacSender.swift` |
 | Connection/route migration | `Mac/MacSenderTransportController.swift`, `Mac/SenderTransport.swift`, `Mac/USBTLSBridge.swift` |
-| Capture (ScreenCaptureKit) and its lifecycle/recovery | `Mac/MacSender.swift`, `Mac/CaptureLifecycle.swift`, `Mac/MacSenderPipelineState.swift` |
+| Capture (ScreenCaptureKit) and its lifecycle/recovery | `Mac/MacSender.swift`, `Mac/CaptureLifecycle.swift`, `Mac/CaptureOwnership.swift`, `Mac/MacSenderPipelineState.swift` |
 | Virtual display for Extend (private `CGVirtualDisplay` SPI, isolated here) | `Mac/VirtualDisplay.swift`, `Mac/DisplayArrangement.swift` |
 | Mirror source selection | `Mac/MirrorDisplaySelection.swift` |
 | Video encode (VideoToolbox) | `Mac/MacSenderVideoEncoder.swift` |
@@ -288,6 +288,11 @@ Sender's per-session Allow Input consent turns it on.
 - **Receiver-local presentation state stays receiver-local** (tray layout,
   viewport zoom, auto-hide); the sender only sees normalized input.
 - **Keep capture lifecycle separate from transport recovery.**
+- **The sender's capture stream has one owner.** `MacSender`'s `queue` alone
+  reads and changes the capture stream, `stopped`, and every capture start,
+  stop and rebuild, through `CaptureOwnership` (`Mac/CaptureOwnership.swift`).
+  A capture start holds a ticket across its ScreenCaptureKit awaits and
+  commits only if no `stop()`, rebuild or newer start replaced it meanwhile.
 - **Pure logic stays platform-neutral** in `Shared/` so it can be tested in
   `OpenSidecarMacTests` without a device.
 - **`project.yml` is the source of truth** for targets; the `.xcodeproj` is

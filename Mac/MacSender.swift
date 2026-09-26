@@ -407,7 +407,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Pinned TLS failures are terminal trust failures, never packet-loss retries.
     @MainActor var onTrustFailure: ((String) -> Void)?
 
-    private var stream: SCStream?
+    /// The capture stream and the capture start/stop lifecycle, owned by
+    /// `queue` and touched nowhere else — see CaptureOwnership.swift. A
+    /// capture start suspends across ScreenCaptureKit and audio-encoder
+    /// calls; it holds a ticket from this owner across them and commits only
+    /// if no `stop()` or rebuild replaced it meanwhile.
+    private var captureOwnership = CaptureOwnership<SCStream>()
+    /// The live (or starting) capture stream. `queue` only.
+    private var stream: SCStream? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return captureOwnership.stream
+    }
     /// Sole owner of the `VTCompressionSession` — creation, configuration,
     /// submission, invalidation and session identity. See
     /// MacSenderVideoEncoder.swift for the confinement invariant that makes
@@ -725,7 +735,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var capturePixelsHigh = 0
     private let authenticatedSession = AuthenticatedSessionState()
     private var activeConnectionGeneration: UInt64 = 0
-    private var stopped = false
+    /// Written only on `queue`, together with `captureOwnership` (see
+    /// `haltCaptureLifecycle`/`beginStart`); this lock-guarded mirror is how
+    /// capture-start tasks and main-thread display checks observe a stop
+    /// without touching queue-owned state.
+    private let stoppedMirror = QueueOwnedFlag()
+    private var stopped: Bool { stoppedMirror.get() }
+    /// Lets `onQueueSync` run inline when already on `queue`.
+    private let queueKey = DispatchSpecificKey<Void>()
     // The liveness monitors are self-rescheduling chains guarded only by
     // `stopped`; arm them at most once per instance so a double start() can't
     // stack parallel loops (the failure mode behind #75). Mirrors the
@@ -1000,8 +1017,57 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.transportController = MacSenderTransportController(
             queue: queue, endpointName: name, statusSink: statusSink)
         super.init()
+        queue.setSpecific(key: queueKey, value: ())
         transportController.delegate = self
         selfBox.install(self)
+    }
+
+    // MARK: - Queue ownership
+
+    /// Runs `body` on `queue` — the owner of the capture stream, `stopped`
+    /// and the capture lifecycle — and hands its result back to an async
+    /// caller. Throws `CancellationError` once the sender is gone.
+    private func onQueue<T: Sendable>(_ body: @escaping @Sendable (MacSender) throws -> T) async throws -> T {
+        let selfBox = self.selfBox
+        return try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                guard let sender = selfBox.currentOnQueue() else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                continuation.resume(with: Result { try body(sender) })
+            }
+        }
+    }
+
+    /// Runs `body` on `queue` synchronously, inline when already there — for
+    /// callers whose effect must be complete when they return (`stop()`,
+    /// `beginStart()`). Safe from the main thread: nothing on `queue` ever
+    /// waits on the main thread.
+    private func onQueueSync(_ body: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            body()
+        } else {
+            queue.sync(execute: body)
+        }
+    }
+
+    /// `queue` only: ends the capture lifecycle — no capture start may begin
+    /// or commit after this — and returns the stream the caller must stop.
+    private func haltCaptureLifecycle() -> SCStream? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let released = captureOwnership.stop()
+        stoppedMirror.set(true)
+        return released
+    }
+
+    /// `queue` only: releases the stream for a rebuild (Video Off,
+    /// reconfigure, resume, wake recovery, a stale Extend display), which
+    /// also invalidates a capture start still in flight. Returns the stream
+    /// the caller must stop.
+    private func releaseCaptureStream() -> SCStream? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return captureOwnership.releaseStream()
     }
 
     // MARK: - Lifecycle
@@ -1174,9 +1240,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// restart: `SCStreamConfiguration.minimumFrameInterval` via
     /// `updateConfiguration`, then a fresh `setupEncoder` at the new rate.
     /// No-op while there is no live stream — the next `startCapture` picks
-    /// up the new preference on its own.
+    /// up the new preference on its own, and one already starting applies
+    /// it when it commits.
     private func applyEffectiveFPSChange() {
-        guard let stream, capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
+        guard let stream = captureOwnership.liveStream, capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
         let fpsResult = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh)
         guard fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
@@ -1317,10 +1384,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sendAudioState()
             return
         }
-        guard let stream else {
+        guard let stream = captureOwnership.liveStream else {
             // No live capture (e.g. video and audio both off, or between
             // sessions) — the next startCapture() picks up
-            // `desiredAudioEnabled`. Nothing to reconfigure yet.
+            // `desiredAudioEnabled`, and one already starting applies it
+            // when it commits. Nothing to reconfigure yet.
             audioEnabled = enabled
             sendAudioState()
             return
@@ -1350,7 +1418,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if !enabled, sender.videoEnabled == false, sender.desiredAudioEnabled == false {
                     // Nothing wants this stream anymore — release it the
                     // same way Video Off does on its own.
-                    sender.stream = nil
+                    sender.captureOwnership.release(stream)
                     stream.stopCapture { _ in }
                     _ = sender.updateCaptureState { $0.stop(); return true }
                 }
@@ -1465,8 +1533,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             self.desiredVideoEnabled = false
             self.inputInjector?.cancelActiveInput()
-            let oldStream = self.stream
-            self.stream = nil
+            let oldStream = self.releaseCaptureStream()
             self.invalidateCapturePipeline(discardingLastFrame: true)
             self.videoEncoder.invalidate()
             let owner = MacSenderTransitionOwner(sender: self)
@@ -1532,7 +1599,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// already running there — `self` is never sent across the suspension,
     /// it's produced fresh inside the domain that uses it.
     nonisolated func beginStart() -> MacSenderStartupHandle {
-        stopped = false
+        // Re-arming the capture lifecycle is `queue`'s, like every other
+        // write to it (see `captureOwnership`).
+        onQueueSync {
+            captureOwnership.resume()
+            stoppedMirror.set(false)
+        }
         let selfBoxForConnect = self.selfBox
         queue.async { selfBoxForConnect.currentOnQueue()?.connect() }   // dial state lives on `queue`
         if !monitorsStarted {
@@ -2058,11 +2130,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Tear down and rebuild when the phone announces new dimensions. Loops
     /// until the built display matches the latest hello, so rotations that
     /// arrive mid-rebuild aren't lost (and rapid flip-flops settle once).
+    /// `queue` only, like the capture lifecycle it guards: one rebuild at a
+    /// time.
     private var reconfiguring = false
     private func reconfigure(_ info: PhoneInfo) async {
-        guard !reconfiguring, !stopped else { return }
-        reconfiguring = true
-        defer { reconfiguring = false }
+        let began = (try? await onQueue { sender -> Bool in
+            guard !sender.reconfiguring, !sender.stopped else { return false }
+            sender.reconfiguring = true
+            return true
+        }) ?? false
+        guard began else { return }
+        let selfBox = self.selfBox
+        defer { queue.async { selfBox.currentOnQueue()?.reconfiguring = false } }
         var target = info
         while !stopped {
             Log.info("reconfiguring for \(target.pixelsWide)x\(target.pixelsHigh)")
@@ -2070,8 +2149,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // display, but never for a rotation: it belongs to the retired
             // desktop and can otherwise be replayed onto the new one.
             invalidateCapturePipeline(discardingLastFrame: true)
-            if let stream { try? await stream.stopCapture() }
-            stream = nil
+            // Released on `queue` before it is stopped, which also
+            // invalidates a capture start still in flight.
+            if let retired = try? await onQueue({ sender in sender.releaseCaptureStream() }) {
+                try? await retired.stopCapture()
+            }
             videoEncoder.invalidate()
             needsKeyframe = true
             do {
@@ -2333,8 +2415,133 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                       userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent (\(state))"])
     }
 
+    /// What `prepareCaptureStart` decided, on `queue`.
+    private enum CaptureStartPreparation: Sendable {
+        /// Nothing wants ScreenCaptureKit: the session stays a no-op logical
+        /// session, and the caller publishes this status.
+        case idle(status: String)
+        case stream(CaptureStreamPlan)
+    }
+
+    /// A capture start that holds the capture slot (`ticket`), with the
+    /// settings `prepareCaptureStart` chose for it on `queue`.
+    private struct CaptureStreamPlan: Sendable {
+        let ticket: CaptureStartTicket
+        let sessionGeneration: UInt64
+        let captureGeneration: UInt64
+        let pixelsWide: Int
+        let pixelsHigh: Int
+        let targetFPS: Int
+        let capturesAudio: Bool
+    }
+
+    private enum CaptureCommitOutcome: Sendable {
+        /// A stop, rebuild, newer start, pause or session change won: the
+        /// caller stops the stream it started.
+        case refused
+        case committed(status: String?)
+    }
+
+    /// Every step that reads or changes the capture stream, `stopped` or the
+    /// capture bookkeeping runs on `queue` (`prepareCaptureStart`,
+    /// `installCaptureStream`, `commitCaptureStart`, `abandonCaptureStart`);
+    /// only the audio-encoder and ScreenCaptureKit awaits run here, between
+    /// them. The ticket taken on `queue` first is what lets a `stop()`,
+    /// rebuild or newer start during any of those awaits win: this start
+    /// then discards its stream instead of installing or keeping it.
     private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int,
                               sessionGeneration requestedGeneration: UInt64? = nil) async throws {
+        let displayID = display.displayID
+        let displayWidth = display.width
+        let displayHeight = display.height
+        let preparation = try await onQueue { sender in
+            try sender.prepareCaptureStart(displayID: displayID, displayWidth: displayWidth,
+                                           displayHeight: displayHeight, pixelsWide: pixelsWide,
+                                           pixelsHigh: pixelsHigh, requestedGeneration: requestedGeneration)
+        }
+        let plan: CaptureStreamPlan
+        switch preparation {
+        case .idle(let text):
+            await status(text)
+            return
+        case .stream(let streamPlan):
+            plan = streamPlan
+        }
+        let ticket = plan.ticket
+        let stream: SCStream
+        do {
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = plan.pixelsWide
+            config.height = plan.pixelsHigh
+            // Ask for double the target even though the source may run slower:
+            // requesting exactly 1/fps makes SCK's rate limiter skip frames that
+            // arrive a hair early (beat frequency) — measured ~51fps instead of
+            // 60 at parity. Same headroom, generalized to the target rate.
+            config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(plan.targetFPS * 2))
+            // 420v matches the encoder's native input — skips a BGRA→YUV conversion
+            // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
+            config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
+                ? kCVPixelFormatType_32BGRA
+                : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            // One buffer is held permanently (keyframe replay) and one sits in
+            // the encoder for ~13ms — headroom prevents SCK starvation drops.
+            config.queueDepth = 8
+            config.showsCursor = !localCursor
+            // Mac system audio (M-audio): a copy of system audio, never a
+            // reroute of the Mac's physical output. `capturesAudio` gates SCK's
+            // own audio capture work — off means SCK does none of it, not just
+            // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
+            // one SCStream; audio's actual on/off is toggled later at runtime
+            // via `stream.updateConfiguration` rather than tearing this stream
+            // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
+            // (there is none today, but excluding it is the documented,
+            // future-proof way to avoid a feedback loop).
+            config.capturesAudio = plan.capturesAudio
+            config.sampleRate = 48_000
+            config.channelCount = 2
+            config.excludesCurrentProcessAudio = true
+
+            await audioCaptureEncoder.reset()
+            stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+        } catch {
+            _ = try? await onQueue { sender in sender.abandonCaptureStart(ticket, startAttempted: false) }
+            throw error
+        }
+        guard try await onQueue({ sender in sender.installCaptureStream(stream, for: ticket) }) else {
+            Log.info("sessionDebug: ignored stale capture start generation=\(plan.sessionGeneration)")
+            throw CancellationError()
+        }
+        do {
+            try await stream.startCapture()
+        } catch {
+            _ = try? await onQueue { sender in sender.abandonCaptureStart(ticket, startAttempted: true) }
+            throw error
+        }
+        let outcome = (try? await onQueue { sender in
+            sender.commitCaptureStart(plan, stream: stream, displayID: displayID)
+        }) ?? .refused
+        guard case .committed(let text) = outcome else {
+            do {
+                try await stream.stopCapture()
+            } catch {
+                let nsError = error as NSError
+                Log.info("capture discarded after pause/disconnect failed to stop domain=\(nsError.domain) code=\(nsError.code)")
+            }
+            Log.info("sessionDebug: ignored stale capture start generation=\(plan.sessionGeneration)")
+            throw CancellationError()
+        }
+        if let text { await status(text) }
+    }
+
+    /// `queue` only: the checks and bookkeeping that open a capture start,
+    /// and the capture slot for it.
+    private func prepareCaptureStart(displayID: CGDirectDisplayID, displayWidth: Int, displayHeight: Int,
+                                     pixelsWide: Int, pixelsHigh: Int,
+                                     requestedGeneration: UInt64?) throws -> CaptureStartPreparation {
+        dispatchPrecondition(condition: .onQueue(queue))
         // Capture is owned by one ADMITTED connection: the one that asked
         // for it, or — for Video On, resume and recovery, which act for the
         // session — the connection admitted right now. Never a connection
@@ -2347,42 +2554,49 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CancellationError()
         }
         let initialPhase = captureStateSnapshot().phase
-        guard initialPhase != .pausing, initialPhase != .paused, initialPhase != .stopped else {
+        guard initialPhase != .pausing, initialPhase != .paused, initialPhase != .stopped,
+              !captureOwnership.stopped else {
             throw CancellationError()
         }
-        guard stream == nil else {
+        guard captureOwnership.liveStream == nil else {
             throw NSError(domain: "MacSender", code: 6,
                           userInfo: [NSLocalizedDescriptionKey: "capture stream is already active"])
         }
-        captureDisplayID = display.displayID
+        captureDisplayID = displayID
         capturePixelsWide = pixelsWide
         capturePixelsHigh = pixelsHigh
         guard videoEnabled || desiredAudioEnabled else {
             // Nothing wants ScreenCaptureKit right now — stay a no-op
             // logical session exactly as before audio existed, rather than
-            // paying for a capture stream nobody will read from.
+            // paying for a capture stream nobody will read from. A start
+            // still in flight is superseded by this decision.
+            releaseCaptureStream()?.stopCapture { _ in }
             invalidateCapturePipeline(discardingLastFrame: true)
             _ = updateCaptureState { $0.captureStarted() }
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
             startCursorEcho()
-            let selfBox = self.selfBox
-            queue.async {
-                guard let self = selfBox.currentOnQueue() else { return }
-                self.sendDisplayState(self.captureStateSnapshot().receiverDisplayState)
-                self.sendDisplayModeState()
-                self.sendAllowInputState()
-                self.sendVideoState()
-                self.sendAudioState()
-                self.sendExtendShapeState()
-            }
-            await status("Video off — controls remain connected")
-            return
+            sendDisplayState(captureStateSnapshot().receiverDisplayState)
+            sendDisplayModeState()
+            sendAllowInputState()
+            sendVideoState()
+            sendAudioState()
+            sendExtendShapeState()
+            return .idle(status: "Video off — controls remain connected")
         }
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let reservation: CaptureOwnership<SCStream>.Reservation
+        switch captureOwnership.reserveStart() {
+        case .success(let granted):
+            reservation = granted
+        case .failure:
+            // Both refusals were ruled out above; nothing has changed since.
+            throw CancellationError()
+        }
+        // A start still suspended mid-`startCapture` loses to this newer one.
+        reservation.superseded?.stopCapture { _ in }
         #if DEBUG
-        Log.info("extendDebug: startCapture mode=\(mode.rawValue) targetDisplay=\(display.displayID) "
-            + "SCDisplaySize=\(display.width)x\(display.height) requestedEncode=\(pixelsWide)x\(pixelsHigh) "
+        Log.info("extendDebug: startCapture mode=\(mode.rawValue) targetDisplay=\(displayID) "
+            + "SCDisplaySize=\(displayWidth)x\(displayHeight) requestedEncode=\(pixelsWide)x\(pixelsHigh) "
             + "captureGeneration=\(captureGenerationNow)")
         #endif
 
@@ -2402,74 +2616,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         captureTargetFPS = targetFPS
         logEncodeCapability(width: pixelsWide, height: pixelsHigh, result: fpsResult)
 
-        let config = SCStreamConfiguration()
-        config.width = pixelsWide
-        config.height = pixelsHigh
-        // Ask for double the target even though the source may run slower:
-        // requesting exactly 1/fps makes SCK's rate limiter skip frames that
-        // arrive a hair early (beat frequency) — measured ~51fps instead of
-        // 60 at parity. Same headroom, generalized to the target rate.
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(targetFPS * 2))
-        // 420v matches the encoder's native input — skips a BGRA→YUV conversion
-        // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
-        config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
-            ? kCVPixelFormatType_32BGRA
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        // One buffer is held permanently (keyframe replay) and one sits in
-        // the encoder for ~13ms — headroom prevents SCK starvation drops.
-        config.queueDepth = 8
-        config.showsCursor = !localCursor
-        // Mac system audio (M-audio): a copy of system audio, never a
-        // reroute of the Mac's physical output. `capturesAudio` gates SCK's
-        // own audio capture work — off means SCK does none of it, not just
-        // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
-        // one SCStream; audio's actual on/off is toggled later at runtime
-        // via `stream.updateConfiguration` rather than tearing this stream
-        // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
-        // (there is none today, but excluding it is the documented,
-        // future-proof way to avoid a feedback loop).
-        config.capturesAudio = desiredAudioEnabled
-        config.sampleRate = 48_000
-        config.channelCount = 2
-        config.excludesCurrentProcessAudio = true
-
         invalidateCapturePipeline(discardingLastFrame: true)
         let generation = captureGenerationNow
         videoEncoder.invalidate()
         if videoEnabled {
-            try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
-        }
-        await audioCaptureEncoder.reset()
-        beginAudioGeneration()
-
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-        self.stream = stream
-        do {
-            try await stream.startCapture()
-        } catch {
-            if self.stream === stream { self.stream = nil }
-            captureDisplayID = 0   // this attempt never actually started capturing
-            throw error
-        }
-        guard authenticatedSession.isLive(generation: sessionGeneration),
-              sessionAuthorization.captureOwner(requested: sessionGeneration) != nil,
-              self.stream === stream, videoEnabled || desiredAudioEnabled,
-              updateCaptureState({ state in state.captureStarted() }) else {
-            if self.stream === stream { self.stream = nil }
-            captureDisplayID = 0   // superseded/discarded — not the active capture
-            invalidateCapturePipeline()
             do {
-                try await stream.stopCapture()
+                try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
             } catch {
-                let nsError = error as NSError
-                Log.info("capture discarded after pause/disconnect failed to stop domain=\(nsError.domain) code=\(nsError.code)")
+                abandonCaptureStart(reservation.ticket, startAttempted: false)
+                throw error
             }
-            Log.info("sessionDebug: ignored stale capture start generation=\(sessionGeneration)")
-            throw CancellationError()
         }
-        audioEnabled = desiredAudioEnabled
+        return .stream(CaptureStreamPlan(
+            ticket: reservation.ticket, sessionGeneration: sessionGeneration, captureGeneration: generation,
+            pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, targetFPS: targetFPS,
+            capturesAudio: desiredAudioEnabled))
+    }
+
+    /// `queue` only: the start's stream exists and is about to start;
+    /// frames from it are accepted from now on. `false` once a stop,
+    /// rebuild or newer start invalidated `ticket` — the stream was never
+    /// started, so there is nothing to stop.
+    private func installCaptureStream(_ newStream: SCStream, for ticket: CaptureStartTicket) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard captureOwnership.install(newStream, for: ticket) else { return false }
+        beginAudioGeneration()
+        return true
+    }
+
+    /// `queue` only: a start failed before committing and gives up the
+    /// capture slot. A failed `SCStream.startCapture()` also clears
+    /// `captureDisplayID`, but only while this start still owned it —
+    /// otherwise the stop, rebuild or newer start that took over owns it now.
+    private func abandonCaptureStart(_ ticket: CaptureStartTicket, startAttempted: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if captureOwnership.abandon(ticket).wasCurrent, startAttempted {
+            captureDisplayID = 0   // this attempt never actually started capturing
+        }
+    }
+
+    /// `queue` only: the stream started. It becomes the live capture only if
+    /// this start still holds the slot and the session, owner and media
+    /// wants it was started for are still current.
+    private func commitCaptureStart(_ plan: CaptureStreamPlan, stream: SCStream,
+                                    displayID: CGDirectDisplayID) -> CaptureCommitOutcome {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard authenticatedSession.isLive(generation: plan.sessionGeneration),
+              sessionAuthorization.captureOwner(requested: plan.sessionGeneration) != nil,
+              captureOwnership.isCurrent(plan.ticket), captureOwnership.stream === stream,
+              videoEnabled || desiredAudioEnabled,
+              updateCaptureState({ state in state.captureStarted() }) else {
+            // Only while this start still owned the capture: a stop,
+            // rebuild or newer start that took over owns it now.
+            if captureOwnership.abandon(plan.ticket).wasCurrent {
+                captureDisplayID = 0   // discarded — not the active capture
+                invalidateCapturePipeline()
+            }
+            return .refused
+        }
+        _ = captureOwnership.commit(plan.ticket)
+        // What the stream was built with. An audio toggle while it was
+        // starting only recorded `desiredAudioEnabled`; apply it now.
+        audioEnabled = plan.capturesAudio
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         startCursorEcho()
@@ -2478,28 +2686,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // this, a pending recovery timer that finds the stream alive exits
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
-        let receiverState = captureStateSnapshot().receiverDisplayState
-        let selfBox = self.selfBox
-        queue.async {
-            guard let self = selfBox.currentOnQueue() else { return }
-            self.captureRecoveryBudget.reset()
-            // Every successful capture start is authoritative. This also
-            // clears a paused state retained by the receiver when changing
-            // modes replaces the old session with a new sender.
-            self.sendDisplayState(receiverState)
-            self.sendDisplayModeState()
-            self.sendAllowInputState()
-            self.sendVideoState()
-            self.sendAudioState()
-            self.sendExtendShapeState()
+        captureRecoveryBudget.reset()
+        // Every successful capture start is authoritative. This also
+        // clears a paused state retained by the receiver when changing
+        // modes replaces the old session with a new sender.
+        sendDisplayState(captureStateSnapshot().receiverDisplayState)
+        sendDisplayModeState()
+        sendAllowInputState()
+        sendVideoState()
+        if desiredAudioEnabled != audioEnabled {
+            applyAudioEnabled(desiredAudioEnabled)   // also reports the audio state
+        } else {
+            sendAudioState()
         }
-        guard authenticatedSession.isLive(generation: sessionGeneration) else {
-            Log.info("sessionDebug: ignored stale capture status generation=\(sessionGeneration)")
-            return
-        }
-        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor) video=\(videoEnabled) audio=\(audioEnabled)")
+        sendExtendShapeState()
+        applyEffectiveFPSChange()   // a max-FPS change while it was starting
+        Log.info("capture started: \(plan.pixelsWide)x\(plan.pixelsHigh) display \(displayID) "
+            + "generation \(plan.captureGeneration) mode \(mode.rawValue) localCursor=\(localCursor) "
+            + "video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
-        await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
+        return .committed(status: "\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) "
+            + "(\(plan.pixelsWide)×\(plan.pixelsHigh))")
     }
 
     // PHASE-1 NOTE: this used to read `connection`/`connectionReady`
@@ -2537,7 +2744,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stop() {
-        stopped = true
+        // Everything `queue` owns — the capture stream, `stopped`, the
+        // capture lifecycle and its bookkeeping — is torn down there,
+        // synchronously, so it is complete when `stop()` returns and a
+        // capture start suspended mid-`startCapture` can no longer install
+        // or keep its stream (`captureOwnership`).
+        onQueueSync { stopOnQueue() }
+        if let wakeCaptureObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeCaptureObserver)
+        }
+        wakeCaptureObserver = nil
+        if let mirrorDisplayTopologyObserver {
+            NotificationCenter.default.removeObserver(mirrorDisplayTopologyObserver)
+        }
+        mirrorDisplayTopologyObserver = nil
+        virtualDisplay = nil   // releasing it removes the display
+    }
+
+    private func stopOnQueue() {
+        let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
         // A stopped pipeline holds no admission and no grant: a late
         // decision (e.g. for a session `restartAll()` just replaced) can
@@ -2557,16 +2782,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorTimer = nil
         cursorImageTimer?.cancel()
         cursorImageTimer = nil
-        if let wakeCaptureObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeCaptureObserver)
-        }
-        wakeCaptureObserver = nil
-        if let mirrorDisplayTopologyObserver {
-            NotificationCenter.default.removeObserver(mirrorDisplayTopologyObserver)
-        }
-        mirrorDisplayTopologyObserver = nil
-        stream?.stopCapture { _ in }
-        stream = nil
+        released?.stopCapture { _ in }
         audioEnabled = false
         beginAudioGeneration()
         let audioCaptureEncoder = self.audioCaptureEncoder
@@ -2580,24 +2796,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // MainActor work in it) and leaves less of a window where a stray
         // probe callback could fire after `stop()` returned.
         transportController.stopCurrentConnectionSynchronously()
-        let selfBox = self.selfBox
-        queue.async {
-            guard let self = selfBox.currentOnQueue() else { return }
-            self.activeUSBBridge?.cancel()
-            self.activeUSBBridge = nil
-            self.activeUSBBridgeTLS = nil
-        }
+        activeUSBBridge?.cancel()
+        activeUSBBridge = nil
+        activeUSBBridgeTLS = nil
         videoEncoder.invalidate()
-        virtualDisplay = nil   // releasing it removes the display
         cancelDropReplayTimer()
-        queue.async {
-            // Unblock a start() that is still waiting for the hello.
-            guard let self = selfBox.currentOnQueue() else { return }
-            self.helloContinuation?.resume(throwing: CancellationError())
-            self.helloContinuation = nil
-            self.admissionContinuation?.resume(throwing: CancellationError())
-            self.admissionContinuation = nil
-        }
+        // Unblock a start() that is still waiting for the hello or admission.
+        helloContinuation?.resume(throwing: CancellationError())
+        helloContinuation = nil
+        admissionContinuation?.resume(throwing: CancellationError())
+        admissionContinuation = nil
     }
 
     /// Called when the preference changes so a gesture already in progress
@@ -2757,7 +2965,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 queue.async {
                     guard let self = selfBox.currentOnQueue(), self.captureStateSnapshot().phase == .pausing else { return }
                     if stoppedCapture {
-                        if self.stream === activeStream { self.stream = nil }
+                        if let activeStream { self.captureOwnership.release(activeStream) }
                         self.videoEncoder.invalidate()
                         // Pause stops both media (SESSION BEHAVIOR): the
                         // stream is gone either way, so audio is not
@@ -2808,13 +3016,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // still wants this SCStream, keep it running — the didOutput
             // callback's `videoEnabled` guard is what actually stops
             // encoding/sending, not stream teardown.
-            if desiredAudioEnabled, stream != nil {
+            // A start still bringing the stream up is kept for audio too;
+            // otherwise Video Off supersedes it.
+            if desiredAudioEnabled, stream != nil || captureOwnership.isStartInFlight {
                 let sink = statusSink
                 Task { @MainActor in sink.publishStatus("Video off — controls remain connected") }
                 return
             }
-            let activeStream = stream
-            stream = nil
+            let activeStream = releaseCaptureStream()
             activeStream?.stopCapture { error in
                 if let error {
                     let nsError = error as NSError
@@ -2830,7 +3039,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard captureStateSnapshot().phase != .paused,
               captureStateSnapshot().phase != .pausing,
               captureStateSnapshot().phase != .stopped else { return }
-        if stream != nil, capturePixelsWide > 0, capturePixelsHigh > 0 {
+        if captureOwnership.liveStream != nil, capturePixelsWide > 0, capturePixelsHigh > 0 {
             // The stream survived Video Off for audio's sake — resume
             // encoding on it directly instead of restarting capture (which
             // would find `stream != nil` and throw "already active").
@@ -2891,7 +3100,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func resumeCapture() async {
-        if let existing = stream {
+        // The live stream, read on `queue`. A start still in flight is not
+        // stopped here: the start below supersedes it.
+        let retained: SCStream?
+        do {
+            retained = try await onQueue { sender in sender.captureOwnership.liveStream }
+        } catch {
+            return
+        }
+        if let existing = retained {
             do {
                 try await existing.stopCapture()
             } catch {
@@ -2904,7 +3121,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 return
             }
-            if stream === existing { stream = nil }
+            _ = try? await onQueue { sender in sender.captureOwnership.release(existing) }
         }
         videoEncoder.invalidate()
         needsKeyframe = true
@@ -3142,7 +3359,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // that follows has no live session for it to belong to.
         inputInjector?.cancelActiveInput()
         invalidateCapturePipeline()
-        stream = nil
+        captureOwnership.release(stoppedStream)
         scheduleCaptureRecovery()
     }
 
@@ -3220,7 +3437,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 3.0) {
             guard let self = selfBox.currentOnQueue() else { return }
             self.captureRecoveryScheduled = false
-            guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped, self.stream == nil,
+            guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped,
+                  self.captureOwnership.liveStream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
             Task { await self.runCaptureRecovery(attempt: attempt) }
         }
@@ -3542,8 +3760,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // stream dead — it must be stopped explicitly rather than just
             // dropped, or the doomed SCStream instance keeps running in the
             // background.
-            let staleStream = self.stream
-            self.stream = nil
+            let staleStream = self.releaseCaptureStream()
             if let staleStream {
                 Task {
                     do { try await staleStream.stopCapture() }
@@ -3588,9 +3805,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = captureGenerationNow
         Log.info("wakeCapture: generation=\(generation)")
 
-        let oldStream = stream
+        // Released on `queue`: the new build below must not be torn down by
+        // the old stream's late callback, and a capture start still in
+        // flight must not install over it.
+        let oldStream = try? await onQueue { sender in sender.releaseCaptureStream() }
         Log.info("wakeCapture: oldStreamPresent=\(oldStream != nil)")
-        stream = nil   // the new build below must not be torn down by the old stream's late callback
         if let oldStream {
             Log.info("wakeCapture: stoppingOldStream")
             do {
@@ -3824,7 +4043,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func reportTrustFailure() {
         guard !stopped else { return }
         invalidateApplicationSession(reason: "certificateRejected")
-        stopped = true
+        haltCaptureLifecycle()?.stopCapture { _ in }
         transportController.cancelConnectionWithoutClearing()
         helloContinuation?.resume(throwing: PairingError.invalidKey)
         helloContinuation = nil
@@ -4413,7 +4632,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         : "This device is no longer trusted. Pair it again if needed."
                     Log.info("SECURITY: application hello rejected reason=\(reason)")
                     invalidateApplicationSession(reason: reason)
-                    stopped = true
+                    haltCaptureLifecycle()?.stopCapture { _ in }
                     transportController.cancelConnectionWithoutClearing()
                     let selfBox = self.selfBox
                     Task { @MainActor in
@@ -5003,7 +5222,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// unadmitted (a deferred Video On, a resume, or a recovery that found
     /// no admitted owner) starts now that one is admitted again.
     private func reconcileCaptureAfterReadmission() {
-        guard !stopped, stream == nil else { return }
+        // A start still in flight was prepared for an earlier admission and
+        // cannot commit for this one; the start below supersedes it.
+        guard !stopped, captureOwnership.liveStream == nil else { return }
         let selfBox = self.selfBox
         switch captureStateSnapshot().phase {
         case .resuming:

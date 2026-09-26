@@ -182,6 +182,7 @@ targets:
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
       - Mac/SenderSessionAuthorization.swift
+      - Mac/CaptureOwnership.swift
       - Mac/CanonicalRuntimeStatus.swift
       - Mac/KeepMacAvailable.swift
       - Mac/SettingsCategory.swift
