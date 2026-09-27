@@ -177,18 +177,26 @@ final class QUICReceiverAuthorityTests: XCTestCase {
         let oldControl = makeStream()
         old.register(oldControl, channel: .control)
         await pipeline.handleIncomingConnection(oldControl)
-        // The old one has failed (never reached .ready): a newcomer adopts directly.
-        try? await Task.sleep(nanoseconds: 200_000_000)
         let newcomer = try XCTUnwrap(admitGroup(registry))
         let newControl = makeStream()
         newcomer.register(newControl, channel: .control)
         await pipeline.handleIncomingConnection(newControl)
         let current = await pipeline.connection
         if current === newControl {
+            // Adopted outright (the old dial had already failed): the old
+            // QUIC connection is retired at once and can never come back.
             XCTAssertTrue(old.isClosed, "a superseded QUIC connection cannot steal the session later")
+        } else {
+            // Parked behind a still-live incumbent: when the race is decided
+            // against it, its whole QUIC connection goes with it.
+            XCTAssertTrue(current === oldControl)
+            await pipeline.cancelPendingConnections()
+            XCTAssertTrue(newcomer.isClosed, "a losing candidate's QUIC connection is closed")
         }
         await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+        XCTAssertTrue(old.isClosed)
         XCTAssertTrue(newcomer.isClosed)
+        XCTAssertEqual(registry.liveCount, 0)
         await pipeline.teardownForStop()
     }
 

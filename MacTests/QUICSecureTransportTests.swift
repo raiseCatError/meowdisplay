@@ -44,44 +44,49 @@ final class QUICSecureTransportTests: XCTestCase {
         super.tearDown()
     }
 
-    /// A fresh self-signed P-256 identity, generated exactly like
-    /// `TrustStore.generateAndStoreIdentity` but stored only in the
-    /// temporary keychain.
+    /// A fresh P-256 identity whose private key is generated INSIDE the
+    /// temporary keychain (file keychains refuse raw EC key imports). The
+    /// certificate carries that key's SPKI; its signature comes from a
+    /// throwaway key, which is irrelevant here exactly as in production:
+    /// MeowDisplay pins the leaf SPKI and never evaluates the chain, while
+    /// the TLS handshake itself proves possession of the keychain key.
     private func makeIdentity() throws -> TestIdentity {
         guard let keychain else { throw XCTSkip("no temporary keychain") }
-        let priv = P256.Signing.PrivateKey()
-        let certKey = Certificate.PrivateKey(priv)
+        var cfError: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateRandomKey([
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits: 256,
+            kSecUseKeychain: keychain,
+            kSecPrivateKeyAttrs: [kSecAttrIsPermanent: true],
+        ] as CFDictionary, &cfError),
+              let publicKey = SecKeyCopyPublicKey(privateKey),
+              let x963 = SecKeyCopyExternalRepresentation(publicKey, &cfError) as Data?,
+              let p256 = try? P256.Signing.PublicKey(x963Representation: x963) else {
+            throw XCTSkip("temporary keychain key unavailable: \(String(describing: cfError?.takeRetainedValue()))")
+        }
+        let signer = Certificate.PrivateKey(P256.Signing.PrivateKey())
         let name = try DistinguishedName { CommonName("meowdisplay-quic-test-\(UUID().uuidString)") }
         let now = Date()
         let certificate = try Certificate(
-            version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: certKey.publicKey,
+            version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: Certificate.PublicKey(p256),
             notValidBefore: now.addingTimeInterval(-3600), notValidAfter: now.addingTimeInterval(3600),
             issuer: name, subject: name, signatureAlgorithm: .ecdsaWithSHA256,
             extensions: try Certificate.Extensions { Critical(BasicConstraints.notCertificateAuthority) },
-            issuerPrivateKey: certKey)
+            issuerPrivateKey: signer)
         var serializer = DER.Serializer()
         try serializer.serialize(certificate)
-        let der = Data(serializer.serializedBytes)
-        var cfError: Unmanaged<CFError>?
-        guard let secKey = SecKeyCreateWithData(priv.x963Representation as CFData, [
-            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-        ] as CFDictionary, &cfError),
-              let secCert = SecCertificateCreateWithData(nil, der as CFData) else {
-            throw XCTSkip("could not build test key/certificate")
+        guard let secCert = SecCertificateCreateWithData(nil, Data(serializer.serializedBytes) as CFData) else {
+            throw XCTSkip("could not build test certificate")
         }
-        var status = SecItemAdd([kSecClass: kSecClassKey, kSecValueRef: secKey,
+        var status = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCert,
                                  kSecUseKeychain: keychain] as CFDictionary, nil)
-        guard status == errSecSuccess else { throw XCTSkip("temporary key import failed (status \(status))") }
-        status = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCert,
-                             kSecUseKeychain: keychain] as CFDictionary, nil)
         guard status == errSecSuccess else { throw XCTSkip("temporary certificate import failed (status \(status))") }
         var identity: SecIdentity?
         status = SecIdentityCreateWithCertificate(keychain, secCert, &identity)
         guard status == errSecSuccess, let identity else {
             throw XCTSkip("temporary identity unavailable (status \(status))")
         }
-        return TestIdentity(identity: identity, spki: priv.publicKey.derRepresentation)
+        return TestIdentity(identity: identity, spki: p256.derRepresentation)
     }
 
     // MARK: - Harness

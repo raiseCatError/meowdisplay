@@ -127,8 +127,11 @@ final class QUICStreamProtocolTests: XCTestCase {
             XCTAssertEqual(error as? QUICFrameAssembler.Failure,
                            .frameTooLarge(declared: 0xFFFF_FFFF, limit: 1024))
         }
+        // The cap is inclusive; one byte over is refused (a refused
+        // assembler is never reused — its connection is closed).
+        var over = QUICFrameAssembler(maxPayloadBytes: 4)
+        XCTAssertThrowsError(try over.append(Data([0, 0, 0, 5])))
         var exact = QUICFrameAssembler(maxPayloadBytes: 4)
-        XCTAssertThrowsError(try exact.append(Data([0, 0, 0, 5])))
         XCTAssertEqual(try exact.append(Data([0, 0, 0, 4, 1, 2, 3, 4])), [Data([1, 2, 3, 4])])
     }
 
