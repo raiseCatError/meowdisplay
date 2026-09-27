@@ -137,8 +137,7 @@ final class QUICSecureTransportTests: XCTestCase {
     private func startServer(identity: TestIdentity, pinned: [Data], outcome: Outcome) throws -> NWListener {
         let options = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
             identity: identity.identity, pinnedSPKIs: { pinned }, isListener: true, queue: queue))
-        options.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
-        options.initialMaxStreamsUnidirectional = 0
+        QUICReceiverListener.configureStreamLimits(options)
         let listener = try NWListener(using: QUICReceiverListener.listenerParameters(quic: options), on: .any)
         let queue = self.queue
         listener.newConnectionGroupHandler = { group in
@@ -344,47 +343,8 @@ final class QUICSecureTransportTests: XCTestCase {
     private func receiverOptions(_ identity: TestIdentity, pinning client: Data) throws -> NWProtocolQUIC.Options {
         let options = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
             identity: identity.identity, pinnedSPKIs: { [client] }, isListener: true, queue: queue))
-        options.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
-        options.initialMaxStreamsUnidirectional = 0
+        QUICReceiverListener.configureStreamLimits(options)
         return options
-    }
-
-    private func startedListener(_ parameters: NWParameters, on port: NWEndpoint.Port) throws -> NWListener {
-        let listener = try NWListener(using: parameters, on: port)
-        listener.newConnectionGroupHandler = { group in group.cancel() }
-        listener.start(queue: queue)
-        waitUntil(3) {
-            switch listener.state {
-            case .ready, .failed, .cancelled: return true
-            default: return false
-            }
-        }
-        return listener
-    }
-
-    /// The listener's UDP port must never be shared with a second binding
-    /// (a stale listener during a re-arm): with local-endpoint reuse — what
-    /// the receiver used before — a second listener on the same port comes
-    /// up silently, which is the precondition for another binding's
-    /// new-flow path seeing a live connection's datagrams.
-    func testProductionQUICListenerNeverSharesItsUDPPort() throws {
-        let identity = try makeIdentity()
-        let peer = try makeIdentity().spki
-        let production = QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer))
-        XCTAssertFalse(production.allowLocalEndpointReuse)
-        XCTAssertTrue(production.includePeerToPeer)
-
-        let first = try startedListener(production, on: .any)
-        guard first.state == .ready, let port = first.port else {
-            first.cancel()
-            throw XCTSkip("loopback QUIC listener unavailable (\(first.state))")
-        }
-        let second = try startedListener(
-            QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer)), on: port)
-        XCTAssertNotEqual(second.state, .ready, "a second production QUIC listener must not share UDP \(port)")
-        second.cancel()
-
-        first.cancel()
     }
 
     private final class GroupEvents: @unchecked Sendable {
@@ -400,12 +360,16 @@ final class QUICSecureTransportTests: XCTestCase {
         var owners: [QUICReceiverGroup] { lock.lock(); defer { lock.unlock() }; return _owners }
     }
 
-    /// The real receiver edge — production listener parameters and
-    /// `QUICReceiverGroup` accept/preface handling — over real QUIC, dialed
-    /// the way `MacSenderTransportController.openQUICStreams` does (three
-    /// streams opened together, each preface sent right after `start`). The
-    /// previous loopback tests used their own ad-hoc stream handling, so
-    /// this production path had never run over a real connection.
+    /// The real receiver edge — production listener parameters, stream limits
+    /// and `QUICReceiverGroup` accept/preface handling — over real QUIC,
+    /// dialed the way `MacSenderTransportController.openQUICStreams` does
+    /// (three streams opened together, each preface sent right after
+    /// `start`). The earlier loopback tests used ad-hoc stream handling and
+    /// only two streams, so they missed both defects the physical iPhone hit:
+    /// Network.framework's own extra (never-ready) object delivered to
+    /// `newConnectionHandler` was treated as a MEOW stream, and a stream
+    /// limit of 3 blocked the sender's third stream because stream 0 is
+    /// Network.framework's.
     func testProductionReceiverGroupAcceptsAllThreeChannels() throws {
         let server = try makeIdentity()
         let client = try makeIdentity()
@@ -435,6 +399,7 @@ final class QUICSecureTransportTests: XCTestCase {
         let group = NWConnectionGroup(with: NWMultiplexGroup(to: .hostPort(host: "127.0.0.1", port: port)),
                                       using: NWParameters(quic: try clientOptions(client, pinning: server.spki)))
         let streams = OutcomeStreams()
+        let receiverOpened = GroupEvents()
         group.stateUpdateHandler = { state in
             guard case .ready = state else { return }
             for channel in [TransportChannel.control, .video, .audio] {
@@ -445,7 +410,11 @@ final class QUICSecureTransportTests: XCTestCase {
                 stream.send(content: QUICStreamPreface(channel: channel).encode(), completion: .contentProcessed { _ in })
             }
         }
-        group.newConnectionHandler = { stream in stream.cancel() }
+        // Production treats any stream arriving here as a protocol violation.
+        group.newConnectionHandler = { stream in
+            receiverOpened.control()
+            stream.cancel()
+        }
         group.start(queue: queue)
 
         waitUntil(8) { events.controls == 1 && events.mediaCount == 2 }
@@ -454,6 +423,11 @@ final class QUICSecureTransportTests: XCTestCase {
         XCTAssertEqual(events.owners.count, 1, "all three streams ride one QUIC connection")
         XCTAssertFalse(events.owners.first?.isClosed ?? true, "a healthy connection is not closed")
         XCTAssertEqual(events.owners.first?.takePendingMedia().count, 2)
+        // Past the preface timeout: nothing (e.g. Network.framework's own
+        // never-ready object) may close the healthy connection later.
+        waitUntil(QUICReceiverLimits.prefaceTimeout + 1) { false }
+        XCTAssertFalse(events.owners.first?.isClosed ?? true, "still open after the preface timeout")
+        XCTAssertEqual(receiverOpened.controls, 0, "the dialer never sees a receiver-opened stream")
 
         group.cancel()
         streams.cancelAll()

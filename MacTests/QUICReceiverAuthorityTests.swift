@@ -437,11 +437,45 @@ final class QUICReceiverAuthorityTests: XCTestCase {
                        .violation(.invalidStreamPreface))
     }
 
-    func testReceiverListenerParametersDoNotReuseTheLocalEndpoint() {
-        let parameters = QUICReceiverListener.listenerParameters(quic: NWProtocolQUIC.Options(alpn: [QUICTransport.alpn]))
-        XCTAssertFalse(parameters.allowLocalEndpointReuse,
-                       "the QUIC listener must own UDP 9001 exclusively")
+    /// Network.framework uses QUIC stream 0 itself, so three MeowDisplay
+    /// streams need a bidirectional stream limit of four.
+    func testStreamLimitsLeaveRoomForNetworkFrameworksOwnStream() {
+        let options = NWProtocolQUIC.Options(alpn: [QUICTransport.alpn])
+        QUICReceiverListener.configureStreamLimits(options)
+        XCTAssertEqual(options.initialMaxStreamsBidirectional, QUICChannelRegistry.maxStreams + 1)
+        XCTAssertEqual(options.initialMaxStreamsUnidirectional, 0)
+        XCTAssertEqual(QUICReceiverLimits.maxDeliveredStreamObjects, QUICChannelRegistry.maxStreams + 1)
+        let parameters = QUICReceiverListener.listenerParameters(quic: options)
         XCTAssertTrue(parameters.includePeerToPeer)
         XCTAssertEqual(parameters.serviceClass, .interactiveVideo)
+    }
+
+    /// A delivered object that never becomes a stream (Network.framework's
+    /// own, or any that fails first) must not close the connection.
+    func testANeverReadyDeliveredObjectDoesNotCloseTheConnection() throws {
+        let registry = QUICReceiverGroupRegistry()
+        let group = try XCTUnwrap(admitGroup(registry))
+        // Dials a closed loopback port: never `.ready`, then fails.
+        let neverReady = makeStream()
+        group.accept(neverReady)
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, neverReady.state != .cancelled {
+            if case .failed = neverReady.state { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(group.isClosed, "only a real stream's failure is the connection's failure")
+        group.close(nil)
+    }
+
+    func testDeliveredObjectsAreBounded() throws {
+        let registry = QUICReceiverGroupRegistry()
+        let group = try XCTUnwrap(admitGroup(registry))
+        for _ in 0..<QUICReceiverLimits.maxDeliveredStreamObjects {
+            group.accept(makeStream())
+            XCTAssertFalse(group.isClosed)
+        }
+        group.accept(makeStream())
+        XCTAssertTrue(group.isClosed, "one object past the bound is a protocol violation")
     }
 }
