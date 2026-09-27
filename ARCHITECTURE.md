@@ -276,6 +276,43 @@ Sender's per-session Allow Input consent turns it on.
   logged-in Mac that has gone to sleep; it is not a general "wake from
   anywhere" feature. See [Connections in the README](README.md#connections).
 
+### Route vs network protocol (TCP / QUIC)
+
+Physical route (USB / LAN / AWDL / Remote — `ConnectionRoute`,
+`RouteArbitration`) and network protocol (TCP / QUIC) are separate axes.
+The route is chosen first, exactly as before (USB > LAN/AWDL > Remote); on a
+network route `MacSender` then asks `TransportProtocolSelector`
+(`Mac/TransportProtocolSelection.swift`) for TCP or QUIC using the device's
+Auto / QUIC / TCP setting, the peer's authenticated capability, discovery
+hints and an in-memory cooldown. USB never uses QUIC.
+
+- **Sender.** `MacSenderTransportController` owns the live transport: a TCP
+  `NWConnection`, or a `QUICTransportSession` (`Mac/QUICTransportSession.swift`)
+  holding one `NWConnectionGroup` with three streams — Control
+  (bidirectional), Video and Audio (Mac → receiver). The Control stream is
+  the session "connection", so hello/welcome, admission, input authority and
+  every staleness check are the TCP code unchanged. Sends are channel-aware
+  (`send(channel:content:)`): over TCP every channel is the one connection
+  with unchanged bytes; over QUIC each channel is its own stream. Video
+  backpressure (`pendingSends`) counts Video only, Audio is tracked
+  separately, Control is never gated, and every completion is tagged with a
+  transport epoch so a retired connection cannot touch the new one's
+  counters. QUIC callbacks capture only the controller weakly plus a
+  generation and resolve the live session on `queue`.
+- **Receiver.** `QUICReceiverListener` (`Shared/QUICReceiverSession.swift`)
+  runs beside the TLS listener and shares its lifecycle (`TLSListenerState.quic`:
+  pairing suppression, trust refresh, teardown). Each accepted connection is
+  a `QUICReceiverGroup` that validates stream topology and prefaces, hands
+  the Control stream to `ReceiverPipelineActor.handleIncomingConnection`
+  exactly like a TCP connection, and parks Video/Audio until that Control
+  stream is the adopted session; `ReceiverFramePipeline` then deframes them
+  with per-channel bounded assemblers into the existing decoder and audio
+  paths. The pipeline retires a QUIC connection whenever it lets go of its
+  Control stream.
+- **Migration.** Changing protocol is the existing hot transport swap
+  (`switchTransport`): display, capture and encoder stay alive; the
+  connection, its authority and input grant are replaced and re-earned.
+
 ## Boundaries and invariants
 
 - **Protocol changes are versioned.** New messages or fields follow
@@ -283,6 +320,8 @@ Sender's per-session Allow Input consent turns it on.
   gated by protocol version.
 - **Don't bypass trust.** No plaintext fallback, no skipping SAS
   confirmation, no treating a route/address as identity.
+- **QUIC is additive.** TCP stays first class; QUIC never falls back after a
+  security or protocol failure, never uses 0-RTT, and is never a route.
 - **Private API stays isolated** in `Mac/VirtualDisplay.swift`.
 - **One gesture arbitration path** on iOS (see above).
 - **Receiver-local presentation state stays receiver-local** (tray layout,

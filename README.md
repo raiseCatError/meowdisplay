@@ -287,6 +287,10 @@ More on [Devices](https://meowdisplay.app/features.html#devices).
 - **Remote Access** — reach a paired Mac through a private network you
   control, such as Tailscale. The address only routes the connection; pairing
   still authenticates it.
+- **Network Transport** — on Wi-Fi and Remote Access, each device can use
+  **Auto** (the default), **QUIC** or **TCP** (Mac Settings → the device).
+  Both use the same pairing and encryption; Auto uses QUIC when both apps
+  support it and uses TCP if QUIC can't get through. USB is unaffected.
 - **Auto-Reconnect** restores the session whenever the connection becomes
   available again.
 - **Wake & Connect** can wake a supported paired Mac on its network and

@@ -58,6 +58,14 @@ final class MacSenderTransportController: @unchecked Sendable {
     private var wiredPathMonitor: NWPathMonitor?
     private var wiredPathWasSatisfied: Bool?
     private var dialGeneration = 0
+    /// The live QUIC tunnel, when the session rides QUIC. Its Control stream
+    /// is then `connection`, so every existing `currentConnection === conn`
+    /// staleness check covers QUIC too. Confined to `queue` like the rest.
+    private var quicSession: QUICTransportSession?
+    private var quicGenerationCounter = 0
+    /// Budget from dial to an accepted authenticated application `hello`.
+    /// Running out before it is an ordinary reachability failure.
+    static let quicApplicationHandshakeTimeout: TimeInterval = 8
 
     // MARK: - Read-only accessors used by MacSender's remaining dial/send code
 
@@ -91,6 +99,22 @@ final class MacSenderTransportController: @unchecked Sendable {
         return dialGeneration
     }
 
+    /// The secure network protocol the live connection rides (TCP also for
+    /// the USB bridge — `MacSender` knows USB is a route, not a protocol).
+    var activeNetworkProtocol: NetworkTransportProtocol? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let connection else { return nil }
+        if let quicSession, quicSession.control === connection { return .quic }
+        return .tcp
+    }
+
+    /// True when the live QUIC session had passed its application handshake.
+    var isQUICApplicationReady: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let quicSession, quicSession.control === connection else { return false }
+        return quicSession.isApplicationReady
+    }
+
     // MARK: - Dial-generation / connection mechanics used by MacSender's
     // still-owned dial code (connectTCP/connectUSB/switchTransport/
     // scheduleReconnect/reportTrustFailure/hello security checks)
@@ -107,6 +131,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// — that only flips true once `becomeReady` runs.
     func installConnection(_ conn: NWConnection) {
         dispatchPrecondition(condition: .onQueue(queue))
+        cancelQUICSession()
         connection = conn
     }
 
@@ -117,6 +142,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// security-rejection paths.
     func cancelAndClearConnection() {
         dispatchPrecondition(condition: .onQueue(queue))
+        cancelQUICSession()
         connection?.cancel()
         connection = nil
     }
@@ -135,9 +161,27 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// and is ready. Returns whether the send was handed to the connection.
     @discardableResult
     func send(content: Data, completion: @escaping @Sendable (NWError?) -> Void) -> Bool {
+        send(channel: .control, content: content, completion: completion)
+    }
+
+    /// Channel-aware send of a pre-framed payload. Over TCP (and the USB
+    /// bridge) every channel is the one TLS connection and the bytes are
+    /// exactly what they always were. Over QUIC each channel is its own
+    /// reliable stream, so a large Video write cannot hold back Control or
+    /// Audio at the transport.
+    @discardableResult
+    func send(channel: TransportChannel, content: Data,
+              completion: @escaping @Sendable (NWError?) -> Void) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let connection, connectionReady else { return false }
-        connection.send(content: content, completion: .contentProcessed { completion($0) })
+        let target: NWConnection
+        if let quicSession, quicSession.control === connection {
+            guard let stream = quicSession.stream(for: channel) else { return false }
+            target = stream
+        } else {
+            target = connection
+        }
+        target.send(content: content, completion: .contentProcessed { completion($0) })
         return true
     }
 
@@ -181,7 +225,8 @@ final class MacSenderTransportController: @unchecked Sendable {
         }
         // -forceUpgradeProbe YES: dev knob — loopback runs never look like
         // WiFi, so this is the only way to exercise probe+migrate on one Mac.
-        if currentPathUsesWiFi || UserDefaults.standard.bool(forKey: "forceUpgradeProbe") {
+        if (currentPathUsesWiFi || UserDefaults.standard.bool(forKey: "forceUpgradeProbe"))
+            && cableUpgradeAllowedForCurrentProtocol() {
             startUpgradeProbing(transport: transport)
         } else {
             stopUpgradeProbing()   // already off WiFi — nothing better to find
@@ -315,6 +360,7 @@ final class MacSenderTransportController: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !stopped, connectionReady,
               currentPathUsesWiFi || UserDefaults.standard.bool(forKey: "forceUpgradeProbe"),
+              cableUpgradeAllowedForCurrentProtocol(),
               case .tcp = transport, !peerAddrs.isEmpty else { return }
         if force {
             upgradeProbes.forEach { $0.cancel() }
@@ -419,6 +465,9 @@ final class MacSenderTransportController: @unchecked Sendable {
         connection?.stateUpdateHandler = nil
         connection?.viabilityUpdateHandler = nil
         connection?.cancel()
+        // A QUIC session migrating onto the cable becomes a TCP session on
+        // the new route: its tunnel is retired with the old connection.
+        cancelQUICSession()
         connection = conn
         conn.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -476,6 +525,7 @@ final class MacSenderTransportController: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         currentPathDirectLink = false
         dialGeneration += 1
+        cancelQUICSession()
         connection?.cancel()
         connection = nil
         return dialGeneration
@@ -487,6 +537,10 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// `stopped`/`onTrustFailure`, not redialing).
     func cancelConnectionWithoutClearing() {
         dispatchPrecondition(condition: .onQueue(queue))
+        // The QUIC tunnel goes too (its streams would otherwise outlive the
+        // refused session); the reference is dropped so no callback of it
+        // can act again.
+        cancelQUICSession()
         connection?.cancel()
     }
 
@@ -499,6 +553,7 @@ final class MacSenderTransportController: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         currentPathDirectLink = false
         dialGeneration += 1
+        cancelQUICSession()
         connection?.cancel()
         connection = nil
         stopUpgradeProbing()
@@ -528,12 +583,13 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// `queue`-confined work. Off `queue`, it hops once via `queue.async` —
     /// fire-and-forget, since no caller here ever awaited the pre-Phase-1
     /// synchronous read's result either.
-    func sendFromAnyContext(content: Data, completion: @escaping @Sendable (NWError?) -> Void) {
+    func sendFromAnyContext(channel: TransportChannel = .control, content: Data,
+                            completion: @escaping @Sendable (NWError?) -> Void) {
         if DispatchQueue.getSpecific(key: queueSpecificKey) != nil {
-            _ = send(content: content, completion: completion)
+            _ = send(channel: channel, content: content, completion: completion)
         } else {
             queue.async { [weak self] in
-                _ = self?.send(content: content, completion: completion)
+                _ = self?.send(channel: channel, content: content, completion: completion)
             }
         }
     }
@@ -565,6 +621,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     private func stopCurrentConnectionOnQueue() {
         dispatchPrecondition(condition: .onQueue(queue))
         stopped = true
+        cancelQUICSession()
         connection?.cancel()
         connection = nil
         upgradeTimer?.cancel()
@@ -574,6 +631,238 @@ final class MacSenderTransportController: @unchecked Sendable {
         probeRoundGeneration += 1
         upgradeProbes.forEach { $0.cancel() }
         upgradeProbes.removeAll()
+    }
+}
+
+// MARK: - QUIC transport (reliable-stream QUIC v1, PROTOCOL.md §2.4)
+
+extension MacSenderTransportController {
+    /// The live QUIC session iff it is still exactly `generation` — every
+    /// QUIC callback resolves through here, so a callback from a cancelled or
+    /// superseded tunnel is a no-op.
+    private func currentQUICSession(generation: Int) -> QUICTransportSession? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !stopped, let quicSession, quicSession.generation == generation else { return nil }
+        return quicSession
+    }
+
+    private func cableUpgradeAllowedForCurrentProtocol() -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let quicSession, quicSession.control === connection else { return true }
+        return delegate?.transportCableUpgradeAllowed() ?? false
+    }
+
+    /// Retires the QUIC tunnel (if any). Clearing the reference first makes
+    /// every late callback of it stale.
+    fileprivate func cancelQUICSession(applicationError: QUICApplicationError? = nil) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let session = quicSession else { return }
+        quicSession = nil
+        session.cancel(applicationError: applicationError)
+    }
+
+    /// Dials the receiver over pinned mutual-TLS QUIC (`TLSConfigurator.
+    /// pinnedQUICOptions` — same identity and SPKI pin as TCP, ALPN
+    /// `meowdisplay-quic/1`, no 0-RTT). Its Control stream becomes the
+    /// session connection once ready; Video and Audio open alongside it.
+    /// Returns false (nothing dialed) when secure QUIC options cannot be
+    /// built — the caller must not treat that as a reason to use TCP.
+    @discardableResult
+    func connectQUIC(to endpoint: NWEndpoint, tls: TLSSessionConfig) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let generation = quicGenerationCounter + 1
+        // The verify block runs on `queue`; a pin rejection is reported as
+        // what it is — a security failure — the moment it happens.
+        guard !stopped, let options = TLSConfigurator.pinnedQUICOptions(
+            identity: tls.identity.value, pinnedSPKIs: { [tls.pinnedPeerSPKI] },
+            isListener: false, queue: queue,
+            onPeerVerification: { [weak self] accepted in
+                // Hop instead of acting inside the TLS callback; the
+                // generation check still applies.
+                guard let controller = self else { return }
+                controller.queue.async { [weak controller] in
+                    guard let owner = controller,
+                          let session = owner.currentQUICSession(generation: generation) else { return }
+                    if accepted {
+                        session.peerVerifiedAt = Date()
+                    } else {
+                        owner.failQUIC(generation: generation, error: nil, failureClass: .security,
+                                      detail: "receiver certificate does not match its pin")
+                    }
+                }
+            }) else { return false }
+        cancelQUICSession()
+        connection?.cancel()
+        connection = nil
+        connectionReady = false
+        let params = NWParameters(quic: options)
+        params.includePeerToPeer = true
+        let group = NWConnectionGroup(with: NWMultiplexGroup(to: endpoint), using: params)
+        quicGenerationCounter = generation
+        quicSession = QUICTransportSession(generation: generation, group: group)
+        group.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            self.queue.async { self.handleQUICGroupState(state, generation: generation) }
+        }
+        // The receiver never opens streams toward the Mac: any such stream is
+        // a protocol violation that fails the whole tunnel.
+        group.newConnectionHandler = { [weak self] stream in
+            stream.cancel()
+            guard let self else { return }
+            self.queue.async {
+                self.failQUIC(generation: generation, error: nil, failureClass: .protocolViolation,
+                              detail: "receiver-initiated stream", applicationError: .protocolViolation)
+            }
+        }
+        group.start(queue: queue)
+        Log.info("quic: dialing \(endpointName) generation=\(generation)")
+        queue.asyncAfter(deadline: .now() + Self.quicApplicationHandshakeTimeout) { [weak self] in
+            guard let self, let session = self.currentQUICSession(generation: generation),
+                  !session.isApplicationReady else { return }
+            // Nothing answered the handshake at all: ordinary reachability.
+            // A peer that DID complete the pinned handshake but then never
+            // said hello is not "unreachable" — no fallback for that.
+            let failureClass: QUICFailureClass = session.groupReadyAt == nil && session.peerVerifiedAt == nil
+                ? .reachability : .indeterminate
+            self.failQUIC(generation: generation, error: nil, failureClass: failureClass,
+                          detail: "no authenticated application handshake within "
+                            + "\(Int(Self.quicApplicationHandshakeTimeout))s")
+        }
+        return true
+    }
+
+    /// `MacSender` accepted the authenticated `hello` on the QUIC Control
+    /// stream: the session is now a LIVE QUIC session.
+    func markQUICApplicationReady() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let quicSession, quicSession.control === connection, quicSession.applicationReadyAt == nil else { return }
+        let now = Date()
+        quicSession.applicationReadyAt = now
+        #if DEBUG
+        let handshakeMs = (quicSession.groupReadyAt ?? now).timeIntervalSince(quicSession.dialStartedAt) * 1000
+        let helloMs = now.timeIntervalSince(quicSession.controlReadyAt ?? now) * 1000
+        Log.info("quicMetrics: protocol=quic route=\(currentRoute?.rawValue ?? "unknown") "
+            + "handshakeMs=\(String(format: "%.1f", handshakeMs)) helloMs=\(String(format: "%.1f", helloMs)) "
+            + "dialToHelloMs=\(String(format: "%.1f", now.timeIntervalSince(quicSession.dialStartedAt) * 1000))")
+        #endif
+    }
+
+    private func handleQUICGroupState(_ state: NWConnectionGroup.State, generation: Int) {
+        guard let session = currentQUICSession(generation: generation) else { return }
+        switch state {
+        case .ready:
+            guard session.groupReadyAt == nil else { return }
+            session.groupReadyAt = Date()
+            openQUICStreams(session)
+        case .waiting(let error):
+            failQUIC(generation: generation, error: error,
+                     failureClass: QUICFailureClassifier.classify(error), detail: "group waiting")
+        case .failed(let error):
+            failQUIC(generation: generation, error: error,
+                     failureClass: QUICFailureClassifier.classify(error), detail: "group failed")
+        case .cancelled:
+            failQUIC(generation: generation, error: nil, failureClass: .indeterminate, detail: "group cancelled")
+        default:
+            break
+        }
+    }
+
+    /// Control first (it is the session connection), then Video and Audio.
+    /// Every stream announces its channel in the 8-byte MEOW preface before
+    /// any framed payload; the receiver never infers it from stream IDs.
+    private func openQUICStreams(_ session: QUICTransportSession) {
+        let generation = session.generation
+        for channel in [TransportChannel.control, .video, .audio] {
+            let created: NWConnection? = NWConnection(from: session.group)
+            guard let stream = created else {
+                failQUIC(generation: generation, error: nil, failureClass: .indeterminate,
+                         detail: "could not open \(channel) stream")
+                return
+            }
+            session.install(stream, for: channel)
+            if channel == .control {
+                connection = stream
+                connectionReady = false
+            }
+            stream.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.queue.async { self.handleQUICStreamState(state, channel: channel, stream: stream, generation: generation) }
+            }
+            stream.start(queue: queue)
+            stream.send(content: QUICStreamPreface(channel: channel).encode(),
+                        completion: .contentProcessed { _ in })
+            if !channel.receiverMayWrite {
+                guardAgainstReverseTraffic(on: stream, channel: channel, generation: generation)
+            }
+        }
+    }
+
+    /// Video/Audio are Mac -> receiver only: a single byte from the receiver
+    /// on them is a protocol violation; their end is the tunnel's end.
+    private func guardAgainstReverseTraffic(on stream: NWConnection, channel: TransportChannel, generation: Int) {
+        stream.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            self.queue.async {
+                guard let session = self.currentQUICSession(generation: generation),
+                      session.stream(for: channel) === stream else { return }
+                if let data, !data.isEmpty {
+                    self.failQUIC(generation: generation, error: nil, failureClass: .protocolViolation,
+                                  detail: "receiver wrote on the \(channel) stream", applicationError: .protocolViolation)
+                } else if let error {
+                    self.failQUIC(generation: generation, error: error,
+                                  failureClass: QUICFailureClassifier.classify(error), detail: "\(channel) stream failed")
+                } else if isComplete {
+                    self.failQUIC(generation: generation, error: nil, failureClass: .indeterminate,
+                                  detail: "\(channel) stream closed by receiver")
+                }
+            }
+        }
+    }
+
+    private func handleQUICStreamState(_ state: NWConnection.State, channel: TransportChannel,
+                                       stream: NWConnection, generation: Int) {
+        guard let session = currentQUICSession(generation: generation),
+              session.stream(for: channel) === stream else { return }
+        switch state {
+        case .ready:
+            guard channel == .control, session.controlReadyAt == nil, connection === stream else { return }
+            session.controlReadyAt = Date()
+            guard let transport = delegate?.transportDialingContext().transport else { return }
+            becomeReady(stream, transport: transport)
+        case .waiting(let error), .failed(let error):
+            failQUIC(generation: generation, error: error,
+                     failureClass: QUICFailureClassifier.classify(error), detail: "\(channel) stream \(state)")
+        case .cancelled:
+            failQUIC(generation: generation, error: nil, failureClass: .indeterminate, detail: "\(channel) stream cancelled")
+        default:
+            break
+        }
+    }
+
+    /// Reports one failure per session to `MacSender` (which decides retry /
+    /// Auto fallback / stop) and retires the tunnel. The session reference
+    /// is dropped before the delegate runs, so nothing it does can be undone
+    /// by a late callback of this tunnel.
+    private func failQUIC(generation: Int, error: NWError?, failureClass: QUICFailureClass,
+                          detail: String, applicationError: QUICApplicationError? = nil) {
+        guard let session = currentQUICSession(generation: generation), !session.failureReported else { return }
+        session.failureReported = true
+        // Once this Mac accepted the receiver's pinned certificate, the path
+        // demonstrably works: a later failure (for example the receiver
+        // refusing THIS Mac's certificate, which reaches the dialer as a
+        // plain POSIX error) is never "unreachable" and never a fallback.
+        let failureClass = QUICFailureClassifier.refine(failureClass, peerVerified: session.peerVerifiedAt != nil)
+        let established = session.isApplicationReady
+        Log.info("quic: failure class=\(failureClass.rawValue) established=\(established) \(detail)"
+            + (error.map { " error=\($0)" } ?? "")
+            + (applicationError.map { " appError=\($0)" } ?? ""))
+        cancelQUICSession(applicationError: applicationError)
+        if connection === session.control {
+            connection = nil
+            connectionReady = false
+        }
+        delegate?.transportQUICFailed(QUICTransportFailure(
+            error: error, failureClass: failureClass, established: established, detail: detail))
     }
 }
 
@@ -618,4 +907,15 @@ protocol MacSenderTransportDelegate: AnyObject {
     /// fresh by the probe timer/wired-path-monitor callbacks, which have no
     /// per-call context of their own.
     func transportDialingContext() -> (transport: SenderTransport, peerAddrs: [String])
+    /// A QUIC dial or live QUIC session failed (reported once per tunnel).
+    /// `MacSender` owns the Auto/TCP/QUIC consequence.
+    func transportQUICFailed(_ failure: QUICTransportFailure)
+    /// Whether a live QUIC session may be migrated onto a probed cable path
+    /// (which is TCP): not when the user explicitly chose QUIC.
+    func transportCableUpgradeAllowed() -> Bool
+}
+
+extension MacSenderTransportDelegate {
+    func transportQUICFailed(_ failure: QUICTransportFailure) {}
+    func transportCableUpgradeAllowed() -> Bool { true }
 }

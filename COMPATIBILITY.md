@@ -69,6 +69,31 @@ with no separate channel, no separate Bonjour service, and no
 authentication of its own to get wrong. There is deliberately no wire path
 for unauthenticated or unencrypted audio at any protocol version.
 
+### Optional QUIC transport (`pv` 22)
+
+QUIC (PROTOCOL.md section 2.4) is purely **additive**:
+
+- `WireProtocol.version` is 22; `minSupportedPeer` stays **1**. No peer is
+  asked to update for QUIC.
+- A peer is QUIC-capable only when its **authenticated** `hello`/`welcome`
+  lists `"quic"` in `transports` with `qv` 1. A missing field — every
+  pv ≤ 21 build — means TCP only, and QUIC is never inferred from `pv`.
+  The `_meowdisp-q._udp` Bonjour record is only a hint that may justify a
+  local QUIC attempt; it never marks a peer capable or trusted.
+- New Mac + old receiver → TCP. Old Mac + new receiver → TCP (the receiver
+  keeps its TCP listener and simply sees no QUIC dial). New + new → Auto may
+  use QUIC. For Remote Access, Auto uses TCP until one authenticated
+  session has shown QUIC support, then may use QUIC on later sessions.
+- An unknown `qv` disables QUIC for that peer rather than guessing.
+- A peer whose authenticated `hello` reports `pv` below 22 (downgraded to a
+  pre-QUIC build) loses any remembered QUIC capability and is TCP-only again;
+  the decision uses that hello's `pv`, never the Bonjour TXT record.
+- The one pv-sensitive check that compared against the build's *current*
+  version (`streamingProfileRequest`) is now pinned to pv 21
+  (`WireProtocol.streamingProfileRequestWireVersion`), so the bump does not
+  stop honoring pv 21 receivers.
+- The pairing protocol version is unchanged (13); QUIC reuses the same pins.
+
 ## 3. Compatibility matrix
 
 Let `iosPV` / `macPV` be the two protocol versions, and `macMinPeer` /

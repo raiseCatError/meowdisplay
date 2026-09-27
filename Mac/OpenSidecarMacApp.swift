@@ -213,6 +213,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     // Nil while dialing so the UI never presents a requested target as the
     // route that Network.framework actually selected.
     @Published var route: ConnectionRoute?
+    // The secure network protocol of the established connection (TCP/QUIC),
+    // reported by the sender alongside `route`; nil while dialing and on USB.
+    @Published var networkProtocol: NetworkTransportProtocol?
     @Published var receiverTrayEnabled = true
     @Published var receiverKeyboardButtonEnabled = true
     // Mac's live cache of the connected receiver's OWN preferences — the
@@ -681,6 +684,9 @@ final class SenderController: ObservableObject {
     }
 
     private var browser: NWBrowser?
+    /// `_meowdisp-q._udp` — QUIC reachability/capability HINTS only (see
+    /// `QUICDiscoveryHintStore`); never trust, never a connect request.
+    private var quicHintBrowser: NWBrowser?
     // Last receiver-originated Connect token handled per peer id, so a
     // browse re-fire with the same still-published token (mDNS is noisy)
     // doesn't redial a session that's already coming up.
@@ -854,6 +860,26 @@ final class SenderController: ObservableObject {
         }
         browser.start(queue: .main)
         self.browser = browser
+        startQUICHintBrowsing()
+    }
+
+    private func startQUICHintBrowsing() {
+        let parameters = NWParameters.udp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: QUICTransport.bonjourServiceType, domain: nil),
+                                using: parameters)
+        browser.browseResultsChangedHandler = { results, _ in
+            // Hint only: an advertised id + qv lets Auto ATTEMPT QUIC on a
+            // local route; the pinned handshake still decides who answered.
+            let entries: [QUICDiscoveryHintStore.Entry] = results.compactMap { result in
+                guard case .bonjour(let txt) = result.metadata,
+                      let hint = QUICDiscoveryHint(txt: txt.dictionary) else { return nil }
+                return QUICDiscoveryHintStore.Entry(hint: hint, endpoint: result.endpoint)
+            }
+            QUICDiscoveryHintStore.shared.replaceAll(entries)
+        }
+        browser.start(queue: .main)
+        quicHintBrowser = browser
     }
 
     private func startPairingListener() {
@@ -1553,7 +1579,13 @@ final class SenderController: ObservableObject {
             removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
             removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) },
-            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0) })
+            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0) },
+            removeNetworkTransportState: {
+                NetworkTransportPreferenceStore.remove(peerID: $0)
+                PeerQUICCapabilityStore.remove(peerID: $0)
+                QUICCooldownStore.shared.clear(peerID: $0)
+                QUICDiscoveryHintStore.shared.remove(peerID: $0)
+            })
         sessionApprovalPrompt.cancelAll(peerID: peerID)
         // Forget must take effect immediately for a still-open listener
         // socket, not just for the next connection this process happens to
@@ -2495,6 +2527,9 @@ final class SenderController: ObservableObject {
         sender.onTransportPath = { [weak session] route in
             session?.route = route
         }
+        sender.onNetworkProtocol = { [weak session] networkProtocol in
+            session?.networkProtocol = networkProtocol
+        }
         sender.onPeerClosed = { [weak self, weak session] in
             // The receiver app quit — a deliberate goodbye, so no reconnect
             // waits around. Reopening the app is a fresh start handled by
@@ -2823,6 +2858,32 @@ final class SenderController: ObservableObject {
         if policy == .blocked { revokeIncomingSessionAuthority(peerID: peerID) }
         objectWillChange.send()
         return true
+    }
+
+    // MARK: - Network Transport (Auto / QUIC / TCP)
+
+    func networkTransportPreference(peerID: String) -> NetworkTransportPreference {
+        NetworkTransportPreferenceStore.load(peerID: peerID)
+    }
+
+    /// Whether explicit QUIC may be offered for this device: this Mac's
+    /// runtime supports it and the device authenticated QUIC support before
+    /// (or advertises it locally right now). Auto never needs this.
+    func quicSelectable(peerID: String) -> Bool {
+        TransportProtocolInputsResolver.quicSelectable(peerID: peerID)
+    }
+
+    /// Persists the per-device setting and hands it to any live session for
+    /// that device (which migrates only when the protocol must change —
+    /// see `MacSender.applyNetworkTransportPreference`).
+    func setNetworkTransportPreference(_ preference: NetworkTransportPreference, peerID: String) {
+        guard preference != .quic || quicSelectable(peerID: peerID)
+                || networkTransportPreference(peerID: peerID) == .quic else { return }
+        NetworkTransportPreferenceStore.save(preference, peerID: peerID)
+        for session in sessions where session.deviceID == peerID || session.intendedPeerID == peerID {
+            session.sender.applyNetworkTransportPreference(preference)
+        }
+        objectWillChange.send()
     }
 
     /// Block is a revocation, like Forget minus the trust removal: an

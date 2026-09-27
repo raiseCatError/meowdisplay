@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 21
+    static let version = 22
 
     /// The pairing protocol's own version, decoupled from `version` (the
     /// media/streaming wire protocol above). Pairing and media evolve on
@@ -186,6 +186,19 @@ enum WireProtocol {
     /// no invitation is sent and the receiver applies its policy to the
     /// legacy sender itself (see `ReceiverSessionAdmission`).
     static let sessionInvitationWireVersion = 21
+
+    /// Protocol version that introduced the optional QUIC transport (reliable
+    /// Control/Video/Audio streams over pinned mutual-TLS QUIC, PROTOCOL.md
+    /// §2.4). Additive: QUIC use is gated ONLY on the explicit authenticated
+    /// `transports`/`qv` capability in hello/welcome, never on `pv` — a
+    /// peer without it (every pv <= 21 peer) simply stays on TCP.
+    static let quicTransportWireVersion = 22
+
+    /// Oldest receiver `pv` whose `streamingProfileRequest` the Mac honors.
+    /// Pinned at 21 — the value the check effectively required before pv 22
+    /// — rather than tracking `version`, so the additive QUIC bump does not
+    /// silently stop honoring pv 21 receivers' requests.
+    static let streamingProfileRequestWireVersion = 21
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change

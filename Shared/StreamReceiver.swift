@@ -134,6 +134,20 @@ final class ReceiverHelloState: @unchecked Sendable {
     private let lock = NSLock()
     private var current = Snapshot()
     private var lastAdvertisedAddrs: [String] = []
+    /// Whether this receiver's QUIC listener is bound right now — hello
+    /// advertises QUIC only then, so a sender never learns a capability
+    /// nothing answers.
+    private var quicAvailable = false
+
+    func setQUICAvailable(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        quicAvailable = value
+    }
+
+    func isQUICAvailable() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return quicAvailable
+    }
     /// Display mode this device asked for with its own pending Connect
     /// request (pv 21 `hello.requestedMode`), until it expires or the Mac's
     /// resulting invitation is accepted.
@@ -343,6 +357,11 @@ final class ReceiverDecodedFrameSink: @unchecked Sendable {
 final class TLSListenerState: @unchecked Sendable {
     private let lock = NSLock()
     private var current: NWListener?
+    /// The TLS listener's QUIC sibling (listener identity + live QUIC
+    /// connections). Carried here so every path that starts, refreshes or
+    /// tears down the secure TCP listener reaches QUIC through the same
+    /// owner — the two can never follow different lifecycles.
+    let quic = QUICReceiverContext()
 
     func hasCurrent() -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -973,6 +992,8 @@ final class StreamReceiver: ObservableObject {
 
     private let tlsListenerState = TLSListenerState()
     private let pairingListenerState = PairingListenerState()
+    /// Admission mirror for QUIC media (see `ReceiverMediaAdmissionGate`).
+    private let mediaAdmissionGate = ReceiverMediaAdmissionGate()
     // Receiver-originated Connect (see connectDebug): a short-lived token
     // published in the `_opensidecar._tcp` TXT record. The Mac already
     // browses that service continuously (it's how "Paired · Nearby" is
@@ -1343,6 +1364,9 @@ final class StreamReceiver: ObservableObject {
                 pairingListenerState.currentListener()?.service = advertisementState.pairingService(
                     installID: installID, protocolVersion: advertisedProtocolVersion,
                     pairingProtocolVersion: WireProtocol.pairingVersion)
+                tlsListenerState.quic.currentListener()?.service = QUICReceiverListener.quicService(
+                    advertisementState: advertisementState, installID: installID,
+                    protocolVersion: advertisedProtocolVersion)
                 Log.info("re-advertising as \"\(resolved)\"")
             }
         }
@@ -1468,6 +1492,8 @@ final class StreamReceiver: ObservableObject {
         _ = presenter
         _ = videoDecoder
         selfBox.install(self)
+        let helloState = self.helloState
+        tlsListenerState.quic.setAvailabilityObserver { helloState.setQUICAvailable($0) }
         uiSink.target = self
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
         pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
@@ -2016,6 +2042,7 @@ final class StreamReceiver: ObservableObject {
             let finish: @Sendable () -> Void = {
                 guard finishedOnce.fireOnce() else { return }
                 tlsListenerState.cancelCurrent()
+                tlsListenerState.quic.cancelCurrent(closeGroups: true)
                 pairingListenerState.cancelCurrent()
                 reconnectContext.update { $0.manualConnectPeerID = nil }
                 // Deliberate teardown by this device: no automatic recovery,
@@ -2071,6 +2098,14 @@ final class StreamReceiver: ObservableObject {
         pairingSuppressionState: PairingSuppressionState, advertisementState: ReceiverAdvertisementState,
         pipeline: ReceiverPipelineActor, installID: String, advertisedProtocolVersion: Int
     ) {
+        // The QUIC sibling first: it keeps its own "already listening" guard,
+        // so this also re-arms QUIC whenever the TLS listener is re-armed.
+        if let identity = TrustStore.shared.ownIdentity() {
+            QUICReceiverListener.startIfNeeded(
+                context: tlsListenerState.quic, identity: identity, queue: queue,
+                pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
+                pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
+        }
         guard !tlsListenerState.hasCurrent(), let identity = TrustStore.shared.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
@@ -2165,6 +2200,7 @@ final class StreamReceiver: ObservableObject {
     ) {
         queue.async {
             tlsListenerState.cancelCurrent()
+            tlsListenerState.quic.cancelCurrent()
             startTLSListener(
                 queue: queue, tlsListenerState: tlsListenerState,
                 pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
@@ -2293,6 +2329,7 @@ final class StreamReceiver: ObservableObject {
     /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
         resetSessionNegotiation()
+        mediaAdmissionGate.begin(generation: generation)
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
@@ -2399,19 +2436,10 @@ final class StreamReceiver: ObservableObject {
     /// connection has not finished TLS yet. Callers treat it as "no pinned
     /// peer" and fail closed.
     private static func resolveAuthenticatedPeerID(from connection: NWConnection) -> String? {
-        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
-            return nil
-        }
-        var resolved: String?
-        sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
-            guard resolved == nil else { return }
-            let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
-            guard let key = SecCertificateCopyKey(secCert),
-                  let x963 = SecKeyCopyExternalRepresentation(key, nil) as Data?,
-                  let pub = try? P256.Signing.PublicKey(x963Representation: x963) else { return }
-            resolved = TrustStore.shared.peerID(forSPKI: pub.derRepresentation)
-        }
-        return resolved
+        // TLS metadata for TCP, QUIC metadata for a QUIC Control stream —
+        // the same pinned SPKI either way (`TLSConfigurator`).
+        guard let spki = TLSConfigurator.authenticatedPeerSPKI(of: connection) else { return nil }
+        return TrustStore.shared.peerID(forSPKI: spki)
     }
 
     // MARK: - Liveness (ping + watchdog)
@@ -2555,6 +2583,7 @@ final class StreamReceiver: ObservableObject {
                     outgoingSessionRequest = nil
                     helloState.setRequestedMode(nil, until: .distantPast)
                     sessionAdmission.revoke()
+                    mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
                 }
                 publishSessionNegotiation(awaitingSenderName: nil)
             }
@@ -2804,6 +2833,10 @@ final class StreamReceiver: ObservableObject {
         // proved a real hardware decoder exists, never guessed from OS
         // version.
         hello["codecs"] = Self.supportedCodecs.map(\.wireValue)
+        // Additive (pv 22): explicit transport capability. QUIC is listed
+        // only while this receiver's QUIC listener is bound; a sender treats
+        // absence as TCP-only and never infers QUIC from `pv`.
+        hello.merge(QUICPeerCapability.advertisedFields(quicAvailable: helloState.isQUICAvailable())) { $1 }
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
@@ -4250,6 +4283,7 @@ final class StreamReceiver: ObservableObject {
                 self.sendControl(SessionInvitationResponse(id: id, result: .cancelled).message)
             }
             self.sessionAdmission.revoke()
+            self.mediaAdmissionGate.set(admitted: self.sessionAdmission.admitted)
             self.publishSessionNegotiation(awaitingSenderName: nil)
         }
     }
@@ -4275,6 +4309,7 @@ final class StreamReceiver: ObservableObject {
     private func admitSession(invitationID: String?, peerID: String) {
         let wasAdmitted = sessionAdmission.admitted
         sessionAdmission.admit(invitationID: invitationID, peerID: peerID)
+        mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         guard !wasAdmitted else { return }
         sendControl(["type": "kf"])
         // This device's own request, if it covered this Mac, is answered by
@@ -4302,6 +4337,7 @@ final class StreamReceiver: ObservableObject {
         // Another Mac's live admission (possible for a pre-pv 21 sender,
         // which records no invitation of its own) is left alone.
         let admissionRevoked = sessionAdmission.revoke(peerID: peerID, currentPeerID: currentPeerID)
+        mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         guard !dismissed.isEmpty || admissionRevoked else { return }
         Log.info("sessionInvite: revoked peer=\(peerID) prompts=\(dismissed.count) admission=\(admissionRevoked)")
         publishSessionNegotiation(awaitingSenderName: nil)
@@ -4331,6 +4367,7 @@ final class StreamReceiver: ObservableObject {
     /// the previous connection can no longer be answered.
     private func resetSessionNegotiation() {
         sessionAdmission.beginConnection()
+        mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         incomingSessionApprovals = PendingSessionApprovals()
         currentSessionInvitationID = nil
         publishSessionNegotiation(awaitingSenderName: nil)
@@ -4937,7 +4974,7 @@ final class StreamReceiver: ObservableObject {
         let actor = ReceiverPipelineActor(
             queue: queue, sendTargetBox: sendTargetBox, reconnectContext: reconnectContext,
             uiEffects: makePipelineUIEffects(), hostEffects: makePipelineHostEffects(),
-            framePipeline: framePipeline)
+            framePipeline: framePipeline, quicGroups: tlsListenerState.quic.groups)
         // `pipelineBox` lets `makePipelineHostEffects()`'s `ensureTLSListening`
         // closure reach this actor at call time with zero `StreamReceiver`
         // capture — see `ReceiverPipelineActorBox`'s doc comment for why a
@@ -5226,6 +5263,9 @@ final class StreamReceiver: ObservableObject {
                     guard let pipeline = pipelineBox.current() else { return }
                     Task { await pipeline.setConnected(false) }
                 }
+            },
+            mediaAdmitted: { [mediaAdmissionGate] generation in
+                mediaAdmissionGate.isAdmitted(generation: generation)
             })
     }
 

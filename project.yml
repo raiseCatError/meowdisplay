@@ -73,7 +73,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
         NSLocalNetworkUsageDescription: MeowDisplay connects to your iPad or iPhone over the local network in WiFi mode.
-        NSBonjourServices: ["_opensidecar._tcp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
+        NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
         # --- Sparkle auto-update ---
         # Disabled: MeowDisplay does not yet have its own appcast + signing
@@ -136,7 +136,7 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSLocalNetworkUsageDescription: MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.
-        NSBonjourServices: ["_opensidecar._tcp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
+        NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
         # Disabled: see the sender target's Sparkle comment above — no
         # MeowDisplay-owned appcast/signing infrastructure exists yet.
@@ -178,6 +178,12 @@ targets:
       - Mac/MacSenderVideoEncoder.swift
       - Mac/SenderTransport.swift
       - Mac/MacSenderTransportController.swift
+      # QUIC transport (PROTOCOL.md §8): the controller and StreamReceiver
+      # above reference these directly.
+      - Mac/QUICTransportSession.swift
+      - Mac/TransportProtocolSelection.swift
+      - Shared/QUICTransportProtocol.swift
+      - Shared/QUICReceiverSession.swift
       - Mac/AutoConnectPolicy.swift
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
@@ -304,7 +310,7 @@ targets:
         UIRequiresFullScreen: true
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
-        NSBonjourServices: ["_opensidecar._tcp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
+        NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         # "Audio, AirPlay, and Picture in Picture": required for the receiver's
         # Picture in Picture window to keep showing the stream in the background.
         UIBackgroundModes: [audio]

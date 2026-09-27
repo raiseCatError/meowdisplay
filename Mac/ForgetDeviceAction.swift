@@ -9,7 +9,8 @@ enum ForgetDeviceAction {
         removeRemoteEndpoint: (String) -> Void,
         removeWakeMetadata: (String) -> Void,
         removeInputAuthorization: (String) -> Void = { _ in },
-        removeSessionPolicy: (String) -> Void = { _ in }
+        removeSessionPolicy: (String) -> Void = { _ in },
+        removeNetworkTransportState: (String) -> Void = { _ in }
     ) {
         forgetTrust(peerID)
         removeRemoteEndpoint(peerID)
@@ -21,5 +22,8 @@ enum ForgetDeviceAction {
         // A Block or Always Allow for session invitations belongs to this
         // trust relationship only.
         removeSessionPolicy(peerID)
+        // The Network Transport setting, learned QUIC capability, cooldown
+        // and discovery hint belong to this device's trust relationship too.
+        removeNetworkTransportState(peerID)
     }
 }

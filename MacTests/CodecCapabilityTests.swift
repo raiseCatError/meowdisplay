@@ -580,7 +580,7 @@ final class CodecCapabilityTests: XCTestCase {
         XCTAssertEqual(WireProtocol.hevcCodecWireVersion, 19)
     }
 
-    func testWireProtocolVersionIsCurrentlyTwentyOne() {
+    func testWireProtocolVersionIsCurrentlyTwentyTwo() {
         // Additive feature (this milestone bumps `WireProtocol.version`
         // itself, following the same convention as every prior additive
         // feature in this file — e.g. `maxFPSWireVersion`,
@@ -589,7 +589,10 @@ final class CodecCapabilityTests: XCTestCase {
         // way `MirrorUnavailableOfferPolicyTests` documents superseding
         // `StreamingPriorityTests`' matching canary.
         // Superseded by Smart Touch (`smartTouchWireVersion`, pv 20), then
-        // session invitations (`sessionInvitationWireVersion`, pv 21).
-        XCTAssertEqual(WireProtocol.version, 21)
+        // session invitations (`sessionInvitationWireVersion`, pv 21), then
+        // the optional QUIC transport (`quicTransportWireVersion`, pv 22).
+        XCTAssertEqual(WireProtocol.version, 22)
+        XCTAssertEqual(WireProtocol.quicTransportWireVersion, 22)
+        XCTAssertEqual(WireProtocol.minSupportedPeer, 1)
     }
 }

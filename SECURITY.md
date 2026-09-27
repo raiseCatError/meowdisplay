@@ -24,6 +24,35 @@ Both ends present a certificate (mutual authentication) — the listener
 explicitly requires a client certificate, so a one-way-authenticated
 connection is never silently accepted.
 
+### QUIC (optional, same trust)
+
+On network routes a session may instead use QUIC, whose TLS 1.3 is built
+into the protocol. It is configured by the same code as TCP/TLS
+(`TLSConfigurator.pinnedQUICOptions`): the same per-device identity, the
+same required client certificate, the same SPKI pin check — there is no
+separate QUIC key, pin or trust store and no unencrypted form. It adds a
+fixed ALPN (`meowdisplay-quic/1`) and disables session tickets and
+resumption, so no 0-RTT early data exists and no click, key, drag, setting
+or session command can be replayed ahead of a full handshake. Above the
+transport nothing changes: the `hello` identity check, per-connection
+admission and the per-connection input grant apply exactly as on TCP.
+
+**No silent downgrade.** In Auto, the Mac falls back from QUIC to TCP only
+after an ordinary reachability failure (UDP blocked, nothing listening,
+unreachable path, no answer in time) — and TCP is itself the same pinned
+mutual TLS. A pin mismatch, certificate or client-certificate failure, ALPN
+mismatch, identity mismatch or protocol violation ends the attempt with an
+error instead of retrying over TCP. A device explicitly set to QUIC never
+uses TCP. The `_meowdisp-q._udp` Bonjour record is a hint only: a spoofed
+one can at most cause a QUIC dial that pinning then rejects.
+
+**Resource limits.** A receiver accepts only a small number of live QUIC
+connections, three sender-opened streams per connection (one per channel),
+bounded frame sizes checked before buffering, and time limits for the stream
+preface and the first Control stream; media is refused until the session is
+admitted, and Forget/Block closes QUIC connections that have not yet
+presented a session.
+
 ## Identity pinning (not certificate-authority trust)
 
 MeowDisplay does not use certificate-authority chain validation. Certificates
@@ -98,6 +127,8 @@ other end. It does not by itself admit a session:
   pair.
 - **LAN/WiFi**: local only, discovered via Bonjour. Nothing leaves the local
   network.
+- **QUIC** (when used): the same local or Remote route over UDP port 9001
+  instead of TCP port 9001; same pinned identities, same destinations.
 - **Remote Access**: uses a reachable private network address (typically a
   [Tailscale](https://tailscale.com) endpoint) to locate the peer outside
   the local network. The remote endpoint address is a **routing hint, not
