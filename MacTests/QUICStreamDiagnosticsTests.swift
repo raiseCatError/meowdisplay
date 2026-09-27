@@ -45,14 +45,15 @@ final class QUICStreamDiagnosticsTests: XCTestCase {
 
     private func wait(_ t: TimeInterval) { RunLoop.current.run(until: Date().addingTimeInterval(t)) }
 
-    private func run(_ name: String, serverLimits: Bool, payloadWithPreface: Bool, channels: [TransportChannel]) throws {
+    private func run(_ name: String, serverLimits: Bool, payloadWithPreface: Bool, channels: [TransportChannel],
+                     bidiLimit: Int = QUICChannelRegistry.maxStreams) throws {
         let (serverID, serverSPKI) = try identity()
         let (clientID, clientSPKI) = try identity()
         let log = Log2()
         let serverOptions = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
             identity: serverID, pinnedSPKIs: { [clientSPKI] }, isListener: true, queue: queue))
         if serverLimits {
-            serverOptions.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
+            serverOptions.initialMaxStreamsBidirectional = bidiLimit
             serverOptions.initialMaxStreamsUnidirectional = 0
         }
         let listener = try NWListener(using: QUICReceiverListener.listenerParameters(quic: serverOptions), on: .any)
@@ -80,7 +81,8 @@ final class QUICStreamDiagnosticsTests: XCTestCase {
         }
         listener.start(queue: queue)
         let deadline = Date().addingTimeInterval(5)
-        while listener.port == nil && Date() < deadline { wait(0.05) }
+        while listener.state != .ready && Date() < deadline { wait(0.05) }
+        log.add("server: listener \(listener.state) port=\(String(describing: listener.port))")
         let clientOptions = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
             identity: clientID, pinnedSPKIs: { [serverSPKI] }, isListener: false, queue: queue))
         let group = NWConnectionGroup(with: NWMultiplexGroup(to: .hostPort(host: "127.0.0.1", port: listener.port!)),
@@ -143,6 +145,8 @@ final class QUICStreamDiagnosticsTests: XCTestCase {
                 channels: [.control, .video, .audio])
         try run("D-limits3-prefaceOnly-2streams", serverLimits: true, payloadWithPreface: false,
                 channels: [.video, .control])
+        try run("E-limits4-prefaceOnly-3streams", serverLimits: true, payloadWithPreface: false,
+                channels: [.control, .video, .audio], bidiLimit: 4)
     }
 }
 

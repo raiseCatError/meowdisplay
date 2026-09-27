@@ -294,7 +294,9 @@ final class QUICReceiverGroup: @unchecked Sendable {
             switch state {
             case .ready:
                 #if DEBUG
-                Log.info("quicListener: connection \(id) stream ready — reading its preface")
+                let streamID = (stream.metadata(definition: NWProtocolQUIC.definition) as? NWProtocolQUIC.Metadata)
+                    .map { String($0.streamIdentifier) } ?? "?"
+                Log.info("quicListener: connection \(id) stream \(streamID) ready — reading its preface")
                 #endif
                 self.readPreface(of: stream)
             case .failed(let error), .waiting(let error):
