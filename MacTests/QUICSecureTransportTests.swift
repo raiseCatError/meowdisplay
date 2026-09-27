@@ -129,8 +129,9 @@ final class QUICSecureTransportTests: XCTestCase {
         }
     }
 
-    /// Starts a receiver-shaped QUIC listener (production options + the same
-    /// stream limits `QUICReceiverListener` sets). The server never reads
+    /// Starts a receiver-shaped QUIC listener (production options, the same
+    /// stream limits and the SAME listener parameters `QUICReceiverListener`
+    /// uses — `listenerParameters(quic:)`). The server never reads
     /// the Video stream past its preface — so if Control only arrived behind
     /// Video, it would never arrive at all.
     private func startServer(identity: TestIdentity, pinned: [Data], outcome: Outcome) throws -> NWListener {
@@ -138,7 +139,7 @@ final class QUICSecureTransportTests: XCTestCase {
             identity: identity.identity, pinnedSPKIs: { pinned }, isListener: true, queue: queue))
         options.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
         options.initialMaxStreamsUnidirectional = 0
-        let listener = try NWListener(using: NWParameters(quic: options), on: .any)
+        let listener = try NWListener(using: QUICReceiverListener.listenerParameters(quic: options), on: .any)
         let queue = self.queue
         listener.newConnectionGroupHandler = { group in
             group.newConnectionHandler = { stream in
@@ -336,5 +337,140 @@ final class QUICSecureTransportTests: XCTestCase {
             receiverSupportsInvitations: true, needsSenderApproval: false)
         XCTAssertNotEqual(wrongKey, .firstConnection)
         XCTAssertFalse(state.isAdmitted)
+    }
+
+    // MARK: - Production receiver path (physical-iPhone regression)
+
+    private func receiverOptions(_ identity: TestIdentity, pinning client: Data) throws -> NWProtocolQUIC.Options {
+        let options = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
+            identity: identity.identity, pinnedSPKIs: { [client] }, isListener: true, queue: queue))
+        options.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
+        options.initialMaxStreamsUnidirectional = 0
+        return options
+    }
+
+    private func startedListener(_ parameters: NWParameters, on port: NWEndpoint.Port) throws -> NWListener {
+        let listener = try NWListener(using: parameters, on: port)
+        listener.newConnectionGroupHandler = { group in group.cancel() }
+        listener.start(queue: queue)
+        waitUntil(3) {
+            switch listener.state {
+            case .ready, .failed, .cancelled: return true
+            default: return false
+            }
+        }
+        return listener
+    }
+
+    /// The listener's UDP port must never be shared with a second binding
+    /// (a stale listener during a re-arm): with local-endpoint reuse — what
+    /// the receiver used before — a second listener on the same port comes
+    /// up silently, which is the precondition for another binding's
+    /// new-flow path seeing a live connection's datagrams.
+    func testProductionQUICListenerNeverSharesItsUDPPort() throws {
+        let identity = try makeIdentity()
+        let peer = try makeIdentity().spki
+        let production = QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer))
+        XCTAssertFalse(production.allowLocalEndpointReuse)
+        XCTAssertTrue(production.includePeerToPeer)
+
+        let first = try startedListener(production, on: .any)
+        guard first.state == .ready, let port = first.port else {
+            first.cancel()
+            throw XCTSkip("loopback QUIC listener unavailable (\(first.state))")
+        }
+        let second = try startedListener(
+            QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer)), on: port)
+        XCTAssertNotEqual(second.state, .ready, "a second production QUIC listener must not share UDP \(port)")
+        second.cancel()
+
+        // Contrast: the previous reuse-enabled parameters let it share.
+        let reusing = QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer))
+        reusing.allowLocalEndpointReuse = true
+        let reused = try startedListener(reusing, on: port)
+        XCTAssertEqual(reused.state, .ready, "local-endpoint reuse is what allowed a shared UDP port")
+        reused.cancel()
+        first.cancel()
+    }
+
+    private final class GroupEvents: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _controls = 0
+        private var _media = 0
+        private var _owners: [QUICReceiverGroup] = []
+        func control() { lock.lock(); _controls += 1; lock.unlock() }
+        func media() { lock.lock(); _media += 1; lock.unlock() }
+        func owner(_ o: QUICReceiverGroup) { lock.lock(); _owners.append(o); lock.unlock() }
+        var controls: Int { lock.lock(); defer { lock.unlock() }; return _controls }
+        var mediaCount: Int { lock.lock(); defer { lock.unlock() }; return _media }
+        var owners: [QUICReceiverGroup] { lock.lock(); defer { lock.unlock() }; return _owners }
+    }
+
+    /// The real receiver edge — production listener parameters and
+    /// `QUICReceiverGroup` accept/preface handling — over real QUIC, dialed
+    /// the way `MacSenderTransportController.openQUICStreams` does (three
+    /// streams opened together, each preface sent right after `start`). The
+    /// previous loopback tests used their own ad-hoc stream handling, so
+    /// this production path had never run over a real connection.
+    func testProductionReceiverGroupAcceptsAllThreeChannels() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let listener = try NWListener(
+            using: QUICReceiverListener.listenerParameters(quic: try receiverOptions(server, pinning: client.spki)),
+            on: .any)
+        let registry = QUICReceiverGroupRegistry()
+        let events = GroupEvents()
+        let queue = self.queue
+        listener.newConnectionGroupHandler = { group in
+            let owner = registry.admit { id in
+                QUICReceiverGroup(id: id, group: group, registry: registry, queue: queue,
+                                  onControlStream: { _ in events.control() },
+                                  onMediaReady: { _ in events.media() })
+            }
+            guard let owner else { group.cancel(); return }
+            events.owner(owner)
+            owner.start()
+        }
+        listener.start(queue: queue)
+        waitUntil(5) { listener.port != nil && listener.state == .ready }
+        guard listener.state == .ready, let port = listener.port else {
+            listener.cancel()
+            throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))")
+        }
+
+        let group = NWConnectionGroup(with: NWMultiplexGroup(to: .hostPort(host: "127.0.0.1", port: port)),
+                                      using: NWParameters(quic: try clientOptions(client, pinning: server.spki)))
+        let streams = OutcomeStreams()
+        group.stateUpdateHandler = { state in
+            guard case .ready = state else { return }
+            for channel in [TransportChannel.control, .video, .audio] {
+                let created: NWConnection? = NWConnection(from: group)
+                guard let stream = created else { return }
+                streams.keep(stream)
+                stream.start(queue: queue)
+                stream.send(content: QUICStreamPreface(channel: channel).encode(), completion: .contentProcessed { _ in })
+            }
+        }
+        group.newConnectionHandler = { stream in stream.cancel() }
+        group.start(queue: queue)
+
+        waitUntil(8) { events.controls == 1 && events.mediaCount == 2 }
+        XCTAssertEqual(events.controls, 1, "the Control stream reaches the session pipeline")
+        XCTAssertEqual(events.mediaCount, 2, "Video and Audio are validated and parked")
+        XCTAssertEqual(events.owners.count, 1, "all three streams ride one QUIC connection")
+        XCTAssertFalse(events.owners.first?.isClosed ?? true, "a healthy connection is not closed")
+        XCTAssertEqual(events.owners.first?.takePendingMedia().count, 2)
+
+        group.cancel()
+        streams.cancelAll()
+        registry.closeAll(error: nil)
+        listener.cancel()
+    }
+
+    private final class OutcomeStreams: @unchecked Sendable {
+        private let lock = NSLock()
+        private var streams: [NWConnection] = []
+        func keep(_ s: NWConnection) { lock.lock(); streams.append(s); lock.unlock() }
+        func cancelAll() { lock.lock(); let all = streams; lock.unlock(); all.forEach { $0.cancel() } }
     }
 }

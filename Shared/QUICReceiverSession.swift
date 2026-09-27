@@ -254,6 +254,9 @@ final class QUICReceiverGroup: @unchecked Sendable {
             self.accept(stream)
         }
         group.start(queue: queue)
+        #if DEBUG
+        Log.info("quicListener: connection \(id) accepted")
+        #endif
         queue.asyncAfter(deadline: .now() + QUICReceiverLimits.applicationHandshakeTimeout) { [weak self] in
             guard let self, !self.isClosed, !self.hasHandedOffControl else { return }
             Log.info("quicListener: connection \(id) presented no Control stream in time — closing")
@@ -281,34 +284,90 @@ final class QUICReceiverGroup: @unchecked Sendable {
             close(topologyError)
             return
         }
-        stream.start(queue: queue)
         let id = self.id
+        // Read nothing until the accepted stream is `.ready`. A stream that
+        // fails first is a TRANSPORT failure of this connection (on iOS the
+        // accepted stream flow is still setting up when it is handed to us,
+        // and dies with its connection) — never a peer protocol violation.
+        stream.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.isClosed, !self.isRegistered(stream) else { return }
+            switch state {
+            case .ready:
+                #if DEBUG
+                Log.info("quicListener: connection \(id) stream ready — reading its preface")
+                #endif
+                self.readPreface(of: stream)
+            case .failed(let error), .waiting(let error):
+                self.closeForTransportFailure("stream \(state) before its preface: \(error)")
+            default:
+                break
+            }
+        }
+        stream.start(queue: queue)
         queue.asyncAfter(deadline: .now() + QUICReceiverLimits.prefaceTimeout) { [weak self] in
             guard let self, !self.isClosed, !self.isRegistered(stream) else { return }
             Log.info("quicListener: connection \(id) stream sent no valid preface in time — closing")
             self.close(.invalidStreamPreface)
         }
-        // Exactly 8 bytes: Network.framework reassembles a split preface,
-        // and nothing past it is consumed here.
+    }
+
+    /// Exactly 8 bytes: Network.framework reassembles a split preface, and
+    /// nothing past it is consumed here. Only ever issued once per stream,
+    /// from its `.ready` transition.
+    private func readPreface(of stream: NWConnection) {
+        lock.lock()
+        let first = !prefaceReads.contains(ObjectIdentifier(stream))
+        if first { prefaceReads.insert(ObjectIdentifier(stream)) }
+        lock.unlock()
+        guard first else { return }
         stream.receive(minimumIncompleteLength: QUICStreamPreface.length,
-                       maximumLength: QUICStreamPreface.length) { [weak self] data, _, _, error in
+                       maximumLength: QUICStreamPreface.length) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            guard error == nil, let data, data.count == QUICStreamPreface.length else {
-                self.close(.invalidStreamPreface)
-                return
-            }
-            switch QUICStreamPreface.parse(data) {
-            case .parsed(let preface, _):
-                self.register(stream, channel: preface.channel)
-            case .rejected(let rejection):
-                self.close(rejection)
-            case .needMoreData:
-                self.close(.invalidStreamPreface)
+            switch Self.prefaceReadOutcome(data: data, isComplete: isComplete, error: error) {
+            case .parsed(let channel):
+                self.register(stream, channel: channel)
+            case .violation(let violation):
+                self.close(violation)
+            case .transportFailure(let detail):
+                self.closeForTransportFailure("preface read failed: \(detail)")
             }
         }
     }
 
+    enum PrefaceReadOutcome: Equatable {
+        case parsed(TransportChannel)
+        /// The peer sent bytes that are not a valid preface, or ended the
+        /// stream before a whole one: a protocol violation.
+        case violation(QUICApplicationError)
+        /// The read itself failed (the stream or its connection went away):
+        /// a transport failure, reported as such and never as a violation.
+        case transportFailure(String)
+    }
+
+    /// Pure classification of the preface read's completion.
+    static func prefaceReadOutcome(data: Data?, isComplete: Bool, error: NWError?) -> PrefaceReadOutcome {
+        if let error { return .transportFailure("\(error)") }
+        guard let data, !data.isEmpty else {
+            return isComplete ? .violation(.invalidStreamPreface) : .transportFailure("no data")
+        }
+        guard data.count == QUICStreamPreface.length else { return .violation(.invalidStreamPreface) }
+        switch QUICStreamPreface.parse(data) {
+        case .parsed(let preface, _): return .parsed(preface.channel)
+        case .rejected(let rejection): return .violation(rejection)
+        case .needMoreData: return .violation(.invalidStreamPreface)
+        }
+    }
+
+    /// The connection broke underneath us (not the peer's fault as far as
+    /// the protocol is concerned): close it without an application error.
+    private func closeForTransportFailure(_ detail: String) {
+        Log.info("quicListener: connection \(id) transport failure — \(detail)")
+        close(nil)
+    }
+
     private var registeredStreams: [ObjectIdentifier] = []
+    /// Streams whose single preface read has been issued (under `lock`).
+    private var prefaceReads: Set<ObjectIdentifier> = []
 
     private func isRegistered(_ stream: NWConnection) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -399,10 +458,7 @@ enum QUICReceiverListener {
         quic.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
         quic.initialMaxStreamsUnidirectional = 0
         do {
-            let params = NWParameters(quic: quic)
-            params.includePeerToPeer = true
-            params.allowLocalEndpointReuse = true
-            params.serviceClass = .interactiveVideo
+            let params = listenerParameters(quic: quic)
             let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: QUICTransport.udpPort)!)
             context.install(listener)
             listener.service = quicService(advertisementState: advertisementState, installID: installID,
@@ -457,6 +513,28 @@ enum QUICReceiverListener {
         } catch {
             Log.info("QUIC listener could not be created: \(error) — TCP remains available")
         }
+    }
+
+    /// The QUIC listener's parameters — the one definition production and
+    /// the loopback QUIC tests share.
+    ///
+    /// Deliberately WITHOUT `allowLocalEndpointReuse` (unlike the TCP
+    /// listener, where it only eases re-binding after TIME_WAIT). A QUIC
+    /// server demultiplexes every accepted connection by UDP 4-tuple on the
+    /// listener's own port; with local-endpoint reuse on, a second binding
+    /// of UDP 9001 (a stale listener during a re-arm) is silently allowed,
+    /// and on iPhone the listener's new-flow path was observed receiving
+    /// datagrams of an already-accepted connection, failing to register a
+    /// duplicate flow for that same 4-tuple (NECP ADD_FLOW "File exists"),
+    /// and taking the live connection down with it (EINVAL). Without reuse a
+    /// re-arm that races an old binding fails with EADDRINUSE and retries
+    /// (`startIfNeeded`'s 1 s backoff) instead of sharing the port.
+    static func listenerParameters(quic: NWProtocolQUIC.Options) -> NWParameters {
+        let params = NWParameters(quic: quic)
+        params.includePeerToPeer = true
+        params.allowLocalEndpointReuse = false
+        params.serviceClass = .interactiveVideo
+        return params
     }
 
     /// `_meowdisp-q._udp`: `id`/`pv`/`qv` only — a capability HINT, never
