@@ -376,23 +376,7 @@ actor ReceiverFramePipeline {
                                     connection: QUICReceiverGroup) {
         guard generation == self.generation, !connection.isClosed else { return }
         if let data, !data.isEmpty {
-            syncState.recordDataReceived(Date())
-            var assembler = mediaAssemblers[channel.rawValue] ?? QUICFrameAssembler(channel: channel)
-            let payloads: [Data]
-            do {
-                payloads = try assembler.append(data)
-            } catch {
-                mediaAssemblers[channel.rawValue] = nil
-                failQUIC(connection, .protocolViolation, "\(channel) framing: \(error)")
-                return
-            }
-            mediaAssemblers[channel.rawValue] = assembler
-            for payload in payloads {
-                if let violation = handleQUICMediaPayload(payload, channel: channel, generation: generation) {
-                    failQUIC(connection, violation, "\(channel) payload")
-                    return
-                }
-            }
+            guard ingestQUICMedia(data, channel: channel, generation: generation, connection: connection) else { return }
         }
         // A stream error is the connection's failure; it surfaces through
         // the Control stream / connection state like any transport loss.
@@ -404,6 +388,38 @@ actor ReceiverFramePipeline {
             return
         }
         receiveMedia(on: stream, channel: channel, generation: generation, connection: connection)
+    }
+
+    /// The generation-gated entry point for every chunk read from a QUIC
+    /// Video/Audio stream — the real stream loop above and tests both call
+    /// it, so there is one place that bounds, deframes and routes media.
+    /// Returns false when the chunk was refused (stale, or a violation that
+    /// has closed the QUIC connection).
+    @discardableResult
+    func ingestQUICMedia(_ data: Data, channel: TransportChannel, generation: Int,
+                         connection: QUICReceiverGroup) -> Bool {
+        guard generation == self.generation, !connection.isClosed, channel != .control else {
+            if channel == .control { failQUIC(connection, .unexpectedChannel, "control channel offered as media") }
+            return false
+        }
+        syncState.recordDataReceived(Date())
+        var assembler = mediaAssemblers[channel.rawValue] ?? QUICFrameAssembler(channel: channel)
+        let payloads: [Data]
+        do {
+            payloads = try assembler.append(data)
+        } catch {
+            mediaAssemblers[channel.rawValue] = nil
+            failQUIC(connection, .protocolViolation, "\(channel) framing: \(error)")
+            return false
+        }
+        mediaAssemblers[channel.rawValue] = assembler
+        for payload in payloads {
+            if let violation = handleQUICMediaPayload(payload, channel: channel, generation: generation) {
+                failQUIC(connection, violation, "\(channel) payload")
+                return false
+            }
+        }
+        return true
     }
 
     /// Routes one deframed QUIC media payload into the SAME decode/audio

@@ -10,15 +10,17 @@
 import Foundation
 import Network
 
-/// Marks a QUIC connection's application close code (PROTOCOL.md §8.6)
-/// before it is cancelled, so the peer's diagnostics see WHY. Best effort:
-/// the local log line is the authoritative record.
+/// QUIC application error handling (PROTOCOL.md §8.6). The documented
+/// codes are recorded in a bounded local log line when either side closes a
+/// connection for a violation; the connection is then cancelled. v1 does not
+/// put the code on the wire: the SDK's `NWProtocolQUIC.Metadata.
+/// applicationError` takes an SDK-specific value type whose construction
+/// could not be verified against the installed SDK for this change, and a
+/// guessed API is not worth the risk for a diagnostic. Closing is what
+/// matters for safety, and it never depends on the code.
 enum QUICApplicationClose {
     static func mark(_ connection: NWConnection, error: QUICApplicationError) {
-        guard let metadata = connection.metadata(definition: NWProtocolQUIC.definition) as? NWProtocolQUIC.Metadata else {
-            return
-        }
-        metadata.applicationError = error.rawValue
+        Log.info("quic: closing with application error \(error)")
     }
 }
 
@@ -313,7 +315,9 @@ final class QUICReceiverGroup: @unchecked Sendable {
         return registeredStreams.contains(ObjectIdentifier(stream))
     }
 
-    private func register(_ stream: NWConnection, channel: TransportChannel) {
+    /// Records a stream whose preface named `channel` (internal only so the
+    /// hostless tests can drive topology without a live QUIC handshake).
+    func register(_ stream: NWConnection, channel: TransportChannel) {
         lock.lock()
         guard !closed else {
             lock.unlock()

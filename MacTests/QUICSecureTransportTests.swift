@@ -1,0 +1,304 @@
+import XCTest
+import Network
+import Security
+import CryptoKit
+import X509
+import SwiftASN1
+
+/// Real loopback QUIC between two ISOLATED temporary identities, built with
+/// the production `TLSConfigurator.pinnedQUICOptions` — never the
+/// developer's MeowDisplay Keychain rows: every identity lives in a
+/// throwaway file keychain created and deleted by this test case. Covers the
+/// pinned-mutual-authentication matrix, ALPN, QUIC-metadata peer resolution
+/// and stream multiplexing (an unread Video stream cannot block Control).
+///
+/// If the runner cannot create a temporary keychain identity the tests skip
+/// with the Security status — they never fall back to real identities.
+final class QUICSecureTransportTests: XCTestCase {
+
+    private struct TestIdentity {
+        let identity: SecIdentity
+        let spki: Data
+    }
+
+    private var keychain: SecKeychain?
+    private var keychainPath = ""
+    private let queue = DispatchQueue(label: "quic.secure.transport.tests")
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        keychainPath = NSTemporaryDirectory() + "meowdisplay-quic-tests-\(UUID().uuidString).keychain"
+        let password = UUID().uuidString
+        var created: SecKeychain?
+        let status = SecKeychainCreate(keychainPath, UInt32(password.utf8.count), password, false, nil, &created)
+        guard status == errSecSuccess, let created else {
+            throw XCTSkip("temporary keychain unavailable on this runner (status \(status))")
+        }
+        keychain = created
+    }
+
+    override func tearDown() {
+        if let keychain { SecKeychainDelete(keychain) }
+        keychain = nil
+        try? FileManager.default.removeItem(atPath: keychainPath)
+        super.tearDown()
+    }
+
+    /// A fresh self-signed P-256 identity, generated exactly like
+    /// `TrustStore.generateAndStoreIdentity` but stored only in the
+    /// temporary keychain.
+    private func makeIdentity() throws -> TestIdentity {
+        guard let keychain else { throw XCTSkip("no temporary keychain") }
+        let priv = P256.Signing.PrivateKey()
+        let certKey = Certificate.PrivateKey(priv)
+        let name = try DistinguishedName { CommonName("meowdisplay-quic-test-\(UUID().uuidString)") }
+        let now = Date()
+        let certificate = try Certificate(
+            version: .v3, serialNumber: Certificate.SerialNumber(), publicKey: certKey.publicKey,
+            notValidBefore: now.addingTimeInterval(-3600), notValidAfter: now.addingTimeInterval(3600),
+            issuer: name, subject: name, signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: try Certificate.Extensions { Critical(BasicConstraints.notCertificateAuthority) },
+            issuerPrivateKey: certKey)
+        var serializer = DER.Serializer()
+        try serializer.serialize(certificate)
+        let der = Data(serializer.serializedBytes)
+        var cfError: Unmanaged<CFError>?
+        guard let secKey = SecKeyCreateWithData(priv.x963Representation as CFData, [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+        ] as CFDictionary, &cfError),
+              let secCert = SecCertificateCreateWithData(nil, der as CFData) else {
+            throw XCTSkip("could not build test key/certificate")
+        }
+        var status = SecItemAdd([kSecClass: kSecClassKey, kSecValueRef: secKey,
+                                 kSecUseKeychain: keychain] as CFDictionary, nil)
+        guard status == errSecSuccess else { throw XCTSkip("temporary key import failed (status \(status))") }
+        status = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCert,
+                             kSecUseKeychain: keychain] as CFDictionary, nil)
+        guard status == errSecSuccess else { throw XCTSkip("temporary certificate import failed (status \(status))") }
+        var identity: SecIdentity?
+        status = SecIdentityCreateWithCertificate(keychain, secCert, &identity)
+        guard status == errSecSuccess, let identity else {
+            throw XCTSkip("temporary identity unavailable (status \(status))")
+        }
+        return TestIdentity(identity: identity, spki: priv.publicKey.derRepresentation)
+    }
+
+    // MARK: - Harness
+
+    private final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _prefaces: [TransportChannel] = []
+        private var _serverPeerSPKI: Data?
+        private var _clientError: NWError?
+        private var _clientReady = false
+        private var _controlPayload: Data?
+        private var _serverStreams: [NWConnection] = []
+        func preface(_ c: TransportChannel) { lock.lock(); _prefaces.append(c); lock.unlock() }
+        func serverPeer(_ d: Data?) { lock.lock(); _serverPeerSPKI = d; lock.unlock() }
+        func clientError(_ e: NWError) { lock.lock(); if _clientError == nil { _clientError = e }; lock.unlock() }
+        func clientReady() { lock.lock(); _clientReady = true; lock.unlock() }
+        func control(_ d: Data) { lock.lock(); _controlPayload = d; lock.unlock() }
+        func keep(_ s: NWConnection) { lock.lock(); _serverStreams.append(s); lock.unlock() }
+        var prefaces: [TransportChannel] { lock.lock(); defer { lock.unlock() }; return _prefaces }
+        var serverPeerSPKI: Data? { lock.lock(); defer { lock.unlock() }; return _serverPeerSPKI }
+        var error: NWError? { lock.lock(); defer { lock.unlock() }; return _clientError }
+        var isClientReady: Bool { lock.lock(); defer { lock.unlock() }; return _clientReady }
+        var controlPayload: Data? { lock.lock(); defer { lock.unlock() }; return _controlPayload }
+        func cancelServerStreams() {
+            lock.lock(); let all = _serverStreams; lock.unlock()
+            all.forEach { $0.cancel() }
+        }
+    }
+
+    private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !condition() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    /// Starts a receiver-shaped QUIC listener (production options + the same
+    /// stream limits `QUICReceiverListener` sets). The server never reads
+    /// the Video stream past its preface — so if Control only arrived behind
+    /// Video, it would never arrive at all.
+    private func startServer(identity: TestIdentity, pinned: [Data], outcome: Outcome) throws -> NWListener {
+        let options = try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
+            identity: identity.identity, pinnedSPKIs: { pinned }, isListener: true, queue: queue))
+        options.initialMaxStreamsBidirectional = QUICChannelRegistry.maxStreams
+        options.initialMaxStreamsUnidirectional = 0
+        let listener = try NWListener(using: NWParameters(quic: options), on: .any)
+        let queue = self.queue
+        listener.newConnectionGroupHandler = { group in
+            group.newConnectionHandler = { stream in
+                outcome.keep(stream)
+                stream.start(queue: queue)
+                stream.receive(minimumIncompleteLength: 8, maximumLength: 8) { data, _, _, _ in
+                    guard let data, case .parsed(let preface, _) = QUICStreamPreface.parse(data) else { return }
+                    outcome.preface(preface.channel)
+                    if preface.channel == .control {
+                        outcome.serverPeer(TLSConfigurator.authenticatedPeerSPKI(of: stream))
+                        stream.receive(minimumIncompleteLength: 5, maximumLength: 64) { payload, _, _, _ in
+                            if let payload { outcome.control(payload) }
+                        }
+                    }
+                }
+            }
+            group.start(queue: queue)
+        }
+        listener.start(queue: queue)
+        waitUntil(5) { listener.port != nil && listener.state == .ready }
+        guard listener.state == .ready else { throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))") }
+        return listener
+    }
+
+    /// Dials like `MacSenderTransportController.connectQUIC`: opens Video
+    /// first (a large write nobody reads), then Control with one message.
+    private func dial(port: NWEndpoint.Port, options: NWProtocolQUIC.Options, outcome: Outcome) -> NWConnectionGroup {
+        let group = NWConnectionGroup(with: NWMultiplexGroup(to: .hostPort(host: "127.0.0.1", port: port)),
+                                      using: NWParameters(quic: options))
+        let queue = self.queue
+        group.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                outcome.clientReady()
+                let video: NWConnection? = NWConnection(from: group)
+                let control: NWConnection? = NWConnection(from: group)
+                guard let video, let control else { return }
+                video.start(queue: queue)
+                video.send(content: QUICStreamPreface(channel: .video).encode()
+                    + QUICFrameAssembler.frame(Data(repeating: 0x42, count: 8 << 20)),
+                           completion: .contentProcessed { _ in })
+                control.start(queue: queue)
+                control.send(content: QUICStreamPreface(channel: .control).encode()
+                    + QUICFrameAssembler.frame(Data(#"{"type":"hello"}"#.utf8)),
+                             completion: .contentProcessed { _ in })
+            case .failed(let error), .waiting(let error):
+                outcome.clientError(error)
+            default:
+                break
+            }
+        }
+        group.start(queue: queue)
+        return group
+    }
+
+    private func clientOptions(_ identity: TestIdentity?, pinning server: Data,
+                               alpn: String = QUICTransport.alpn) throws -> NWProtocolQUIC.Options {
+        if let identity {
+            return try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
+                identity: identity.identity, pinnedSPKIs: { [server] }, isListener: false, queue: queue, alpn: alpn))
+        }
+        // No client certificate at all, but otherwise the production pin check.
+        let options = NWProtocolQUIC.Options(alpn: [alpn])
+        sec_protocol_options_set_verify_block(options.securityProtocolOptions, { _, trust, complete in
+            let chain = SecTrustCopyCertificateChain(sec_trust_copy_ref(trust).takeRetainedValue()) as? [SecCertificate]
+            complete(chain?.first.flatMap(TLSConfigurator.spkiDER(of:)) == server)
+        }, queue)
+        return options
+    }
+
+    private func run(server: TestIdentity, serverPins: [Data], client: NWProtocolQUIC.Options) throws -> Outcome {
+        let outcome = Outcome()
+        let listener = try startServer(identity: server, pinned: serverPins, outcome: outcome)
+        let group = dial(port: try XCTUnwrap(listener.port), options: client, outcome: outcome)
+        waitUntil(6) { outcome.controlPayload != nil || outcome.error != nil }
+        // Give a rejected handshake a moment to surface on both sides.
+        if outcome.controlPayload == nil { waitUntil(1) { false } }
+        group.cancel()
+        outcome.cancelServerStreams()
+        listener.cancel()
+        return outcome
+    }
+
+    // MARK: - Tests
+
+    func testCorrectMutualPinsConnectAndMultiplex() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let outcome = try run(server: server, serverPins: [client.spki],
+                              client: try clientOptions(client, pinning: server.spki))
+        XCTAssertTrue(outcome.prefaces.contains(.control))
+        XCTAssertTrue(outcome.prefaces.contains(.video))
+        XCTAssertEqual(outcome.serverPeerSPKI, client.spki,
+                       "QUIC metadata resolves the same pinned SPKI TLS does")
+        // 8 MiB of Video was never read by the server, yet Control arrived:
+        // the streams are independent, not one ordered byte stream.
+        XCTAssertEqual(outcome.controlPayload, QUICFrameAssembler.frame(Data(#"{"type":"hello"}"#.utf8)))
+    }
+
+    func testWrongServerPinFailsAsSecurity() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let impostorPin = try makeIdentity().spki
+        let outcome = try run(server: server, serverPins: [client.spki],
+                              client: try clientOptions(client, pinning: impostorPin))
+        XCTAssertTrue(outcome.prefaces.isEmpty, "no stream may reach an unpinned server")
+        XCTAssertNil(outcome.controlPayload)
+        if let error = outcome.error {
+            XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability,
+                              "a pin mismatch must never look like a reachability failure (\(error))")
+        }
+    }
+
+    func testWrongClientPinFails() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let otherPin = try makeIdentity().spki
+        let outcome = try run(server: server, serverPins: [otherPin],
+                              client: try clientOptions(client, pinning: server.spki))
+        XCTAssertNil(outcome.controlPayload)
+        XCTAssertNil(outcome.serverPeerSPKI)
+    }
+
+    func testUnknownPinFails() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let outcome = try run(server: server, serverPins: [],
+                              client: try clientOptions(client, pinning: server.spki))
+        XCTAssertNil(outcome.controlPayload)
+    }
+
+    func testMissingClientCertificateFails() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let outcome = try run(server: server, serverPins: [client.spki],
+                              client: try clientOptions(nil, pinning: server.spki))
+        XCTAssertNil(outcome.controlPayload, "the listener requires a client certificate")
+        XCTAssertNil(outcome.serverPeerSPKI)
+    }
+
+    func testALPNMismatchFails() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let outcome = try run(server: server, serverPins: [client.spki],
+                              client: try clientOptions(client, pinning: server.spki, alpn: "not-meowdisplay/1"))
+        XCTAssertNil(outcome.controlPayload)
+        XCTAssertTrue(outcome.prefaces.isEmpty)
+    }
+
+    /// Transport authentication succeeds, but the pinned key belongs to a
+    /// different device than the one this session was built for: the
+    /// application hello check (`SenderSessionAuthorizationState`) rejects
+    /// it — which stops the session, it never downgrades.
+    func testAuthenticatedPeerIDMismatchIsRejected() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let outcome = try run(server: server, serverPins: [client.spki],
+                              client: try clientOptions(client, pinning: server.spki))
+        let authenticated = try XCTUnwrap(outcome.serverPeerSPKI)
+        var state = SenderSessionAuthorizationState()
+        state.transportBegan(generation: 1)
+        let verdict = state.acceptHello(
+            generation: 1, intendedPeerID: "device-A", claimedPeerID: "device-B",
+            authenticatedSPKI: authenticated, currentPinnedSPKI: authenticated,
+            receiverSupportsInvitations: true, needsSenderApproval: false)
+        XCTAssertEqual(verdict, .rejected(.identityMismatch))
+        let wrongKey = state.acceptHello(
+            generation: 1, intendedPeerID: "device-A", claimedPeerID: "device-A",
+            authenticatedSPKI: authenticated, currentPinnedSPKI: server.spki,
+            receiverSupportsInvitations: true, needsSenderApproval: false)
+        XCTAssertNotEqual(wrongKey, .firstConnection)
+        XCTAssertFalse(state.isAdmitted)
+    }
+}
