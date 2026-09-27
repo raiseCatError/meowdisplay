@@ -1855,6 +1855,42 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    /// See `ReceiverLocalAudioSuspension`. `queue`-confined.
+    private var localAudioSuspension = ReceiverLocalAudioSuspension()
+
+    /// Stop/resume LOCAL audio playback around a background linger without
+    /// Picture in Picture. Receiver-local only: never sends an audio request
+    /// or changes the Audio preference, so the session's audio state is
+    /// intact when the app comes back.
+    func setLocalAudioSuspended(_ suspended: Bool) {
+        let queue = self.queue
+        let selfBox = self.selfBox
+        queue.async {
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            let change = receiver.localAudioSuspension.setSuspended(
+                suspended, hasAudioFormat: receiver.audioFormatDescription != nil)
+            switch change {
+            case .none:
+                break
+            case .stopPlayback:
+                Log.info("audio: local playback suspended (backgrounded)")
+                // Same teardown as Resync: both playback paths stop, the
+                // format survives so resuming needs no new config frame.
+                receiver.resetAudioPlayback(keepingFormat: true)
+                receiver.pcmPlaybackEngine.afterPendingWork {
+                    queue.async {
+                        guard let receiver = selfBox.currentOnQueue(),
+                              receiver.localAudioSuspension.isSuspended else { return }
+                        receiver.deactivateAudioSessionIfNeeded()
+                    }
+                }
+            case .resumePlayback(let rebuildChain):
+                Log.info("audio: local playback resumed")
+                if rebuildChain { receiver.ensureAudioPlaybackChain() }
+            }
+        }
+    }
+
     /// The device locked — nobody can see the stream, so tell the Mac and go
     /// silent. Sends "sleeping" (the Mac drops its virtual display so the
     /// cursor isn't stranded on an invisible screen and arms a reconnect),
@@ -3337,10 +3373,12 @@ final class StreamReceiver: ObservableObject {
         case .config(let config):
             applyAudioConfig(config)
         case .packet(let packet):
+            guard localAudioSuspension.admitsPackets else { return }
             scheduleAudioPacket(packet)
         case .pcmConfig(let config):
             applyPCMConfig(config)
         case .pcmPacket(let packet):
+            guard localAudioSuspension.admitsPackets else { return }
             schedulePCMPacket(packet)
         }
     }
@@ -3451,6 +3489,7 @@ final class StreamReceiver: ObservableObject {
     #endif
 
     private func ensureAudioPlaybackChain() {
+        guard localAudioSuspension.mayStartPlayback else { return }
         audioPresenter.ensurePlaybackChain(activateSession: activateAudioSessionIfNeeded)
     }
 
@@ -3597,7 +3636,7 @@ final class StreamReceiver: ObservableObject {
     /// output device/session state has, so the next packet re-anchors and
     /// resumes cleanly without waiting for a brand-new `AudioConfigFrame`.
     private func handleAudioSessionDisruption(reactivateSession: Bool) {
-        if reactivateSession {
+        if localAudioSuspension.reactivatesSession(afterDisruption: reactivateSession) {
             audioSessionActive = false
             activateAudioSessionIfNeeded()
         }

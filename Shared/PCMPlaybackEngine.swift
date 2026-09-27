@@ -440,4 +440,12 @@ final class PCMPlaybackEngine: @unchecked Sendable {
             #endif
         }
     }
+
+    /// Runs `body` on the engine's queue once every call already made — in
+    /// particular a `reset()` stopping the engine — has finished, so an
+    /// `AVAudioSession` deactivation that follows it never races a still-
+    /// running engine.
+    func afterPendingWork(_ body: @escaping @Sendable () -> Void) {
+        queue.async(execute: body)
+    }
 }

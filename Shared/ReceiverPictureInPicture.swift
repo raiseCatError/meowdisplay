@@ -185,3 +185,44 @@ struct ReceiverPictureInPictureLifecycle: Equatable {
         return true
     }
 }
+
+/// Receiver-local audio output while the app lingers in the background with
+/// no Picture in Picture window. The audio background mode Picture in
+/// Picture requires would otherwise let Mac audio keep playing after a plain
+/// app switch; this restores the old behavior by stopping local playback
+/// only. The user's Audio preference and the Mac are never touched — the Mac
+/// keeps sending, and packets are simply not played until the app returns
+/// or a Picture in Picture window takes over.
+struct ReceiverLocalAudioSuspension: Equatable {
+    enum Change: Equatable {
+        case none
+        /// Tear playback down (keeping the format) and deactivate the audio
+        /// session once the engine has actually stopped.
+        case stopPlayback
+        /// Rebuild the playback chain and reactivate the session; the next
+        /// packet re-anchors. `false` when no audio format is known yet, in
+        /// which case the next config frame starts playback as usual.
+        case resumePlayback(rebuildChain: Bool)
+    }
+
+    private(set) var isSuspended = false
+
+    mutating func setSuspended(_ suspended: Bool, hasAudioFormat: Bool) -> Change {
+        guard suspended != isSuspended else { return .none }
+        isSuspended = suspended
+        return suspended ? .stopPlayback : .resumePlayback(rebuildChain: hasAudioFormat)
+    }
+
+    /// Whether an arriving audio packet may be played.
+    var admitsPackets: Bool { !isSuspended }
+
+    /// Whether a playback chain may be built and the session activated (a
+    /// config frame arriving while suspended only records the format).
+    var mayStartPlayback: Bool { !isSuspended }
+
+    /// Interruption/route-change recovery may reactivate the session only
+    /// while playback isn't deliberately suspended.
+    func reactivatesSession(afterDisruption requested: Bool) -> Bool {
+        requested && !isSuspended
+    }
+}

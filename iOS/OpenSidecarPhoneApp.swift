@@ -2208,6 +2208,7 @@ final class ReceiverModel: ObservableObject {
         pictureInPicture.sceneDidActivate()
         endBackgroundAssertion()
         receiver.setRenderingPaused(false)
+        receiver.setLocalAudioSuspended(false)
         receiver.ensureListening()
         // Resume a parked recovery run from where it stopped. If the session
         // is healthy this is a no-op; if it is beyond recovery the session
@@ -2244,6 +2245,9 @@ final class ReceiverModel: ObservableObject {
     private func lingerInBackground() {
         beginBackgroundAssertion()
         receiver.setRenderingPaused(true)
+        // The audio background mode (required for Picture in Picture) would
+        // otherwise keep Mac audio playing after a plain app switch.
+        receiver.setLocalAudioSuspended(true)
         // iOS will suspend us shortly; an automatic recovery run cannot make
         // progress there, so park it rather than let it burn its budget and
         // land in Connection Lost while the phone was simply in a pocket.
@@ -2255,6 +2259,7 @@ final class ReceiverModel: ObservableObject {
     private func resumeFromLinger() {
         endBackgroundAssertion()
         receiver.setRenderingPaused(false)
+        receiver.setLocalAudioSuspended(false)
         receiver.setAppActive(true)
     }
 

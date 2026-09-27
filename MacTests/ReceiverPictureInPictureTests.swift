@@ -224,4 +224,117 @@ final class ReceiverPictureInPictureTests: XCTestCase {
         }
         XCTAssertFalse(lifecycle.sceneDidActivate())
     }
+
+    // MARK: - Local audio outside Picture in Picture
+
+    func testSuspendingStopsPlaybackAndBlocksEveryWayBackToPlaying() {
+        var audio = ReceiverLocalAudioSuspension()
+        XCTAssertEqual(audio.setSuspended(true, hasAudioFormat: true), .stopPlayback)
+        XCTAssertFalse(audio.admitsPackets)
+        // A config frame arriving while suspended must not start the chain
+        // or activate the session.
+        XCTAssertFalse(audio.mayStartPlayback)
+        // Interruption-ended / route-change recovery must not reactivate it.
+        XCTAssertFalse(audio.reactivatesSession(afterDisruption: true))
+    }
+
+    func testResumingRebuildsPlaybackOnlyWhenAFormatIsKnown() {
+        var audio = ReceiverLocalAudioSuspension()
+        _ = audio.setSuspended(true, hasAudioFormat: true)
+        XCTAssertEqual(audio.setSuspended(false, hasAudioFormat: true), .resumePlayback(rebuildChain: true))
+        XCTAssertTrue(audio.admitsPackets)
+        XCTAssertTrue(audio.mayStartPlayback)
+        XCTAssertTrue(audio.reactivatesSession(afterDisruption: true))
+
+        _ = audio.setSuspended(true, hasAudioFormat: false)
+        // Audio off (no format): the next config frame starts playback as usual.
+        XCTAssertEqual(audio.setSuspended(false, hasAudioFormat: false), .resumePlayback(rebuildChain: false))
+    }
+
+    func testRepeatedRequestsAreNoOps() {
+        var audio = ReceiverLocalAudioSuspension()
+        XCTAssertEqual(audio.setSuspended(false, hasAudioFormat: true), .none)
+        _ = audio.setSuspended(true, hasAudioFormat: true)
+        XCTAssertEqual(audio.setSuspended(true, hasAudioFormat: true), .none)
+    }
+
+    func testDisruptionRecoveryStillHonorsTheSystemWhenNotSuspended() {
+        let audio = ReceiverLocalAudioSuspension()
+        XCTAssertFalse(audio.reactivatesSession(afterDisruption: false))
+        XCTAssertTrue(audio.reactivatesSession(afterDisruption: true))
+    }
+
+    /// Drives the lifecycle and the audio suspension together exactly as
+    /// `ReceiverModel` does: linger suspends, resume/foreground unsuspends.
+    private struct BackgroundAudioHarness {
+        var lifecycle = ReceiverPictureInPictureLifecycle()
+        var audio = ReceiverLocalAudioSuspension()
+
+        mutating func background() {
+            if lifecycle.sceneDidBackground(deviceLocked: false) == .linger {
+                _ = audio.setSuspended(true, hasAudioFormat: true)
+            }
+        }
+        mutating func foreground() {
+            _ = lifecycle.sceneDidActivate()
+            _ = audio.setSuspended(false, hasAudioFormat: true)
+        }
+        mutating func pictureInPictureStarts() {
+            if lifecycle.pictureInPictureWillStart() {
+                _ = audio.setSuspended(false, hasAudioFormat: true)
+            }
+            lifecycle.pictureInPictureDidStart()
+        }
+        mutating func pictureInPictureFailsToStart() {
+            if lifecycle.pictureInPictureDidEnd() {
+                _ = audio.setSuspended(true, hasAudioFormat: true)
+            }
+        }
+        mutating func pictureInPictureCloses() {
+            lifecycle.pictureInPictureWillStop()
+            if lifecycle.pictureInPictureDidEnd() {
+                _ = audio.setSuspended(true, hasAudioFormat: true)
+            }
+        }
+    }
+
+    func testAppSwitchWithoutPictureInPictureSilencesLocalAudio() {
+        var harness = BackgroundAudioHarness()
+        harness.background()
+        XCTAssertFalse(harness.audio.admitsPackets)
+        harness.foreground()
+        XCTAssertTrue(harness.audio.admitsPackets)
+    }
+
+    func testAudioKeepsPlayingWhileAPictureInPictureWindowShows() {
+        var harness = BackgroundAudioHarness()
+        harness.pictureInPictureStarts()
+        harness.background()
+        XCTAssertTrue(harness.audio.admitsPackets)
+    }
+
+    func testLateAutomaticStartUndoesTheAudioSuspension() {
+        var harness = BackgroundAudioHarness()
+        harness.background()
+        XCTAssertFalse(harness.audio.admitsPackets)
+        harness.pictureInPictureStarts()
+        XCTAssertTrue(harness.audio.admitsPackets)
+    }
+
+    func testClosingTheWindowInTheBackgroundSilencesAudioAgain() {
+        var harness = BackgroundAudioHarness()
+        harness.pictureInPictureStarts()
+        harness.background()
+        harness.pictureInPictureCloses()
+        XCTAssertFalse(harness.audio.admitsPackets)
+        harness.foreground()
+        XCTAssertTrue(harness.audio.admitsPackets)
+    }
+
+    func testFailedStartLeavesAudioSilencedInTheBackground() {
+        var harness = BackgroundAudioHarness()
+        harness.background()
+        harness.pictureInPictureFailsToStart()
+        XCTAssertFalse(harness.audio.admitsPackets)
+    }
 }
