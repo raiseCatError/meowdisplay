@@ -62,6 +62,36 @@ jobs:
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/ios-receiver" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+
+      # `GeometryProxy.reservedRegions` (iPhone Duo fold/camera geometry)
+      # exists only in the iOS 27.1+ SDK, so the receiver compiles it in
+      # behind a compile-time gate. Prove which side of that gate this
+      # toolchain took: the built app must reference the symbol exactly when
+      # the SDK declares it — excluded on older SDKs, enabled on 27.1+.
+      - name: Check reserved-region SDK gate
+        run: |
+          xcodebuild -version
+          xcrun swiftc --version
+          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          app="$RUNNER_TEMP/ios-receiver/Build/Products/Debug-iphoneos/OpenSidecariOS.app"
+          interfaces=("$sdk"/System/Library/Frameworks/SwiftUICore.framework/Modules/SwiftUICore.swiftmodule/*.swiftinterface)
+          # A wrong path must fail here, never pass as "not referenced".
+          test -d "$app"
+          test -f "${interfaces[0]}"
+          if grep -q 'func reservedRegions(' "${interfaces[@]}"; then
+            declared=yes
+          else
+            declared=no
+          fi
+          if find "$app" -maxdepth 1 -type f \( -perm -u+x -o -name '*.dylib' \) -exec xcrun nm -u {} + 2>/dev/null \
+              | grep -q 'GeometryProxyV15reservedRegions'; then
+            referenced=yes
+          else
+            referenced=no
+          fi
+          echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version): reservedRegions declared=$declared referenced=$referenced"
+          test "$declared" = "$referenced"

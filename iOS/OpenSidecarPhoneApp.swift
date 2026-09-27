@@ -484,6 +484,14 @@ extension ControlReservedRegion {
     /// positioned in). iOS 27.1 introduced them; earlier systems report none,
     /// which leaves the safe-area/notch fallback as the only input.
     static func active(in proxy: GeometryProxy) -> [ControlReservedRegion] {
+        // `#available` alone cannot keep older SDKs building: the compiler
+        // must still resolve `reservedRegions`, which first ships in the
+        // iOS 27.1 SDK. The compiler version cannot tell that SDK apart
+        // either — Swift 6.4 is needed (Xcode 26.6 has 6.3.3), but Xcode
+        // 27.0 also has Swift 6.4 with an iOS 27.0 SDK that lacks the API —
+        // so the SwiftUI module version of the iOS 27.1 SDK (8.0.85.27)
+        // decides. Any other toolchain compiles the empty fallback.
+        #if compiler(>=6.4) && canImport(SwiftUI, _version: 8.0.85.27)
         guard #available(iOS 27.1, *) else { return [] }
         // The default query already omits inactive regions (a fold while
         // the device lies flat); filtering again keeps that explicit.
@@ -494,6 +502,9 @@ extension ControlReservedRegion {
             .filter(\.isActive)
             .map { ControlReservedRegion(kind: .occlusion, frame: $0.frame) }
         return divisions + occlusions
+        #else
+        return []
+        #endif
     }
 }
 

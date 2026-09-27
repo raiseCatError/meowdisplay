@@ -1697,6 +1697,36 @@ final class ReservedRegionLayoutTests: XCTestCase {
         XCTAssertEqual(result.axis, .horizontal)
     }
 
+    /// A fold always splits the display's longer dimension (landscape: a
+    /// vertical fold; portrait: a horizontal one), so the tray runs
+    /// parallel to it and keeps that dimension's full length. Even a tray
+    /// longer than the screen — which `ReceiverControlOverlay` draws at its
+    /// intrinsic size, centered on `trayFrame` — therefore overflows only
+    /// along the fold, never across it.
+    func testFullLengthTrayRunsParallelToAFoldThatSplitsTheLongerDimension() {
+        func rendered(_ layout: ControlTrayLayout, _ size: CGSize) -> CGRect {
+            CGRect(x: layout.trayFrame.midX - size.width / 2, y: layout.trayFrame.midY - size.height / 2,
+                   width: size.width, height: size.height)
+        }
+        let wide = CGRect(x: 0, y: 0, width: 900, height: 620)
+        let verticalFold = division(x: 438, in: wide)
+        let tallTray = CGSize(width: 44, height: 700)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(wide, side: side, regions: [verticalFold], traySize: tallTray)
+            XCTAssertEqual(result.axis, .vertical)
+            XCTAssertEqual(result.trayFrame.height, wide.height - 24)
+            XCTAssertFalse(rendered(result, tallTray).intersects(verticalFold.frame))
+        }
+        let tall = CGRect(x: 0, y: 0, width: 620, height: 900)
+        let horizontalFold = division(y: 438, in: tall)
+        let wideTray = CGSize(width: 700, height: 44)
+        let result = layout(tall, portrait: true, regions: [horizontalFold], traySize: wideTray)
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.trayFrame.width, tall.width - 24)
+        XCTAssertFalse(rendered(result, wideTray).intersects(horizontalFold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(horizontalFold.frame))
+    }
+
     // MARK: E. Dynamic changes
 
     func testFoldingAndUnfoldingRecomputesFromEachSnapshotWithoutStaleState() {
