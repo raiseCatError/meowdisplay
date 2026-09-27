@@ -233,7 +233,10 @@ to `hello` (receiver) and `welcome` (sender) — inside the authenticated
 session. A receiver lists `quic` only while its QUIC listener is bound. A
 missing capability means TCP only; QUIC is never inferred from `pv`. The
 Mac remembers only POSITIVE authenticated capability per peer; an
-incompatible `qv` disables QUIC for that peer; Forget removes it.
+incompatible `qv` disables QUIC for that peer; an authenticated `hello` with
+`pv` below 22 (the peer now runs a pre-QUIC build) clears it, while a pv 22+
+peer that lists TCP only (listener momentarily unbound) keeps it; Forget
+removes it.
 
 **Selection (sender, per device: Auto / QUIC / TCP, default Auto).**
 

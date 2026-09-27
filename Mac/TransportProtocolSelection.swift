@@ -309,20 +309,31 @@ final class QUICCooldownStore: @unchecked Sendable {
 
 /// Persisted POSITIVE authenticated QUIC capability per peer. Only an
 /// authenticated hello writes it; a Bonjour hint never does; a transient
-/// failure never erases it; an incompatible announced version does; Forget
-/// removes it.
+/// failure never erases it; an incompatible announced version does; a peer
+/// now running a build older than QUIC (authenticated `pv` below
+/// `quicTransportWireVersion`) does; Forget removes it.
 enum PeerQUICCapabilityStore {
     static func key(peerID: String) -> String { "quicCapability.v1.\(peerID)" }
 
+    /// - peerProtocolVersion: the `pv` of THIS authenticated hello (absent =
+    ///   `WireProtocol.assumedWhenAbsent`) — never a Bonjour TXT value.
     static func recordAuthenticatedHello(_ capability: QUICPeerCapability, peerID: String,
+                                         peerProtocolVersion: Int,
                                          defaults: UserDefaults = .standard) {
+        guard peerProtocolVersion >= WireProtocol.quicTransportWireVersion else {
+            // The authenticated peer build predates QUIC altogether (e.g. the
+            // receiver was downgraded): whatever was learned from a newer
+            // build no longer describes it.
+            defaults.removeObject(forKey: key(peerID: peerID))
+            return
+        }
         if capability.supportsCompatibleQUIC {
             defaults.set(QUICTransport.applicationVersion, forKey: key(peerID: peerID))
         } else if capability.announcesIncompatibleQUIC {
             defaults.set(-1, forKey: key(peerID: peerID))
         }
-        // Absent/TCP-only capability: leave whatever was learned before —
-        // the receiver's QUIC listener may be down only transiently.
+        // A QUIC-era build (pv >= 22) announcing TCP only: leave whatever was
+        // learned before — its QUIC listener may be down only transiently.
     }
 
     static func support(peerID: String, defaults: UserDefaults = .standard) -> PeerQUICSupport {

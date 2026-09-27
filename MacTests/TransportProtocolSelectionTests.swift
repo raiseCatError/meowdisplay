@@ -247,21 +247,93 @@ final class TransportProtocolSelectionTests: XCTestCase {
         let peer = "peer-\(UUID().uuidString)"
         XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .unknown)
         PeerQUICCapabilityStore.recordAuthenticatedHello(
-            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 1), peerID: peer, defaults: defaults)
+            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 1), peerID: peer,
+            peerProtocolVersion: 22, defaults: defaults)
         XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .authenticated)
         // A later hello without QUIC (listener down for a moment) does not
         // erase what was learned.
         PeerQUICCapabilityStore.recordAuthenticatedHello(
-            QUICPeerCapability(transports: ["tcp"], quicVersion: nil), peerID: peer, defaults: defaults)
+            QUICPeerCapability(transports: ["tcp"], quicVersion: nil), peerID: peer,
+            peerProtocolVersion: 22, defaults: defaults)
         XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .authenticated)
     }
 
     func testIncompatibleQUICVersionDisablesSelection() {
         let peer = "peer-\(UUID().uuidString)"
         PeerQUICCapabilityStore.recordAuthenticatedHello(
-            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 2), peerID: peer, defaults: defaults)
+            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 2), peerID: peer,
+            peerProtocolVersion: 22, defaults: defaults)
         XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .incompatible)
         XCTAssertEqual(TransportProtocolSelector().decide(inputs(.auto, support: .incompatible)), .tcp)
+    }
+
+    // MARK: - Authenticated capability vs the hello's own pv
+
+    private func learnQUIC(_ peer: String) {
+        PeerQUICCapabilityStore.recordAuthenticatedHello(
+            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 1), peerID: peer,
+            peerProtocolVersion: WireProtocol.quicTransportWireVersion, defaults: defaults)
+        XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .authenticated)
+    }
+
+    /// The receiver was downgraded to a pre-QUIC build: its authenticated
+    /// pv 21 hello (no `transports`/`qv`) must clear what a newer build taught.
+    func testDowngradedPeerHelloClearsRememberedQUIC() {
+        let peer = "peer-\(UUID().uuidString)"
+        learnQUIC(peer)
+        PeerQUICCapabilityStore.recordAuthenticatedHello(
+            QUICPeerCapability(message: ["type": "hello", "pv": 21]), peerID: peer,
+            peerProtocolVersion: 21, defaults: defaults)
+        XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .unknown)
+        XCTAssertEqual(TransportProtocolSelector().decide(inputs(.auto, support: .unknown)), .tcp,
+                       "Auto uses TCP for the downgraded peer")
+        XCTAssertFalse(TransportProtocolInputsResolver.quicSelectable(
+            peerID: peer, defaults: defaults, hints: QUICDiscoveryHintStore()),
+                       "the UI stops offering explicit QUIC")
+    }
+
+    /// A hello with no `pv` at all is protocol 1 (`assumedWhenAbsent`) —
+    /// equally pre-QUIC — even if it (bogusly) lists QUIC.
+    func testPreQUICVersionHelloNeverRecordsCapability() {
+        let peer = "peer-\(UUID().uuidString)"
+        learnQUIC(peer)
+        PeerQUICCapabilityStore.recordAuthenticatedHello(
+            QUICPeerCapability(transports: ["tcp", "quic"], quicVersion: 1), peerID: peer,
+            peerProtocolVersion: WireProtocol.assumedWhenAbsent, defaults: defaults)
+        XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .unknown)
+    }
+
+    /// A QUIC-era (pv 22) peer whose listener is momentarily unbound says
+    /// TCP only: the learned positive capability may stay.
+    func testQUICEraTCPOnlyHelloKeepsRememberedQUIC() {
+        let peer = "peer-\(UUID().uuidString)"
+        learnQUIC(peer)
+        PeerQUICCapabilityStore.recordAuthenticatedHello(
+            QUICPeerCapability(message: ["type": "hello", "pv": 22, "transports": ["tcp"]]), peerID: peer,
+            peerProtocolVersion: 22, defaults: defaults)
+        XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .authenticated)
+    }
+
+    func testIncompatibleQVFromAQUICEraPeerReplacesRememberedQUIC() {
+        let peer = "peer-\(UUID().uuidString)"
+        learnQUIC(peer)
+        PeerQUICCapabilityStore.recordAuthenticatedHello(
+            QUICPeerCapability(message: ["transports": ["tcp", "quic"], "qv": 2]), peerID: peer,
+            peerProtocolVersion: 23, defaults: defaults)
+        XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .incompatible)
+        XCTAssertEqual(TransportProtocolSelector().decide(inputs(.auto, support: .incompatible)), .tcp)
+    }
+
+    func testOldPeerWithNoPriorCapabilityStaysTCPOnly() {
+        let peer = "peer-\(UUID().uuidString)"
+        for pv in [WireProtocol.assumedWhenAbsent, 21] {
+            PeerQUICCapabilityStore.recordAuthenticatedHello(
+                QUICPeerCapability(message: ["type": "hello"]), peerID: peer,
+                peerProtocolVersion: pv, defaults: defaults)
+            XCTAssertEqual(PeerQUICCapabilityStore.support(peerID: peer, defaults: defaults), .unknown)
+            XCTAssertNil(defaults.object(forKey: PeerQUICCapabilityStore.key(peerID: peer)))
+            XCTAssertEqual(TransportProtocolSelector().decide(inputs(.auto, support: .unknown)), .tcp)
+        }
     }
 
     func testBonjourHintNeverPersistsCapabilityOrTrust() {
@@ -324,7 +396,8 @@ final class TransportProtocolSelectionTests: XCTestCase {
         for peer in [forgotten, kept] {
             NetworkTransportPreferenceStore.save(.quic, peerID: peer, defaults: defaults)
             PeerQUICCapabilityStore.recordAuthenticatedHello(
-                QUICPeerCapability(transports: ["quic"], quicVersion: 1), peerID: peer, defaults: defaults)
+                QUICPeerCapability(transports: ["quic"], quicVersion: 1), peerID: peer,
+            peerProtocolVersion: 22, defaults: defaults)
             cooldown.start(peerID: peer, routeKind: .local)
         }
         hints.replaceAll([forgotten, kept].map {

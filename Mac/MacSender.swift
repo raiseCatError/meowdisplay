@@ -4770,8 +4770,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 disconnectedSince = nil
                 Log.info("sessionDebug: applicationReady generation=\(generation)")
                 // Authenticated capability (pinned identity just verified
-                // above): remember positive QUIC support for later sessions.
-                PeerQUICCapabilityStore.recordAuthenticatedHello(QUICPeerCapability(message: obj), peerID: tls.peerID)
+                // above): remember positive QUIC support for later sessions,
+                // judged against this hello's own `pv`.
+                PeerQUICCapabilityStore.recordAuthenticatedHello(
+                    QUICPeerCapability(message: obj), peerID: tls.peerID,
+                    peerProtocolVersion: info.protocolVersion)
                 if case .tcp = transport, let established = transportController.activeNetworkProtocol {
                     if established == .quic { transportController.markQUICApplicationReady() }
                     protocolSelector.established(established, preference: networkPreference)

@@ -85,6 +85,9 @@ QUIC (PROTOCOL.md section 2.4) is purely **additive**:
   use QUIC. For Remote Access, Auto uses TCP until one authenticated
   session has shown QUIC support, then may use QUIC on later sessions.
 - An unknown `qv` disables QUIC for that peer rather than guessing.
+- A peer whose authenticated `hello` reports `pv` below 22 (downgraded to a
+  pre-QUIC build) loses any remembered QUIC capability and is TCP-only again;
+  the decision uses that hello's `pv`, never the Bonjour TXT record.
 - The one pv-sensitive check that compared against the build's *current*
   version (`streamingProfileRequest`) is now pinned to pv 21
   (`WireProtocol.streamingProfileRequestWireVersion`), so the bump does not
