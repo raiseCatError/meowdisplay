@@ -40,13 +40,38 @@ the App Store is pending Apple approval. Until then, MeowDisplay can be
 
 | | |
 |---|---|
-| **Display** | Mirror an existing Mac display, choosing the source when several are connected · Extend with a virtual display · Extend shape options, including Use Full Display, where supported |
-| **Control** | Direct Touch · Trackpad mode · keyboard · click, drag and right-click · scroll, pinch and rotate · Mac system gestures |
+| **Display** | Mirror an existing Mac display, choosing the source when several are connected · Extend with a virtual display · Extend shape options, including Use Full Display, where supported · clamshell and headless Macs |
+| **Control** | Direct Touch · Precise Control · Trackpad mode · Smart Touch (experimental) · keyboard · click, drag and right-click · scroll, pinch and rotate · Mac system gestures |
+| **Picture in Picture** | Keep a view-only window of the live Mac on screen while you use other apps (iPhone and iPad) |
 | **Shortcuts** | Main Control Tray · Function Tray · Chords and modifier palettes · customizable actions · profiles · Auto-hide |
 | **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
 | **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
 | **Security** | Trusted pairing with a matching code · TLS 1.3 · pinned peer identity |
-| **Receivers** | iPhone and iPad |
+| **Receivers** | iPhone and iPad · another Mac with the display-only Mac Receiver |
+
+## Why MeowDisplay?
+
+MeowDisplay isn't trying to be the most powerful remote desktop. It's trying
+to make one common moment take as little thought as possible: you pull out
+your iPhone or iPad, your Mac is there, and you can use it.
+
+That shapes where the effort goes:
+
+- **Interaction feel.** Touch, pointer and gesture handling are designed for
+  fingers on glass, not a mouse emulated on a phone.
+- **Mirror and a real Extend.** Show a Mac display as it is, or give the Mac
+  a virtual display of its own — including with the lid closed and no
+  monitor attached.
+- **iPhone first.** The iPhone is the main receiver, with iPad fully
+  supported.
+- **Your own devices and networks.** USB, local Wi-Fi, or a private network
+  you control. No MeowDisplay account and no MeowDisplay-hosted relay.
+- **Quick access, not administration.** It's for using your own Mac from a
+  nearby screen, not for managing fleets of machines.
+
+Many good tools cover neighboring ground — Sidecar, Luna, Astropad,
+RustDesk, AnyDesk and others — each with different strengths. MeowDisplay is
+simply focused on this one experience.
 
 ## Display: Mirror & Extend
 
@@ -70,6 +95,30 @@ receiver's Settings:
 - **Trackpad** — the pointer moves relatively, like a MacBook trackpad.
   Touching doesn't jump the cursor to that spot. Sensitivity is adjustable,
   and multi-finger gestures keep working.
+
+### Precise Control
+
+Direct Touch is quick, but a fingertip covers exactly the spot you're aiming
+at, and small targets are hard to hit. Precise Control, built into Direct
+Touch, lets you fine-tune the pointer before you click:
+
+1. **Touch** near what you want. The pointer jumps there, as usual.
+2. **Keep that finger down and add a second finger** anywhere on the screen.
+   From that moment the pointer stops jumping to your fingers: moving either
+   finger nudges it from where it already is, following your movement on the
+   picture — finer still if you've pinched in to zoom the view.
+3. **Tap the second finger** to click at the pointer's position. Double- and
+   triple-tap for double- and triple-click; tap, then hold and move, to drag
+   from that exact spot. Tap two extra fingers together to right-click.
+4. **Lift every finger** to finish. The next touch is ordinary Direct Touch
+   again.
+
+Your finger never has to sit on top of the target, and the pointer never
+snaps back under the finger that placed it. There's nothing to turn on. In
+Trackpad mode the pointer is always relative, so the same precision is
+simply the default there.
+
+### Smart Touch
 
 **Smart Touch (Experimental)** is an optional add-on to Direct Touch, off by
 default. It uses the Mac's Accessibility information to decide what a
@@ -224,6 +273,28 @@ Mac system audio can stream to the receiver while the Mac keeps playing
 locally. Turn it on with the receiver's **Audio** toggle; if sound and picture
 drift apart, adjust **A/V Sync** or tap **Resync**.
 
+## Picture in Picture
+
+On iPhone and iPad, the Mac can stay in view while you do something else.
+MeowDisplay uses the system's own Picture in Picture window, fed by the same
+stream the receiver is already showing.
+
+- **Starts on its own.** With **Picture in Picture** on (the default) and a
+  live session showing your Mac, leaving MeowDisplay moves the picture into
+  a floating window. You can also start it from the receiver's Settings.
+- **For glancing, not controlling.** The window is view-only: it shows what
+  your Mac is doing, but touches in it never reach the Mac. All interaction
+  stays in the full receiver.
+- **One tap back.** The window's restore button returns you to the full
+  receiver, and opening MeowDisplay again does the same.
+- **Audio.** If the receiver's **Audio** is on, Mac audio can keep playing
+  while the window is showing. Leaving the app without Picture in Picture
+  still silences the receiver as before.
+- **Your choice.** Turn Picture in Picture off in the receiver's Settings and
+  leaving the app never starts it.
+
+Picture in Picture is new, and real-device testing is ongoing.
+
 ## Security
 
 - Devices pair explicitly, confirming a matching verification code (SAS) on
@@ -301,12 +372,29 @@ Human-written translations only, please — no AI or machine-generated
 localization. See [Translations in CONTRIBUTING.md](CONTRIBUTING.md#translations)
 for how to get started.
 
-## Prefer something simpler?
+## Built on OpenDisplay
 
-MeowDisplay builds on OpenDisplay but adds a broader set of input, control,
-audio, remote-access and interaction features. If you only need the core
-second-display experience, or need compatibility better served by the
-upstream project, check out [OpenDisplay](https://github.com/peetzweg/opendisplay).
+MeowDisplay started as a fork of
+[OpenDisplay](https://github.com/peetzweg/opendisplay) by Philip Poloczek.
+OpenDisplay already had a working low-level foundation — Mac screen
+capture, virtual displays, video encoding and an iPhone/iPad receiver — and
+there was no good reason to rebuild a working open-source base just to say
+every layer was written from scratch. Thank you to OpenDisplay for it.
+
+Most of MeowDisplay's own work since then has gone into what happens on top
+of that foundation: input, touch and gestures, Smart Touch, Precise Control,
+the control trays, Remote Access, pairing and security, the session
+lifecycle, clamshell and headless use, audio, Picture in Picture, and a lot
+of polish.
+
+If you only need the core second-display experience, or compatibility that
+the upstream project serves better, OpenDisplay is well worth a look.
+
+## Responsible use
+
+MeowDisplay is intended for devices you own or are authorized to use. Don't
+use it to watch, access or control someone else's device without their
+permission.
 
 ## License & credits
 
