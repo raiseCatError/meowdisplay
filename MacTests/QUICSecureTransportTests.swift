@@ -184,6 +184,10 @@ final class QUICSecureTransportTests: XCTestCase {
                 break
             }
         }
+        // Required by Network.framework before `start` (a group with neither
+        // handler refuses to start); production sets the same rejecting
+        // handler (`MacSenderTransportController.connectQUIC`).
+        group.newConnectionHandler = { stream in stream.cancel() }
         group.start(queue: queue)
         return group
     }
@@ -240,10 +244,11 @@ final class QUICSecureTransportTests: XCTestCase {
                               client: try clientOptions(client, pinning: impostorPin))
         XCTAssertTrue(outcome.prefaces.isEmpty, "no stream may reach an unpinned server")
         XCTAssertNil(outcome.controlPayload)
-        if let error = outcome.error {
-            XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability,
-                              "a pin mismatch must never look like a reachability failure (\(error))")
-        }
+        // The client's own pin check refused the server: the dial must fail,
+        // and never in a way Auto could mistake for "QUIC unreachable".
+        let error = try XCTUnwrap(outcome.error, "the handshake must fail on the client")
+        XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability,
+                          "a pin mismatch must never look like a reachability failure (\(error))")
     }
 
     func testWrongClientPinFails() throws {
