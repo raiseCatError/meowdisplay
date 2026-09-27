@@ -224,7 +224,9 @@ final class TransportProtocolSelectionTests: XCTestCase {
     }
 
     func testAmbiguousErrorsAreNeverReachability() {
-        for code in [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .EPROTO, .EBADMSG, .EPERM] {
+        // ENOTCONN is how a server-side certificate rejection reaches the
+        // dialing QUIC group — it must never read as "unreachable".
+        for code in [POSIXErrorCode.ENOTCONN, .ECONNRESET, .ECONNABORTED, .EPROTO, .EBADMSG, .EPERM] {
             XCTAssertEqual(QUICFailureClassifier.classify(.posix(code)), .indeterminate, "\(code)")
         }
     }

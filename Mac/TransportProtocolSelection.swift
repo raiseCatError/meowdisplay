@@ -74,8 +74,13 @@ enum QUICFailureClassifier {
 
     static let reachabilityCodes: Set<POSIXErrorCode> = [
         .ECONNREFUSED, .ENETUNREACH, .EHOSTUNREACH, .ENETDOWN, .EHOSTDOWN,
-        .ETIMEDOUT, .EADDRNOTAVAIL, .ENOTCONN,
+        .ETIMEDOUT, .EADDRNOTAVAIL,
     ]
+    // Deliberately NOT here: ENOTCONN / ECONNRESET / ECONNABORTED. A peer that
+    // rejects this Mac's certificate during the QUIC handshake surfaces on
+    // the dialing group as ENOTCONN (observed on macOS 26 loopback), so
+    // treating it as reachability would turn an authentication failure into
+    // a TCP downgrade.
 }
 
 /// What the Mac knows about this peer's QUIC support, strongest first.

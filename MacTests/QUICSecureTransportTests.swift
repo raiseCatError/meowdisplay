@@ -99,6 +99,9 @@ final class QUICSecureTransportTests: XCTestCase {
         private var _clientReady = false
         private var _controlPayload: Data?
         private var _serverStreams: [NWConnection] = []
+        private var _peerRejected = false
+        func peerRejected() { lock.lock(); _peerRejected = true; lock.unlock() }
+        var wasPeerRejected: Bool { lock.lock(); defer { lock.unlock() }; return _peerRejected }
         func preface(_ c: TransportChannel) { lock.lock(); _prefaces.append(c); lock.unlock() }
         func serverPeer(_ d: Data?) { lock.lock(); _serverPeerSPKI = d; lock.unlock() }
         func clientError(_ e: NWError) { lock.lock(); if _clientError == nil { _clientError = e }; lock.unlock() }
@@ -193,10 +196,12 @@ final class QUICSecureTransportTests: XCTestCase {
     }
 
     private func clientOptions(_ identity: TestIdentity?, pinning server: Data,
-                               alpn: String = QUICTransport.alpn) throws -> NWProtocolQUIC.Options {
+                               alpn: String = QUICTransport.alpn,
+                               rejected: Outcome? = nil) throws -> NWProtocolQUIC.Options {
         if let identity {
             return try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
-                identity: identity.identity, pinnedSPKIs: { [server] }, isListener: false, queue: queue, alpn: alpn))
+                identity: identity.identity, pinnedSPKIs: { [server] }, isListener: false, queue: queue, alpn: alpn,
+                onPeerRejected: { rejected?.peerRejected() }))
         }
         // No client certificate at all, but otherwise the production pin check.
         let options = NWProtocolQUIC.Options(alpn: [alpn])
@@ -207,11 +212,11 @@ final class QUICSecureTransportTests: XCTestCase {
         return options
     }
 
-    private func run(server: TestIdentity, serverPins: [Data], client: NWProtocolQUIC.Options) throws -> Outcome {
-        let outcome = Outcome()
+    private func run(server: TestIdentity, serverPins: [Data], client: NWProtocolQUIC.Options,
+                     outcome: Outcome = Outcome()) throws -> Outcome {
         let listener = try startServer(identity: server, pinned: serverPins, outcome: outcome)
         let group = dial(port: try XCTUnwrap(listener.port), options: client, outcome: outcome)
-        waitUntil(6) { outcome.controlPayload != nil || outcome.error != nil }
+        waitUntil(6) { outcome.controlPayload != nil || outcome.error != nil || outcome.wasPeerRejected }
         // Give a rejected handshake a moment to surface on both sides.
         if outcome.controlPayload == nil { waitUntil(1) { false } }
         group.cancel()
@@ -240,15 +245,19 @@ final class QUICSecureTransportTests: XCTestCase {
         let server = try makeIdentity()
         let client = try makeIdentity()
         let impostorPin = try makeIdentity().spki
-        let outcome = try run(server: server, serverPins: [client.spki],
-                              client: try clientOptions(client, pinning: impostorPin))
+        let outcome = Outcome()
+        _ = try run(server: server, serverPins: [client.spki],
+                    client: try clientOptions(client, pinning: impostorPin, rejected: outcome), outcome: outcome)
         XCTAssertTrue(outcome.prefaces.isEmpty, "no stream may reach an unpinned server")
         XCTAssertNil(outcome.controlPayload)
-        // The client's own pin check refused the server: the dial must fail,
-        // and never in a way Auto could mistake for "QUIC unreachable".
-        let error = try XCTUnwrap(outcome.error, "the handshake must fail on the client")
-        XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability,
-                          "a pin mismatch must never look like a reachability failure (\(error))")
+        // The client's own pin check refused the server and said so — which
+        // `MacSenderTransportController` turns into a `.security` failure at
+        // once (never a timeout that could read as "QUIC unreachable").
+        XCTAssertTrue(outcome.wasPeerRejected, "the pin rejection must be reported to the dialer")
+        if let error = outcome.error {
+            XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability,
+                              "a pin mismatch must never look like a reachability failure (\(error))")
+        }
     }
 
     func testWrongClientPinFails() throws {
@@ -259,6 +268,11 @@ final class QUICSecureTransportTests: XCTestCase {
                               client: try clientOptions(client, pinning: server.spki))
         XCTAssertNil(outcome.controlPayload)
         XCTAssertNil(outcome.serverPeerSPKI)
+        // The receiver refusing this Mac's certificate must not read as a
+        // reachability failure on the dialing side (no silent TCP fallback).
+        if let error = outcome.error {
+            XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability, "\(error)")
+        }
     }
 
     func testUnknownPinFails() throws {

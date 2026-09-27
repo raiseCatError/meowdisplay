@@ -44,14 +44,20 @@ enum TLSConfigurator {
     ///   * session tickets and resumption are disabled, so no PSK ever
     ///     exists to carry 0-RTT early data — every MeowDisplay QUIC
     ///     connection is a full, freshly authenticated 1-RTT handshake, and
-    ///     no replay-sensitive control message can arrive as early data.
+    ///     no replay-sensitive control message can arrive as early data;
+    ///   * `onPeerRejected` fires (on `queue`) when THIS side's pin check
+    ///     refuses the peer. A QUIC connection group does not reliably
+    ///     surface that as a state change, and the dialer must classify it
+    ///     as a security failure at once — never let it age into a timeout
+    ///     that could look like "QUIC unreachable".
     /// Returns nil (never a weaker configuration) when the identity is
     /// unusable; the caller then refuses QUIC exactly like TLS.
     static func pinnedQUICOptions(identity: SecIdentity,
                                   pinnedSPKIs: @escaping () -> [Data],
                                   isListener: Bool,
                                   queue: DispatchQueue,
-                                  alpn: String = QUICTransport.alpn) -> NWProtocolQUIC.Options? {
+                                  alpn: String = QUICTransport.alpn,
+                                  onPeerRejected: (@Sendable () -> Void)? = nil) -> NWProtocolQUIC.Options? {
         guard let secIdentity = sec_identity_create(identity) else {
             Log.info("ERROR: sec_identity_create failed — identity unusable, refusing QUIC setup")
             return nil
@@ -60,7 +66,8 @@ enum TLSConfigurator {
         let sec = quic.securityProtocolOptions
         applyPinnedMutualAuthentication(
             to: sec, identity: secIdentity,
-            pinnedSPKIs: pinnedSPKIs, isListener: isListener, queue: queue)
+            pinnedSPKIs: pinnedSPKIs, isListener: isListener, queue: queue,
+            onPeerRejected: onPeerRejected)
         // No 0-RTT: without tickets/resumption there is no pre-shared key a
         // later connection could send early data under.
         sec_protocol_options_set_tls_tickets_enabled(sec, false)
@@ -73,7 +80,8 @@ enum TLSConfigurator {
                                                         identity: sec_identity_t,
                                                         pinnedSPKIs: @escaping () -> [Data],
                                                         isListener: Bool,
-                                                        queue: DispatchQueue) {
+                                                        queue: DispatchQueue,
+                                                        onPeerRejected: (@Sendable () -> Void)? = nil) {
         sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv13)
         sec_protocol_options_set_max_tls_protocol_version(sec, .TLSv13) // min == max: downgrade-proof
         sec_protocol_options_set_local_identity(sec, identity)          // both roles present a cert
@@ -89,6 +97,7 @@ enum TLSConfigurator {
             guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
                   let leaf = chain.first,
                   let spki = spkiDER(of: leaf) else {
+                onPeerRejected?()
                 complete(false)
                 return
             }
@@ -96,7 +105,9 @@ enum TLSConfigurator {
             // that produced every pinned value, so pinned == extracted
             // byte-for-byte. Plain Data equality — both operands public,
             // so a constant-time compare is deliberately not needed.
-            complete(pinnedSPKIs().contains(spki))
+            let accepted = pinnedSPKIs().contains(spki)
+            if !accepted { onPeerRejected?() }
+            complete(accepted)
         }, queue)
     }
 
