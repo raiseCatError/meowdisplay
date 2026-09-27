@@ -127,12 +127,6 @@ struct ReceiverDeviceDetailView: View {
         }
     }
 
-    /// This device's own Extend shape (PROTOCOL.md 6.7) — Mac-authoritative,
-    /// unlike the receiver-reported sections below: `session.sender` is the
-    /// live source of truth and this control writes straight through it via
-    /// `requestExtendShape`, the same path a receiver's own
-    /// `extendShapeRequest` takes.
-    @ViewBuilder
     /// Per-device TCP/QUIC choice (the Mac is the only selection authority).
     /// QUIC is offered only once this device has shown it supports it; Auto
     /// then uses TCP until it does. USB ignores this setting.
@@ -166,6 +160,12 @@ struct ReceiverDeviceDetailView: View {
         }
     }
 
+    /// This device's own Extend shape (PROTOCOL.md 6.7) — Mac-authoritative,
+    /// unlike the receiver-reported sections below: `session.sender` is the
+    /// live source of truth and this control writes straight through it via
+    /// `requestExtendShape`, the same path a receiver's own
+    /// `extendShapeRequest` takes.
+    @ViewBuilder
     private func extendShapeSection(_ session: DeviceSession) -> some View {
         Section {
             Picker("Extend Display", selection: Binding(
