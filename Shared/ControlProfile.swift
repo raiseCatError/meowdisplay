@@ -512,7 +512,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 14
+    static let schemaVersion = 15
 
     var version = schemaVersion
     var trayEnabled = true
@@ -596,6 +596,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `AVSyncOffset.range`. Positive delays audio, negative delays video.
     /// Never sent to the Mac — it only ever affects local playback timing.
     var avSyncOffsetMs = 0
+    /// Picture in Picture: while on, leaving the app during a live session
+    /// moves the view-only picture into the system floating window, and
+    /// Settings offers a manual start. Off means Picture in Picture never
+    /// starts. Defaults on.
+    var pictureInPictureEnabled = true
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -673,6 +678,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
         smartTouchEnabled = try value(.smartTouchEnabled, fallback.smartTouchEnabled)
         smartTouchLongPressHapticEnabled = try value(.smartTouchLongPressHapticEnabled,
                                                      fallback.smartTouchLongPressHapticEnabled)
+        // Absent (schema < 15) means "written before Picture in Picture
+        // existed" — default on, matching a brand-new install.
+        pictureInPictureEnabled = try value(.pictureInPictureEnabled, fallback.pictureInPictureEnabled)
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -820,6 +828,12 @@ struct ReceiverControlPreferencesRepository {
         // defaulted `smartTouchEnabled` to off — nothing to transform.
         if value.version < 14 {
             value.version = 14
+        }
+        // Schema 14 predates Picture in Picture; the custom decoder above
+        // already defaulted `pictureInPictureEnabled` to on — nothing to
+        // transform.
+        if value.version < 15 {
+            value.version = 15
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

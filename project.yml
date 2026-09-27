@@ -213,6 +213,7 @@ targets:
       - Shared/Protocol.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
+      - Shared/ReceiverPictureInPicture.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift
@@ -304,6 +305,9 @@ targets:
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
         NSBonjourServices: ["_opensidecar._tcp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
+        # "Audio, AirPlay, and Picture in Picture": required for the receiver's
+        # Picture in Picture window to keep showing the stream in the background.
+        UIBackgroundModes: [audio]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
