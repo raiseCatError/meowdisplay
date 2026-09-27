@@ -17,6 +17,8 @@ final class QUICTransportSession {
     let group: NWConnectionGroup
     let dialStartedAt: Date
     private(set) var streams: [TransportChannel: NWConnection] = [:]
+    /// This Mac's pin check accepted the receiver's certificate.
+    var peerVerifiedAt: Date?
     /// The group finished its QUIC/TLS handshake (pins verified).
     var groupReadyAt: Date?
     /// The Control stream is ready and adopted as the session connection.

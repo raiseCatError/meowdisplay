@@ -231,6 +231,16 @@ final class TransportProtocolSelectionTests: XCTestCase {
         }
     }
 
+    func testReachabilityIsNeverBelievedAfterThePeerWasVerified() {
+        XCTAssertEqual(QUICFailureClassifier.refine(.reachability, peerVerified: false), .reachability)
+        XCTAssertEqual(QUICFailureClassifier.refine(.reachability, peerVerified: true), .indeterminate)
+        XCTAssertEqual(QUICFailureClassifier.refine(.security, peerVerified: true), .security)
+        XCTAssertEqual(QUICFailureClassifier.refine(.protocolViolation, peerVerified: false), .protocolViolation)
+        var selector = TransportProtocolSelector()
+        let observed = QUICFailureClassifier.refine(QUICFailureClassifier.classify(.posix(.ENETDOWN)), peerVerified: true)
+        XCTAssertEqual(selector.quicFailed(observed, preference: .auto), .retryQUIC, "no TCP fallback")
+    }
+
     // MARK: - Stores
 
     func testAuthenticatedCapabilityIsRememberedAndTransientAbsenceIsNot() {

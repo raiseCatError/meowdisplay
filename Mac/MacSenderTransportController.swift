@@ -676,12 +676,17 @@ extension MacSenderTransportController {
         guard !stopped, let options = TLSConfigurator.pinnedQUICOptions(
             identity: tls.identity.value, pinnedSPKIs: { [tls.pinnedPeerSPKI] },
             isListener: false, queue: queue,
-            onPeerRejected: { [weak self] in
-                // Hop instead of tearing the tunnel down inside the TLS
-                // callback; the generation check still applies.
+            onPeerVerification: { [weak self] accepted in
+                // Hop instead of acting inside the TLS callback; the
+                // generation check still applies.
                 self?.queue.async {
-                    self?.failQUIC(generation: generation, error: nil, failureClass: .security,
-                                   detail: "receiver certificate does not match its pin")
+                    guard let self, let session = self.currentQUICSession(generation: generation) else { return }
+                    if accepted {
+                        session.peerVerifiedAt = Date()
+                    } else {
+                        self.failQUIC(generation: generation, error: nil, failureClass: .security,
+                                      detail: "receiver certificate does not match its pin")
+                    }
                 }
             }) else { return false }
         cancelQUICSession()
@@ -715,7 +720,8 @@ extension MacSenderTransportController {
             // Nothing answered the handshake at all: ordinary reachability.
             // A peer that DID complete the pinned handshake but then never
             // said hello is not "unreachable" — no fallback for that.
-            let failureClass: QUICFailureClass = session.groupReadyAt == nil ? .reachability : .indeterminate
+            let failureClass: QUICFailureClass = session.groupReadyAt == nil && session.peerVerifiedAt == nil
+                ? .reachability : .indeterminate
             self.failQUIC(generation: generation, error: nil, failureClass: failureClass,
                           detail: "no authenticated application handshake within "
                             + "\(Int(Self.quicApplicationHandshakeTimeout))s")
@@ -835,10 +841,15 @@ extension MacSenderTransportController {
     /// Auto fallback / stop) and retires the tunnel. The session reference
     /// is dropped before the delegate runs, so nothing it does can be undone
     /// by a late callback of this tunnel.
-    fileprivate func failQUIC(generation: Int, error: NWError?, failureClass: QUICFailureClass,
+    private func failQUIC(generation: Int, error: NWError?, failureClass: QUICFailureClass,
                           detail: String, applicationError: QUICApplicationError? = nil) {
         guard let session = currentQUICSession(generation: generation), !session.failureReported else { return }
         session.failureReported = true
+        // Once this Mac accepted the receiver's pinned certificate, the path
+        // demonstrably works: a later failure (for example the receiver
+        // refusing THIS Mac's certificate, which reaches the dialer as a
+        // plain POSIX error) is never "unreachable" and never a fallback.
+        let failureClass = QUICFailureClassifier.refine(failureClass, peerVerified: session.peerVerifiedAt != nil)
         let established = session.isApplicationReady
         Log.info("quic: failure class=\(failureClass.rawValue) established=\(established) \(detail)"
             + (error.map { " error=\($0)" } ?? "")

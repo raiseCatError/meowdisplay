@@ -100,7 +100,10 @@ final class QUICSecureTransportTests: XCTestCase {
         private var _controlPayload: Data?
         private var _serverStreams: [NWConnection] = []
         private var _peerRejected = false
+        private var _peerAccepted = false
         func peerRejected() { lock.lock(); _peerRejected = true; lock.unlock() }
+        func peerAccepted() { lock.lock(); _peerAccepted = true; lock.unlock() }
+        var wasPeerAccepted: Bool { lock.lock(); defer { lock.unlock() }; return _peerAccepted }
         var wasPeerRejected: Bool { lock.lock(); defer { lock.unlock() }; return _peerRejected }
         func preface(_ c: TransportChannel) { lock.lock(); _prefaces.append(c); lock.unlock() }
         func serverPeer(_ d: Data?) { lock.lock(); _serverPeerSPKI = d; lock.unlock() }
@@ -201,7 +204,9 @@ final class QUICSecureTransportTests: XCTestCase {
         if let identity {
             return try XCTUnwrap(TLSConfigurator.pinnedQUICOptions(
                 identity: identity.identity, pinnedSPKIs: { [server] }, isListener: false, queue: queue, alpn: alpn,
-                onPeerRejected: { rejected?.peerRejected() }))
+                onPeerVerification: { accepted in
+                    if accepted { rejected?.peerAccepted() } else { rejected?.peerRejected() }
+                }))
         }
         // No client certificate at all, but otherwise the production pin check.
         let options = NWProtocolQUIC.Options(alpn: [alpn])
@@ -264,14 +269,21 @@ final class QUICSecureTransportTests: XCTestCase {
         let server = try makeIdentity()
         let client = try makeIdentity()
         let otherPin = try makeIdentity().spki
-        let outcome = try run(server: server, serverPins: [otherPin],
-                              client: try clientOptions(client, pinning: server.spki))
+        let outcome = Outcome()
+        _ = try run(server: server, serverPins: [otherPin],
+                    client: try clientOptions(client, pinning: server.spki, rejected: outcome), outcome: outcome)
         XCTAssertNil(outcome.controlPayload)
         XCTAssertNil(outcome.serverPeerSPKI)
         // The receiver refusing this Mac's certificate must not read as a
         // reachability failure on the dialing side (no silent TCP fallback).
+        // The raw POSIX code is unreliable here (ENOTCONN / ENETDOWN were both
+        // observed), which is why the dialer refines it with its own verdict
+        // on the receiver's pin — exactly as `failQUIC` does.
+        XCTAssertTrue(outcome.wasPeerAccepted, "the Mac did verify the receiver before being refused")
         if let error = outcome.error {
-            XCTAssertNotEqual(QUICFailureClassifier.classify(error), .reachability, "\(error)")
+            let refined = QUICFailureClassifier.refine(QUICFailureClassifier.classify(error),
+                                                       peerVerified: outcome.wasPeerAccepted)
+            XCTAssertNotEqual(refined, .reachability, "\(error)")
         }
     }
 

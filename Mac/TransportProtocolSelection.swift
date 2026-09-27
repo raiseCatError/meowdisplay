@@ -72,6 +72,16 @@ enum QUICFailureClassifier {
         }
     }
 
+    /// A reachability verdict is only believable while the peer has NOT yet
+    /// proven itself: after this side accepted the peer's pinned certificate
+    /// the network evidently reached it, so any failure is at best
+    /// indeterminate (the POSIX code a QUIC group reports after the peer
+    /// rejects our certificate has been ENOTCONN or ENETDOWN).
+    static func refine(_ failureClass: QUICFailureClass, peerVerified: Bool) -> QUICFailureClass {
+        guard peerVerified, failureClass == .reachability else { return failureClass }
+        return .indeterminate
+    }
+
     static let reachabilityCodes: Set<POSIXErrorCode> = [
         .ECONNREFUSED, .ENETUNREACH, .EHOSTUNREACH, .ENETDOWN, .EHOSTDOWN,
         .ETIMEDOUT, .EADDRNOTAVAIL,
