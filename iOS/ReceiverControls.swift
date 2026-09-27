@@ -260,6 +260,9 @@ struct ReceiverControlOverlay: View {
     /// Physical notch side — see `PhysicalNotchSide`. `nil` in portrait, on
     /// a flat/unknown orientation, or a non-notched device.
     let notchSide: LandscapeTraySide?
+    /// Active system-reserved regions (iOS 27.1+; empty before). Divisions
+    /// can move the tray's effective side — see `ControlPlacementArea`.
+    let reservedRegions: [ControlReservedRegion]
     let haptics: ReceiverHaptics
     let onOccupiedFramesChange: ([CGRect]) -> Void
 
@@ -353,12 +356,6 @@ struct ReceiverControlOverlay: View {
         // scale nudge and shortens the animation to a near-instant fade.
         let autoHiding = store.autoHidden
         let autoHideRetreat: CGFloat = reduceMotion ? 0 : 3
-        let autoHideOffset: CGSize = autoHiding
-            ? (portrait
-                ? CGSize(width: 0, height: autoHideRetreat)
-                : CGSize(width: store.preferences.preferredLandscapeSide == .leading
-                                 ? -autoHideRetreat : autoHideRetreat, height: 0))
-            : .zero
         let autoHideOpacity: Double = autoHiding ? 0 : 1
         let autoHideScale: CGFloat = autoHiding && !reduceMotion ? 0.98 : 1
         let paletteChord = interaction.paletteChord
@@ -374,7 +371,16 @@ struct ReceiverControlOverlay: View {
             traySize: traySize,
             paletteSize: paletteSize,
             avoidNotch: store.preferences.avoidNotch,
-            notchSide: notchSide)
+            notchSide: notchSide,
+            reservedRegions: reservedRegions)
+        // Retreats toward the edge the tray actually uses this pass, which a
+        // fold can move away from the stored preference.
+        let autoHideOffset: CGSize = autoHiding
+            ? (portrait
+                ? CGSize(width: 0, height: autoHideRetreat)
+                : CGSize(width: layout.side == .leading
+                                 ? -autoHideRetreat : autoHideRetreat, height: 0))
+            : .zero
         let rawLayout = ControlTrayGeometry.layout(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
@@ -384,7 +390,8 @@ struct ReceiverControlOverlay: View {
             traySize: traySize,
             paletteSize: paletteSize,
             avoidNotch: false,
-            notchSide: notchSide)
+            notchSide: notchSide,
+            reservedRegions: reservedRegions)
         // Independent of the Main Tray's own visibility — only `allowInput`
         // and the Function Tray's own "Show Function Tray" preference
         // gate it (see `functionGroups`). One frame per visual group (see
@@ -415,13 +422,14 @@ struct ReceiverControlOverlay: View {
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
-            mainSide: store.preferences.preferredLandscapeSide,
+            mainSide: layout.side,
             position: store.preferences.functionTrayPosition,
             mainTrayFrame: renderedMainTrayFrame,
             groupSizes: functionGroupSizes,
             avoiding: renderedPaletteFrame,
             avoidNotch: store.preferences.avoidNotch,
-            notchSide: notchSide)
+            notchSide: notchSide,
+            reservedRegions: reservedRegions)
         #if DEBUG
         // Only computed when the overlay is actually on — a second,
         // avoidNotch:false pass purely for the debug visualization below.
@@ -430,12 +438,13 @@ struct ReceiverControlOverlay: View {
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
-            mainSide: store.preferences.preferredLandscapeSide,
+            mainSide: rawLayout.side,
             position: store.preferences.functionTrayPosition,
             mainTrayFrame: renderedMainTrayFrame,
             groupSizes: functionGroupSizes,
             avoiding: renderedPaletteFrame,
-            avoidNotch: false) : []
+            avoidNotch: false,
+            reservedRegions: reservedRegions) : []
         #endif
         let occupiedFrames = [renderedMainTrayFrame]
             + functionFrames
@@ -523,6 +532,7 @@ struct ReceiverControlOverlay: View {
                 : notchSide == .trailing ? safe.trailing : 0
             Log.info("notchTrace: orientation=\(portrait ? "portrait" : "landscape") "
                      + "avoidNotch=\(store.preferences.avoidNotch) trayPreferredSide=\(store.preferences.preferredLandscapeSide) "
+                     + "trayEffectiveSide=\(layout.side) reservedRegions=\(reservedRegions) "
                      + "container=\(containerSize) resolvedSafeInsets=\(safe) "
                      + "physicalNotchSide=\(notchSide.map(String.init(describing:)) ?? "none") notchDepthUsed=\(notchDepth) "
                      + "rawMain=\(rawLayout.trayFrame) "
@@ -604,6 +614,13 @@ struct ReceiverControlOverlay: View {
             Rectangle().fill(Color.red.opacity(0.35))
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX, y: rect.midY)
+        }
+        // Pink: system-reported reserved regions (iOS 27.1+), exactly as
+        // the geometry received them.
+        ForEach(Array(reservedRegions.enumerated()), id: \.offset) { _, region in
+            Rectangle().fill(Color.pink.opacity(region.kind == .division ? 0.35 : 0.2))
+                .frame(width: region.frame.width, height: region.frame.height)
+                .position(x: region.frame.midX, y: region.frame.midY)
         }
         Rectangle().strokeBorder(Color.yellow, lineWidth: 2)
             .frame(width: mainRaw.width, height: mainRaw.height)
