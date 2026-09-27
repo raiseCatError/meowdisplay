@@ -91,6 +91,18 @@ struct ReceiverScreen: View {
         model.receiver.session.allowsLiveInput && controlStore.preferences.allowInput
     }
 
+    /// Everything outside AVKit that decides whether Picture in Picture may
+    /// run — see `ReceiverPictureInPictureConditions`.
+    private var pictureInPictureConditions: ReceiverPictureInPictureConditions {
+        ReceiverPictureInPictureConditions(
+            preferenceEnabled: controlStore.preferences.pictureInPictureEnabled,
+            systemSupported: model.pictureInPicture.systemSupported,
+            rendersThroughDisplayLayer: !metalRenderer,
+            receiverSurfaceShown: showsReceiverSurface,
+            sessionPhase: model.receiver.session.phase,
+            videoEnabled: model.receiver.videoEnabled)
+    }
+
     // The floating keyboard button is offered only while keyboard input can
     // actually reach the Mac: streaming, not paused, and the connected Mac
     // is new enough to understand `keyboard` wire messages. (Allow Input off
@@ -173,6 +185,9 @@ struct ReceiverScreen: View {
                         // `ReceiverControlOverlay`, a sibling view outside
                         // this hit-testing gate, so it stays reachable.
                         .allowsHitTesting(inputReachesMac)
+                    if model.pictureInPicture.isShowingWindow {
+                        ReceiverPictureInPicturePlaceholder()
+                    }
                     if let interruption = model.receiver.session.interruption {
                         ReceiverInterruptionOverlay(interruption: interruption) {
                             model.receiver.reconnectNow()
@@ -233,7 +248,8 @@ struct ReceiverScreen: View {
         .statusBarHidden(showsReceiverSurface)
         .persistentSystemOverlays(showsReceiverSurface ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
-            SettingsView(receiver: model.receiver, controlStore: controlStore, haptics: haptics)
+            SettingsView(receiver: model.receiver, controlStore: controlStore,
+                         pictureInPicture: model.pictureInPicture, haptics: haptics)
         }
         // One sheet for the whole secure pairing ceremony on every transport
         // (LAN, USB, Remote): SAS → waiting for the other device. The Remote
@@ -322,6 +338,13 @@ struct ReceiverScreen: View {
             }
             // M4: never hold the keyboard responder while backgrounded.
             if phase != .active { keyboardActive = false }
+        }
+        .onAppear { model.pictureInPicture.update(pictureInPictureConditions) }
+        .onChange(of: pictureInPictureConditions) { model.pictureInPicture.update($0) }
+        // The receiver surface is covered while the picture is in the
+        // floating window; typing into it blind makes no sense.
+        .onChange(of: model.pictureInPicture.isShowingWindow) { showing in
+            if showing { keyboardActive = false }
         }
         // M4: close the keyboard the moment it stops being usable — peer too
         // old, capture paused, or the session ended.
@@ -1200,6 +1223,7 @@ struct OnboardingView: View {
 struct SettingsView: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var controlStore: ReceiverControlStore
+    @ObservedObject var pictureInPicture: ReceiverPictureInPictureController
     let haptics: ReceiverHaptics
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
@@ -1337,6 +1361,29 @@ struct SettingsView: View {
                         Text("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Picture in Picture", isOn: preferenceBinding(\.pictureInPictureEnabled))
+                        Text("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It’s view-only — control stays in MeowDisplay.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if let note = pictureInPictureNote {
+                            Text(note)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if pictureInPicture.isShowingWindow {
+                        Button("Stop Picture in Picture") { pictureInPicture.stop() }
+                    } else if pictureInPicture.availability == .available {
+                        Button {
+                            // Started from the tap itself: AVKit only honors a
+                            // manual start made in response to user action.
+                            pictureInPicture.start()
+                            dismiss()
+                        } label: {
+                            Label("Start Picture in Picture", systemImage: "pip.enter")
+                        }
                     }
                     Toggle("Show Surface Grid", isOn: preferenceBinding(\.showSurfaceGrid))
                     VStack(alignment: .leading, spacing: 4) {
@@ -2020,6 +2067,19 @@ struct SettingsView: View {
         .pickerStyle(.segmented)
     }
 
+    /// Why Picture in Picture can't run even though it's turned on, when
+    /// that reason is something other than simply waiting for live video.
+    private var pictureInPictureNote: String? {
+        switch pictureInPicture.availability {
+        case .unsupported:
+            return String(localized: "Picture in Picture isn’t supported on this device.")
+        case .requiresSystemVideoLayer:
+            return String(localized: "Unavailable while the experimental Metal renderer is on.")
+        case .available, .turnedOff, .waitingForVideo:
+            return nil
+        }
+    }
+
     private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
         Binding(get: { controlStore.preferences[keyPath: keyPath] },
                 set: { value in controlStore.update { $0[keyPath: keyPath] = value } })
@@ -2068,6 +2128,7 @@ enum iOSDecodeCeiling {
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
     let wakeConnect: WakeConnectCoordinator
+    let pictureInPicture: ReceiverPictureInPictureController
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -2082,6 +2143,7 @@ final class ReceiverModel: ObservableObject {
                                   maxEncodeHigh: iOSDecodeCeiling.maxEncodeHigh,
                                   maxFPS: UIScreen.main.maximumFramesPerSecond)
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
+        pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
         // Announce the native panel size to the Mac.
         let native = UIScreen.main.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
@@ -2093,6 +2155,12 @@ final class ReceiverModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        pictureInPicture.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        pictureInPicture.onStartedAfterLinger = { [weak self] in self?.resumeFromLinger() }
+        pictureInPicture.onEndedInBackground = { [weak self] in self?.lingerInBackground() }
     }
 
     func start() {
@@ -2120,22 +2188,24 @@ final class ReceiverModel: ObservableObject {
         // Immediately (the Face ID default). Other configurations make a
         // lock indistinguishable from an app switch, so those keep the
         // session like a backgrounded app would.
-        if !UIApplication.shared.isProtectedDataAvailable {
+        let deviceLocked = !UIApplication.shared.isProtectedDataAvailable
+        switch pictureInPicture.sceneDidBackground(deviceLocked: deviceLocked) {
+        case .sleep:
             // Backgrounded because the device locked, not an app switch.
             Log.info("backgrounded by device lock — sleeping now")
             goToSleep()
-            return
+        case .keepLive:
+            // Picture in Picture keeps the app running and showing the
+            // stream; the linger waits until the window closes.
+            Log.info("app switched away — Picture in Picture keeps the session live")
+        case .linger:
+            Log.info("app switched away — keeping the session, rendering paused")
+            lingerInBackground()
         }
-        Log.info("app switched away — keeping the session, rendering paused")
-        beginBackgroundAssertion()
-        receiver.setRenderingPaused(true)
-        // iOS will suspend us shortly; an automatic recovery run cannot make
-        // progress there, so park it rather than let it burn its budget and
-        // land in Connection Lost while the phone was simply in a pocket.
-        receiver.setAppActive(false)
     }
 
     func sceneDidActivate() {
+        pictureInPicture.sceneDidActivate()
         endBackgroundAssertion()
         receiver.setRenderingPaused(false)
         receiver.ensureListening()
@@ -2147,6 +2217,7 @@ final class ReceiverModel: ObservableObject {
 
     func deviceWillLock() {
         Log.info("device locking — sleeping now")
+        pictureInPicture.deviceWillLock()
         goToSleep()
     }
 
@@ -2168,6 +2239,23 @@ final class ReceiverModel: ObservableObject {
     func appWillTerminate() {
         Log.info("app terminating — closing session")
         receiver.shutDown()
+    }
+
+    private func lingerInBackground() {
+        beginBackgroundAssertion()
+        receiver.setRenderingPaused(true)
+        // iOS will suspend us shortly; an automatic recovery run cannot make
+        // progress there, so park it rather than let it burn its budget and
+        // land in Connection Lost while the phone was simply in a pocket.
+        receiver.setAppActive(false)
+    }
+
+    /// Picture in Picture started after the linger was already applied: it
+    /// keeps the app running, so undo the pause and let recovery continue.
+    private func resumeFromLinger() {
+        endBackgroundAssertion()
+        receiver.setRenderingPaused(false)
+        receiver.setAppActive(true)
     }
 
     private func goToSleep() {
