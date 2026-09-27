@@ -10,7 +10,7 @@
 import Foundation
 import Network
 
-/// QUIC application error handling (PROTOCOL.md §8.6). The documented
+/// QUIC application error handling (PROTOCOL.md §2.4). The documented
 /// codes are recorded in a bounded local log line when either side closes a
 /// connection for a violation; the connection is then cancelled. v1 does not
 /// put the code on the wire: the SDK's `NWProtocolQUIC.Metadata.

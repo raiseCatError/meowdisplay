@@ -11,7 +11,7 @@ import Foundation
 /// Fixed identity of the QUIC transport. TCP (`WireCrypto.tlsPort`) stays a
 /// first-class path; QUIC is an additive second secure transport on the same
 /// port NUMBER over UDP (TCP and UDP port spaces are separate), so no
-/// `RemoteEndpointStore` schema change is needed. See PROTOCOL.md §8.
+/// `RemoteEndpointStore` schema change is needed. See PROTOCOL.md §2.4.
 enum QUICTransport {
     /// TLS application protocol (ALPN). A mismatch fails the handshake.
     static let alpn = "meowdisplay-quic/1"
@@ -73,7 +73,7 @@ enum TransportChannel: UInt8, Sendable, CaseIterable, CustomStringConvertible {
     }
 }
 
-/// Stable, documented QUIC application error codes (PROTOCOL.md §8.6). Used
+/// Stable, documented QUIC application error codes (PROTOCOL.md §2.4). Used
 /// for bounded local diagnostics and, where the SDK exposes it, as the
 /// application close code.
 enum QUICApplicationError: UInt64, Error, Sendable, CustomStringConvertible {

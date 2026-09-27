@@ -189,7 +189,7 @@ enum WireProtocol {
 
     /// Protocol version that introduced the optional QUIC transport (reliable
     /// Control/Video/Audio streams over pinned mutual-TLS QUIC, PROTOCOL.md
-    /// §8). Additive: QUIC use is gated ONLY on the explicit authenticated
+    /// §2.4). Additive: QUIC use is gated ONLY on the explicit authenticated
     /// `transports`/`qv` capability in hello/welcome, never on `pv` — a
     /// peer without it (every pv <= 21 peer) simply stays on TCP.
     static let quicTransportWireVersion = 22

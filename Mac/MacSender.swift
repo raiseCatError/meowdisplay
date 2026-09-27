@@ -4720,20 +4720,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "hello":
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
-                let authenticatedSPKI: Data? = {
-                    guard let conn = transportController.currentConnection,
-                          let metadata = conn.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
-                    var result: Data?
-                    sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
-                        guard result == nil else { return }
-                        let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
-                        guard let key = SecCertificateCopyKey(secCert),
-                              let x963 = SecKeyCopyExternalRepresentation(key, nil) as Data?,
-                              let pub = try? P256.Signing.PublicKey(x963Representation: x963) else { return }
-                        result = pub.derRepresentation
-                    }
-                    return result
-                }()
+                // The pinned peer key this connection authenticated with —
+                // TLS metadata over TCP, QUIC metadata over a QUIC Control
+                // stream; the same SPKI encoding either way.
+                let authenticatedSPKI: Data? = transportController.currentConnection
+                    .flatMap(TLSConfigurator.authenticatedPeerSPKI(of:))
                 // Identity first, identically for every route: USB is only a
                 // route, so a USB hello meets exactly the TCP rule — the
                 // claimed install ID must be the peer this pipeline was built

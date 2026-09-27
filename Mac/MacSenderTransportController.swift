@@ -634,7 +634,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     }
 }
 
-// MARK: - QUIC transport (reliable-stream QUIC v1, PROTOCOL.md §8)
+// MARK: - QUIC transport (reliable-stream QUIC v1, PROTOCOL.md §2.4)
 
 extension MacSenderTransportController {
     /// The live QUIC session iff it is still exactly `generation` — every

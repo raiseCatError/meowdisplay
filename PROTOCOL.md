@@ -156,6 +156,117 @@ never overwritten; recovery requires Forget Device. Messages use the normal
 big-endian length framing, are limited to 64 KiB, and are invalid on the
 media listener.
 
+### 2.4 QUIC (`pv` 22, optional)
+
+QUIC is an **additive second secure transport** on network routes (LAN,
+AWDL, Remote). TCP (sections 2.1–2.3) stays fully supported and is always
+what a peer without the QUIC capability uses; USB never uses QUIC. Route
+(USB / LAN / AWDL / Remote) and protocol (TCP / QUIC) are orthogonal: the
+sender first picks the route exactly as before, then TCP or QUIC inside it.
+
+**Discovery and port.** A receiver whose QUIC listener is bound also
+advertises `_meowdisp-q._udp` with the SAME instance name as its
+`_opensidecar._tcp` service, on **UDP 9001** (`QUICTransport.udpPort`; TCP
+and UDP port spaces are separate, so TCP 9001 is unchanged). Its TXT record
+carries only `id`, `pv` and `qv` (the QUIC application framing version,
+currently `1`). It is a reachability/capability **hint**: it never
+establishes trust, is never persisted as capability, and never carries the
+one-shot `cr` connect-request token (which stays on `_opensidecar._tcp`, so
+one user action is handled once). A Remote Access endpoint hint reaches QUIC
+at the same host and port number over UDP.
+
+**Security.** QUIC's integrated TLS 1.3 is configured with exactly the TCP
+rules: the same persistent self-signed identity on both ends, a client
+certificate required by the listener, and the same leaf-SPKI verification
+against the stored pins (`TLSConfigurator`). There is no QUIC-specific key,
+pin or trust store, and no plaintext form. ALPN is fixed to
+`meowdisplay-quic/1`; a peer without it fails the handshake. Session tickets
+and resumption are disabled, so **no 0-RTT early data** can exist: no
+MeowDisplay message is ever acted on before the full authenticated handshake
+and, above it, the unchanged `hello` identity check and session admission
+(section 6.9).
+
+**Streams.** One QUIC connection per session carries exactly three
+long-lived, reliable, **sender-opened bidirectional** streams:
+
+| Channel | Byte | Direction of payload | Carries |
+|---|---|---|---|
+| Control | `0x01` | both | every JSON control message (hello/welcome, invitations, ping/pong, input, settings, `kf`, cursor, teardown) |
+| Video | `0x02` | sender → receiver | Annex-B access units (section 5, unchanged) plus `videoState` / `streamCodecState`, which ride Video so they stay ordered with the frames they describe |
+| Audio | `0x03` | sender → receiver | `0x01`-marked audio media frames (section 5A, unchanged) |
+
+Every stream begins with an 8-byte preface; its channel comes ONLY from the
+preface, never from QUIC stream IDs or open order:
+
+```
+0..3  "MEOW" (4D 45 4F 57)
+4     QUIC application framing version (1)
+5     channel (0x01 / 0x02 / 0x03)
+6..7  flags, big-endian, 0 in v1
+```
+
+After the preface each stream uses the section 3 framing
+(`[UInt32 BE length][payload]`). The receiver does not write a preface on
+the Control stream's reverse direction. Receivers MUST reject (close the
+QUIC connection): a bad magic, version or non-zero flags; an unknown
+channel; a second stream for a channel; more than three streams; any
+unidirectional stream; a payload of the wrong kind for its channel; a
+declared length of 0 or above the channel cap (Control and Audio 1 MiB,
+Video 32 MiB — the raw 4:2:0 size of a 4096×4096 frame plus headroom,
+larger than any legitimate access unit at the receivers' 4096-pixel decode
+ceilings), checked before buffering; a stream that ends mid-frame; and any
+Video access unit or Audio frame before the session is admitted. A sender
+MUST treat a receiver-opened stream, or any byte the receiver writes on
+Video/Audio, the same way. A receiver refuses QUIC connections beyond a
+small live bound, closes one whose preface does not arrive within 5 s or
+whose Control stream does not arrive within 10 s, and closes a QUIC
+connection whenever the session lets go of its Control stream.
+
+Application error codes (diagnostic; v1 records them in local logs and
+cancels the connection, without putting them on the wire):
+`0x100` invalidStreamPreface, `0x101` unsupportedTransportVersion, `0x102`
+duplicateChannel, `0x103` unexpectedChannel, `0x104` sessionNotAdmitted,
+`0x105` protocolViolation, `0x106` peerRevoked.
+
+**Capability.** Both sides add `transports` (e.g. `["tcp","quic"]`) and `qv`
+to `hello` (receiver) and `welcome` (sender) — inside the authenticated
+session. A receiver lists `quic` only while its QUIC listener is bound. A
+missing capability means TCP only; QUIC is never inferred from `pv`. The
+Mac remembers only POSITIVE authenticated capability per peer; an
+incompatible `qv` disables QUIC for that peer; Forget removes it.
+
+**Selection (sender, per device: Auto / QUIC / TCP, default Auto).**
+
+* *TCP*: always TCP.
+* *QUIC*: QUIC when this peer is known to support it; otherwise the session
+  reports QUIC as unavailable — it never silently uses TCP.
+* *Auto*: TCP when QUIC is unsupported (no authenticated capability; on a
+  local route a compatible Bonjour hint may justify an attempt, on Remote
+  only an authenticated capability does) or a QUIC cooldown is active;
+  otherwise QUIC. Whichever protocol first completes the authenticated
+  `hello` is kept for the rest of the logical session — no periodic
+  re-challenge, no metric-driven switching.
+* Only an ordinary **reachability** failure (no answer within 8 s of dialing,
+  ICMP-refused, unreachable network/host, DNS) lets Auto fall back to secure
+  TCP; it then starts a 10-minute in-memory cooldown for that peer and route
+  kind and stays on TCP for the rest of the logical session. A **security**
+  failure (any TLS failure: pin mismatch, certificate, missing client
+  certificate, ALPN) or an authenticated **protocol violation** ends the
+  attempt with a trust/protocol error and NEVER falls back. An ambiguous
+  error retries QUIC rather than switching.
+* A live QUIC session that is lost gets exactly one QUIC recovery dial;
+  if that dial then fails for reachability, Auto falls back as above.
+* Changing the setting on a live session: explicit TCP/QUIC migrate through
+  the ordinary transport swap (section 9) only when the protocol differs;
+  Auto keeps the current protocol until the next reconnect or route change.
+
+**Migration.** TCP and QUIC connections are never mutated into each other.
+A protocol change is the same hot transport swap as a route change: held
+input is cancelled, the old connection's authority invalidated, a new
+connection is authenticated, says `hello` and is admitted again; no input
+grant carries over; video resyncs with a keyframe and audio starts a new
+generation. There is no make-before-break.
+
 ## 3. Framing
 
 Every message in **both directions** is length-prefixed:
@@ -1178,7 +1289,7 @@ Rules already stated elsewhere, gathered:
 Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 
 * `pv` is a single integer, bumped **only when the wire changes**, never
-  per release. Current: **21**.
+  per release. Current: **22**.
 * A peer that advertises no `pv` anywhere (TXT, `hello`, `welcome`) **is**
   protocol 1.
 * Each side declares the oldest peer it supports (`welcome.min` on the
@@ -1214,6 +1325,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
 | 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
+| 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 
 ---
 
@@ -1305,4 +1417,5 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-17 | `pv` 13: Mac-authoritative Mirror capture-source selection (`mirrorDisplayRequest` / `mirrorDisplayState`) |
 | 2026-09-18 | `pv` 14: Mac-authoritative Extend display shape (`extendShapeRequest` / `extendShapeState`, section 6.7); additive `hello.maxEncodeWide`/`maxEncodeHigh` now advertised by the official iOS receiver |
 | 2026-09-18 | `pv` 15: encoder-safe FPS ceiling and receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`, section 6.8) |
+| 2026-09-27 | `pv` 22: optional reliable-stream QUIC transport (section 2.4) with authenticated `transports`/`qv` capability |
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |

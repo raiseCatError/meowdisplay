@@ -178,7 +178,7 @@ actor ReceiverFramePipeline {
     /// generation` itself — the three are deliberately never merged.
     private var generation = 0
 
-    // MARK: - QUIC (PROTOCOL.md §8)
+    // MARK: - QUIC (PROTOCOL.md §2.4)
 
     /// Set when the adopted session connection is a QUIC Control stream: its
     /// frames are then control JSON only (strict), and it is the connection
