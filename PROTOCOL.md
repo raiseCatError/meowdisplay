@@ -252,6 +252,10 @@ removes it.
   otherwise QUIC. Whichever protocol first completes the authenticated
   `hello` is kept for the rest of the logical session — no periodic
   re-challenge, no metric-driven switching.
+* A dial the platform reports as merely *waiting* (Network.framework's
+  `.waiting`, e.g. `ENETDOWN` while a path comes up) is not a failure: it
+  is left to become ready, bounded by the same 8 s application-handshake
+  timeout. Only the platform's *failed* state ends the dial.
 * Only an ordinary **reachability** failure (no answer within 8 s of dialing,
   ICMP-refused, unreachable network/host, DNS) lets Auto fall back to secure
   TCP; it then starts a 10-minute in-memory cooldown for that peer and route

@@ -435,6 +435,88 @@ final class QUICSecureTransportTests: XCTestCase {
         listener.cancel()
     }
 
+    private final class ControllerEvents: MacSenderTransportDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private let transport: SenderTransport
+        private var _ready: [NWConnection] = []
+        private var _receiving: [NWConnection] = []
+        private var _failures: [QUICTransportFailure] = []
+        init(transport: SenderTransport) { self.transport = transport }
+        func transportSessionBecameReady(on connection: NWConnection) { lock.lock(); _ready.append(connection); lock.unlock() }
+        func transportShouldBeginReceiving(on connection: NWConnection) { lock.lock(); _receiving.append(connection); lock.unlock() }
+        func transportPathChanged(_ route: ConnectionRoute?) {}
+        func transportSessionInvalidated(reason: String) {}
+        func transportLinkDied(_ detail: String) {}
+        func transportCancelActiveInput() {}
+        func transportPeerDeviceKind() -> String? { nil }
+        func transportDialingContext() -> (transport: SenderTransport, peerAddrs: [String]) { (transport, []) }
+        func transportQUICFailed(_ failure: QUICTransportFailure) { lock.lock(); _failures.append(failure); lock.unlock() }
+        var ready: [NWConnection] { lock.lock(); defer { lock.unlock() }; return _ready }
+        var receiving: [NWConnection] { lock.lock(); defer { lock.unlock() }; return _receiving }
+        var failures: [QUICTransportFailure] { lock.lock(); defer { lock.unlock() }; return _failures }
+    }
+
+    /// The production dialer end to end: `MacSenderTransportController.
+    /// connectQUIC` against the production receiver group. Once the group is
+    /// ready, the Control stream must be ADOPTED — `becomeReady` flips the
+    /// controller ready and starts the control read loop — or the hello is
+    /// never sent and the session dies at the handshake timeout. This fails
+    /// if that adoption path is removed or the group state policy stops
+    /// opening streams.
+    func testProductionSenderControllerAdoptsControlStreamOnceReady() throws {
+        let server = try makeIdentity()
+        let client = try makeIdentity()
+        let listener = try NWListener(
+            using: QUICReceiverListener.listenerParameters(quic: try receiverOptions(server, pinning: client.spki)),
+            on: .any)
+        let registry = QUICReceiverGroupRegistry()
+        let events = GroupEvents()
+        let queue = self.queue
+        listener.newConnectionGroupHandler = { group in
+            let owner = registry.admit { id in
+                QUICReceiverGroup(id: id, group: group, registry: registry, queue: queue,
+                                  onControlStream: { _ in events.control() },
+                                  onMediaReady: { _ in events.media() })
+            }
+            guard let owner else { group.cancel(); return }
+            events.owner(owner)
+            owner.start()
+        }
+        listener.start(queue: queue)
+        waitUntil(5) { listener.port != nil && listener.state == .ready }
+        guard listener.state == .ready, let port = listener.port else {
+            listener.cancel()
+            throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))")
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+        let tls = TLSSessionConfig(identity: SendableSecIdentity(value: client.identity),
+                                   pinnedPeerSPKI: server.spki, peerID: "quic-controller-test")
+        let controllerQueue = DispatchQueue(label: "quic.secure.transport.tests.controller")
+        let controller = MacSenderTransportController(queue: controllerQueue, endpointName: "test",
+                                                      statusSink: MacSenderStatusSink())
+        let delegate = ControllerEvents(transport: .tcp(endpoint, tls: tls))
+        controller.delegate = delegate
+        let dialed = controllerQueue.sync { controller.connectQUIC(to: endpoint, tls: tls) }
+        XCTAssertTrue(dialed)
+
+        waitUntil(6) { delegate.receiving.count == 1 && events.controls == 1 && events.mediaCount == 2 }
+        XCTAssertEqual(delegate.ready.count, 1, "the Control stream was adopted (becomeReady)")
+        XCTAssertEqual(delegate.receiving.count, 1, "the control read loop was started")
+        controllerQueue.sync {
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.activeNetworkProtocol, .quic)
+            XCTAssertTrue(controller.currentConnection === delegate.ready.first)
+        }
+        XCTAssertEqual(events.controls, 1)
+        XCTAssertEqual(events.mediaCount, 2)
+        XCTAssertTrue(delegate.failures.isEmpty, "no failure before the hello: \(delegate.failures)")
+
+        controllerQueue.sync { controller.cancelAndClearConnection() }
+        registry.closeAll(error: nil)
+        listener.cancel()
+    }
+
     private final class OutcomeStreams: @unchecked Sendable {
         private let lock = NSLock()
         private var streams: [NWConnection] = []
