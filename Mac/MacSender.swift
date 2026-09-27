@@ -324,6 +324,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         get { statusSink.onTransportPath }
         set { statusSink.onTransportPath = newValue }
     }
+    // The secure network protocol (TCP/QUIC) the established connection
+    // rides; nil while disconnected and on USB (a route, not a protocol).
+    @MainActor var onNetworkProtocol: ((NetworkTransportProtocol?) -> Void)? {
+        get { statusSink.onNetworkProtocol }
+        set { statusSink.onNetworkProtocol = newValue }
+    }
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
@@ -637,6 +643,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var debugSendsCompletedWindow = 0
     private var debugPeakPendingSends = 0
     private var debugSendTimingsMs: [Double] = []
+    private var debugAudioSendTimingsMs: [Double] = []
     #endif
     /// The persisted preference and the state actually applied to this peer
     /// differ until its hello proves support for protocol v9. Older peers are
@@ -785,6 +792,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var deferredRotationRebuild = false
 
     private var lastHello: PhoneInfo?
+    /// TCP/QUIC choice inside the network route (`TransportProtocolSelection.swift`).
+    /// `queue`-confined. Sticky per logical session (this sender's lifetime).
+    private var protocolSelector = TransportProtocolSelector()
+    /// The per-device Network Transport setting, read at session creation and
+    /// live-updated by `applyNetworkTransportPreference`.
+    private var networkPreference: NetworkTransportPreference
+    /// The protocol of the dial in flight / the connection in use.
+    private var dialingProtocol: NetworkTransportProtocol?
     private struct ApplicationReadySession {
         let info: PhoneInfo
         let generation: UInt64
@@ -1014,6 +1029,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.pipelineState = MacSenderPipelineState(
             maxPendingEncodes: StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority))
         self.codecPreference = codecPreference
+        self.networkPreference = NetworkTransportPreferenceStore.load(peerID: transport.tls.peerID)
         self.transportController = MacSenderTransportController(
             queue: queue, endpointName: name, statusSink: statusSink)
         super.init()
@@ -1361,10 +1377,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendVideoState() {
         guard let info = lastHello,
               info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
+        // Video channel: over QUIC this keeps the state ordered with the
+        // frames it describes; over TCP it is the same byte stream as ever.
         sendJSONObject(["type": WireMessage.videoState,
                         "enabled": videoEnabled,
                         "width": capturePixelsWide,
-                        "height": capturePixelsHigh])
+                        "height": capturePixelsHigh], channel: .video)
     }
 
     private func sendAudioState() {
@@ -3169,6 +3187,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // A held hardware key (or drag/pen contact) must not survive the
             // old connection into the migrated one.
             self.inputInjector?.cancelActiveInput()
+            if Self.networkRouteKind(of: self.transport) != Self.networkRouteKind(of: newTransport) {
+                // A material route change (LAN/AWDL <-> Remote, USB <-> network)
+                // may re-run TCP/QUIC selection for the new route.
+                self.protocolSelector.routeChanged()
+            }
             self.transport = newTransport
             // Fresh grace window: if the new link can't come up either, the
             // session ends like any other disconnect instead of dialing
@@ -3176,7 +3199,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.disconnectedSince = Date()
             self.invalidateApplicationSession(reason: "transportSwitch")
             let sink = self.statusSink
-            Task { @MainActor in sink.publishTransportPath(nil) }
+            Task { @MainActor in
+                sink.publishTransportPath(nil)
+                sink.publishNetworkProtocol(nil)
+            }
             self.activeUSBBridge?.cancel()
             self.activeUSBBridge = nil
             self.activeUSBBridgeTLS = nil
@@ -3185,7 +3211,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // adopt), cancels/clears the connection, and stops upgrade
             // probing — see MacSenderTransportController.resetForTransportSwitch.
             self.transportController.resetForTransportSwitch()
-            self.pipelineState.setPendingSends(0)
+            self.pipelineState.resetPendingSendsForNewTransport()
             self.pipelineState.resetPendingEncodes()
             self.connect()
         }
@@ -3945,8 +3971,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("connectDebug: senderStartRequested peer=\(endpointName)")
         switch transport {
         case .tcp(let endpoint, let tls):
-            Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp")
-            connectTCP(endpoint, tls: tls)
+            let quicEndpoint = TransportProtocolInputsResolver.quicEndpoint(for: endpoint, peerID: tls.peerID)
+            let routeKind = NetworkRouteKind(endpoint: endpoint)
+            let decision = protocolSelector.decide(TransportProtocolSelector.Inputs(
+                preference: networkPreference,
+                localQUICAvailable: QUICRuntimeAvailability.isAvailable && quicEndpoint != nil,
+                peerSupport: TransportProtocolInputsResolver.peerSupport(peerID: tls.peerID, routeKind: routeKind),
+                routeKind: routeKind,
+                cooldownActive: QUICCooldownStore.shared.isActive(peerID: tls.peerID, routeKind: routeKind)))
+            switch decision {
+            case .tcp:
+                dialingProtocol = .tcp
+                Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp protocol=tcp"
+                    + " preference=\(networkPreference.rawValue)")
+                connectTCP(endpoint, tls: tls)
+            case .quic:
+                guard let quicEndpoint else { return }
+                dialingProtocol = .quic
+                Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp protocol=quic"
+                    + " preference=\(networkPreference.rawValue)")
+                connectQUIC(quicEndpoint, tls: tls)
+            case .unavailable(let reason):
+                // Explicit QUIC never silently becomes TCP.
+                dialingProtocol = nil
+                Log.info("connectDebug: explicit QUIC unavailable peer=\(endpointName) reason=\(reason)")
+                let sink = statusSink
+                let text = "QUIC is unavailable: \(reason). Choose Auto or TCP for this device."
+                Task { @MainActor in sink.publishStatus(text) }
+                reportGone("explicit QUIC unavailable (\(reason)) — not using TCP instead")
+            }
         case .usb(let udid, let tls):
             Log.info("connectDebug: dialStarted peer=\(endpointName) route=usb")
             connectUSB(udid: udid, tls: tls)
@@ -4033,6 +4086,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         conn.start(queue: queue)
+    }
+
+    /// QUIC twin of `connectTCP`: the transport controller owns the tunnel
+    /// and its three streams; the Control stream becomes the session
+    /// connection and reaches `becomeReady` exactly like a TCP connection,
+    /// so authentication, hello/welcome, admission and input authority run
+    /// unchanged. Failures come back through `transportQUICFailed`.
+    private func connectQUIC(_ endpoint: NWEndpoint, tls: TLSSessionConfig) {
+        guard transportController.connectQUIC(to: endpoint, tls: tls) else {
+            // The identity itself is unusable — TCP would fail identically,
+            // and explicit QUIC must not become TCP anyway.
+            let sink = statusSink
+            Task { @MainActor in sink.publishStatus("Secure connection unavailable") }
+            return
+        }
+    }
+
+    private static func networkRouteKind(of transport: SenderTransport) -> NetworkRouteKind? {
+        guard case .tcp(let endpoint, _) = transport else { return nil }
+        return NetworkRouteKind(endpoint: endpoint)
+    }
+
+    /// An authenticated QUIC session (or its handshake) broke the MeowDisplay
+    /// stream protocol: like a trust failure, the session stops — no TCP
+    /// fallback for a peer that authenticated and then misbehaved.
+    private func reportQUICProtocolFailure(detail: String) {
+        guard !stopped else { return }
+        Log.info("SECURITY: QUIC protocol violation — ending session without fallback (\(detail))")
+        invalidateApplicationSession(reason: "quicProtocolViolation")
+        haltCaptureLifecycle()?.stopCapture { _ in }
+        transportController.cancelConnectionWithoutClearing()
+        helloContinuation?.resume(throwing: PairingError.invalidKey)
+        helloContinuation = nil
+        let selfBox = self.selfBox
+        Task { @MainActor in
+            guard let self = selfBox.resolve() else { return }
+            self.onTrustFailure?("MeowDisplay stopped a QUIC session that broke the protocol. Try again, or choose TCP for this device.")
+        }
+    }
+
+    /// The user changed this device's Network Transport setting. Explicit
+    /// TCP/QUIC migrate a live session through the ordinary hot transport
+    /// swap (`switchTransport`: input cancelled, authority invalidated,
+    /// fresh authenticated connection, re-admission, keyframe resync) only
+    /// when the protocol actually differs; Auto keeps a healthy session on
+    /// its current protocol until the next reconnect or route change.
+    func applyNetworkTransportPreference(_ preference: NetworkTransportPreference) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), !self.stopped,
+                  preference != self.networkPreference else { return }
+            self.networkPreference = preference
+            guard case .tcp(_, let tls) = self.transport else { return }   // USB: applies to the next network route
+            if preference == .quic { QUICCooldownStore.shared.clear(peerID: tls.peerID) }
+            let current = self.transportController.activeNetworkProtocol ?? self.dialingProtocol
+            guard let target = self.protocolSelector.preferenceChanged(to: preference, current: current) else {
+                Log.info("network transport preference=\(preference.rawValue) — keeping current protocol")
+                return
+            }
+            Log.info("network transport preference=\(preference.rawValue) — migrating \(self.endpointName) to \(target.title)")
+            self.switchTransport(to: self.transport)
+        }
     }
 
     private static func isTLSFailure(_ error: NWError) -> Bool {
@@ -4171,7 +4286,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("connectDebug: automaticRetry peer=\(endpointName)")
         invalidateApplicationSession(reason: "reconnectScheduled")
         let transportPathSink = statusSink
-        Task { @MainActor in transportPathSink.publishTransportPath(nil) }
+        Task { @MainActor in
+            transportPathSink.publishTransportPath(nil)
+            transportPathSink.publishNetworkProtocol(nil)
+        }
         activeUSBBridge?.cancel()
         activeUSBBridge = nil
         activeUSBBridgeTLS = nil
@@ -4181,8 +4299,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // bumps the dial generation (a USB dial still in flight must not
         // adopt) and cancels/clears the connection — see
         // MacSenderTransportController.resetForRedial.
+        if transportController.isQUICApplicationReady {
+            // A live QUIC session was lost (EOF, watchdog, receive error):
+            // the redial below is its single QUIC recovery attempt.
+            protocolSelector.liveQUICLost()
+        }
         let generation = transportController.resetForRedial()
-        pipelineState.setPendingSends(0)
+        pipelineState.resetPendingSendsForNewTransport()
         pipelineState.resetPendingEncodes()
         let selfBox = self.selfBox
         queue.asyncAfter(deadline: .now() + 1.0) {
@@ -4272,7 +4395,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // treat it exactly like inbound silence, since silently sitting
             // on a wedged writer forever is the "connected but frozen"
             // failure this exists to catch.
-            if self.transportController.isReady, self.pipelineState.pendingSendsNow > 0,
+            if self.transportController.isReady,
+               self.pipelineState.pendingSendsNow + self.pipelineState.pendingAudioSendsNow > 0,
                Date().timeIntervalSince(self.lastSendCompletionAt) > 5 {
                 if !self.sendStallReported {
                     self.sendStallReported = true
@@ -4654,6 +4778,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 awaitingWake = false
                 disconnectedSince = nil
                 Log.info("sessionDebug: applicationReady generation=\(generation)")
+                // Authenticated capability (pinned identity just verified
+                // above): remember positive QUIC support for later sessions.
+                PeerQUICCapabilityStore.recordAuthenticatedHello(QUICPeerCapability(message: obj), peerID: tls.peerID)
+                if case .tcp = transport, let established = transportController.activeNetworkProtocol {
+                    if established == .quic { transportController.markQUICApplicationReady() }
+                    protocolSelector.established(established, preference: networkPreference)
+                }
                 // Pinned mutual-TLS (checked above) + this application
                 // handshake together are exactly "the expected paired peer
                 // is authenticated" for every route — arm the same bounded
@@ -4978,7 +5109,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case WireMessage.streamingProfileRequest:
             guard let info = lastHello,
-                  info.protocolVersion >= WireProtocol.version,
+                  info.protocolVersion >= WireProtocol.streamingProfileRequestWireVersion,
                   let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
             let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
@@ -5437,7 +5568,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// this message when it sends `codecs` at all.
     private func sendStreamCodecState() {
         guard let info = lastHello, CodecCapabilityProbe.shouldConfirmCodecOnHello(codecs: info.codecs) else { return }
-        sendJSONObject(StreamCodecStateUpdate(codec: activeCodec, reason: activeCodecReason).wireFields)
+        sendJSONObject(StreamCodecStateUpdate(codec: activeCodec, reason: activeCodecReason).wireFields,
+                       channel: .video)
     }
 
     // MARK: - Capture callback
@@ -5974,7 +6106,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Identify ourselves to the receiver: our protocol version and the oldest
     /// receiver version we still support.
     private func sendWelcome() {
-        sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
+        var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
+                                      "min": WireProtocol.minSupportedPeer]
+        welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
+        sendJSONObject(welcome)
     }
 
     private func sendStreamingProfileState() {
@@ -6087,10 +6222,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func sendJSONObject(_ object: [String: Any]) {
+    private func sendJSONObject(_ object: [String: Any], channel: TransportChannel = .control) {
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let json = String(data: data, encoding: .utf8) else { return }
-        sendJSONFrame(json)
+        sendJSONFrame(json, channel: channel)
     }
 
     /// CR2 fix: unlike `sendFramed` below (verified — every call site already
@@ -6100,12 +6235,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// main-thread cursor-sprite poll. `sendFromAnyContext` hops onto
     /// `queue` itself when needed instead of this method touching
     /// `currentConnection`/`isReady` directly — see its doc comment.
-    private func sendJSONFrame(_ json: String) {
-        let payload = Data(json.utf8)
-        var header = UInt32(payload.count).bigEndian
-        var frame = Data(bytes: &header, count: 4)
-        frame.append(payload)
-        transportController.sendFromAnyContext(content: frame) { _ in }
+    private func sendJSONFrame(_ json: String, channel: TransportChannel = .control) {
+        let frame = QUICFrameAssembler.frame(Data(json.utf8))
+        transportController.sendFromAnyContext(channel: channel, content: frame) { _ in }
     }
 
     /// `kind` is DEBUG-only telemetry (never sent on the wire): identifies
@@ -6124,21 +6256,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // live admitted connection receives any.
         guard transportController.currentConnection != nil, transportController.isReady,
               sessionAuthorization.isAdmitted else { return }
-        var header = UInt32(payload.count).bigEndian
-        var frame = Data(bytes: &header, count: 4)
-        frame.append(payload)
+        // Media rides its own channel: over QUIC, Video and Audio are
+        // independent streams, and the in-flight accounting is per channel
+        // (video backpressure never gates audio) and per transport epoch (a
+        // completion from a retired connection never touches the new one's
+        // counters).
+        let channel: TransportChannel = kind == "audio" ? .audio : .video
+        let frame = QUICFrameAssembler.frame(payload)
         let frameByteCount = frame.count
-        let pendingSendsAfterIncrement = pipelineState.incrementPendingSends()
+        let (pendingSendsAfterIncrement, sendEpoch) = pipelineState.beginMediaSend(channel: channel)
         #if DEBUG
         let queuedAt = Date()
         let queuedByteCount = frame.count
         debugSendsStartedWindow += 1
-        debugPeakPendingSends = max(debugPeakPendingSends, pendingSendsAfterIncrement)
+        if channel == .video {
+            debugPeakPendingSends = max(debugPeakPendingSends, pendingSendsAfterIncrement)
+        }
         #endif
         let selfBox = self.selfBox
-        transportController.send(content: frame) { error in
+        #if DEBUG
+        let protocolLabel = transportController.activeNetworkProtocol?.rawValue ?? "none"
+        #endif
+        let handed = transportController.send(channel: channel, content: frame) { error in
             guard let self = selfBox.currentOnQueue() else { return }
-            _ = self.pipelineState.decrementPendingSends()
+            // A retired transport's late completion is ignored wholesale.
+            guard self.pipelineState.completeMediaSend(channel: channel, epoch: sendEpoch) else { return }
             self.lastSendCompletionAt = Date()
             self.sendStallReported = false
             if let error {
@@ -6151,12 +6293,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.debugSendsCompletedWindow += 1
             if kind == "audio" {
                 let writeMs = Date().timeIntervalSince(queuedAt) * 1000
+                self.debugAudioSendTimingsMs.append(writeMs)
                 // A normal LAN write completes in low single-digit ms; a
                 // multi-KB video keyframe already in flight ahead of this
                 // small audio packet is the primary suspect for anything
                 // much slower — this is evidence-gathering, not a fix.
                 if writeMs > 15 {
-                    Log.info("audioTrace: TCP write latency \(String(format: "%.1f", writeMs))ms bytes=\(queuedByteCount) pendingSends=\(self.pipelineState.pendingSendsNow) lastVideoBytes=\(self.lastVideoFrameByteCount)")
+                    Log.info("audioTrace: \(protocolLabel) write latency \(String(format: "%.1f", writeMs))ms bytes=\(queuedByteCount) pendingSends=\(self.pipelineState.pendingSendsNow) lastVideoBytes=\(self.lastVideoFrameByteCount)")
                 }
             } else {
                 self.lastVideoFrameByteCount = queuedByteCount
@@ -6188,12 +6331,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let sendP95 = sendTimings.isEmpty ? 0 :
                     sendTimings[min(sendTimings.count - 1, Int(Double(sendTimings.count) * 0.95))]
                 let sendMax = sendTimings.last ?? 0
+                let audioTimings = self.debugAudioSendTimingsMs.sorted()
+                let audioP50 = audioTimings.isEmpty ? 0 : audioTimings[audioTimings.count / 2]
+                let audioP95 = audioTimings.isEmpty ? 0 :
+                    audioTimings[min(audioTimings.count - 1, Int(Double(audioTimings.count) * 0.95))]
+                let audioMax = audioTimings.last ?? 0
                 Log.info("senderPipeline: sck=\(self.debugSCKWindow) admit=\(self.debugAdmittedWindow) "
                     + "vtSub=\(vtWindow.submitted) vtOK=\(vtWindow.completed) "
                     + "encDrop=\(self.pipelineState.dropsEncThisWindow) netDrop=\(self.pipelineState.dropsNetThisWindow) "
                     + "pending=\(self.pipelineState.pendingSendsNow) peakPending=\(self.debugPeakPendingSends) "
                     + "sendStart=\(self.debugSendsStartedWindow) sendOK=\(self.debugSendsCompletedWindow) "
                     + "sendMs(p50=\(String(format: "%.1f", sendP50)) p95=\(String(format: "%.1f", sendP95)) max=\(String(format: "%.1f", sendMax))) "
+                    + "audioMs(p50=\(String(format: "%.1f", audioP50)) p95=\(String(format: "%.1f", audioP95)) max=\(String(format: "%.1f", audioMax))) "
+                    + "pendingAudio=\(self.pipelineState.pendingAudioSendsNow) "
+                    + "protocol=\(protocolLabel) route=\(self.transportController.route?.rawValue ?? "none") "
                     + "frames=\(frames) mbps=\(String(format: "%.2f", mbps))")
                 self.debugSCKWindow = 0
                 self.debugAdmittedWindow = 0
@@ -6201,8 +6352,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.debugSendsCompletedWindow = 0
                 self.debugPeakPendingSends = self.pipelineState.pendingSendsNow
                 self.debugSendTimingsMs.removeAll(keepingCapacity: true)
+                self.debugAudioSendTimingsMs.removeAll(keepingCapacity: true)
                 #endif
             }
+        }
+        if !handed {
+            // Nothing was queued (e.g. a QUIC media stream is gone): release
+            // the in-flight slot taken above instead of leaking it.
+            pipelineState.completeMediaSend(channel: channel, epoch: sendEpoch)
         }
     }
 
@@ -6260,6 +6417,14 @@ extension MacSender: MacSenderTransportDelegate {
         Log.info("connectDebug: tlsReady peer=\(endpointName)")
         Log.info("connectDebug: authenticated peer=\(endpointName) generation=\(activeConnectionGeneration)")
         Log.info("connectDebug: connected peer=\(endpointName)")
+        let networkProtocol: NetworkTransportProtocol? = {
+            if case .usb = transport { return nil }
+            return transportController.activeNetworkProtocol
+        }()
+        dialingProtocol = networkProtocol
+        Log.info("connectDebug: protocol=\(networkProtocol?.rawValue ?? "usb") peer=\(endpointName)")
+        let protocolSink = statusSink
+        Task { @MainActor in protocolSink.publishNetworkProtocol(networkProtocol) }
         cursorSeq = 0   // per-session; the receiver rewound its floor with the connection
         consecutiveRefusals = 0
         disconnectedSince = nil
@@ -6311,5 +6476,44 @@ extension MacSender: MacSenderTransportDelegate {
 
     func transportDialingContext() -> (transport: SenderTransport, peerAddrs: [String]) {
         (transport, peerAddrs)
+    }
+
+    func transportCableUpgradeAllowed() -> Bool {
+        networkPreference != .quic
+    }
+
+    /// The Auto/TCP/QUIC consequence of a failed QUIC dial or live session
+    /// (see `TransportProtocolSelector.quicFailed`): retry QUIC, fall back to
+    /// secure TCP (Auto + ordinary reachability failure only, with a
+    /// cooldown), or stop on a security/protocol failure — never a silent
+    /// downgrade.
+    func transportQUICFailed(_ failure: QUICTransportFailure) {
+        guard !stopped, case .tcp(let endpoint, let tls) = transport else { return }
+        let action = protocolSelector.quicFailed(failure.failureClass, preference: networkPreference,
+                                                 established: failure.established)
+        Log.info("quic: policy class=\(failure.failureClass.rawValue) established=\(failure.established)"
+            + " preference=\(networkPreference.rawValue) action=\(action)")
+        switch action {
+        case .stop(.security):
+            invalidateApplicationSession(reason: "certificateRejected")
+            reportTrustFailure()
+        case .stop:
+            reportQUICProtocolFailure(detail: failure.detail)
+        case .fallbackToTCP:
+            QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+            Log.info("quic: unreachable for \(endpointName) — secure TCP for the rest of this session"
+                + " (QUIC cooldown \(Int(QUICCooldownStore.defaultDuration / 60))min)")
+            invalidateApplicationSession(reason: "quicUnreachable")
+            scheduleReconnect()
+        case .retryQUIC:
+            invalidateApplicationSession(reason: "quicFailed")
+            if case .posix(let code)? = failure.error, code == .ECONNREFUSED { dialRefused() }
+            if networkPreference == .quic {
+                let sink = statusSink
+                let text = "Waiting for \(endpointName) over QUIC…"
+                Task { @MainActor in sink.publishStatus(text) }
+            }
+            scheduleReconnect()
+        }
     }
 }

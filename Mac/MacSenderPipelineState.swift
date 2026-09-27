@@ -21,6 +21,15 @@ final class MacSenderPipelineState: @unchecked Sendable {
 
     private var pendingSends = 0
     let maxPendingSends: Int
+    /// Audio sends still in flight. Tracked apart from `pendingSends` (which
+    /// is VIDEO backpressure only) so audio never makes video drop frames
+    /// and video backpressure never gates audio — the app-level half of not
+    /// recreating head-of-line blocking over QUIC's independent streams.
+    private var pendingAudioSends = 0
+    /// Bumped whenever the transport is replaced; a send completion carrying
+    /// an older epoch belongs to a retired connection and must not touch
+    /// the new connection's counters.
+    private var sendEpoch: UInt64 = 0
 
     private var dropsEncThisWindowValue = 0
     private var dropsNetThisWindowValue = 0
@@ -167,6 +176,60 @@ final class MacSenderPipelineState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         pendingSends = TransportSafety.decrementedPendingCount(pendingSends)
         return pendingSends
+    }
+
+    // MARK: - Channel-aware, epoch-guarded send accounting
+
+    var pendingAudioSendsNow: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingAudioSends
+    }
+
+    var sendEpochNow: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return sendEpoch
+    }
+
+    /// The transport was replaced (redial, transport switch): every counter
+    /// restarts at zero under a fresh epoch. Returns the new epoch.
+    @discardableResult
+    func resetPendingSendsForNewTransport() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        pendingSends = 0
+        pendingAudioSends = 0
+        sendEpoch &+= 1
+        return sendEpoch
+    }
+
+    /// Accounts one media send on `channel` (Control is never counted: it is
+    /// not subject to media backpressure). Returns the channel's new
+    /// in-flight count and the epoch the completion must present.
+    func beginMediaSend(channel: TransportChannel) -> (inFlight: Int, epoch: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        switch channel {
+        case .video:
+            pendingSends += 1
+            return (pendingSends, sendEpoch)
+        case .audio:
+            pendingAudioSends += 1
+            return (pendingAudioSends, sendEpoch)
+        case .control:
+            return (0, sendEpoch)
+        }
+    }
+
+    /// Completion of a send started by `beginMediaSend`. Ignored (returns
+    /// false) when it belongs to an older transport epoch.
+    @discardableResult
+    func completeMediaSend(channel: TransportChannel, epoch: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard epoch == sendEpoch else { return false }
+        switch channel {
+        case .video: pendingSends = TransportSafety.decrementedPendingCount(pendingSends)
+        case .audio: pendingAudioSends = TransportSafety.decrementedPendingCount(pendingAudioSends)
+        case .control: break
+        }
+        return true
     }
 
     // MARK: - Drop counters (HUD/PHONE-STATS/ping snapshots)

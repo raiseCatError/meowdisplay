@@ -95,6 +95,8 @@ struct ReceiverDeviceDetailView: View {
                 }
             }
 
+            networkTransportSection
+
             Section {
                 Picker("Connection Requests", selection: Binding(
                     get: { controller.sessionPolicy(peerID: peerID) },
@@ -131,6 +133,38 @@ struct ReceiverDeviceDetailView: View {
     /// `requestExtendShape`, the same path a receiver's own
     /// `extendShapeRequest` takes.
     @ViewBuilder
+    /// Per-device TCP/QUIC choice (the Mac is the only selection authority).
+    /// QUIC is offered only once this device has shown it supports it; Auto
+    /// then uses TCP until it does. USB ignores this setting.
+    private var networkTransportSection: some View {
+        let quicSelectable = controller.quicSelectable(peerID: peerID)
+        let preference = controller.networkTransportPreference(peerID: peerID)
+        let options = NetworkTransportPreference.allCases.filter {
+            $0 != .quic || quicSelectable || preference == .quic
+        }
+        return Section {
+            Picker("Network Transport", selection: Binding(
+                get: { controller.networkTransportPreference(peerID: peerID) },
+                set: { controller.setNetworkTransportPreference($0, peerID: peerID) })) {
+                ForEach(options) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            if let session, let route = session.route {
+                LabeledContent("Currently", value: session.networkProtocol.map { "\($0.title) · \(route.rawValue)" }
+                    ?? route.rawValue)
+            }
+        } header: {
+            Text("Network")
+        } footer: {
+            Text(quicSelectable
+                 ? "Auto uses QUIC when this device supports it and uses TCP if QUIC can't reach it. Both use the same pairing and encryption. USB is unaffected."
+                 : "QUIC isn't available for this device yet, so Auto uses TCP. It becomes available after a connection with a MeowDisplay version that supports it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private func extendShapeSection(_ session: DeviceSession) -> some View {
         Section {
             Picker("Extend Display", selection: Binding(

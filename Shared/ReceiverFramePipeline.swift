@@ -144,6 +144,11 @@ actor ReceiverFramePipeline {
         var connectionFailed: @Sendable (NWError) -> Void
         /// The peer closed the connection (`isComplete`).
         var connectionClosedByPeer: @Sendable () -> Void
+        /// Whether the connection adopted at `generation` has been admitted
+        /// (`ReceiverMediaAdmissionGate`). QUIC Video/Audio payloads are
+        /// refused — and their QUIC connection closed — until it has.
+        /// Defaults to "never" so a caller that does not wire it fails closed.
+        var mediaAdmitted: @Sendable (_ generation: Int) -> Bool = { _ in false }
     }
 
     // MARK: - State moved together from StreamReceiver (C3)
@@ -172,6 +177,19 @@ actor ReceiverFramePipeline {
     /// decode-level) and from `ReceiverPipelineActor.sessionState.
     /// generation` itself — the three are deliberately never merged.
     private var generation = 0
+
+    // MARK: - QUIC (PROTOCOL.md §8)
+
+    /// Set when the adopted session connection is a QUIC Control stream: its
+    /// frames are then control JSON only (strict), and it is the connection
+    /// any QUIC violation closes.
+    private var quicConnection: QUICReceiverGroup?
+    /// Per-channel bounded deframers for the adopted QUIC connection's
+    /// Video/Audio streams. Reset with every adoption.
+    private var mediaAssemblers: [UInt8: QUICFrameAssembler] = [:]
+    /// Media streams whose attach raced ahead of their generation's
+    /// `beginAdoption` (independent Tasks); started by `finishAdoption`.
+    private var heldMedia: [(stream: NWConnection, channel: TransportChannel, generation: Int, connection: QUICReceiverGroup)] = []
 
     // MARK: - Dependencies
 
@@ -212,6 +230,9 @@ actor ReceiverFramePipeline {
         // guess until told otherwise).
         videoEnabled = true
         self.generation = generation
+        quicConnection = nil
+        mediaAssemblers.removeAll()
+        heldMedia.removeAll { $0.generation < generation }
         syncState.recordAdoption(generation: generation, at: Date())
     }
 
@@ -221,13 +242,21 @@ actor ReceiverFramePipeline {
     /// this generation may already have been superseded by the time this
     /// runs, in which case it no-ops (the newer generation's own
     /// `finishAdoption` owns starting its receive loop).
-    func finishAdoption(connection: NWConnection, generation: Int, initialData: Data?) {
+    func finishAdoption(connection: NWConnection, generation: Int, initialData: Data?,
+                        quicConnection: QUICReceiverGroup? = nil) {
         guard generation == self.generation else { return }
+        self.quicConnection = quicConnection
         if let initialData, !initialData.isEmpty {
             buffer.append(initialData)
             drainFrames()
         }
         beginReceiving(on: connection, generation: generation)
+        let ready = heldMedia.filter { $0.generation == generation }
+        heldMedia.removeAll { $0.generation == generation }
+        for held in ready {
+            beginMediaReceiving(on: held.stream, channel: held.channel,
+                                generation: held.generation, connection: held.connection)
+        }
     }
 
     // MARK: - Ordered ingress
@@ -247,6 +276,8 @@ actor ReceiverFramePipeline {
     ) async {
         ingest(data, generation: generation)
         guard generation == self.generation else { return }
+        // A QUIC protocol violation already closed the connection: stop.
+        if let quicConnection, quicConnection.isClosed { return }
         if let error {
             outputEffects.connectionFailed(error)
             return
@@ -278,11 +309,28 @@ actor ReceiverFramePipeline {
         while buffer.distance(from: cursor, to: buffer.endIndex) >= 4 {
             let len = buffer[cursor..<buffer.index(cursor, offsetBy: 4)]
                 .withUnsafeBytes { Int(UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self))) }
+            if let quicConnection, len == 0 || len > QUICFrameLimits.controlMaxPayloadBytes {
+                // QUIC Control: the declared length is refused BEFORE any
+                // buffering toward it.
+                failQUIC(quicConnection, .protocolViolation, "control frame length \(len)")
+                return
+            }
             guard buffer.distance(from: cursor, to: buffer.endIndex) >= 4 + len else { break }
             let start = buffer.index(cursor, offsetBy: 4)
             let end = buffer.index(start, offsetBy: len)
             let payload = Data(buffer[start..<end])
-            if AudioMediaFrame.isAudioFrame(payload) {
+            if let quicConnection {
+                // QUIC Control carries control JSON only — media has its own
+                // streams and is never accepted here.
+                if QUICVideoChannelPolicy.looksLikeJSON(payload) {
+                    applyControlStateIfNeeded(payload)
+                    outputEffects.controlMessage(payload)
+                } else if payload.first != UInt8(ascii: "{") {
+                    failQUIC(quicConnection, .unexpectedChannel, "media on the control stream")
+                    return
+                }
+                // (Oversized JSON is dropped, exactly as over TCP.)
+            } else if AudioMediaFrame.isAudioFrame(payload) {
                 outputEffects.audioPayload(payload)
             } else {
                 handleAnnexB(payload)
@@ -290,6 +338,107 @@ actor ReceiverFramePipeline {
             cursor = end
         }
         buffer.removeSubrange(buffer.startIndex..<cursor)
+    }
+
+    // MARK: - QUIC media streams
+
+    /// Starts the ordered receive loop of one validated QUIC Video/Audio
+    /// stream for the connection adopted at `generation`. Called only by
+    /// `ReceiverPipelineActor` for the CURRENT session connection's streams.
+    func beginMediaReceiving(on stream: NWConnection, channel: TransportChannel,
+                             generation: Int, connection: QUICReceiverGroup) {
+        guard channel != .control else {
+            failQUIC(connection, .unexpectedChannel, "control channel offered as media")
+            return
+        }
+        if generation > self.generation {
+            heldMedia.append((stream, channel, generation, connection))
+            return
+        }
+        guard generation == self.generation, !connection.isClosed else { return }
+        receiveMedia(on: stream, channel: channel, generation: generation, connection: connection)
+    }
+
+    private func receiveMedia(on stream: NWConnection, channel: TransportChannel,
+                              generation: Int, connection: QUICReceiverGroup) {
+        stream.receive(minimumIncompleteLength: 1, maximumLength: QUICFrameLimits.receiveChunkBytes) {
+            [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            Task {
+                await self.handleMediaReceive(on: stream, channel: channel, data: data, isComplete: isComplete,
+                                              error: error, generation: generation, connection: connection)
+            }
+        }
+    }
+
+    private func handleMediaReceive(on stream: NWConnection, channel: TransportChannel, data: Data?,
+                                    isComplete: Bool, error: NWError?, generation: Int,
+                                    connection: QUICReceiverGroup) {
+        guard generation == self.generation, !connection.isClosed else { return }
+        if let data, !data.isEmpty {
+            syncState.recordDataReceived(Date())
+            var assembler = mediaAssemblers[channel.rawValue] ?? QUICFrameAssembler(channel: channel)
+            let payloads: [Data]
+            do {
+                payloads = try assembler.append(data)
+            } catch {
+                mediaAssemblers[channel.rawValue] = nil
+                failQUIC(connection, .protocolViolation, "\(channel) framing: \(error)")
+                return
+            }
+            mediaAssemblers[channel.rawValue] = assembler
+            for payload in payloads {
+                if let violation = handleQUICMediaPayload(payload, channel: channel, generation: generation) {
+                    failQUIC(connection, violation, "\(channel) payload")
+                    return
+                }
+            }
+        }
+        // A stream error is the connection's failure; it surfaces through
+        // the Control stream / connection state like any transport loss.
+        guard error == nil else { return }
+        if isComplete {
+            if (mediaAssemblers[channel.rawValue]?.bufferedByteCount ?? 0) > 0 {
+                failQUIC(connection, .protocolViolation, "\(channel) stream ended mid-frame")
+            }
+            return
+        }
+        receiveMedia(on: stream, channel: channel, generation: generation, connection: connection)
+    }
+
+    /// Routes one deframed QUIC media payload into the SAME decode/audio
+    /// paths TCP uses. Returns the violation, if any. Video may carry the
+    /// two media-state messages ordered with its frames (at any time, as
+    /// over TCP); every media payload requires an admitted session.
+    private func handleQUICMediaPayload(_ payload: Data, channel: TransportChannel,
+                                        generation: Int) -> QUICApplicationError? {
+        switch channel {
+        case .video:
+            if QUICVideoChannelPolicy.looksLikeJSON(payload) {
+                guard QUICVideoChannelPolicy.isAllowedJSON(payload) else { return .protocolViolation }
+                applyControlStateIfNeeded(payload)
+                outputEffects.controlMessage(payload)
+                return nil
+            }
+            guard outputEffects.mediaAdmitted(generation) else { return .sessionNotAdmitted }
+            guard !AudioMediaFrame.isAudioFrame(payload) else { return .unexpectedChannel }
+            handleAnnexB(payload)
+            return nil
+        case .audio:
+            guard outputEffects.mediaAdmitted(generation) else { return .sessionNotAdmitted }
+            guard AudioMediaFrame.isAudioFrame(payload) else { return .unexpectedChannel }
+            outputEffects.audioPayload(payload)
+            return nil
+        case .control:
+            return .unexpectedChannel
+        }
+    }
+
+    private func failQUIC(_ connection: QUICReceiverGroup, _ error: QUICApplicationError, _ detail: String) {
+        Log.info("quic: receiver closing connection \(connection.id) — \(error) (\(detail))")
+        buffer.removeAll()
+        mediaAssemblers.removeAll()
+        connection.close(error)
     }
 
     private func handleAnnexB(_ data: Data) {

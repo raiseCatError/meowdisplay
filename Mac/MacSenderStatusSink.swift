@@ -48,6 +48,9 @@ final class MacSenderStatusSink: Sendable {
     // changes. Nil while disconnected; the UI never infers a route from the
     // requested target.
     var onTransportPath: ((ConnectionRoute?) -> Void)?
+    // Fired with the secure network protocol (TCP/QUIC) of each established
+    // connection; nil while disconnected and on USB.
+    var onNetworkProtocol: ((NetworkTransportProtocol?) -> Void)?
     // Fired when the user stopped the capture from the system UI (menu-bar
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
@@ -117,6 +120,10 @@ final class MacSenderStatusSink: Sendable {
 
     func publishTransportPath(_ route: ConnectionRoute?) {
         onTransportPath?(route)
+    }
+
+    func publishNetworkProtocol(_ networkProtocol: NetworkTransportProtocol?) {
+        onNetworkProtocol?(networkProtocol)
     }
 
     func publishCaptureStoppedByUser() {

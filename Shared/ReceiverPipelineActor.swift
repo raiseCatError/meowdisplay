@@ -151,16 +151,30 @@ actor ReceiverPipelineActor {
     /// `ReceiverFramePipeline`'s file header for why that is one `Task`'s
     /// two sequential `await`s, never two independent ones.
     nonisolated let framePipeline: ReceiverFramePipeline
+    /// Live accepted QUIC connections. Whenever this actor lets go of a
+    /// connection (replaced, dropped, revoked, failed) it retires it here
+    /// too, so a QUIC Control stream's whole connection — Video and Audio
+    /// included — can never outlive its place as the session connection.
+    nonisolated let quicGroups: QUICReceiverGroupRegistry
 
     init(queue: DispatchQueue, sendTargetBox: StreamReceiver.SendTargetBox,
          reconnectContext: ReconnectContext, uiEffects: UIEffects, hostEffects: HostControlEffects,
-         framePipeline: ReceiverFramePipeline) {
+         framePipeline: ReceiverFramePipeline,
+         quicGroups: QUICReceiverGroupRegistry = QUICReceiverGroupRegistry()) {
         self.queue = queue
         self.sendTargetBox = sendTargetBox
         self.reconnectContext = reconnectContext
         self.uiEffects = uiEffects
         self.hostEffects = hostEffects
         self.framePipeline = framePipeline
+        self.quicGroups = quicGroups
+    }
+
+    /// The one way this actor drops a connection: cancel it and, when it is
+    /// a QUIC Control stream, close its whole QUIC connection.
+    private func retire(_ conn: NWConnection, error: QUICApplicationError? = nil) {
+        conn.cancel()
+        quicGroups.retire(controlStream: conn, error: error)
     }
 
     /// Permanent facade/UI-mirror outputs: every call here means "publish
@@ -328,7 +342,7 @@ actor ReceiverPipelineActor {
         guard let conn = connection, conn.state == .ready,
               Date().timeIntervalSince(lastDataReceived) > 5 else { return }
         Log.info("watchdog: nothing from the Mac for >5s — dropping connection")
-        conn.cancel()
+        retire(conn)
         connection = nil
         setConnected(false)
     }
@@ -336,7 +350,7 @@ actor ReceiverPipelineActor {
     // MARK: - Incoming connections / adoption
 
     func cancelPendingConnections() {
-        pendingConnections.forEach { $0.cancel() }
+        pendingConnections.forEach { retire($0) }
         pendingConnections.removeAll()
     }
 
@@ -353,8 +367,12 @@ actor ReceiverPipelineActor {
             let owner = hostEffects.resolvePinnedPeerID(candidate)
             return owner == nil || owner == peerID
         }
-        revoked.forEach { $0.cancel() }
+        revoked.forEach { retire($0, error: .peerRevoked) }
         pendingConnections.removeAll { candidate in revoked.contains { $0 === candidate } }
+        // QUIC connections that have not handed a Control stream to this
+        // actor yet carry no application authority; after Forget/Block
+        // none of them may go on to present one.
+        quicGroups.closeUnboundGroups(error: .peerRevoked)
         if !revoked.isEmpty {
             Log.info("reconnectDebug: cancelled \(revoked.count) parked candidate(s) for revoked peer=\(peerID)")
         }
@@ -379,11 +397,18 @@ actor ReceiverPipelineActor {
         if let current = connection, current.state != .cancelled, !Self.isFailed(current.state) {
             Log.info("reconnectDebug: incomingReplacement peer via TLS listener — parked pending proof")
             pendingConnections.append(newConnection)
-            newConnection.stateUpdateHandler = { [weak self] state in
-                guard let self, case .ready = state else { return }
-                Task { await self.handlePendingConnectionReady(newConnection) }
+            if newConnection.state == .ready {
+                // A QUIC Control stream arrives already started and ready
+                // (its preface was read first): no `.ready` callback will
+                // come again, so prove it now.
+                handlePendingConnectionReady(newConnection)
+            } else {
+                newConnection.stateUpdateHandler = { [weak self] state in
+                    guard let self, case .ready = state else { return }
+                    Task { await self.handlePendingConnectionReady(newConnection) }
+                }
+                newConnection.start(queue: queue)
             }
-            newConnection.start(queue: queue)
         } else {
             Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
             adopt(newConnection)
@@ -403,7 +428,7 @@ actor ReceiverPipelineActor {
         // race (or was cancelled by a newer adoption in the meantime) must
         // not resurrect itself here.
         guard pendingConnections.contains(where: { $0 === pending }) else {
-            pending.cancel()
+            retire(pending)
             return
         }
         pendingConnections.removeAll { $0 === pending }
@@ -412,7 +437,7 @@ actor ReceiverPipelineActor {
         // replace the session.
         guard hostEffects.resolvePinnedPeerID(pending) != nil else {
             Log.info("reconnectDebug: parked candidate no longer resolves to a pinned peer — not adopting it")
-            pending.cancel()
+            retire(pending, error: .peerRevoked)
             return
         }
         if let data, !data.isEmpty {
@@ -420,7 +445,7 @@ actor ReceiverPipelineActor {
         } else {
             Log.info("ignored a stale TLS connection that closed at once"
                      + (error.map { " (\($0))" } ?? ""))
-            pending.cancel()
+            retire(pending)
         }
         _ = isComplete
     }
@@ -432,7 +457,7 @@ actor ReceiverPipelineActor {
         if greeted { Log.info("newcomer proved itself — adopting it as the session") }
         let supersededGeneration = sessionState.generation
         let hadPriorConnection = connection != nil
-        connection?.cancel()
+        if let previous = connection, previous !== conn { retire(previous) }
         connection = conn
         // A new session supersedes any recovery run: retries scheduled
         // against the old generation can no longer win.
@@ -448,7 +473,7 @@ actor ReceiverPipelineActor {
         // had, with no publication lag.
         sendTargetBox.install(StreamReceiver.SendTarget(connection: conn, generation: sessionState.generation))
         // The race is decided: rival candidates die here.
-        for pending in pendingConnections where pending !== conn { pending.cancel() }
+        for pending in pendingConnections where pending !== conn { retire(pending) }
         pendingConnections.removeAll()
 
         // Host-owned reset — enqueued to `queue` now, strictly before `conn`
@@ -478,10 +503,22 @@ actor ReceiverPipelineActor {
         // distinction matters: this actor's mailbox does not guarantee two
         // separately-created Tasks enter in creation order, but it does
         // guarantee one Task's own sequential awaits do).
+        // A QUIC Control stream: its connection's validated Video/Audio
+        // streams are attached right after the receive loop starts, in the
+        // SAME Task, so they can never race ahead of this generation's reset.
         let framePipeline = framePipeline
+        let quicOwner = quicGroups.owner(ofControlStream: conn)
+        let media = quicOwner?.takePendingMedia() ?? []
         Task {
             await framePipeline.beginAdoption(generation: generation)
-            await framePipeline.finishAdoption(connection: conn, generation: generation, initialData: initialData)
+            await framePipeline.finishAdoption(connection: conn, generation: generation, initialData: initialData,
+                                               quicConnection: quicOwner)
+            if let quicOwner {
+                for (channel, stream) in media {
+                    await framePipeline.beginMediaReceiving(on: stream, channel: channel,
+                                                            generation: generation, connection: quicOwner)
+                }
+            }
         }
     }
 
@@ -503,9 +540,28 @@ actor ReceiverPipelineActor {
             // connection synchronously in `adopt` itself.
             performOnReady(conn, greeted: false)
         case .failed, .cancelled:
+            quicGroups.retire(controlStream: conn)
             setConnected(false)
         default:
             break
+        }
+    }
+
+    /// A QUIC connection validated another Video/Audio stream. It is fed to
+    /// the frame pipeline only while that connection's Control stream IS the
+    /// adopted session connection; otherwise it stays parked on its owner
+    /// (a candidate still proving itself), and `adopt` attaches it later.
+    func attachQUICMedia(from owner: QUICReceiverGroup) {
+        guard let control = owner.controlStream, let current = connection, control === current else { return }
+        let generation = sessionState.generation
+        let media = owner.takePendingMedia()
+        guard !media.isEmpty else { return }
+        let framePipeline = framePipeline
+        Task {
+            for (channel, stream) in media {
+                await framePipeline.beginMediaReceiving(on: stream, channel: channel,
+                                                        generation: generation, connection: owner)
+            }
         }
     }
 
@@ -746,7 +802,7 @@ actor ReceiverPipelineActor {
     /// watchdog's stale-link drop): cancel it, clear the field, cancel any
     /// scheduled retry, then run it through the same `setConnected` funnel.
     func disconnectCurrentConnection(reason: ReceiverSessionLossReason) {
-        connection?.cancel()
+        if let connection { retire(connection) }
         connection = nil
         cancelReconnect()
         setConnected(false, reason: reason)
