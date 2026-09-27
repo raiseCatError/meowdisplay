@@ -679,12 +679,14 @@ extension MacSenderTransportController {
             onPeerVerification: { [weak self] accepted in
                 // Hop instead of acting inside the TLS callback; the
                 // generation check still applies.
-                self?.queue.async {
-                    guard let self, let session = self.currentQUICSession(generation: generation) else { return }
+                guard let controller = self else { return }
+                controller.queue.async { [weak controller] in
+                    guard let owner = controller,
+                          let session = owner.currentQUICSession(generation: generation) else { return }
                     if accepted {
                         session.peerVerifiedAt = Date()
                     } else {
-                        self.failQUIC(generation: generation, error: nil, failureClass: .security,
+                        owner.failQUIC(generation: generation, error: nil, failureClass: .security,
                                       detail: "receiver certificate does not match its pin")
                     }
                 }

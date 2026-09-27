@@ -136,13 +136,14 @@ struct ReceiverDeviceDetailView: View {
     /// Per-device TCP/QUIC choice (the Mac is the only selection authority).
     /// QUIC is offered only once this device has shown it supports it; Auto
     /// then uses TCP until it does. USB ignores this setting.
+    @ViewBuilder
     private var networkTransportSection: some View {
         let quicSelectable = controller.quicSelectable(peerID: peerID)
         let preference = controller.networkTransportPreference(peerID: peerID)
         let options = NetworkTransportPreference.allCases.filter {
             $0 != .quic || quicSelectable || preference == .quic
         }
-        return Section {
+        Section {
             Picker("Network Transport", selection: Binding(
                 get: { controller.networkTransportPreference(peerID: peerID) },
                 set: { controller.setNetworkTransportPreference($0, peerID: peerID) })) {
