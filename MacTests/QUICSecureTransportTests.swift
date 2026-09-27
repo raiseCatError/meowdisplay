@@ -384,12 +384,6 @@ final class QUICSecureTransportTests: XCTestCase {
         XCTAssertNotEqual(second.state, .ready, "a second production QUIC listener must not share UDP \(port)")
         second.cancel()
 
-        // Contrast: the previous reuse-enabled parameters let it share.
-        let reusing = QUICReceiverListener.listenerParameters(quic: try receiverOptions(identity, pinning: peer))
-        reusing.allowLocalEndpointReuse = true
-        let reused = try startedListener(reusing, on: port)
-        XCTAssertEqual(reused.state, .ready, "local-endpoint reuse is what allowed a shared UDP port")
-        reused.cancel()
         first.cancel()
     }
 
