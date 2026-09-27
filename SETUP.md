@@ -175,11 +175,15 @@ locally. The Mac app has no audio toggle of its own. **A/V Sync** and
 
 ### Input
 
-Touch, mouse, and keyboard input from the receiving device is routed back
-to the Mac and injected as real input events once connected, alongside
-supported gestures (two-finger scroll, pinch/rotate, and system gestures
-like Spotlight where implemented). This requires the Mac's Accessibility
-permission — see [Required permissions](#required-permissions) above.
+On iPhone and iPad, touch, pointer, keyboard and supported gestures can
+control the Mac. This requires Accessibility permission, the Mac's
+**Allow Input** master switch, and permission for the current session.
+Connecting alone never grants control: use **Request Control** in receiver
+Settings. **Always Allow Requests** skips the Mac prompt but still requires
+that request each session. See [Allow Input & control requests](README.md#allow-input--control-requests).
+
+Receivers can still view the Mac with input off. The standalone Mac Receiver
+is display-only; its keyboard and trackpad are not forwarded.
 
 ### Connecting and reconnecting
 
