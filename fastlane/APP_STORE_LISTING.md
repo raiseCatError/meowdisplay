@@ -77,9 +77,10 @@ CONTROL
 • Direct Touch: tap exactly where you want on screen
 • Trackpad: move a pointer with familiar gestures
 • Click, double-click, drag, right-click and scroll
-• Apple Pencil on supported iPads, with tilt and hover
 • Multi-finger gestures for Mission Control, Spaces, Spotlight and more
 • A keyboard, a Main Control Tray for modifier keys, a customizable Function Tray, and Chords with shortcut palettes
+• On iPad, place the controls as an edge Strip, a floating Overlay, or your own Custom layouts
+• Pan and zoom the view on your device without sending anything to the Mac
 • Controls can hide automatically while you work
 
 CONNECT
@@ -133,7 +134,7 @@ Work through this before pressing **Submit for Review**.
 | App Review notes | See [App Review notes](#app-review-notes) |
 | Sign-in required | No — there is no account |
 | Screenshots | See [Screenshot plan](#screenshot-plan) — **not captured yet** |
-| Build | Select the processed build uploaded by `fastlane ios release` |
+| Build | Select the processed build — uploaded by `fastlane ios release`, or from a local Release archive via Xcode Organizer → Distribute App → App Store Connect → Upload |
 | Version release | Choose **Manually release this version** |
 
 ### Before the first submission
@@ -173,6 +174,11 @@ How to test:
 6. Touch the screen to control the Mac: Direct Touch taps where you touch; Trackpad moves a pointer. The keyboard button and control trays send keys and shortcuts.
 
 Remote Access and Wake & Connect are optional and need extra network setup; they are not needed to review the core features.
+
+Permissions and background use:
+- Local Network: the app advertises itself over Bonjour so the user's own Mac can find it and connect directly. No other devices are contacted.
+- Face ID / passcode: only to confirm trusting a newly paired device.
+- Background audio (UIBackgroundModes "audio"): keeps the system Picture in Picture window of the user's Mac, and the Mac audio the user turned on, playing after they leave the app. With Picture in Picture off, leaving the app stops playback.
 ```
 
 ---
@@ -282,6 +288,7 @@ Real captures from the running app only. No fake UI, no price wording
 | 4 | Direct Touch or Trackpad in use, control tray visible | Touch or trackpad control |
 | 5 | Function Tray / Chords shortcut palette open | Shortcuts at your fingertips |
 | 6 | Connected devices / connection choice | USB, Wi-Fi or Remote Access |
+| 7 | iPad with Strip or Overlay controls (iPad set only) | Controls that fit your iPad |
 
 Capture the same set on iPhone and iPad (the app is universal). Use a clean
 desktop, neutral content, and no personal names, addresses, or notifications.

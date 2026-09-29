@@ -125,6 +125,17 @@ the **Settings gear stays reachable**. The Mac can **Revoke Control** in the
 device's settings, or the receiver can **Turn Off** control. These permissions
 are separate from permission to connect.
 
+A touch that input doesn't allow shows a brief **Request Input** prompt; it
+never changes a setting on its own. Requests are only sent automatically when
+you turn on **Request Input Automatically** for that Mac, and the Mac still
+decides.
+
+**Local view navigation is separate from input.** With **Allow Local View
+Navigation** on (the default), you can pan, zoom, rotate and reset the view
+on the receiver even while input is off — nothing is sent to the Mac. On
+iPad, **Move View** lets one finger pan and a pinch zoom without touching the
+Mac at all.
+
 ### Precise Control
 
 **Precise Control works in Direct Touch and Trackpad.** Keep one finger down
@@ -149,8 +160,8 @@ for the full gesture details.
 
 ### Smart Touch
 
-**Smart Touch (Experimental)** is an optional addition to Direct Touch, off
-by default. It uses the Mac's Accessibility information to recognize supported
+**Smart Touch (Experimental)** is an optional addition to Direct Touch, on
+by default and easy to turn off in the receiver's Settings. It uses the Mac's Accessibility information to recognize supported
 scrollable areas and window title bars:
 
 - Swipe a scrollable area with one finger, with momentum in either axis.
@@ -242,6 +253,30 @@ keyboard, and choose which actions each palette offers.
 A separate tray of one-tap actions — **Zoom In**, **Zoom Out**, **Undo** and
 **Redo** by default. It's customized independently of the Main Control Tray,
 with its own profiles, and can sit on the same or the opposite side.
+
+Add, remove, reorder and rename its actions, and give each one a face — an
+SF Symbol, text, an emoji, or its keys. Custom actions can be one-tap
+keyboard shortcuts (including multi-key chords) or short sequences of
+existing actions, and chord palettes can offer them too.
+
+### iPad controls
+
+On iPad, choose how the controls sit around the Mac:
+
+- **Strip** — a solid rail on any edge, with the Mac's picture fitted beside
+  it.
+- **Overlay** — the Mac fills the screen and the controls float over it in
+  compact trays.
+- **Custom** — up to five layouts of your own, with separate landscape and
+  portrait arrangements, built in a full-screen visual editor with Preview,
+  alignment guides and snapping. Layouts can be shared as a code and
+  imported on another iPad.
+
+The Main and Function controls pick their edges independently, **Control
+Size** scales them, and **Two-Hand Assist** puts helper modifiers on the
+opposite side. While the on-screen keyboard is up, a keyboard accessory bar
+with modifiers, Escape and Tab takes the controls' place. iPhone keeps the
+Control Trays above.
 
 ### Auto-hide
 
@@ -339,6 +374,17 @@ Picture in Picture is new; physical-device validation is not yet complete.
 More in [SECURITY.md](SECURITY.md) and the
 [Privacy page](https://meowdisplay.app/privacy.html).
 
+## Requirements
+
+| App | Runs on |
+|---|---|
+| **MeowDisplay** (the Mac app that shares its display) | macOS 14 or later |
+| **MeowDisplay Receiver** (a spare Mac as a display) | macOS 12 or later |
+| **MeowDisplay** for iPhone and iPad | iOS / iPadOS 16.4 or later |
+
+Remote control of the Mac needs Accessibility permission; capturing a
+display needs Screen Recording.
+
 ## Getting started
 
 1. Run MeowDisplay on your Mac.
@@ -384,6 +430,8 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 
 ## Contributing
 
+Source, issues and releases live at
+[github.com/raiseCatError/meowdisplay](https://github.com/raiseCatError/meowdisplay).
 Issues and pull requests are welcome, especially testing on iPad, different
 Mac models, external-display setups and networks. Please open an issue before
 starting large architecture work.

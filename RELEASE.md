@@ -84,6 +84,34 @@ If App Review rejects the build, fix it on `main`, let release-please update
 the PR, and upload a new candidate with the same version (a new run gives it
 a higher build number).
 
+## First release without CI secrets (manual path)
+
+None of the secrets below exist yet, so the first release can be built
+locally instead of by the workflows:
+
+- **Version.** The inherited tag sequence ends at `v1.19.0` and the open
+  release-please PR proposes **1.20.0**, so the first release is 1.20.0.
+  Build it with `MARKETING_VERSION=1.20.0` and a `CURRENT_PROJECT_VERSION`
+  higher than any build already uploaded for that version.
+- **iOS.** Generate the project with `DEVELOPMENT_TEAM` set, archive the
+  `OpenSidecariOS` scheme in Release, then upload from Xcode Organizer →
+  Distribute App → App Store Connect. A later `app-store-candidate.yml` run
+  numbers its builds from its own run counter, so give a manual upload a
+  build number above the run numbers that workflow will reach for the same
+  version (or re-upload under a new version).
+- **Mac.** Archive `OpenSidecarMac` and `OpenSidecarMacReceiver` in Release,
+  export each with Developer ID, notarize (`xcrun notarytool submit …
+  --wait`), staple, and package as `MeowDisplay.dmg` /
+  `MeowDisplayReceiver.dmg` as `fastlane mac build_release` would.
+
+Values still to fill in before or at release:
+
+- [ ] `AppStore.iOSAppID` in `Shared/AppStore.swift` — the app's numeric
+      Apple ID from App Store Connect (see `fastlane/APP_STORE_LISTING.md`).
+- [ ] `ProjectLinks.koFiPage` in `Shared/ProjectLinks.swift` — the Ko-fi page
+      URL, once it exists. Until then no app shows a support link. Add the
+      same URL to the README's Contributing section and `SUPPORT.md` then.
+
 ## Required secrets
 
 None are currently configured on this fork. Exact inventory (see the

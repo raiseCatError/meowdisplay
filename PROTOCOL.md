@@ -340,7 +340,8 @@ control data to route it to the video path).
 ## 5. Video
 
 The video stream is **H.264 Annex B**, one *access unit* (one encoded
-picture) per wire frame.
+picture) per wire frame. A receiver that advertises it may instead be sent
+**HEVC (H.265) Main 8-bit**, framed the same way (section 5.4).
 
 ### 5.1 Frame layout
 
@@ -389,6 +390,36 @@ resumed from background) requests a keyframe with the `kf` control message
 an IDR (with SPS/PPS, per 5.1). Senders SHOULD also send an IDR unprompted
 whenever a connection is (re)established, including replaying the last
 captured frame if the screen is static and the capturer produces nothing.
+
+### 5.4 HEVC (`hello.codecs`, `streamCodecState`, `pv` 19)
+
+HEVC is optional and additive; H.264 stays the universal baseline.
+
+* **Capability.** A receiver lists the codecs it can decode in hardware as
+  `hello.codecs` (array of strings): always `"h264"`, plus `"hevc"` only when
+  a hardware HEVC decoder exists. The field itself is the capability signal:
+  a receiver that omits it is H.264-only whatever its `pv`, and a sender
+  MUST NOT send it HEVC.
+* **Choice.** The sender alone picks the codec, from its user's preference
+  (Auto, H.264 or HEVC) and both sides' hardware support. Auto uses H.264
+  unless H.264 would have to reduce the requested stream and HEVC is
+  supported on both sides. The decode ceiling (section 6.5) applies to both
+  codecs.
+* **Announcement.** `{"type":"streamCodecState","codec":"h264"|"hevc","reason":<string>}`
+  (sender -> receiver) names the codec of the frames that follow. It is sent
+  whenever the encoder is (re)built and again after every `hello`, only to a
+  receiver that sent `codecs`. It travels on the channel that carries video
+  frames (on QUIC, the Video stream — section 2.4) so it stays ordered with
+  them. `reason` is diagnostic text; receivers MUST NOT branch on it, and
+  MUST ignore a `codec` they do not know.
+* **Framing.** HEVC access units follow 5.1 with HEVC NAL headers: the NAL
+  type is `(byte0 >> 1) & 0x3F`, and every IDR is prefixed with the current
+  VPS, SPS and PPS. On a codec change the receiver drops its parameter sets
+  and decoder state and waits for the new codec's keyframe.
+* **Fallback.** The sender may switch an HEVC stream back to H.264 at any
+  time — when the HEVC encoder cannot be created or produces no frames, or
+  when a later `hello` no longer lists `"hevc"` — announcing it with
+  `streamCodecState` before the first H.264 frame.
 
 ## 5A. Mac system audio (`pv` 12)
 
@@ -1338,7 +1369,11 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 12 | Mac system audio: typed `0x01` media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
 | 13 | Mac-authoritative Mirror capture-source selection: `mirrorDisplayRequest` / `mirrorDisplayState` |
 | 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
+| 15 | Encoder-safe FPS ceiling and receiver-enforced maximum FPS: `maxFPSRequest` / `maxFPSState` (section 6.8) |
+| 16 | Streaming priority: `streamingPriorityRequest` / `streamingPriorityState` |
 | 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
+| 18 | Session-scoped input consent: `allowInputState.state` |
+| 19 | Optional HEVC video (section 5.4): `hello.codecs`, `streamCodecState`; codec capability comes from the field, never from `pv` |
 | 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
@@ -1434,4 +1469,5 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-18 | `pv` 14: Mac-authoritative Extend display shape (`extendShapeRequest` / `extendShapeState`, section 6.7); additive `hello.maxEncodeWide`/`maxEncodeHigh` now advertised by the official iOS receiver |
 | 2026-09-18 | `pv` 15: encoder-safe FPS ceiling and receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`, section 6.8) |
 | 2026-09-27 | `pv` 22: optional reliable-stream QUIC transport (section 2.4) with authenticated `transports`/`qv` capability |
+| 2026-09-30 | Documented optional HEVC video (section 5.4, `pv` 19) and the `pv` 15/16/18 rows; no wire change. The sender now also falls back to H.264 when an HEVC encoder produces no frames or a new `hello` drops `"hevc"` |
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
