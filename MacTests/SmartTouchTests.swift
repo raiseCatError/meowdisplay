@@ -585,8 +585,8 @@ final class SmartTouchTests: XCTestCase {
 
     // MARK: - Preference persistence
 
-    func testSmartTouchDefaultsOffAndMigratesFromOlderSchema() throws {
-        XCTAssertFalse(ReceiverControlPreferences().smartTouchEnabled)
+    func testSmartTouchDefaultsOnAndMigratesFromOlderSchema() throws {
+        XCTAssertTrue(ReceiverControlPreferences().smartTouchEnabled)
         XCTAssertTrue(ReceiverControlPreferences().smartTouchLongPressHapticEnabled)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SmartTouchTests.\(UUID().uuidString)"))
         var old = ReceiverControlPreferences()
@@ -599,13 +599,14 @@ final class SmartTouchTests: XCTestCase {
         let repository = ReceiverControlPreferencesRepository(defaults: defaults)
         let loaded = repository.load()
         XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
-        XCTAssertFalse(loaded.smartTouchEnabled)
+        // Schema 16 turns Smart Touch on for pre-release installs once.
+        XCTAssertTrue(loaded.smartTouchEnabled)
         XCTAssertTrue(loaded.smartTouchLongPressHapticEnabled)
         XCTAssertEqual(loaded.inputMode, .trackpad, "other preferences survive")
 
-        var enabled = loaded
-        enabled.smartTouchEnabled = true
-        repository.save(enabled)
-        XCTAssertTrue(repository.load().smartTouchEnabled)
+        var disabled = loaded
+        disabled.smartTouchEnabled = false
+        repository.save(disabled)
+        XCTAssertFalse(repository.load().smartTouchEnabled, "a schema-16 choice is never re-migrated")
     }
 }

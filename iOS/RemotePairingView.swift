@@ -102,14 +102,37 @@ struct RemotePairingView: View {
 }
 
 /// Small transient confirmation; not a notification framework.
+/// Compact success banner. Reads on black, on bright desktop content and
+/// over the Home screen: a nearly opaque system background (not a thin
+/// material that takes on whatever is behind it), a green success mark,
+/// primary text, and a hairline border plus soft shadow for separation.
 struct PairedToast: View {
     var body: some View {
-        VStack(spacing: 2) {
-            Text("Paired Successfully").font(.subheadline.weight(.semibold))
-            Text("You can now connect to this Mac.").font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .green)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Paired Successfully")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text("You can now connect to this Mac.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.leading, 14)
+        .padding(.trailing, 18)
+        .padding(.vertical, 11)
+        .background(Color(.secondarySystemGroupedBackground).opacity(0.97),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(Color.green.opacity(0.35), lineWidth: 1))
+        .shadow(color: .black.opacity(0.28), radius: 14, y: 4)
+        .frame(maxWidth: 420)
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isStaticText)
     }
 }

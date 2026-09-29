@@ -69,15 +69,25 @@ enum ReceiverMultiFingerRecognizer: CaseIterable {
 /// while it runs, and comes back when it stops. Ordinary one-finger input is
 /// not gated here. Held as a value so a recognizer force-cancelled by an
 /// `isEnabled` false/true toggle is restored to THIS state, never to a
-/// blind `true` that would undo the VoiceOver gate.
+/// blind `true` that would undo the VoiceOver gate. Move View (local
+/// viewport navigation) also parks them, so no Mac gesture fires while the
+/// user is only moving the view.
 struct ReceiverMultiFingerGestureGate: Equatable {
     private(set) var voiceOverRunning: Bool
+    private(set) var viewportNavigationActive = false
 
     init(voiceOverRunning: Bool) {
         self.voiceOverRunning = voiceOverRunning
     }
 
-    var recognizersEnabled: Bool { !voiceOverRunning }
+    var recognizersEnabled: Bool { !voiceOverRunning && !viewportNavigationActive }
+
+    /// Returns whether availability changed.
+    mutating func update(viewportNavigationActive: Bool) -> Bool {
+        guard viewportNavigationActive != self.viewportNavigationActive else { return false }
+        self.viewportNavigationActive = viewportNavigationActive
+        return true
+    }
 
     func isEnabled(_ recognizer: ReceiverMultiFingerRecognizer) -> Bool {
         recognizersEnabled
@@ -93,10 +103,23 @@ struct ReceiverMultiFingerGestureGate: Equatable {
 
 /// Screen-edge system gestures are deferred (the first swipe goes to the
 /// Mac, a second still reaches iPadOS) only while the remote surface is on
-/// screen AND input may reach the Mac.
+/// screen, input may reach the Mac, Prefer MeowDisplay Gestures is on, and
+/// VoiceOver is off — VoiceOver always owns its own gestures.
 enum ReceiverScreenEdgePolicy {
-    static func defersScreenEdges(surfaceShown: Bool, inputAllowed: Bool) -> Bool {
-        surfaceShown && inputAllowed
+    static func defersScreenEdges(surfaceShown: Bool, inputAllowed: Bool,
+                                  preferMeowDisplayGestures: Bool = true,
+                                  voiceOverRunning: Bool = false) -> Bool {
+        surfaceShown && inputAllowed && preferMeowDisplayGestures && !voiceOverRunning
+    }
+}
+
+/// Prefer MeowDisplay Gestures' effect on UIKit's three-finger editing
+/// interactions (undo/redo/copy/paste and their HUD) over the receiver
+/// surface. Public API only: this never claims iPadOS's 4/5-finger
+/// multitasking gestures, and VoiceOver's gestures are untouched by it.
+enum ReceiverEditingInteractionPolicy {
+    static func suppressesEditingInteractions(preferMeowDisplayGestures: Bool) -> Bool {
+        preferMeowDisplayGestures
     }
 }
 

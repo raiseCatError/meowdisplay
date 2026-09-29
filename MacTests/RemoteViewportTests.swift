@@ -499,21 +499,21 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertEqual(clamped.scale, ManualViewportState.maxScale)
     }
 
-    func testReturningToMinimumScaleClearsPan() {
+    func testMinimumScaleKeepsPanWithinHalfTheContent() {
+        // 100% no longer forces the view back to center; an edge may reach
+        // the viewport's center and no further.
         let clamped = ManualViewportState(scale: 1, panX: 999, panY: -999).clamped(against: squareBounds)
-        XCTAssertEqual(clamped.panX, 0)
-        XCTAssertEqual(clamped.panY, 0)
+        XCTAssertEqual(clamped.panX, squareBounds.width / 2)
+        XCTAssertEqual(clamped.panY, -squareBounds.height / 2)
     }
 
-    func testPanClampsSoScaledContentAlwaysCoversTheBase() {
+    func testZoomedPanStopsWhenAnEdgeReachesTheViewportCenter() {
         let state = ManualViewportState(scale: 2, panX: 10_000, panY: -10_000)
         let clamped = state.clamped(against: squareBounds)
         let width = squareBounds.width * clamped.scale
         let height = squareBounds.height * clamped.scale
-        let maxPanX = (width - squareBounds.width) / 2
-        let maxPanY = (height - squareBounds.height) / 2
-        XCTAssertEqual(clamped.panX, maxPanX, accuracy: 0.001)
-        XCTAssertEqual(clamped.panY, -maxPanY, accuracy: 0.001)
+        XCTAssertEqual(clamped.panX, width / 2, accuracy: 0.001)
+        XCTAssertEqual(clamped.panY, -height / 2, accuracy: 0.001)
     }
 
     func testPinchZoomsAroundTheGestureMidpoint() {

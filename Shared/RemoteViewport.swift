@@ -449,45 +449,52 @@ struct ManualViewportState: Equatable {
 
     var isIdentity: Bool { self == .identity }
 
-    /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` so that
-    /// `base`, scaled by the result, can never reveal blank space beyond
-    /// `base`'s own footprint — i.e. the scaled rect always fully contains
-    /// `base` (PRODUCT RULE: "cannot drag the remote display completely
-    /// away and reveal arbitrary blank space"). At `minScale`, pan is
-    /// forced to zero so returning to 1x always lands at exactly the
-    /// normal, unpanned presentation. The single source of truth for this
-    /// math — both `applyManualZoom` and the live pinch/pan policy
-    /// (`pinching(from:...)`) funnel through this rather than duplicating
-    /// clamp arithmetic, which also makes it the one place that re-derives
-    /// valid pan bounds whenever `base` changes (rotation, keyboard
-    /// open/close) — see the type's use from `VideoView.layoutSubviews`.
+    /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` to
+    /// `panLimits(against:)`: translation is independent of zoom (100% can
+    /// pan too), but any edge of the remote display may travel at most to
+    /// the viewport's center, never past it — so the Mac can be brought
+    /// within reach from any direction yet never flung off screen. The
+    /// viewport's center is `base`'s center: the normal presentation is
+    /// centered in the surface, and the keyboard-open one in the area above
+    /// the keyboard. The single source of truth for this math — both
+    /// `applyManualZoom` and the live pinch/pan policy (`pinching(from:...)`)
+    /// funnel through this rather than duplicating clamp arithmetic, which
+    /// also makes it the one place that re-derives valid pan bounds whenever
+    /// `base` changes (rotation, keyboard open/close, a Strip rail) — see
+    /// the type's use from `VideoView.layoutSubviews`.
     func clamped(against base: CGRect) -> ManualViewportState {
         var copy = self
         copy.scale = scale.isFinite ? min(max(scale, Self.minScale), Self.maxScale) : Self.minScale
         copy.rotationRadians = rotationRadians.isFinite ? Self.normalizedAngle(rotationRadians) : 0
-        guard base.width > 0, base.height > 0,
-              copy.scale > Self.minScale || abs(copy.rotationRadians) > 0.0001 else {
+        guard let limits = copy.panLimits(against: base) else {
             copy.panX = 0
             copy.panY = 0
             copy.rotationRadians = 0
             return copy
         }
-        let width = base.width * copy.scale
-        let height = base.height * copy.scale
-        guard width.isFinite, height.isFinite, width > 0, height > 0 else {
-            copy.panX = 0
-            copy.panY = 0
-            return copy
-        }
-        let c = abs(cos(copy.rotationRadians))
-        let s = abs(sin(copy.rotationRadians))
-        let extentWidth = width * c + height * s
-        let extentHeight = width * s + height * c
-        let maxPanX = max(0, (extentWidth - base.width) / 2)
-        let maxPanY = max(0, (extentHeight - base.height) / 2)
-        copy.panX = panX.isFinite ? min(max(panX, -maxPanX), maxPanX) : 0
-        copy.panY = panY.isFinite ? min(max(panY, -maxPanY), maxPanY) : 0
+        copy.panX = panX.isFinite ? min(max(panX, -limits.x), limits.x) : 0
+        copy.panY = panY.isFinite ? min(max(panY, -limits.y), limits.y) : 0
+        // Floating-point dust from a pinch that ended back at rest must not
+        // leave a technically-non-identity state behind.
+        if abs(copy.panX) < 0.01 { copy.panX = 0 }
+        if abs(copy.panY) < 0.01 { copy.panY = 0 }
         return copy
+    }
+
+    /// The largest |panX|/|panY| for this scale and rotation: half the
+    /// displayed content's axis-aligned extent, which is exactly how far
+    /// its center can move before one of its (rotated) edges would cross
+    /// the viewport's center. `nil` for unusable geometry.
+    func panLimits(against base: CGRect) -> (x: CGFloat, y: CGFloat)? {
+        guard base.width > 0, base.height > 0, base.width.isFinite, base.height.isFinite else { return nil }
+        let scale = self.scale.isFinite ? min(max(self.scale, Self.minScale), Self.maxScale) : Self.minScale
+        let rotation = rotationRadians.isFinite ? rotationRadians : 0
+        let width = base.width * scale
+        let height = base.height * scale
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+        let c = abs(cos(rotation))
+        let s = abs(sin(rotation))
+        return ((width * c + height * s) / 2, (width * s + height * c) / 2)
     }
 
     /// Pure pinch/pan policy for a live two-finger gesture: given the
@@ -681,10 +688,11 @@ extension RemoteViewportCalculator {
     /// `base.displayedRect`; `viewPoint`/`remotePoint` need no changes to
     /// stay each other's exact inverse under it.
     ///
-    /// At `state.scale <= 1` (identity), returns `base` completely
+    /// At identity (1x, no pan, no rotation) returns `base` completely
     /// unchanged — not merely numerically equal — so resetting manual zoom
     /// always lands at exactly the normal/keyboard-adjusted presentation,
-    /// with no accumulated floating-point drift.
+    /// with no accumulated floating-point drift. A 1x state that is only
+    /// panned is a plain translation of `base`.
     static func applyManualZoom(to base: RemoteViewportTransform,
                                 state: ManualViewportState) -> RemoteViewportTransform {
         guard base.isValid else { return base }
@@ -699,5 +707,71 @@ extension RemoteViewportCalculator {
                             width: width, height: height)
         return RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: scaled,
                                        rotationRadians: clamped.rotationRadians)
+    }
+}
+
+/// Move View: while active, the receiver surface navigates the local
+/// viewport instead of controlling the Mac. One finger pans; two fingers
+/// pan plus pinch-zoom (when `allowsZoom`) and rotate (when
+/// `allowsRotation`). Every change in the number of fingers re-baselines
+/// from the current state, so lifting or adding a finger never jumps.
+/// Reuses `ManualViewportState.pinching` — the same anchored math and clamp
+/// as an ordinary viewport pinch — rather than a second viewport model.
+struct ViewportNavigationSession {
+    private var start = ManualViewportState.identity
+    private var base = CGRect.zero
+    private var initialCentroid = CGPoint.zero
+    private var initialDistance: CGFloat = 0
+    private var initialAngle: CGFloat = 0
+    private(set) var touchCount = 0
+
+    /// Feeds the current finger positions (surface coordinates). Returns
+    /// the viewport state to show; `current` unchanged when there is
+    /// nothing to do (no fingers, a re-baseline, or unusable geometry).
+    mutating func update(points: [CGPoint], current: ManualViewportState, base: CGRect,
+                         allowsZoom: Bool, allowsRotation: Bool) -> ManualViewportState {
+        let fingers = Array(points.prefix(2))
+        guard !fingers.isEmpty, base.width > 0, base.height > 0 else {
+            touchCount = 0
+            return current
+        }
+        let centroid = Self.centroid(fingers)
+        if fingers.count != touchCount || base != self.base {
+            touchCount = fingers.count
+            start = current
+            self.base = base
+            initialCentroid = centroid
+            initialDistance = fingers.count == 2 ? Self.distance(fingers) : 0
+            initialAngle = fingers.count == 2 ? Self.angle(fingers) : 0
+            return current
+        }
+        var scaleRatio: CGFloat = 1
+        var rotationDelta: CGFloat = 0
+        if fingers.count == 2 {
+            if allowsZoom, initialDistance > 0 { scaleRatio = Self.distance(fingers) / initialDistance }
+            if allowsRotation {
+                rotationDelta = ManualViewportState.normalizedAngle(Self.angle(fingers) - initialAngle)
+            }
+        }
+        return ManualViewportState.pinching(from: start, initialBase: base,
+                                            initialMidpoint: initialCentroid, currentMidpoint: centroid,
+                                            scaleRatio: scaleRatio, rotationDelta: rotationDelta)
+    }
+
+    mutating func end() {
+        touchCount = 0
+    }
+
+    private static func centroid(_ points: [CGPoint]) -> CGPoint {
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+    }
+
+    private static func distance(_ points: [CGPoint]) -> CGFloat {
+        hypot(points[1].x - points[0].x, points[1].y - points[0].y)
+    }
+
+    private static func angle(_ points: [CGPoint]) -> CGFloat {
+        atan2(points[1].y - points[0].y, points[1].x - points[0].x)
     }
 }

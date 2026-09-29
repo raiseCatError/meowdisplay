@@ -249,6 +249,9 @@ targets:
       - Shared/ControlProfile.swift
       - Shared/ControlInteraction.swift
       - Shared/ControlTrayGeometry.swift
+      - Shared/PadControlLayout.swift
+      - Shared/CustomControlLayout.swift
+      - Shared/MobileSettingsCategory.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
       - Shared/RemotePairing.swift

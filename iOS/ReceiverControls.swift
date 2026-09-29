@@ -25,10 +25,38 @@ final class ReceiverControlStore: ObservableObject {
     private static let autoHideDelay: Duration = .seconds(9)
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
+    /// The iPad-only presentation (Strip/Overlay/Custom, Control Size, …)
+    /// applies only when true; the iPhone keeps its compact tray.
+    let isPad: Bool
+    /// Move View: while true the receiver surface moves the local viewport
+    /// instead of controlling the Mac. Transient — never persisted, and
+    /// dropped whenever input stops reaching the Mac.
+    @Published private(set) var moveViewActive = false
+    /// Bumped to ask the receiver surface to reset its local viewport.
+    @Published private(set) var viewportResetGeneration = 0
 
-    init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository()) {
+    init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository(),
+         isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
+        self.isPad = isPad
         preferences = repository.load()
+    }
+
+    /// The iPad layout mode actually in effect: Custom needs a layout to
+    /// show, otherwise it presents as Overlay.
+    var effectivePadLayout: PadControlLayoutMode {
+        let stored = preferences.padControlLayout
+        return stored == .custom && preferences.activeCustomLayout == nil ? .overlay : stored
+    }
+
+    func setMoveViewActive(_ active: Bool) {
+        guard moveViewActive != active else { return }
+        moveViewActive = active
+        if active { beginAutoHideActivity() } else { scheduleAutoHide() }
+    }
+
+    func requestViewportReset() {
+        viewportResetGeneration &+= 1
     }
 
     /// Call at the start of ANY meaningful interaction — anywhere on the
@@ -51,15 +79,19 @@ final class ReceiverControlStore: ObservableObject {
     /// cancelled it.
     func scheduleAutoHide(interactionIdle: Bool = true) {
         autoHideTask?.cancel()
-        guard preferences.autoHideEnabled, preferences.trayCanBeShown,
-              !preferences.trayCollapsed, interactionIdle else { return }
+        guard autoHideAllowed, interactionIdle else { return }
         autoHideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.autoHideDelay)
-            guard let self, !Task.isCancelled else { return }
-            guard self.preferences.autoHideEnabled, self.preferences.trayCanBeShown,
-                  !self.preferences.trayCollapsed else { return }
+            guard let self, !Task.isCancelled, self.autoHideAllowed else { return }
             self.autoHidden = true
         }
+    }
+
+    /// Move View keeps its controls up so the mode can always be left.
+    private var autoHideAllowed: Bool {
+        preferences.autoHideEnabled && preferences.trayCanBeShown && !preferences.trayCollapsed
+            && !moveViewActive
+            && ControlAutoHidePolicy.applies(isPad: isPad, layout: effectivePadLayout)
     }
 
     /// Cancels any pending countdown and clears auto-hidden state, then
@@ -241,6 +273,20 @@ final class SmartTouchHaptics {
     }
 }
 
+/// The live rendered-display footprint, published by the receiver surface
+/// (`VideoView`) on every layout pass that changes it. Kept out of every
+/// other observed object on purpose: during a pinch it changes per frame,
+/// and only the small control-backdrop layer observes it.
+@MainActor
+final class DisplayFootprintStore: ObservableObject {
+    @Published private(set) var footprint = DisplayFootprint.none
+
+    func update(_ footprint: DisplayFootprint) {
+        guard footprint != self.footprint else { return }
+        self.footprint = footprint
+    }
+}
+
 private struct ControlFramePreference: PreferenceKey {
     static let defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
@@ -265,8 +311,15 @@ struct ReceiverControlOverlay: View {
     let reservedRegions: [ControlReservedRegion]
     let haptics: ReceiverHaptics
     let onOccupiedFramesChange: ([CGRect]) -> Void
+    /// iPad only: the rendered-display footprint, for control halos.
+    var footprintStore: DisplayFootprintStore?
+    /// iPad only: where the Mac canvas goes (the Strip reserves rails).
+    var onCanvasChange: (CGRect) -> Void = { _ in }
 
     @State private var interaction = ControlInteractionState()
+    @State private var initiatingMoveView = false
+    /// The modifier whose placement a Custom-layout palette blooms around.
+    @State private var paletteAnchor: ControlModifier?
     @State private var frames: [String: CGRect] = [:]
     @State private var holdTask: Task<Void, Never>?
     @State private var initiatingModifier: ControlModifier?
@@ -328,15 +381,102 @@ struct ReceiverControlOverlay: View {
         // `functionGroups`'s doc above; the full tray (settings gear
         // included, since it is one of `visibleTrayItems` whenever the tray
         // isn't manually collapsed) stays mounted and fades out in place.
-        return profile.visibleTrayItems.filter {
-            if $0.modifier != nil {
-                return receiver.macProtocolVersion >= WireProtocol.receiverControlsWireVersion
-            }
-            return $0 != .keyboard || (store.preferences.keyboardButtonEnabled && keyboardAvailable)
+        return profile.visibleTrayItems.filter(capabilityAllows)
+    }
+
+    /// Modifiers need a Mac that understands receiver controls; Keyboard
+    /// needs the keyboard wire and its own switch.
+    private func capabilityAllows(_ item: ControlTrayItem) -> Bool {
+        if item.modifier != nil {
+            return receiver.macProtocolVersion >= WireProtocol.receiverControlsWireVersion
         }
+        return item != .keyboard || (store.preferences.keyboardButtonEnabled && keyboardAvailable)
+    }
+
+    /// The tray items the chord gesture can start on in the current
+    /// presentation. Custom layouts place items themselves, independent of
+    /// the profile's tray visibility.
+    private var interactiveTrayItems: [ControlTrayItem] {
+        guard store.isPad, store.effectivePadLayout == .custom else { return controls }
+        guard store.preferences.trayCanBeShown, !store.preferences.trayCollapsed else { return [.settings] }
+        return ControlTrayItem.allCases.filter(capabilityAllows)
     }
 
     var body: some View {
+        Group {
+            if store.isPad {
+                padBody
+            } else {
+                phoneBody
+            }
+        }
+        .onAppear {
+            if !interaction.latchedModifiers.isEmpty || !interaction.temporaryModifiers.isEmpty {
+                apply(interaction.resetAll())
+            }
+        }
+        // A fresh mount (new session, view recreated) always begins visible
+        // according to the normal tray settings, then starts counting down
+        // if Auto-hide is on.
+        .onAppear { store.resetAutoHide() }
+        .animation(.snappy(duration: 0.24), value: store.preferences.trayCollapsed)
+        // One coordinated animation for the whole Auto-hide fade (Main Tray +
+        // Function Tray, see their `.opacity`/`.scaleEffect`/`.offset`)
+        // — restrained and short, never the tray's own spring/snappy feel.
+        // Reduce Motion collapses it to a near-instant fade.
+        .animation(reduceMotion ? .easeInOut(duration: 0.12) : .easeInOut(duration: 0.28), value: store.autoHidden)
+        .animation(.snappy(duration: 0.2), value: interaction.phase)
+        // Any session interruption — pause, recovery, a failed recovery or a
+        // plain disconnect — drops every latched modifier/held control, so no
+        // transient control state survives into the next live session.
+        .onChange(of: receiver.session.phase) { phase in
+            if phase != .connected {
+                apply(interaction.resetAll())
+                store.setMoveViewActive(false)
+            }
+            store.resetAutoHide()
+        }
+        .onChange(of: receiver.displayState) { state in
+            if state != .running {
+                apply(interaction.resetAll())
+                store.setMoveViewActive(false)
+            }
+            store.resetAutoHide()
+        }
+        .onChange(of: receiver.videoEnabled) { enabled in
+            if !enabled { store.setMoveViewActive(false) }
+        }
+        .onChange(of: store.preferences.activeControlProfile) { _ in
+            apply(interaction.resetAll())
+            store.resetAutoHide()
+        }
+        .onChange(of: store.preferences.activeFunctionTrayProfile) { _ in
+            apply(interaction.resetAll())
+            store.resetAutoHide()
+        }
+        // The Mac released its synthetic input state; drop the matching
+        // local latch silently. A Mac-originated refresh is not a
+        // receiver-confirmed action and must not buzz.
+        .onChange(of: receiver.inputResetGeneration) { _ in
+            apply(interaction.resetAll())
+            store.resetAutoHide()
+        }
+        .onChange(of: receiver.controlResetGeneration) { _ in
+            apply(interaction.resetAll())
+            store.resetAutoHide()
+        }
+        .onChange(of: store.preferences.autoHideEnabled) { _ in store.resetAutoHide() }
+        .onChange(of: store.preferences.trayCollapsed) { _ in store.resetAutoHide() }
+        .onChange(of: store.preferences.trayCanBeShown) { _ in store.resetAutoHide() }
+        .onChange(of: store.preferences.padControlLayout) { _ in
+            apply(interaction.resetAll())
+            store.resetAutoHide()
+        }
+        .onChange(of: store.preferences.activeCustomLayoutID) { _ in apply(interaction.resetAll()) }
+    }
+
+    @ViewBuilder
+    private var phoneBody: some View {
         // The gear is permanent receiver chrome and must always be
         // reachable while this overlay exists at all (its parent only
         // mounts it while actively streaming) — `controls` and `collapsed`
@@ -500,8 +640,8 @@ struct ReceiverControlOverlay: View {
 
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
-                .contentShape(ControlRegionShape(tray: autoHiding ? .zero : layout.trayFrame,
-                                                 palette: paletteChord == nil ? nil : layout.paletteFrame))
+                .contentShape(ControlRegionShape(rects: [autoHiding ? .zero : layout.trayFrame]
+                                                    + (paletteChord == nil ? [] : [layout.paletteFrame])))
                 .gesture(controlGesture())
 
             #if DEBUG
@@ -542,55 +682,6 @@ struct ReceiverControlOverlay: View {
         }
         .onAppear { onOccupiedFramesChange(occupiedFrames) }
         .onChange(of: occupiedFrames) { onOccupiedFramesChange($0) }
-        .onAppear {
-            if !interaction.latchedModifiers.isEmpty || !interaction.temporaryModifiers.isEmpty {
-                apply(interaction.resetAll())
-            }
-        }
-        // A fresh mount (new session, view recreated) always begins visible
-        // according to the normal tray settings, then starts counting down
-        // if Auto-hide is on.
-        .onAppear { store.resetAutoHide() }
-        .animation(.snappy(duration: 0.24), value: store.preferences.trayCollapsed)
-        // One coordinated animation for the whole Auto-hide fade (Main Tray +
-        // Function Tray, see their `.opacity`/`.scaleEffect`/`.offset` above)
-        // — restrained and short, never the tray's own spring/snappy feel.
-        // Reduce Motion collapses it to a near-instant fade.
-        .animation(reduceMotion ? .easeInOut(duration: 0.12) : .easeInOut(duration: 0.28), value: store.autoHidden)
-        .animation(.snappy(duration: 0.2), value: interaction.phase)
-        // Any session interruption — pause, recovery, a failed recovery or a
-        // plain disconnect — drops every latched modifier/held control, so no
-        // transient control state survives into the next live session.
-        .onChange(of: receiver.session.phase) { phase in
-            if phase != .connected { apply(interaction.resetAll()) }
-            store.resetAutoHide()
-        }
-        .onChange(of: receiver.displayState) { state in
-            if state != .running { apply(interaction.resetAll()) }
-            store.resetAutoHide()
-        }
-        .onChange(of: store.preferences.activeControlProfile) { _ in
-            apply(interaction.resetAll())
-            store.resetAutoHide()
-        }
-        .onChange(of: store.preferences.activeFunctionTrayProfile) { _ in
-            apply(interaction.resetAll())
-            store.resetAutoHide()
-        }
-        // The Mac released its synthetic input state; drop the matching
-        // local latch silently. A Mac-originated refresh is not a
-        // receiver-confirmed action and must not buzz.
-        .onChange(of: receiver.inputResetGeneration) { _ in
-            apply(interaction.resetAll())
-            store.resetAutoHide()
-        }
-        .onChange(of: receiver.controlResetGeneration) { _ in
-            apply(interaction.resetAll())
-            store.resetAutoHide()
-        }
-        .onChange(of: store.preferences.autoHideEnabled) { _ in store.resetAutoHide() }
-        .onChange(of: store.preferences.trayCollapsed) { _ in store.resetAutoHide() }
-        .onChange(of: store.preferences.trayCanBeShown) { _ in store.resetAutoHide() }
     }
 
     #if DEBUG
@@ -812,16 +903,24 @@ struct ReceiverControlOverlay: View {
         }
     }
 
-    private func shortcutButton(_ action: ShortcutItem, portrait: Bool) -> some View {
+    private func shortcutButton(_ action: ShortcutItem, portrait: Bool,
+                                diameter: CGFloat = Metrics.paletteKey) -> some View {
         let selected = interaction.selectedActionID == action.id
+        let fontScale = diameter / Metrics.paletteKey
         return Text(action.displayKey)
-        .font(.system(size: action.displayKey.count > 2 ? 11 : 15, weight: .semibold))
+        .font(.system(size: (action.displayKey.count > 2 ? 11 : 15) * fontScale, weight: .semibold))
         .minimumScaleFactor(0.7)
         .lineLimit(1)
         .foregroundStyle(selected ? Color.black : Color.white)
-        .frame(width: Metrics.paletteKey, height: Metrics.paletteKey)
+        .frame(width: diameter, height: diameter)
         .background(frameReader("action:\(action.id)"))
-        .background(chip(selected: selected))
+        .background(Group {
+            if store.isPad {
+                PadChip(selected: selected, onRail: false)
+            } else {
+                chip(selected: selected)
+            }
+        })
         .scaleEffect(selected ? 1.12 : 1)
         .animation(.snappy(duration: 0.14), value: selected)
         .accessibilityLabel(action.title)
@@ -857,8 +956,11 @@ struct ReceiverControlOverlay: View {
                     // Auto-hide fire out from under it mid-interaction.
                     store.beginAutoHideActivity()
                     initiatingItem = trayItem(at: value.startLocation)
+                    initiatingMoveView = initiatingItem == nil
+                        && frames["control:moveView"]?.contains(value.startLocation) == true
                     if let modifier = initiatingItem?.modifier {
                         initiatingModifier = modifier
+                        paletteAnchor = modifier
                         interaction.press(modifier)
                         holdTask?.cancel()
                         holdTask = Task { @MainActor in
@@ -905,11 +1007,16 @@ struct ReceiverControlOverlay: View {
                 } else if let item = initiatingItem,
                           frames["tray:\(item.rawValue)"]?.contains(value.location) == true {
                     perform(item)
+                } else if initiatingMoveView,
+                          frames["control:moveView"]?.contains(value.location) == true {
+                    store.setMoveViewActive(!store.moveViewActive)
+                    haptics.play(.selection)
                 } else if interaction.paletteChord != nil {
                     apply(interaction.finish(with: nil))
                 }
                 initiatingModifier = nil
                 initiatingItem = nil
+                initiatingMoveView = false
                 lastHoveredModifier = nil
                 gestureActive = false
                 // The touch lifted: safe to (re)start counting down again,
@@ -920,7 +1027,7 @@ struct ReceiverControlOverlay: View {
     }
 
     private func trayItem(at point: CGPoint) -> ControlTrayItem? {
-        controls.first { item in
+        interactiveTrayItems.first { item in
             if let modifier = item.modifier {
                 return frames["modifier:\(modifier.rawValue)"]?.contains(point) == true
             }
@@ -991,14 +1098,663 @@ struct ReceiverControlOverlay: View {
     }
 }
 
+// MARK: - iPad presentation (Strip / Overlay / Custom)
+
+/// One placed iPad control, resolved for this layout pass.
+private struct PadPlacedControl: Identifiable {
+    let id: String
+    let kind: CustomControlKind
+    /// The control's circle.
+    let frame: CGRect
+    /// The circle plus its caption while Strip hints show.
+    let cell: CGRect
+}
+
+extension ReceiverControlOverlay {
+    private var padMetricsScale: Double { store.preferences.padControlScale }
+    private var padCollapsed: Bool { store.preferences.trayCollapsed || !store.preferences.trayCanBeShown }
+
+    /// Move View only matters while the picture is live.
+    private var padShowsMoveView: Bool {
+        !padCollapsed && receiver.videoEnabled
+    }
+
+    @ViewBuilder
+    var padBody: some View {
+        let mode = store.effectivePadLayout
+        let container = CGRect(origin: .zero, size: containerSize)
+        ZStack(alignment: .topLeading) {
+            if mode == .custom, let layout = store.preferences.activeCustomLayout {
+                customLayoutContent(layout, container: container)
+            } else {
+                edgeLayoutContent(mode: mode, container: container)
+            }
+            if store.moveViewActive {
+                moveViewBanner
+                    .position(x: containerSize.width / 2, y: safeInsets.top + 34)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .coordinateSpace(name: "receiverControls")
+        .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
+        .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
+        .animation(.snappy(duration: 0.22), value: store.moveViewActive)
+    }
+
+    // MARK: Strip / Overlay
+
+    @ViewBuilder
+    private func edgeLayoutContent(mode: PadControlLayoutMode, container: CGRect) -> some View {
+        let strip = mode == .strip
+        let hints = strip && store.preferences.padShowControlHints
+        let metrics = PadControlMetrics(scale: padMetricsScale, showsHints: hints)
+        let mainKinds = padMainKinds
+        let groups = functionGroups
+        let mainEdge = store.preferences.padMainEdge
+        let functionEdge = store.preferences.padFunctionEdge
+        let firstPass = PadEdgeGeometry.layout(
+            container: container, safeInsets: safeInsets, reservesStrips: strip,
+            mainEdge: mainEdge, functionEdge: functionEdge,
+            mainCount: padCollapsed ? 0 : mainKinds.count,
+            functionGroupCounts: groups.map(\.count), metrics: metrics)
+        let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
+        let layout = keyboardTop == nil ? firstPass : PadEdgeGeometry.layout(
+            container: container, safeInsets: safeInsets, reservesStrips: strip,
+            mainEdge: mainEdge, functionEdge: functionEdge,
+            mainCount: padCollapsed ? 0 : mainKinds.count,
+            functionGroupCounts: groups.map(\.count), metrics: metrics, keyboardTop: keyboardTop)
+        // Collapsed (or the tray can't show): only the gear, floating at the
+        // Main edge, never a rail.
+        let gearFrame: CGRect? = padCollapsed ? PadEdgeGeometry.layout(
+            container: container, safeInsets: safeInsets, reservesStrips: false,
+            mainEdge: mainEdge, functionEdge: functionEdge, mainCount: 1, functionGroupCounts: [],
+            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop).mainFrame : nil
+        let mainControls: [PadPlacedControl] = layout.mainFrame.map { frame in
+            let cells = PadEdgeGeometry.cellFrames(in: frame, count: mainKinds.count, edge: mainEdge, metrics: metrics)
+            return zip(mainKinds, cells).map { kind, cell in
+                PadPlacedControl(id: padID(kind), kind: kind,
+                                 frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
+            }
+        } ?? []
+        let functionControls: [(item: ShortcutItem, frame: CGRect, cell: CGRect)] =
+            zip(groups, layout.functionFrames).flatMap { group, frame in
+                zip(group, PadEdgeGeometry.cellFrames(in: frame, count: group.count, edge: functionEdge,
+                                                     metrics: metrics)).map { item, cell in
+                    (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell)
+                }
+            }
+        let autoHiding = store.autoHidden
+        let paletteChord = interaction.paletteChord
+        let actions = paletteChord.map(profile.actions(for:)) ?? []
+        let keySize = hints
+            ? CGSize(width: 132 * metrics.scale, height: 36 * metrics.scale)
+            : CGSize(width: metrics.item * 0.92, height: metrics.item * 0.92)
+        let paletteBounds = layout.canvas.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin)
+        let grid = PadEdgeGeometry.paletteGrid(count: actions.count, key: keySize, gap: metrics.gap,
+                                               edge: mainEdge, available: paletteBounds.size)
+        let paletteFrame: CGRect? = paletteChord.flatMap { _ in
+            (layout.mainFrame ?? gearFrame).map {
+                PadEdgeGeometry.paletteFrame(size: actions.isEmpty ? CGSize(width: 220, height: 36) : grid.size,
+                                             anchor: $0, edge: mainEdge, bounds: paletteBounds, gap: metrics.gap * 2)
+            }
+        }
+        let paletteKeys: [(action: ShortcutItem, frame: CGRect)] = paletteFrame.map { frame in
+            actions.enumerated().map { index, action in
+                // Column-major along a vertical edge, row-major along a
+                // horizontal one — so keys read outward from the rail.
+                let row = mainEdge.stacksVertically ? index % grid.rows : index / grid.columns
+                let column = mainEdge.stacksVertically ? index / grid.rows : index % grid.columns
+                let origin = CGPoint(x: frame.minX + CGFloat(column) * (keySize.width + metrics.gap),
+                                     y: frame.minY + CGFloat(row) * (keySize.height + metrics.gap))
+                return (action, CGRect(origin: origin, size: keySize))
+            }
+        } ?? []
+        let occupied = [layout.mainFrame, gearFrame, paletteFrame].compactMap { $0 } + layout.functionFrames
+
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(layout.strips.enumerated()), id: \.offset) { _, strip in
+                PadStripBackground(edge: strip.edge)
+                    .frame(width: strip.frame.width, height: strip.frame.height)
+                    .position(x: strip.frame.midX, y: strip.frame.midY)
+            }
+            // Halos: only floating controls and palette keys over the Mac.
+            if let footprintStore {
+                ControlBackdropLayer(store: footprintStore,
+                                     circles: (strip ? [] : mainControls.map(\.frame) + functionControls.map(\.frame)
+                                                + (gearFrame.map { [$0] } ?? []))
+                                        + paletteKeys.map(\.frame),
+                                     capsules: hints)
+                    .opacity(autoHiding ? 0 : 1)
+                    .allowsHitTesting(false)
+            }
+            if let gearFrame {
+                padControlChip(.tray(.settings), frame: gearFrame, onRail: false, hint: nil)
+            }
+            ForEach(mainControls) { control in
+                padControlChip(control.kind, frame: control.frame, onRail: strip,
+                               hint: hints ? padHint(control.kind) : nil)
+                    .opacity(autoHiding ? 0 : 1)
+                    .allowsHitTesting(!autoHiding)
+            }
+            ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
+                padFunctionChip(control.item, frame: control.frame, onRail: strip,
+                                hint: hints ? control.item.title.lowercased() : nil)
+                    .opacity(autoHiding ? 0 : 1)
+                    .allowsHitTesting(!autoHiding)
+            }
+            if let paletteChord, let paletteFrame {
+                padPalette(actions: actions, keys: paletteKeys, frame: paletteFrame, chord: paletteChord,
+                           pills: hints)
+            }
+            if let selected = selectedAction(in: actions), let paletteFrame {
+                shortcutHUD(selected)
+                    .position(x: paletteFrame.midX,
+                              y: max(safeInsets.top + 30, paletteFrame.minY - 28))
+                    .transition(.opacity.combined(with: .scale))
+            }
+            Color.clear
+                .frame(width: containerSize.width, height: containerSize.height)
+                .contentShape(ControlRegionShape(
+                    rects: (autoHiding ? [] : mainControls.map { $0.frame.insetBy(dx: -4, dy: -4) })
+                        + (gearFrame.map { [$0.insetBy(dx: -4, dy: -4)] } ?? [])
+                        + (paletteFrame.map { [$0] } ?? [])))
+                .gesture(controlGesture())
+        }
+        .onAppear {
+            onCanvasChange(layout.canvas)
+            onOccupiedFramesChange(occupied)
+        }
+        .onChange(of: layout.canvas) { onCanvasChange($0) }
+        .onChange(of: occupied) { onOccupiedFramesChange($0) }
+    }
+
+    /// Main controls for Strip/Overlay: the profile's visible tray items,
+    /// with Move View before the Settings gear.
+    private var padMainKinds: [CustomControlKind] {
+        var kinds = controls.map(CustomControlKind.tray)
+        if padShowsMoveView, store.preferences.padShowMoveViewControl {
+            let index = kinds.firstIndex(of: .tray(.settings)) ?? kinds.endIndex
+            kinds.insert(.moveView, at: index)
+        }
+        return kinds
+    }
+
+    // MARK: Custom
+
+    @ViewBuilder
+    private func customLayoutContent(_ layout: CustomControlLayout, container: CGRect) -> some View {
+        let portrait = containerSize.height > containerSize.width
+        let arrangement = layout.arrangement(portrait: portrait)
+        let metrics = PadControlMetrics(scale: padMetricsScale)
+        let area = CustomLayoutGeometry.layoutArea(container: container, safeInsets: safeInsets)
+        let placements = customPlacements(arrangement)
+        let controlsPlaced: [PadPlacedControl] = placements.map { placement in
+            let frame = CustomLayoutGeometry.frame(for: placement, in: area, baseDiameter: metrics.item)
+            return PadPlacedControl(id: placement.id, kind: placement.kind, frame: frame, cell: frame)
+        }
+        let functionItems = store.activeFunctionTrayProfile.items.map(\.item)
+        let autoHiding = store.autoHidden
+        let paletteChord = interaction.paletteChord
+        let actions = paletteChord.map(profile.actions(for:)) ?? []
+        let keyDiameter = CustomLayoutGeometry.paletteKeyDiameter(baseDiameter: metrics.item)
+        let anchorModifier = paletteAnchor.flatMap { arrangement.placement(for: $0) != nil ? $0 : nil }
+            ?? ControlModifier.allCases.first { interaction.activeChord.contains($0)
+                && arrangement.placement(for: $0) != nil }
+        let anchorControl = anchorModifier.flatMap { modifier in
+            controlsPlaced.first { $0.kind.modifier == modifier }
+        }
+        let anchorStyle = anchorModifier.flatMap { arrangement.placement(for: $0)?.palette } ?? PalettePresentation()
+        let paletteKeys: [(action: ShortcutItem, frame: CGRect)] = {
+            guard paletteChord != nil, let anchorControl else { return [] }
+            let points = CustomLayoutGeometry.paletteCenters(
+                count: actions.count, anchor: anchorControl.frame, style: anchorStyle, area: area,
+                baseDiameter: metrics.item, spacing: metrics.gap,
+                obstacles: controlsPlaced.filter { $0.id != anchorControl.id }.map(\.frame))
+            return zip(actions, points).map { action, point in
+                (action, CGRect(x: point.x - keyDiameter / 2, y: point.y - keyDiameter / 2,
+                                width: keyDiameter, height: keyDiameter))
+            }
+        }()
+        let assistState = TwoHandAssist.state(
+            enabled: layout.twoHandAssist && !padCollapsed && store.preferences.allowInput,
+            interaction: interaction)
+        let assistIdleItems = layout.assistActionIDs.compactMap { id in functionItems.first { $0.id == id } }
+        let assistCount: Int = {
+            switch assistState {
+            case .hidden: return 0
+            case .idle: return store.preferences.functionTrayCanBeShown ? assistIdleItems.count : 0
+            case .helper: return TwoHandAssist.helperModifiers.count
+            }
+        }()
+        let assistPoints = TwoHandAssist.helperPoints(count: assistCount, clusterCentroid: arrangement.clusterCentroid,
+                                                      area: area, itemDiameter: metrics.item, spacing: metrics.gap * 1.5)
+        let assistFrames = assistPoints.map {
+            CGRect(x: $0.x - metrics.item / 2, y: $0.y - metrics.item / 2, width: metrics.item, height: metrics.item)
+        }
+        let regionControls = controlsPlaced.filter {
+            if case .function = $0.kind { return false }
+            return true
+        }
+        let occupied = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
+
+        ZStack(alignment: .topLeading) {
+            if let footprintStore {
+                ControlBackdropLayer(store: footprintStore,
+                                     circles: (autoHiding ? [] : controlsPlaced.map(\.frame) + assistFrames)
+                                        + paletteKeys.map(\.frame),
+                                     capsules: false)
+                    .allowsHitTesting(false)
+            }
+            ForEach(controlsPlaced) { control in
+                Group {
+                    if case .function(let id) = control.kind {
+                        if let item = functionItems.first(where: { $0.id == id }) {
+                            padFunctionChip(item, frame: control.frame, onRail: false, hint: nil)
+                        }
+                    } else {
+                        padControlChip(control.kind, frame: control.frame, onRail: false, hint: nil)
+                    }
+                }
+                .opacity(autoHiding && control.kind != .tray(.settings) ? 0 : 1)
+                .allowsHitTesting(!autoHiding || control.kind == .tray(.settings))
+            }
+            if let paletteChord {
+                if paletteKeys.isEmpty, let anchorControl {
+                    emptyPaletteLabel(paletteChord)
+                        .position(x: anchorControl.frame.midX,
+                                  y: anchorControl.frame.minY - metrics.item * 0.9)
+                } else {
+                    ForEach(paletteKeys, id: \.action.id) { key in
+                        shortcutButton(key.action, portrait: portrait, diameter: key.frame.width)
+                            .position(x: key.frame.midX, y: key.frame.midY)
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
+                }
+            }
+            twoHandAssistLayer(state: assistState, idleItems: assistIdleItems, frames: assistFrames)
+                .opacity(autoHiding ? 0 : 1)
+                .allowsHitTesting(!autoHiding)
+            if let selected = selectedAction(in: actions) {
+                shortcutHUD(selected)
+                    .position(x: containerSize.width / 2, y: safeInsets.top + 44)
+                    .transition(.opacity.combined(with: .scale))
+            }
+            Color.clear
+                .frame(width: containerSize.width, height: containerSize.height)
+                .contentShape(ControlRegionShape(
+                    rects: regionControls.filter { !autoHiding || $0.kind == .tray(.settings) }
+                        .map { $0.frame.insetBy(dx: -4, dy: -4) }
+                        + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }))
+                .gesture(controlGesture())
+        }
+        .animation(.snappy(duration: 0.22), value: assistState)
+        .onAppear {
+            onCanvasChange(container)
+            onOccupiedFramesChange(occupied)
+        }
+        .onChange(of: occupied) { onOccupiedFramesChange($0) }
+    }
+
+    /// The placements to render: those whose control can act right now.
+    /// Settings is permanent chrome, so a layout without it still gets one
+    /// in its corner.
+    private func customPlacements(_ arrangement: CustomControlArrangement) -> [CustomControlPlacement] {
+        let allowed = Set(interactiveTrayItems)
+        var result = arrangement.placements.filter { placement in
+            switch placement.kind {
+            case .tray(let item): return allowed.contains(item)
+            case .function: return store.preferences.functionTrayCanBeShown && !padCollapsed
+            case .moveView: return padShowsMoveView
+            }
+        }
+        if !result.contains(where: { $0.kind == .tray(.settings) }) {
+            let corner = arrangement.corner.unitPoint
+            result.append(CustomControlPlacement(id: "settings", kind: .tray(.settings),
+                                                 x: Double(corner.x), y: Double(corner.y), size: 0.9))
+        }
+        return result
+    }
+
+    /// The opposite side: idle Function actions, or — while a chord is in
+    /// progress — helper modifiers projecting the same chord state.
+    @ViewBuilder
+    private func twoHandAssistLayer(state: TwoHandAssistState, idleItems: [ShortcutItem],
+                                    frames: [CGRect]) -> some View {
+        switch state {
+        case .hidden:
+            EmptyView()
+        case .idle:
+            ForEach(Array(zip(idleItems, frames)), id: \.0.id) { item, frame in
+                padFunctionChip(item, frame: frame, onRail: false, hint: nil)
+                    .transition(.opacity)
+            }
+        case .helper(let active):
+            ForEach(Array(zip(TwoHandAssist.helperModifiers, frames)), id: \.0) { modifier, frame in
+                let selected = active.contains(modifier)
+                Text(modifier.symbol)
+                    .font(.system(size: frame.width * 0.46, weight: .semibold))
+                    .foregroundStyle(selected ? Color.black : Color.white)
+                    .frame(width: frame.width, height: frame.height)
+                    .background(PadChip(selected: selected, onRail: false))
+                    .contentShape(Circle())
+                    .onTapGesture {
+                        apply(interaction.toggleAssistModifier(modifier))
+                        store.beginAutoHideActivity()
+                    }
+                    .position(x: frame.midX, y: frame.midY)
+                    .accessibilityLabel(modifier.title)
+                    .accessibilityValue(selected ? "On" : "Off")
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
+        }
+    }
+
+    // MARK: Pieces
+
+    private func padID(_ kind: CustomControlKind) -> String {
+        switch kind {
+        case .tray(let item): return "tray-\(item.rawValue)"
+        case .function(let id): return "function-\(id)"
+        case .moveView: return "moveView"
+        }
+    }
+
+    private func padHint(_ kind: CustomControlKind) -> String {
+        switch kind {
+        case .tray(let item):
+            switch item {
+            case .command: return String(localized: "command", comment: "Strip control hint under the ⌘ key.")
+            case .option: return String(localized: "option", comment: "Strip control hint under the ⌥ key.")
+            case .control: return String(localized: "control", comment: "Strip control hint under the ⌃ key.")
+            case .shift: return String(localized: "shift", comment: "Strip control hint under the ⇧ key.")
+            case .escape: return String(localized: "escape", comment: "Strip control hint.")
+            case .tab: return String(localized: "tab", comment: "Strip control hint.")
+            case .dock: return String(localized: "dock", comment: "Strip control hint.")
+            case .keyboard: return String(localized: "keyboard", comment: "Strip control hint.")
+            case .settings: return String(localized: "settings", comment: "Strip control hint.")
+            }
+        case .function(let id): return id
+        case .moveView: return String(localized: "move view", comment: "Strip control hint.")
+        }
+    }
+
+    /// A Main control: modifier, tray action, or Move View. Taps are handled
+    /// by `controlGesture` (via the frames reported here), exactly as on
+    /// iPhone.
+    @ViewBuilder
+    private func padControlChip(_ kind: CustomControlKind, frame: CGRect, onRail: Bool, hint: String?) -> some View {
+        let diameter = frame.width
+        let selected: Bool = {
+            switch kind {
+            case .tray(let item):
+                guard let modifier = item.modifier else { return false }
+                return interaction.latchedModifiers.contains(modifier)
+                    || interaction.temporaryModifiers.contains(modifier)
+                    || interaction.phase == .pressed(modifier)
+            case .moveView: return store.moveViewActive
+            case .function: return false
+            }
+        }()
+        let frameID: String = {
+            switch kind {
+            case .tray(let item):
+                return item.modifier.map { "modifier:\($0.rawValue)" } ?? "tray:\(item.rawValue)"
+            case .moveView: return "control:moveView"
+            case .function(let id): return "function:\(id)"
+            }
+        }()
+        VStack(spacing: 2) {
+            Group {
+                switch kind {
+                case .tray(let item) where item.modifier != nil:
+                    Text(item.modifier?.symbol ?? "")
+                        .font(.system(size: diameter * 0.46, weight: .semibold))
+                case .tray(let item) where item == .escape || item == .tab:
+                    Text(item.displayLabel).font(.system(size: diameter * 0.3, weight: .semibold))
+                case .tray(let item):
+                    Image(systemName: item.displayLabel).font(.system(size: diameter * 0.4, weight: .semibold))
+                case .moveView:
+                    Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(.system(size: diameter * 0.38, weight: .semibold))
+                case .function:
+                    EmptyView()
+                }
+            }
+            .foregroundStyle(selected ? Color.black : Color.white)
+            .frame(width: diameter, height: diameter)
+            .background(frameReader(frameID))
+            .background(PadChip(selected: selected, onRail: onRail))
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: diameter + PadControlMetrics.hintWidthAllowance,
+                           height: PadControlMetrics.hintHeight)
+            }
+        }
+        .position(x: frame.midX, y: frame.minY + (diameter + (hint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(padAccessibilityLabel(kind))
+        .accessibilityValue(kind.modifier != nil || kind == .moveView ? (selected ? "On" : "Off") : "")
+    }
+
+    private func padAccessibilityLabel(_ kind: CustomControlKind) -> String {
+        switch kind {
+        case .tray(let item): return item.title
+        case .moveView: return String(localized: "Move View")
+        case .function(let id): return id
+        }
+    }
+
+    /// A Function control fires on tap, exactly like the iPhone tray.
+    private func padFunctionChip(_ item: ShortcutItem, frame: CGRect, onRail: Bool, hint: String?) -> some View {
+        let diameter = frame.width
+        return VStack(spacing: 2) {
+            Group {
+                if let systemImage = item.systemImage {
+                    Image(systemName: systemImage).font(.system(size: diameter * 0.4, weight: .semibold))
+                } else {
+                    Text(item.displayKey).font(.system(size: diameter * 0.34, weight: .semibold))
+                }
+            }
+            .foregroundStyle(.white)
+            .frame(width: diameter, height: diameter)
+            .background(PadChip(selected: false, onRail: onRail))
+            .contentShape(Circle())
+            .onTapGesture { performFunctionAction(item) }
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: diameter + PadControlMetrics.hintWidthAllowance,
+                           height: PadControlMetrics.hintHeight)
+            }
+        }
+        .position(x: frame.midX, y: frame.minY + (diameter + (hint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.title)
+        .accessibilityAddTraits(.isButton)
+    }
+
+    @ViewBuilder
+    private func padPalette(actions: [ShortcutItem], keys: [(action: ShortcutItem, frame: CGRect)],
+                            frame: CGRect, chord: ModifierChord, pills: Bool) -> some View {
+        if actions.isEmpty {
+            emptyPaletteLabel(chord)
+                .position(x: frame.midX, y: frame.midY)
+        } else {
+            ForEach(keys, id: \.action.id) { key in
+                Group {
+                    if pills {
+                        paletteHintKey(key.action, size: key.frame.size)
+                    } else {
+                        shortcutButton(key.action, portrait: true, diameter: key.frame.width)
+                    }
+                }
+                .position(x: key.frame.midX, y: key.frame.midY)
+                .transition(.scale(scale: 0.8).combined(with: .opacity))
+            }
+        }
+    }
+
+    /// Strip hint key: the key cap beside its action name ("C  Copy").
+    private func paletteHintKey(_ action: ShortcutItem, size: CGSize) -> some View {
+        let selected = interaction.selectedActionID == action.id
+        return HStack(spacing: 8) {
+            Text(action.displayKey)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .frame(minWidth: 22)
+            Text(action.title)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .foregroundStyle(selected ? Color.black : Color.white)
+        .frame(width: size.width, height: size.height)
+        .background(frameReader("action:\(action.id)"))
+        .background(Capsule().fill(selected ? Color.white.opacity(0.92) : Color.black.opacity(0.55)))
+        .overlay(Capsule().strokeBorder(.white.opacity(selected ? 0.5 : 0.2), lineWidth: 0.75))
+        .scaleEffect(selected ? 1.05 : 1)
+        .animation(.snappy(duration: 0.14), value: selected)
+        .accessibilityLabel(action.title)
+    }
+
+    private func emptyPaletteLabel(_ chord: ModifierChord) -> some View {
+        Text("No shortcuts for \(chord.displayName)")
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Capsule().fill(Color.black.opacity(0.6)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+    }
+
+    /// Move View is a mode, so it says so while it's on — with a way back.
+    private var moveViewBanner: some View {
+        HStack(spacing: 12) {
+            Label("Move View", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Divider().frame(height: 18)
+            Button("Reset") {
+                store.requestViewportReset()
+                haptics.play(.reset)
+            }
+            Button("Done") {
+                store.setMoveViewActive(false)
+                haptics.play(.selection)
+            }
+            .fontWeight(.semibold)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
+        .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// The iPad control face. On a Strip rail it reads like a key on the rail;
+/// floating, a darker disc keeps white glyphs legible over any content —
+/// the soft blur comes from `ControlBackdropLayer`, only where the Mac is
+/// actually behind the control.
+private struct PadChip: View {
+    let selected: Bool
+    let onRail: Bool
+
+    var body: some View {
+        Circle()
+            .fill(selected ? Color.white.opacity(0.92)
+                           : (onRail ? Color.white.opacity(0.1) : Color.black.opacity(0.42)))
+            .overlay(Circle().strokeBorder(.white.opacity(selected ? 0.5 : (onRail ? 0.1 : 0.22)),
+                                           lineWidth: 0.75))
+            .shadow(color: .black.opacity(onRail ? 0 : 0.25), radius: 4, y: 1)
+    }
+}
+
+/// The Strip rail: solid black, with a hairline where it meets the canvas.
+private struct PadStripBackground: View {
+    let edge: ControlEdge
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.black)
+            .overlay(alignment: innerAlignment) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: edge.stacksVertically ? 0.5 : nil, height: edge.stacksVertically ? nil : 0.5)
+            }
+    }
+
+    private var innerAlignment: Alignment {
+        switch edge {
+        case .leading: return .trailing
+        case .trailing: return .leading
+        case .top: return .bottom
+        case .bottom: return .top
+        }
+    }
+}
+
+/// Small, soft material halos under floating controls — drawn only where a
+/// control actually covers rendered Mac content (see
+/// `ControlBackdropPolicy`), and never as one big panel. The only view that
+/// observes the per-frame display footprint.
+private struct ControlBackdropLayer: View {
+    @ObservedObject var store: DisplayFootprintStore
+    let circles: [CGRect]
+    /// Palette pills (Strip hints) are capsules, not circles.
+    let capsules: Bool
+
+    private static let spread: CGFloat = 14
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(circles.enumerated()), id: \.offset) { _, rect in
+                let strength = ControlBackdropPolicy.haloStrength(for: rect, footprint: store.footprint)
+                if strength > 0 {
+                    let size = CGSize(width: rect.width + Self.spread * 2, height: rect.height + Self.spread * 2)
+                    halo(size: size, capsule: capsules && rect.width > rect.height * 1.5)
+                        .opacity(strength)
+                        .position(x: rect.midX, y: rect.midY)
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: store.footprint)
+    }
+
+    @ViewBuilder
+    private func halo(size: CGSize, capsule: Bool) -> some View {
+        let fade = RadialGradient(colors: [.black, .black, .black.opacity(0)], center: .center,
+                                  startRadius: 0, endRadius: max(size.width, size.height) / 2)
+        Group {
+            if capsule {
+                Capsule().fill(.ultraThinMaterial)
+            } else {
+                Circle().fill(.ultraThinMaterial)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .mask(fade)
+    }
+}
+
 private struct ControlRegionShape: Shape {
-    var tray: CGRect
-    var palette: CGRect?
+    var rects: [CGRect]
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        path.addRect(tray)
-        if let palette { path.addRect(palette) }
+        for region in rects where !region.isEmpty { path.addRect(region) }
         return path
     }
 }

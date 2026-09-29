@@ -1315,8 +1315,10 @@ final class ReceiverControlsTests: XCTestCase {
         defaults.set(try JSONEncoder().encode(old),
                      forKey: ReceiverControlPreferencesRepository.defaultsKey)
         let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        // Schema 16 moves pre-release installs to Pinch → Viewport,
+        // Rotation → Disabled once.
         XCTAssertEqual(loaded.pinchTarget, .viewport)
-        XCTAssertEqual(loaded.rotateTarget, .viewport)
+        XCTAssertEqual(loaded.rotateTarget, .disabled)
         XCTAssertTrue(loaded.snapRotation)
         XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
     }

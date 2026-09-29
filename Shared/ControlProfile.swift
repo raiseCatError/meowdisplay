@@ -544,7 +544,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 15
+    static let schemaVersion = 16
 
     var version = schemaVersion
     var trayEnabled = true
@@ -559,9 +559,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `ReceiverControlOverlay` itself, and never persisted here, so a
     /// relaunch always starts visible according to `trayCollapsed`/
     /// `trayEnabled` as normal. Independent of `trayCollapsed`, which stays
-    /// the user's manual, persisted collapse choice. Defaults off so
-    /// existing users see no behavior change until they opt in.
-    var autoHideEnabled = false
+    /// the user's manual, persisted collapse choice. Defaults on (schema 16:
+    /// the Mac display is the canvas, so controls get out of its way); the
+    /// iPad Strip layout keeps its reserved rail visible regardless — see
+    /// `ControlAutoHidePolicy`.
+    var autoHideEnabled = true
     /// Whether THIS session currently has effective input, mirrored from the
     /// Mac's per-session consent decision once connected (see
     /// `ReceiverControlStore.sessionInputState`/`applySessionInputState`,
@@ -583,8 +585,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
-    /// No effect in Trackpad mode. Defaults off.
-    var smartTouchEnabled = false
+    /// No effect in Trackpad mode. Defaults on (schema 16).
+    var smartTouchEnabled = true
     /// Smart Touch Haptics: every Smart Touch hold haptic — the long press
     /// that switches a touch into plain Direct Touch, and the title bar
     /// hold's build-up and confirmation. Also silenced whenever
@@ -611,8 +613,17 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// while video production is off. It never participates in hit-testing.
     var showSurfaceGrid = true
     var pinchTarget = ReceiverGestureTarget.viewport
-    var rotateTarget = ReceiverGestureTarget.viewport
+    /// Defaults to Disabled (schema 16): an accidental twist while pinching
+    /// should never tilt the Mac display. Viewport rotation stays one
+    /// setting away.
+    var rotateTarget = ReceiverGestureTarget.disabled
     var snapRotation = true
+    /// Prefer MeowDisplay Gestures: while the receiver surface controls the
+    /// Mac, ask iPadOS/iOS to defer its screen-edge gestures and opt the
+    /// surface out of UIKit's three-finger editing interactions. Only public
+    /// API, so system-owned gestures (VoiceOver, 4/5-finger multitasking)
+    /// still win — see `ReceiverSystemGesturePolicy`.
+    var preferMeowDisplayGestures = true
     /// App-mode command chords — see App Gesture Commands (spec section D).
     /// Independent of `pinchTarget`/`rotateTarget`: changing a binding never
     /// changes which target is active, and "Reset to Defaults" on this page
@@ -633,6 +644,26 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Settings offers a manual start. Off means Picture in Picture never
     /// starts. Defaults on.
     var pictureInPictureEnabled = true
+
+    // MARK: iPad-only presentation (never shown or applied on iPhone)
+
+    /// Strip reserves an edge rail and fits the Mac beside it; Overlay floats
+    /// controls over a full-screen Mac; Custom uses `activeCustomLayoutID`.
+    var padControlLayout = PadControlLayoutMode.strip
+    /// Independent edges for the Main controls and the Function controls in
+    /// Strip and Overlay — the iPad replacement for `functionTrayPosition`.
+    var padMainEdge = ControlEdge.trailing
+    var padFunctionEdge = ControlEdge.trailing
+    /// Strip only: compact key/action captions beside the controls.
+    var padShowControlHints = true
+    /// Multiplier on every iPad control, clamped to `PadControlScale.range`.
+    var padControlScale = PadControlScale.defaultValue
+    /// Adds the Move View control to the Strip/Overlay Main controls.
+    var padShowMoveViewControl = true
+    /// At most `CustomControlLayout.maximumCount`; none exist until the user
+    /// creates one — see `createCustomLayout`.
+    var customLayouts: [CustomControlLayout] = []
+    var activeCustomLayoutID: String?
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -703,16 +734,34 @@ struct ReceiverControlPreferences: Codable, Equatable {
         audioPreferred = try value(.audioPreferred, fallback.audioPreferred)
         avSyncOffsetMs = AVSyncOffset.clamped(try value(.avSyncOffsetMs, fallback.avSyncOffsetMs))
         // Absent (schema < 13) means "written before Auto-hide existed" —
-        // default off, matching a brand-new install.
+        // take a brand-new install's value (the schema-16 migration below
+        // then settles it).
         autoHideEnabled = try value(.autoHideEnabled, fallback.autoHideEnabled)
         // Absent (schema < 14) means "written before Smart Touch existed" —
-        // default off, matching a brand-new install.
+        // take a brand-new install's value (the schema-16 migration below
+        // then settles it).
         smartTouchEnabled = try value(.smartTouchEnabled, fallback.smartTouchEnabled)
         smartTouchLongPressHapticEnabled = try value(.smartTouchLongPressHapticEnabled,
                                                      fallback.smartTouchLongPressHapticEnabled)
         // Absent (schema < 15) means "written before Picture in Picture
         // existed" — default on, matching a brand-new install.
         pictureInPictureEnabled = try value(.pictureInPictureEnabled, fallback.pictureInPictureEnabled)
+        // Absent (schema < 16) means "written before Prefer MeowDisplay
+        // Gestures and the iPad layouts existed" — default to a brand-new
+        // install's values.
+        preferMeowDisplayGestures = try value(.preferMeowDisplayGestures, fallback.preferMeowDisplayGestures)
+        padControlLayout = try value(.padControlLayout, fallback.padControlLayout)
+        padMainEdge = try value(.padMainEdge, fallback.padMainEdge)
+        padFunctionEdge = try value(.padFunctionEdge, fallback.padFunctionEdge)
+        padShowControlHints = try value(.padShowControlHints, fallback.padShowControlHints)
+        padControlScale = PadControlScale.clamped(try value(.padControlScale, fallback.padControlScale))
+        padShowMoveViewControl = try value(.padShowMoveViewControl, fallback.padShowMoveViewControl)
+        // Lossy: one layout written by a newer build (an unknown control
+        // kind, say) is dropped on its own instead of resetting every
+        // preference above.
+        customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
+            .elements.prefix(CustomControlLayout.maximumCount))
+        activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -852,12 +901,12 @@ struct ReceiverControlPreferencesRepository {
             value.version = 12
         }
         // Schema 12 predates Auto-hide; the custom decoder above already
-        // defaulted `autoHideEnabled` to off — nothing to transform.
+        // defaulted `autoHideEnabled` — nothing to transform.
         if value.version < 13 {
             value.version = 13
         }
         // Schema 13 predates Smart Touch; the custom decoder above already
-        // defaulted `smartTouchEnabled` to off — nothing to transform.
+        // defaulted `smartTouchEnabled` — nothing to transform.
         if value.version < 14 {
             value.version = 14
         }
@@ -866,6 +915,19 @@ struct ReceiverControlPreferencesRepository {
         // transform.
         if value.version < 15 {
             value.version = 15
+        }
+        // Schema 16 changes four pre-release defaults (Smart Touch on,
+        // Auto-hide on, Pinch → Viewport, Rotation → Disabled). MeowDisplay
+        // has not shipped, so existing test installs move to them once;
+        // anything the user changes afterwards is saved as schema 16 and
+        // never touched here again.
+        if value.version < 16 {
+            let defaults = ReceiverControlPreferences()
+            value.smartTouchEnabled = defaults.smartTouchEnabled
+            value.autoHideEnabled = defaults.autoHideEnabled
+            value.pinchTarget = defaults.pinchTarget
+            value.rotateTarget = defaults.rotateTarget
+            value.version = 16
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
