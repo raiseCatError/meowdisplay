@@ -91,6 +91,13 @@ struct ReceiverScreen: View {
         model.receiver.session.allowsLiveInput && controlStore.preferences.allowInput
     }
 
+    /// Screen edges whose system gestures wait for a second swipe — see
+    /// `ReceiverScreenEdgePolicy`.
+    private var deferredSystemGestureEdges: Edge.Set {
+        ReceiverScreenEdgePolicy.defersScreenEdges(surfaceShown: showsReceiverSurface,
+                                                   inputAllowed: inputReachesMac) ? .all : []
+    }
+
     /// Everything outside AVKit that decides whether Picture in Picture may
     /// run — see `ReceiverPictureInPictureConditions`.
     private var pictureInPictureConditions: ReceiverPictureInPictureConditions {
@@ -247,6 +254,13 @@ struct ReceiverScreen: View {
         .ignoresSafeArea(edges: showsReceiverSurface ? .all : [])
         .statusBarHidden(showsReceiverSurface)
         .persistentSystemOverlays(showsReceiverSurface ? .hidden : .automatic)
+        // SwiftUI forwards this to the hosting controller's
+        // `preferredScreenEdgesDeferringSystemGestures` and invalidates it
+        // (`setNeedsUpdateOfScreenEdgesDeferringSystemGestures`) whenever the
+        // value changes. Deferral only makes the FIRST edge swipe reach the
+        // remote Mac; a second swipe still opens Control Center, the Home
+        // indicator etc. Never while input is off or outside the surface.
+        .defersSystemGestures(on: deferredSystemGestureEdges)
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver, controlStore: controlStore,
                          pictureInPicture: model.pictureInPicture, haptics: haptics)
@@ -2462,6 +2476,7 @@ struct VideoLayerView: UIViewRepresentable {
         viewportDoubleTap.delegate = view
         view.viewportDoubleTapRecognizer = viewportDoubleTap
         view.addGestureRecognizer(viewportDoubleTap)
+        view.applyMultiFingerGate()
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -2656,6 +2671,9 @@ struct VideoLayerView: UIViewRepresentable {
             NotificationCenter.default.addObserver(
                 self, selector: #selector(keyboardWillChangeFrame(_:)),
                 name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(voiceOverStatusDidChange(_:)),
+                name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
             // The zoomed/panned content layer can extend beyond `bounds` —
             // clip it so it never bleeds into sibling SwiftUI content.
             clipsToBounds = true
@@ -2677,6 +2695,49 @@ struct VideoLayerView: UIViewRepresentable {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
+        }
+
+        /// The remote surface is not text: opt it out of the iPadOS
+        /// three-finger undo/redo/copy/paste editing gestures (and their
+        /// HUD), which otherwise compete with the three-finger Mac-system
+        /// recognizers below. Scoped to this view only, never app-wide.
+        override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+
+        // VoiceOver gate for every multi-finger recognizer — see
+        // `ReceiverMultiFingerGestureGate`.
+        private var multiFingerGate = ReceiverMultiFingerGestureGate(voiceOverRunning: false)
+
+        private func recognizer(for kind: ReceiverMultiFingerRecognizer) -> UIGestureRecognizer? {
+            switch kind {
+            case .twoFingerViewport: return twoFingerRecognizer
+            case .viewportDoubleTap: return viewportDoubleTapRecognizer
+            case .threeFingerSwipe: return threeFingerPanRecognizer
+            case .threeFingerTap: return threeFingerTapRecognizer
+            case .pinchSpread: return pinchSpreadGestureRecognizer
+            }
+        }
+
+        /// Called once the multi-finger recognizers are attached, and again
+        /// whenever VoiceOver starts or stops. Disabling a recognizer
+        /// mid-gesture cancels it, which its action already handles.
+        func applyMultiFingerGate() {
+            _ = multiFingerGate.update(voiceOverRunning: UIAccessibility.isVoiceOverRunning)
+            for kind in ReceiverMultiFingerRecognizer.allCases {
+                recognizer(for: kind)?.isEnabled = multiFingerGate.isEnabled(kind)
+            }
+        }
+
+        /// Forces `kind`'s recognizer to `.cancelled` (UIKit's `isEnabled`
+        /// toggle) and leaves it enabled only if the VoiceOver gate allows.
+        private func cancelRecognizer(_ kind: ReceiverMultiFingerRecognizer) {
+            guard let target = recognizer(for: kind) else { return }
+            target.isEnabled = false
+            target.isEnabled = multiFingerGate.isEnabled(kind)
+        }
+
+        @objc private func voiceOverStatusDidChange(_ note: Notification) {
+            guard multiFingerGate.update(voiceOverRunning: UIAccessibility.isVoiceOverRunning) else { return }
+            applyMultiFingerGate()
         }
 
         func installVideoLayer(_ layer: CALayer) {
@@ -2871,8 +2932,7 @@ struct VideoLayerView: UIViewRepresentable {
             // mid-deciding or already committed to — toggling `isEnabled`
             // is UIKit's standard way to force a recognizer to `.cancelled`
             // (same trick used elsewhere for gesture-ownership hand-off).
-            twoFingerRecognizer?.isEnabled = false
-            twoFingerRecognizer?.isEnabled = true
+            cancelRecognizer(.twoFingerViewport)
         }
 
         /// Releases any pointer-engine-held mouse button and forgets every
@@ -3842,8 +3902,7 @@ struct VideoLayerView: UIViewRepresentable {
                         // Preempt the legacy scroll/pinch recognizer from
                         // also claiming these same two touches — see
                         // `PointerGestureEngine.isChordContinuation`'s doc.
-                        twoFingerRecognizer?.isEnabled = false
-                        twoFingerRecognizer?.isEnabled = true
+                        cancelRecognizer(.twoFingerViewport)
                     }
                 case .mouseUp(let button, let clickCount):
                     receiver.sendPointerUp(button: button, clickCount: clickCount)
@@ -3980,10 +4039,8 @@ struct VideoLayerView: UIViewRepresentable {
                 }
                 if recognizerResetPending, activeFingerTouchIDs.isEmpty {
                     recognizerResetPending = false
-                    twoFingerRecognizer?.isEnabled = false
-                    twoFingerRecognizer?.isEnabled = true
-                    viewportDoubleTapRecognizer?.isEnabled = false
-                    viewportDoubleTapRecognizer?.isEnabled = true
+                    cancelRecognizer(.twoFingerViewport)
+                    cancelRecognizer(.viewportDoubleTap)
                 }
                 for touch in touches { surfaceAdmission.end(ObjectIdentifier(touch)) }
             }

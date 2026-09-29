@@ -719,11 +719,11 @@ extension MacSenderTransportController {
         queue.asyncAfter(deadline: .now() + Self.quicApplicationHandshakeTimeout) { [weak self] in
             guard let self, let session = self.currentQUICSession(generation: generation),
                   !session.isApplicationReady else { return }
-            // Nothing answered the handshake at all: ordinary reachability.
-            // A peer that DID complete the pinned handshake but then never
-            // said hello is not "unreachable" — no fallback for that.
-            let failureClass: QUICFailureClass = session.groupReadyAt == nil && session.peerVerifiedAt == nil
-                ? .reachability : .indeterminate
+            // Also bounds a group that sits in `.waiting` and never becomes
+            // ready. A peer that DID complete the pinned handshake but then
+            // never said hello is not "unreachable" — no fallback for that.
+            let failureClass = QUICGroupStatePolicy.handshakeTimeoutClass(
+                groupReady: session.groupReadyAt != nil, peerVerified: session.peerVerifiedAt != nil)
             self.failQUIC(generation: generation, error: nil, failureClass: failureClass,
                           detail: "no authenticated application handshake within "
                             + "\(Int(Self.quicApplicationHandshakeTimeout))s")
@@ -749,21 +749,18 @@ extension MacSenderTransportController {
 
     private func handleQUICGroupState(_ state: NWConnectionGroup.State, generation: Int) {
         guard let session = currentQUICSession(generation: generation) else { return }
-        switch state {
-        case .ready:
-            guard session.groupReadyAt == nil else { return }
+        switch QUICGroupStatePolicy.action(for: state, groupAlreadyReady: session.groupReadyAt != nil) {
+        case .openStreams:
             session.groupReadyAt = Date()
             openQUICStreams(session)
-        case .waiting(let error):
-            failQUIC(generation: generation, error: error,
-                     failureClass: QUICFailureClassifier.classify(error), detail: "group waiting")
-        case .failed(let error):
-            failQUIC(generation: generation, error: error,
-                     failureClass: QUICFailureClassifier.classify(error), detail: "group failed")
-        case .cancelled:
-            failQUIC(generation: generation, error: nil, failureClass: .indeterminate, detail: "group cancelled")
-        default:
-            break
+        case .fail(let failureClass, let detail):
+            var error: NWError?
+            if case .failed(let stateError) = state { error = stateError }
+            failQUIC(generation: generation, error: error, failureClass: failureClass, detail: detail)
+        case .ignore:
+            if case .waiting(let error) = state {
+                Log.info("quic: group waiting generation=\(generation) error=\(error) — letting it retry")
+            }
         }
     }
 

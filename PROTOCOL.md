@@ -210,7 +210,10 @@ After the preface each stream uses the section 3 framing
 the Control stream's reverse direction. Receivers MUST reject (close the
 QUIC connection): a bad magic, version or non-zero flags; an unknown
 channel; a second stream for a channel; more than three streams; any
-unidirectional stream; a payload of the wrong kind for its channel; a
+unidirectional stream (the receiver advertises a bidirectional stream limit
+of four, because Apple's Network.framework uses QUIC stream 0 itself and the
+sender's streams start at stream 4; only streams that actually open count
+toward the three); a payload of the wrong kind for its channel; a
 declared length of 0 or above the channel cap (Control and Audio 1 MiB,
 Video 32 MiB — the raw 4:2:0 size of a 4096×4096 frame plus headroom,
 larger than any legitimate access unit at the receivers' 4096-pixel decode
@@ -249,6 +252,10 @@ removes it.
   otherwise QUIC. Whichever protocol first completes the authenticated
   `hello` is kept for the rest of the logical session — no periodic
   re-challenge, no metric-driven switching.
+* A dial the platform reports as merely *waiting* (Network.framework's
+  `.waiting`, e.g. `ENETDOWN` while a path comes up) is not a failure: it
+  is left to become ready, bounded by the same 8 s application-handshake
+  timeout. Only the platform's *failed* state ends the dial.
 * Only an ordinary **reachability** failure (no answer within 8 s of dialing,
   ICMP-refused, unreachable network/host, DNS) lets Auto fall back to secure
   TCP; it then starts a 10-minute in-memory cooldown for that peer and route

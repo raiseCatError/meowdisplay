@@ -127,6 +127,11 @@ struct KeyboardShortcut: Codable, Equatable {
 
 enum ControlAction: Codable, Equatable {
     case keyboardShortcut(KeyboardShortcut)
+    /// A semantic `ReceiverGesture` (its raw value) sent as the existing
+    /// `gesture` message — for Mac actions that have no reliable keyboard
+    /// shortcut (Launchpad, Show Desktop), so they stay reachable if the
+    /// 4/5-finger pinch collides with iPadOS's multitasking gestures.
+    case receiverGesture(String)
 }
 
 struct ShortcutItem: Codable, Equatable, Identifiable {
@@ -146,6 +151,14 @@ struct ShortcutItem: Codable, Equatable, Identifiable {
         self.title = title
         self.displayKey = displayKey
         action = .keyboardShortcut(KeyboardShortcut(usage: usage, modifiers: modifiers))
+        self.systemImage = systemImage
+    }
+
+    init(id: String, title: String, gesture: ReceiverGesture, systemImage: String) {
+        self.id = id
+        self.title = title
+        displayKey = title
+        action = .receiverGesture(gesture.rawValue)
         self.systemImage = systemImage
     }
 }
@@ -433,16 +446,23 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     }
 
     /// Refreshes presentation and shortcut metadata by stable action ID.
-    /// Visibility, ordering, and grouping remain entirely user-owned.
+    /// Visibility, ordering, and grouping remain entirely user-owned. A
+    /// canonical item a saved profile predates is appended HIDDEN, so the
+    /// editor can offer it without changing the tray the user already has.
     func resolvingCanonicalMetadata() -> FunctionTrayProfile {
-        let canonicalByID = Dictionary(uniqueKeysWithValues:
-            Self.canonical(slot: slot).items.map { ($0.id, $0.item) })
-        return FunctionTrayProfile(slot: slot, items: items.map { configuration in
-            guard let canonical = canonicalByID[configuration.id] else { return configuration }
-            return FunctionTrayItemConfiguration(item: canonical,
+        let canonical = Self.canonical(slot: slot).items
+        let canonicalByID = Dictionary(uniqueKeysWithValues: canonical.map { ($0.id, $0.item) })
+        let savedIDs = Set(items.map(\.id))
+        let resolved: [FunctionTrayItemConfiguration] = items.map { configuration in
+            guard let item = canonicalByID[configuration.id] else { return configuration }
+            return FunctionTrayItemConfiguration(item: item,
                                                  isVisible: configuration.isVisible,
                                                  group: configuration.group)
-        })
+        }
+        let added = canonical.filter { !savedIDs.contains($0.id) }.map {
+            FunctionTrayItemConfiguration(item: $0.item, isVisible: false, group: $0.group)
+        }
+        return FunctionTrayProfile(slot: slot, items: resolved + added)
     }
 }
 
@@ -462,6 +482,7 @@ extension FunctionTrayProfile {
         // `FunctionTrayProfile` itself knows "zoom" or "edit".
         let zoomGroup = 0
         let editGroup = 1
+        let systemGroup = 2
         let items: [(ShortcutItem, Int)] = [
             (ShortcutItem(id: "zoom-in", title: "Zoom In", displayKey: "+", usage: 46, modifiers: command,
                          systemImage: "plus.magnifyingglass"), zoomGroup),
@@ -472,8 +493,19 @@ extension FunctionTrayProfile {
             (ShortcutItem(id: "redo", title: "Redo", displayKey: "Z", usage: 29, modifiers: commandShift,
                          systemImage: "arrow.uturn.forward"), editGroup),
         ]
+        // Opt-in (hidden by default): the only routes to Launchpad and Show
+        // Desktop besides the 4/5-finger pinch/spread, which can collide
+        // with iPadOS's own multitasking gestures.
+        let systemItems: [(ShortcutItem, Int)] = [
+            (ShortcutItem(id: "launchpad", title: "Launchpad", gesture: .launchpad,
+                          systemImage: "square.grid.3x3"), systemGroup),
+            (ShortcutItem(id: "show-desktop", title: "Show Desktop", gesture: .showDesktop,
+                          systemImage: "rectangle.dashed"), systemGroup),
+        ]
         return FunctionTrayProfile(slot: slot, items: items.map {
             FunctionTrayItemConfiguration(item: $0.0, isVisible: true, group: $0.1)
+        } + systemItems.map {
+            FunctionTrayItemConfiguration(item: $0.0, isVisible: false, group: $0.1)
         })
     }
 }

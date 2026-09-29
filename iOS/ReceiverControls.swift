@@ -744,9 +744,14 @@ struct ReceiverControlOverlay: View {
     }
 
     private func performFunctionAction(_ item: ShortcutItem) {
-        guard case .keyboardShortcut(let shortcut) = item.action else { return }
-        receiver.sendKeyboardPress(usage: shortcut.usage,
-                                   modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
+        switch item.action {
+        case .keyboardShortcut(let shortcut):
+            receiver.sendKeyboardPress(usage: shortcut.usage,
+                                       modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
+        case .receiverGesture(let name):
+            guard ReceiverGesture(rawValue: name) != nil else { return }
+            receiver.sendGesture(name: name)
+        }
         haptics.play(.confirmation)
         store.scheduleAutoHide()
     }

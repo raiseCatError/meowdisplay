@@ -501,6 +501,46 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.title, "Undo")
     }
 
+    /// Launchpad and Show Desktop have no reliable Mac keyboard shortcut, so
+    /// these opt-in items are their only route besides the 4/5-finger pinch.
+    /// Hidden by default: the default tray is unchanged.
+    func testLaunchpadAndShowDesktopAreOptInFunctionTrayGestures() throws {
+        let profile = FunctionTrayProfile.canonical()
+        XCTAssertFalse(profile.visibleItems.contains { $0.id == "launchpad" || $0.id == "show-desktop" })
+        let launchpad = try XCTUnwrap(profile.items.first { $0.id == "launchpad" })
+        let showDesktop = try XCTUnwrap(profile.items.first { $0.id == "show-desktop" })
+        XCTAssertFalse(launchpad.isVisible)
+        XCTAssertFalse(showDesktop.isVisible)
+        XCTAssertEqual(launchpad.item.action, .receiverGesture(ReceiverGesture.launchpad.rawValue))
+        XCTAssertEqual(showDesktop.item.action, .receiverGesture(ReceiverGesture.showDesktop.rawValue))
+        XCTAssertEqual(launchpad.group, showDesktop.group)
+        XCTAssertFalse(profile.items.filter { $0.item.action != launchpad.item.action
+            && $0.item.action != showDesktop.item.action }.contains { $0.group == launchpad.group })
+    }
+
+    func testSavedFunctionTrayGainsNewItemsHiddenWithoutChangingItsTray() throws {
+        var saved = FunctionTrayProfile.canonical(slot: .profile2)
+        saved.items.removeAll { $0.id == "launchpad" || $0.id == "show-desktop" }
+        saved.items.swapAt(0, 1)
+        saved.items[2].isVisible = false
+        let resolved = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(resolved.visibleItems.map(\.id), saved.visibleItems.map(\.id))
+        XCTAssertEqual(Array(resolved.items.map(\.id).prefix(saved.items.count)), saved.items.map(\.id))
+        XCTAssertEqual(Array(resolved.items.map(\.id).suffix(2)), ["launchpad", "show-desktop"])
+        XCTAssertFalse(resolved.items.suffix(2).contains { $0.isVisible })
+        // Idempotent: nothing is appended twice.
+        XCTAssertEqual(resolved.resolvingCanonicalMetadata().items.map(\.id), resolved.items.map(\.id))
+    }
+
+    func testReceiverGestureActionRoundTripsThroughPersistence() throws {
+        let item = ShortcutItem(id: "launchpad", title: "Launchpad", gesture: .launchpad, systemImage: "square.grid.3x3")
+        let decoded = try JSONDecoder().decode(ShortcutItem.self, from: JSONEncoder().encode(item))
+        XCTAssertEqual(decoded, item)
+        let legacy = try JSONDecoder().decode(ShortcutItem.self, from: JSONEncoder().encode(
+            ShortcutItem(id: "undo", title: "Undo", displayKey: "Z", usage: 29, modifiers: ModifierChord([.command]))))
+        XCTAssertEqual(legacy.action, .keyboardShortcut(KeyboardShortcut(usage: 29, modifiers: ModifierChord([.command]))))
+    }
+
     func testSchemaSevenProfilesGainDockImmediatelyBeforeKeyboard() throws {
         let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

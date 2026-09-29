@@ -2,6 +2,42 @@ import CoreGraphics
 import XCTest
 
 final class InputRoutingTests: XCTestCase {
+    /// VoiceOver owns multi-finger gestures: every custom multi-finger
+    /// recognizer — two-finger viewport/scroll, two-finger double-tap,
+    /// three-finger swipe and tap, 4/5-finger pinch/spread — steps aside.
+    func testEveryMultiFingerRecognizerStepsAsideWhileVoiceOverRuns() {
+        XCTAssertEqual(Set(ReceiverMultiFingerRecognizer.allCases),
+                       [.twoFingerViewport, .viewportDoubleTap, .threeFingerSwipe, .threeFingerTap, .pinchSpread])
+        let off = ReceiverMultiFingerGestureGate(voiceOverRunning: false)
+        let on = ReceiverMultiFingerGestureGate(voiceOverRunning: true)
+        for kind in ReceiverMultiFingerRecognizer.allCases {
+            XCTAssertTrue(off.isEnabled(kind), "\(kind)")
+            XCTAssertFalse(on.isEnabled(kind), "\(kind)")
+        }
+    }
+
+    /// VoiceOver toggled while the app runs: the gate follows it both ways
+    /// and reports only real changes (so the view re-applies only then).
+    func testMultiFingerGateFollowsRuntimeVoiceOverChanges() {
+        var gate = ReceiverMultiFingerGestureGate(voiceOverRunning: false)
+        XCTAssertFalse(gate.update(voiceOverRunning: false))
+        XCTAssertTrue(gate.update(voiceOverRunning: true))
+        XCTAssertFalse(gate.recognizersEnabled)
+        XCTAssertFalse(gate.update(voiceOverRunning: true))
+        XCTAssertTrue(gate.update(voiceOverRunning: false))
+        XCTAssertTrue(gate.recognizersEnabled)
+        for kind in ReceiverMultiFingerRecognizer.allCases { XCTAssertTrue(gate.isEnabled(kind)) }
+    }
+
+    /// Screen-edge deferral only while the remote surface is shown and input
+    /// may reach the Mac — never on the idle screen or with input off.
+    func testScreenEdgesAreDeferredOnlyForALiveInputSurface() {
+        XCTAssertTrue(ReceiverScreenEdgePolicy.defersScreenEdges(surfaceShown: true, inputAllowed: true))
+        XCTAssertFalse(ReceiverScreenEdgePolicy.defersScreenEdges(surfaceShown: true, inputAllowed: false))
+        XCTAssertFalse(ReceiverScreenEdgePolicy.defersScreenEdges(surfaceShown: false, inputAllowed: true))
+        XCTAssertFalse(ReceiverScreenEdgePolicy.defersScreenEdges(surfaceShown: false, inputAllowed: false))
+    }
+
     func testThreeFingerDirectionsRequireMeaningfulPredominantMovement() {
         XCTAssertNil(ReceiverGesture.swipe(translationX: 0, translationY: -79.9))
         XCTAssertEqual(ReceiverGesture.swipe(translationX: 0, translationY: -80), .missionControl)

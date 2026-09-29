@@ -396,4 +396,86 @@ final class QUICReceiverAuthorityTests: XCTestCase {
         XCTAssertTrue(group.isClosed)
         control.cancel()
     }
+
+    // MARK: - Preface read classification (physical-iPhone regression)
+
+    /// A read that fails because the stream or its connection went away is a
+    /// TRANSPORT failure. On iPhone every such failure ("Socket is not
+    /// connected") was reported as `invalidStreamPreface`, hiding the real
+    /// fault; only bytes that are not a preface are a protocol violation.
+    func testPrefaceReadErrorIsATransportFailureNotAViolation() {
+        for error in [NWError.posix(.ENOTCONN), .posix(.ECONNRESET), .posix(.EINVAL), .posix(.ECANCELED)] {
+            guard case .transportFailure = QUICReceiverGroup.prefaceReadOutcome(
+                data: nil, isComplete: false, error: error) else {
+                return XCTFail("\(error) must be a transport failure")
+            }
+            // Even with partial bytes in hand, a failed read is transport.
+            guard case .transportFailure = QUICReceiverGroup.prefaceReadOutcome(
+                data: Data([0x4D, 0x45]), isComplete: true, error: error) else {
+                return XCTFail("\(error) with partial data must be a transport failure")
+            }
+        }
+    }
+
+    func testPrefaceReadClassifiesPeerBytes() {
+        for channel in TransportChannel.allCases {
+            XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(
+                data: QUICStreamPreface(channel: channel).encode(), isComplete: false, error: nil), .parsed(channel))
+        }
+        XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(data: Data("GET / HT".utf8), isComplete: false, error: nil),
+                       .violation(.invalidStreamPreface))
+        XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(
+            data: Data([0x4D, 0x45, 0x4F, 0x57, 2, 1, 0, 0]), isComplete: false, error: nil),
+                       .violation(.unsupportedTransportVersion))
+        XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(
+            data: Data([0x4D, 0x45, 0x4F, 0x57, 1, 9, 0, 0]), isComplete: false, error: nil),
+                       .violation(.unexpectedChannel))
+        // The peer ended the stream before a whole preface: a violation.
+        XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(data: Data([0x4D, 0x45]), isComplete: true, error: nil),
+                       .violation(.invalidStreamPreface))
+        XCTAssertEqual(QUICReceiverGroup.prefaceReadOutcome(data: nil, isComplete: true, error: nil),
+                       .violation(.invalidStreamPreface))
+    }
+
+    /// Network.framework uses QUIC stream 0 itself, so three MeowDisplay
+    /// streams need a bidirectional stream limit of four.
+    func testStreamLimitsLeaveRoomForNetworkFrameworksOwnStream() {
+        let options = NWProtocolQUIC.Options(alpn: [QUICTransport.alpn])
+        QUICReceiverListener.configureStreamLimits(options)
+        XCTAssertEqual(options.initialMaxStreamsBidirectional, QUICChannelRegistry.maxStreams + 1)
+        XCTAssertEqual(options.initialMaxStreamsUnidirectional, 0)
+        XCTAssertEqual(QUICReceiverLimits.maxDeliveredStreamObjects, QUICChannelRegistry.maxStreams + 1)
+        let parameters = QUICReceiverListener.listenerParameters(quic: options)
+        XCTAssertTrue(parameters.includePeerToPeer)
+        XCTAssertEqual(parameters.serviceClass, .interactiveVideo)
+    }
+
+    /// A delivered object that never becomes a stream (Network.framework's
+    /// own, or any that fails first) must not close the connection.
+    func testANeverReadyDeliveredObjectDoesNotCloseTheConnection() throws {
+        let registry = QUICReceiverGroupRegistry()
+        let group = try XCTUnwrap(admitGroup(registry))
+        // Dials a closed loopback port: never `.ready`, then fails.
+        let neverReady = makeStream()
+        group.accept(neverReady)
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, neverReady.state != .cancelled {
+            if case .failed = neverReady.state { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(group.isClosed, "only a real stream's failure is the connection's failure")
+        group.close(nil)
+    }
+
+    func testDeliveredObjectsAreBounded() throws {
+        let registry = QUICReceiverGroupRegistry()
+        let group = try XCTUnwrap(admitGroup(registry))
+        for _ in 0..<QUICReceiverLimits.maxDeliveredStreamObjects {
+            group.accept(makeStream())
+            XCTAssertFalse(group.isClosed)
+        }
+        group.accept(makeStream())
+        XCTAssertTrue(group.isClosed, "one object past the bound is a protocol violation")
+    }
 }

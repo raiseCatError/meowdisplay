@@ -241,6 +241,78 @@ final class TransportProtocolSelectionTests: XCTestCase {
         XCTAssertEqual(selector.quicFailed(observed, preference: .auto), .retryQUIC, "no TCP fallback")
     }
 
+    // MARK: - QUIC group state policy (physical Mac -> iPhone regression)
+
+    /// The physical dial reported `.waiting(ENETDOWN)` and then `.ready`
+    /// moments later; treating `.waiting` as fatal tore the tunnel down
+    /// before it could open its streams.
+    func testGroupWaitingIsNotFatal() {
+        for code in [POSIXErrorCode.ENETDOWN, .ENETUNREACH, .EHOSTUNREACH, .ECONNREFUSED, .ETIMEDOUT, .ENOTCONN] {
+            XCTAssertEqual(QUICGroupStatePolicy.action(for: .waiting(.posix(code)), groupAlreadyReady: false),
+                           .ignore, "\(code)")
+            XCTAssertEqual(QUICGroupStatePolicy.action(for: .waiting(.posix(code)), groupAlreadyReady: true),
+                           .ignore, "\(code) on a ready group")
+        }
+        // Uniformly nonterminal, whatever the error: only `.failed` is fatal.
+        for error in [NWError.tls(errSSLPeerCertUnknown), .tls(errSSLBadCert)] {
+            XCTAssertEqual(QUICGroupStatePolicy.action(for: .waiting(error), groupAlreadyReady: false), .ignore)
+        }
+        XCTAssertEqual(QUICGroupStatePolicy.action(for: .setup, groupAlreadyReady: false), .ignore)
+    }
+
+    func testGroupReadyAfterWaitingOpensTheStreamsOnce() {
+        let sequence: [NWConnectionGroup.State] = [.setup, .waiting(.posix(.ENETDOWN)), .ready, .ready]
+        var groupReady = false
+        var opened = 0
+        for state in sequence {
+            switch QUICGroupStatePolicy.action(for: state, groupAlreadyReady: groupReady) {
+            case .openStreams:
+                groupReady = true
+                opened += 1
+            case .fail(let failureClass, let detail):
+                XCTFail("\(state) failed the tunnel: \(failureClass) \(detail)")
+            case .ignore:
+                break
+            }
+        }
+        XCTAssertEqual(opened, 1)
+    }
+
+    func testGroupFailedIsFatalWithItsClassification() {
+        XCTAssertEqual(QUICGroupStatePolicy.action(for: .failed(.posix(.ENETDOWN)), groupAlreadyReady: false),
+                       .fail(.reachability, detail: "group failed"))
+        XCTAssertEqual(QUICGroupStatePolicy.action(for: .failed(.posix(.ENOTCONN)), groupAlreadyReady: true),
+                       .fail(.indeterminate, detail: "group failed"))
+        XCTAssertEqual(QUICGroupStatePolicy.action(for: .failed(.tls(errSSLBadCert)), groupAlreadyReady: false),
+                       .fail(.security, detail: "group failed"))
+        XCTAssertEqual(QUICGroupStatePolicy.action(for: .cancelled, groupAlreadyReady: true),
+                       .fail(.indeterminate, detail: "group cancelled"))
+    }
+
+    /// The application-handshake timer still bounds a group that waits
+    /// forever; it is reachability only if nothing ever answered.
+    func testHandshakeTimeoutBoundsAGroupThatNeverProgresses() {
+        XCTAssertEqual(MacSenderTransportController.quicApplicationHandshakeTimeout, 8)
+        XCTAssertEqual(QUICGroupStatePolicy.handshakeTimeoutClass(groupReady: false, peerVerified: false), .reachability)
+        XCTAssertEqual(QUICGroupStatePolicy.handshakeTimeoutClass(groupReady: false, peerVerified: true), .indeterminate)
+        XCTAssertEqual(QUICGroupStatePolicy.handshakeTimeoutClass(groupReady: true, peerVerified: false), .indeterminate)
+        XCTAssertEqual(QUICGroupStatePolicy.handshakeTimeoutClass(groupReady: true, peerVerified: true), .indeterminate)
+    }
+
+    func testExplicitQUICNeverFallsBackToTCP() {
+        for failureClass in [QUICFailureClass.security, .protocolViolation, .indeterminate, .reachability] {
+            for established in [false, true] {
+                var selector = TransportProtocolSelector()
+                let action = selector.quicFailed(failureClass, preference: .quic, established: established)
+                XCTAssertNotEqual(action, .fallbackToTCP, "\(failureClass) established=\(established)")
+                if failureClass == .security || failureClass == .protocolViolation {
+                    XCTAssertEqual(action, .stop(failureClass))
+                }
+                XCTAssertNotEqual(selector.decide(inputs(.quic)), .tcp)
+            }
+        }
+    }
+
     // MARK: - Stores
 
     func testAuthenticatedCapabilityIsRememberedAndTransientAbsenceIsNot() {

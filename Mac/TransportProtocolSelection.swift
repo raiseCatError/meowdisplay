@@ -93,6 +93,48 @@ enum QUICFailureClassifier {
     // a TCP downgrade.
 }
 
+/// What the dialing Mac does with each `NWConnectionGroup` state of its
+/// QUIC tunnel. Pure so the transient-vs-fatal split is testable without a
+/// network.
+enum QUICGroupStatePolicy {
+    enum Action: Equatable {
+        /// First `.ready`: open Control, Video and Audio.
+        case openStreams
+        /// Nothing to do — including `.waiting`, which Network.framework
+        /// retries on its own (a physical Mac -> iPhone dial reported
+        /// `.waiting(ENETDOWN)` and then `.ready` moments later).
+        case ignore
+        case fail(QUICFailureClass, detail: String)
+    }
+
+    /// `.waiting` is never terminal, whatever error it carries: `.failed` is
+    /// the group's fatal state. A group that never progresses is bounded by
+    /// the application-handshake timer before the hello, and by the ping
+    /// watchdog after it.
+    static func action(for state: NWConnectionGroup.State, groupAlreadyReady: Bool) -> Action {
+        switch state {
+        case .ready:
+            return groupAlreadyReady ? .ignore : .openStreams
+        case .waiting:
+            return .ignore
+        case .failed(let error):
+            return .fail(QUICFailureClassifier.classify(error), detail: "group failed")
+        case .cancelled:
+            return .fail(.indeterminate, detail: "group cancelled")
+        default:
+            return .ignore
+        }
+    }
+
+    /// Class of the application-handshake timeout. Only a tunnel that never
+    /// became ready AND never showed the receiver's pinned certificate is
+    /// "unreachable"; a peer that completed the handshake but never said
+    /// hello is not, so it never earns an Auto fallback.
+    static func handshakeTimeoutClass(groupReady: Bool, peerVerified: Bool) -> QUICFailureClass {
+        !groupReady && !peerVerified ? .reachability : .indeterminate
+    }
+}
+
 /// What the Mac knows about this peer's QUIC support, strongest first.
 enum PeerQUICSupport: Equatable, Sendable {
     /// Positive capability from a previous AUTHENTICATED hello.

@@ -48,6 +48,58 @@ enum ReceiverGesture: String, CaseIterable {
     }
 }
 
+/// The receiver surface's custom direct-touch multi-finger recognizers.
+enum ReceiverMultiFingerRecognizer: CaseIterable {
+    /// Two-finger remote scroll and local viewport pinch/zoom/pan/rotation
+    /// (`TwoFingerViewportGestureRecognizer`).
+    case twoFingerViewport
+    /// Two-finger double-tap viewport reset/restore.
+    case viewportDoubleTap
+    /// Three-finger swipe: Mission Control, App Exposé, Spaces.
+    case threeFingerSwipe
+    /// Three-finger tap: Spotlight.
+    case threeFingerTap
+    /// Four/five-finger pinch/spread: Launchpad, Show Desktop.
+    case pinchSpread
+}
+
+/// Whether the multi-finger recognizers may run. VoiceOver owns two-, three-
+/// and four-finger gestures (two-finger double tap, rotor, three-finger
+/// scroll/tap, …), so every `ReceiverMultiFingerRecognizer` steps aside
+/// while it runs, and comes back when it stops. Ordinary one-finger input is
+/// not gated here. Held as a value so a recognizer force-cancelled by an
+/// `isEnabled` false/true toggle is restored to THIS state, never to a
+/// blind `true` that would undo the VoiceOver gate.
+struct ReceiverMultiFingerGestureGate: Equatable {
+    private(set) var voiceOverRunning: Bool
+
+    init(voiceOverRunning: Bool) {
+        self.voiceOverRunning = voiceOverRunning
+    }
+
+    var recognizersEnabled: Bool { !voiceOverRunning }
+
+    func isEnabled(_ recognizer: ReceiverMultiFingerRecognizer) -> Bool {
+        recognizersEnabled
+    }
+
+    /// Returns whether availability changed (VoiceOver toggled at runtime).
+    mutating func update(voiceOverRunning: Bool) -> Bool {
+        guard voiceOverRunning != self.voiceOverRunning else { return false }
+        self.voiceOverRunning = voiceOverRunning
+        return true
+    }
+}
+
+/// Screen-edge system gestures are deferred (the first swipe goes to the
+/// Mac, a second still reaches iPadOS) only while the remote surface is on
+/// screen AND input may reach the Mac.
+enum ReceiverScreenEdgePolicy {
+    static func defersScreenEdges(surfaceShown: Bool, inputAllowed: Bool) -> Bool {
+        surfaceShown && inputAllowed
+    }
+}
+
 /// The mean of every active fingertip pair gives pinch/spread a symmetric
 /// measure that does not assume one particular contact is the thumb.
 enum ReceiverGestureGeometry {
