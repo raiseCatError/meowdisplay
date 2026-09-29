@@ -836,6 +836,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`.
     private var captureRecoveryBudget = CaptureRecoveryBudget()
     private var captureRecoveryScheduled = false
+    // Display sleep and screen lock make every recovery attempt fail until
+    // the user is back, so rounds are deferred instead of spent on them —
+    // otherwise any sleep longer than the budget ends the session. Set while
+    // deferring so the wait logs once. On `queue`.
+    private var waitingForConsole = false
 
     // Consecutive actively-refused dials on a previously connected session.
     // Refusal is unambiguous: the device is reachable but nothing listens,
@@ -2705,6 +2710,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
         captureRecoveryBudget.reset()
+        waitingForConsole = false
         // Every successful capture start is authoritative. This also
         // clears a paused state retained by the receiver when changing
         // modes replaces the old session with a new sender.
@@ -2796,6 +2802,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         invalidateCapturePipeline(discardingLastFrame: true)
         captureDisplayID = 0   // definitive teardown — nothing is being captured anymore
+        waitingForConsole = false
         cursorTimer?.cancel()
         cursorTimer = nil
         cursorImageTimer?.cancel()
@@ -3457,8 +3464,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
               captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
         let attempt = captureRecoveryBudget.failedAttempts + 1
-        Log.info("capture recovery starting mode=\(mode.rawValue) "
-            + "attempt=\(attempt)/\(captureRecoveryBudget.maximumAttempts) delay=3s")
+        if !waitingForConsole {
+            Log.info("capture recovery starting mode=\(mode.rawValue) "
+                + "attempt=\(attempt)/\(captureRecoveryBudget.maximumAttempts) delay=3s")
+        }
         let selfBox = self.selfBox
         queue.asyncAfter(deadline: .now() + 3.0) {
             guard let self = selfBox.currentOnQueue() else { return }
@@ -3466,6 +3475,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped,
                   self.captureOwnership.liveStream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
+            // A doomed attempt must not count against the budget: re-arm
+            // without running a round until the console can capture again.
+            guard self.consoleCanCapture else {
+                if !self.waitingForConsole {
+                    self.waitingForConsole = true
+                    Log.info("capture down while the display sleeps or the screen is locked — "
+                        + "waiting for the user before retrying")
+                }
+                self.scheduleCaptureRecovery()
+                return
+            }
+            if self.waitingForConsole {
+                self.waitingForConsole = false
+                Log.info("console is back — resuming capture recovery")
+            }
             Task { await self.runCaptureRecovery(attempt: attempt) }
         }
     }
@@ -3639,6 +3663,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let onConsole = info[kCGSessionOnConsoleKey as String] as? Bool ?? true
         let locked = info["CGSSessionScreenIsLocked"] as? Bool ?? false
         return onConsole && !locked
+    }
+
+    /// Whether a recovery attempt can succeed right now. SCK finds no
+    /// capturable displays while the main display sleeps or the screen is
+    /// locked (display sleep drops capture seconds before the lock engages),
+    /// so attempts then are doomed and must not count against the budget.
+    private var consoleCanCapture: Bool {
+        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
     }
 
     /// On `queue`: after a recovery round, re-arm the loop while capture is
