@@ -25,6 +25,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_opensidecar._tcp</string>
+		<string>_meowdisp-q._udp</string>
 		<string>_opendisplay-pair._tcp</string>
 		<string>_opendisplay-mac-pair._tcp</string>
 	</array>
@@ -32,11 +33,6 @@
 	<string>MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<!-- Sparkle auto-update is disabled: MeowDisplay does not yet have its own
-	     appcast + signing infrastructure and must not consume upstream
-	     OpenDisplay's feed or trust its signing key. Re-enable by restoring
-	     SUEnableAutomaticChecks, and adding SUFeedURL + SUPublicEDKey for
-	     MeowDisplay-owned infrastructure, once that exists. -->
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 </dict>
