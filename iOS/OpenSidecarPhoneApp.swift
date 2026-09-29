@@ -9,7 +9,7 @@ import Combine
 /// Repository — hosts the Mac app download and explains the two-app setup.
 /// MeowDisplay does not yet have its own landing-page domain, so this points
 /// at the GitHub repo rather than a hosted site.
-let macAppURL = URL(string: "https://github.com/raiseCatError/MeowDisplay")!
+let macAppURL = ProjectLinks.gitHub
 
 @main
 struct OpenSidecarPhoneApp: App {

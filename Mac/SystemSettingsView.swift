@@ -157,6 +157,14 @@ struct SystemSettingsView: View {
                     // non-interactive detail row.
                     .contentShape(Rectangle())
                     .onTapGesture { registerCatModeTap() }
+                Link(destination: ProjectLinks.gitHub) {
+                    Label("MeowDisplay on GitHub", systemImage: "link")
+                }
+                if let support = ProjectLinks.support {
+                    Link(destination: support) {
+                        Label("Support MeowDisplay", systemImage: "heart")
+                    }
+                }
                 if catModeUnlocked {
                     Toggle(isOn: catModeToggleBinding) {
                         Label("Cat Mode", systemImage: "pawprint.fill")

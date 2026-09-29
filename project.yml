@@ -242,6 +242,7 @@ targets:
       - Shared/PairingNetwork.swift
       - Shared/LocalOwnerAuthenticator.swift
       - Shared/AppStore.swift
+      - Shared/ProjectLinks.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift

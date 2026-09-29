@@ -18,7 +18,7 @@ enum AppStore {
 
     /// The project page: how to get and update every MeowDisplay app, and
     /// where an update link points while there is no App Store listing.
-    static let projectURL = URL(string: "https://github.com/raiseCatError/MeowDisplay")!
+    static var projectURL: URL { ProjectLinks.gitHub }
 
     /// Opens the App Store app directly on the listing (with an Update
     /// button). Nil while there is no listing.
