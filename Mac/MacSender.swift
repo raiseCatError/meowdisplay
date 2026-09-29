@@ -724,7 +724,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pcmPacketSeq = 0
         activeAudioIsPCM = UserDefaults.standard.string(forKey: "audioDebugMode") == "pcm"
         // FORENSIC NOTE: a previous pass's instructions told the user to
-        // `defaults write com.peetzweg.opensidecar.mac.debug ...` — the
+        // `defaults write com.raisecaterror.meowdisplay.mac.debug ...` — the
         // upstream/tracked bundle ID (`project.yml`). This checkout's local
         // signing override (`project.local.yml`, see repo CLAUDE.md) rebuilds
         // the Debug target as `com.raisecaterror.meowdisplay.mac.debug`, so
@@ -861,7 +861,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // capture→encode→stream→display latency (~30ms perceived). Instead we
     // hide it from capture and stream its position on the control channel —
     // the phone draws it locally on the ~2ms path the touches use.
-    // Escape hatch: `defaults write com.peetzweg.opensidecar.mac localCursor -bool false`.
+    // Escape hatch: `defaults write com.raisecaterror.meowdisplay.mac localCursor -bool false`.
     private let localCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
         || UserDefaults.standard.bool(forKey: "localCursor")
     private var cursorTimer: DispatchSourceTimer?
@@ -2153,7 +2153,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                sessionGeneration: sessionGeneration)
         await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vdID)
 
-        // Debug aid (`defaults write com.peetzweg.opensidecar.mac testPattern -bool true`):
+        // Debug aid (`defaults write com.raisecaterror.meowdisplay.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
         // stream so steady-state latency can be measured without user activity.
         if UserDefaults.standard.bool(forKey: "testPattern") {
