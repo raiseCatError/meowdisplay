@@ -120,21 +120,157 @@ struct TrayItemConfiguration: Codable, Equatable, Identifiable {
     var id: ControlTrayItem { item }
 }
 
-struct KeyboardShortcut: Codable, Equatable {
+struct KeyboardShortcut: Codable, Hashable {
     var usage: Int
     var modifiers: ModifierChord
+    /// Further ordinary keys held together with `usage` (e.g. K + 3). Empty
+    /// for every ordinary shortcut, and then never encoded, so the wire and
+    /// stored form of existing shortcuts is unchanged.
+    var additionalUsages: [Int] = []
+
+    /// Every ordinary key in the chord, in press order.
+    var usages: [Int] { [usage] + additionalUsages }
+
+    /// USB HID keyboard-page usages a chord may use (modifier keys excluded:
+    /// those travel as `modifiers`).
+    static let validUsages: ClosedRange<Int> = 4...221
+    static let maximumKeys = 4
+
+    var isValid: Bool {
+        usages.count <= Self.maximumKeys && usages.allSatisfy(Self.validUsages.contains)
+            && Set(usages).count == usages.count
+    }
 }
 
-enum ControlAction: Codable, Equatable {
+extension KeyboardShortcut {
+    private enum CodingKeys: String, CodingKey { case usage, modifiers, additionalUsages }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        usage = try container.decode(Int.self, forKey: .usage)
+        modifiers = try container.decode(ModifierChord.self, forKey: .modifiers)
+        additionalUsages = try container.decodeIfPresent([Int].self, forKey: .additionalUsages) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(usage, forKey: .usage)
+        try container.encode(modifiers, forKey: .modifiers)
+        if !additionalUsages.isEmpty { try container.encode(additionalUsages, forKey: .additionalUsages) }
+    }
+}
+
+/// One key transition of a one-tap chord.
+struct KeyboardChordEvent: Equatable {
+    enum Phase: Equatable { case down, up }
+    var phase: Phase
+    var usage: Int
+    var modifiers: [String]
+}
+
+/// How a one-tap shortcut reaches the Mac over the existing `keyboard`
+/// messages: a single key uses the atomic `press` (unchanged behavior); a
+/// multi-key chord presses every key down in order, then releases them in
+/// reverse, so nothing is ever left held.
+enum KeyboardChordPlan {
+    static func events(for shortcut: KeyboardShortcut) -> [KeyboardChordEvent] {
+        let modifiers = ControlModifier.allCases.filter(shortcut.modifiers.contains).map(\.rawValue)
+        let keys = shortcut.usages
+        return keys.map { KeyboardChordEvent(phase: .down, usage: $0, modifiers: modifiers) }
+            + keys.reversed().map { KeyboardChordEvent(phase: .up, usage: $0, modifiers: modifiers) }
+    }
+}
+
+indirect enum ControlAction: Codable, Hashable, Sendable {
     case keyboardShortcut(KeyboardShortcut)
     /// A semantic `ReceiverGesture` (its raw value) sent as the existing
     /// `gesture` message — for Mac actions that have no reliable keyboard
     /// shortcut (Launchpad, Show Desktop), so they stay reachable if the
     /// 4/5-finger pinch collides with iPadOS's multitasking gestures.
     case receiverGesture(String)
+    /// A bounded macro: existing keyboard/semantic actions run in order —
+    /// never scripts, never nested sequences. See `ControlActionPlan`.
+    case sequence([ControlActionStep])
+
+    static let maximumSequenceSteps = 8
+    static let maximumStepDelayMs = 2000
+
+    /// Sequences are 1…`maximumSequenceSteps` flat steps; shortcuts must be
+    /// valid chords; gestures must be known semantic actions.
+    var isValid: Bool {
+        switch self {
+        case .keyboardShortcut(let shortcut):
+            return shortcut.isValid
+        case .receiverGesture(let name):
+            return ReceiverGesture(rawValue: name) != nil
+        case .sequence(let steps):
+            return (1...Self.maximumSequenceSteps).contains(steps.count) && steps.allSatisfy { step in
+                if case .sequence = step.action { return false }
+                return step.action.isValid && (0...Self.maximumStepDelayMs).contains(step.delayMs)
+            }
+        }
+    }
 }
 
-struct ShortcutItem: Codable, Equatable, Identifiable {
+/// One step of a `ControlAction.sequence`, and the pause after it.
+struct ControlActionStep: Codable, Hashable, Sendable {
+    static let defaultDelayMs = 150
+    var action: ControlAction
+    var delayMs: Int = ControlActionStep.defaultDelayMs
+}
+
+/// One thing a one-tap control does on the existing wire.
+enum ControlActionOperation: Equatable {
+    /// The atomic `keyboard` press (a single key with its modifiers).
+    case press(usage: Int, modifiers: [String])
+    /// One half of a multi-key chord.
+    case key(KeyboardChordEvent)
+    /// The semantic `gesture` message.
+    case gesture(String)
+    /// A pause between sequence steps.
+    case pause(milliseconds: Int)
+}
+
+/// The ordered wire operations for a one-tap action. Deterministic; every
+/// key that goes down comes back up within its own step, so a sequence can
+/// never leave a key held between steps.
+enum ControlActionPlan {
+    static func operations(for action: ControlAction) -> [ControlActionOperation] {
+        guard action.isValid else { return [] }
+        switch action {
+        case .keyboardShortcut(let shortcut):
+            let modifiers = ControlModifier.allCases.filter(shortcut.modifiers.contains).map(\.rawValue)
+            if shortcut.additionalUsages.isEmpty { return [.press(usage: shortcut.usage, modifiers: modifiers)] }
+            return KeyboardChordPlan.events(for: shortcut).map(ControlActionOperation.key)
+        case .receiverGesture(let name):
+            return [.gesture(name)]
+        case .sequence(let steps):
+            return steps.enumerated().flatMap { index, step -> [ControlActionOperation] in
+                operations(for: step.action)
+                    + (index < steps.count - 1 && step.delayMs > 0 ? [.pause(milliseconds: step.delayMs)] : [])
+            }
+        }
+    }
+}
+
+/// How a one-tap button looks — separate from what it does.
+enum ShortcutButtonDisplay: Codable, Hashable, Sendable {
+    case symbol(String)
+    case text(String)
+    case emoji(String)
+    /// The keys it sends, e.g. `⌃U`.
+    case keys
+
+    static let maximumTextLength = 4
+}
+
+/// What a button face actually draws.
+enum ShortcutButtonFace: Equatable {
+    case symbol(String)
+    case text(String)
+}
+
+struct ShortcutItem: Codable, Hashable, Identifiable {
     var id: String
     var title: String
     var displayKey: String
@@ -144,6 +280,35 @@ struct ShortcutItem: Codable, Equatable, Identifiable {
     /// showing `displayKey`'s plain keycap text. Never required: any
     /// renderer can fall back to `displayKey` when this is `nil`.
     var systemImage: String?
+    /// The user's chosen face (symbol, text, emoji or keys); `nil` keeps the
+    /// default of `systemImage`, else `displayKey`.
+    var display: ShortcutButtonDisplay?
+
+    /// What to draw on this button.
+    var face: ShortcutButtonFace {
+        switch display {
+        case .symbol(let name) where !name.isEmpty: return .symbol(name)
+        case .text(let text) where !text.isEmpty: return .text(String(text.prefix(ShortcutButtonDisplay.maximumTextLength)))
+        case .emoji(let emoji) where !emoji.isEmpty: return .text(String(emoji.prefix(2)))
+        case .keys: return .text(keysDescription)
+        default: return systemImage.map(ShortcutButtonFace.symbol) ?? .text(displayKey)
+        }
+    }
+
+    /// The keys this sends, e.g. `⌘⇧P` or `K+3`; a sequence shows its steps.
+    var keysDescription: String {
+        func describe(_ action: ControlAction) -> String {
+            switch action {
+            case .keyboardShortcut(let shortcut):
+                return shortcut.modifiers.symbols + shortcut.usages.map(appGestureCommandKeyLabel(for:)).joined(separator: "+")
+            case .receiverGesture:
+                return title
+            case .sequence(let steps):
+                return steps.map { describe($0.action) }.joined(separator: " → ")
+            }
+        }
+        return describe(action)
+    }
 
     init(id: String = UUID().uuidString, title: String, displayKey: String,
          usage: Int, modifiers: ModifierChord, systemImage: String? = nil) {
@@ -403,7 +568,20 @@ struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
     var item: ShortcutItem
     var isVisible: Bool
     var group: Int
+    /// The user's name for a built-in action (custom items rename `item`
+    /// itself). Survives canonical metadata refreshes.
+    var customTitle: String?
+    /// The user's face for a built-in action — see `ShortcutButtonDisplay`.
+    var customDisplay: ShortcutButtonDisplay?
     var id: String { item.id }
+
+    /// `item` with the user's name and face applied.
+    var resolvedItem: ShortcutItem {
+        var resolved = item
+        if let customTitle, !customTitle.isEmpty { resolved.title = customTitle }
+        if let customDisplay { resolved.display = customDisplay }
+        return resolved
+    }
 }
 
 /// Independent of `ControlProfile` (the Main Tray's profile type) even
@@ -420,8 +598,11 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     var id: String { slot.rawValue }
 
     var visibleItems: [ShortcutItem] {
-        items.filter(\.isVisible).map(\.item)
+        items.filter(\.isVisible).map(\.resolvedItem)
     }
+
+    /// Every action, visible or not, as it should appear.
+    var allItems: [ShortcutItem] { items.map(\.resolvedItem) }
 
     /// `visibleItems` clustered into consecutive runs of the same `group`
     /// value, in tray order — the rendering seam between one small bubble
@@ -436,7 +617,7 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
                 groups.append([])
                 currentGroup = configuration.group
             }
-            groups[groups.count - 1].append(configuration.item)
+            groups[groups.count - 1].append(configuration.resolvedItem)
         }
         return groups
     }
@@ -457,7 +638,9 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
             guard let item = canonicalByID[configuration.id] else { return configuration }
             return FunctionTrayItemConfiguration(item: item,
                                                  isVisible: configuration.isVisible,
-                                                 group: configuration.group)
+                                                 group: configuration.group,
+                                                 customTitle: configuration.customTitle,
+                                                 customDisplay: configuration.customDisplay)
         }
         let added = canonical.filter { !savedIDs.contains($0.id) }.map {
             FunctionTrayItemConfiguration(item: $0.item, isVisible: false, group: $0.group)
@@ -471,6 +654,55 @@ extension FunctionTrayProfile {
     /// "Undo/Redo tray" or "Zoom tray" — so future actions (Disconnect,
     /// Paste, contextual app actions, …) are just more items (and,
     /// optionally, groups) in this one list.
+    static let canonicalIDs: Set<String> = Set(canonical().items.map(\.id))
+
+    static func isBuiltIn(_ id: String) -> Bool { canonicalIDs.contains(id) }
+
+    static let maximumCustomItems = 24
+
+    /// Adds a user-made action (a shortcut or a sequence), visible, in its
+    /// own group at the end. `false` when it isn't valid or the tray is full.
+    @discardableResult
+    mutating func addCustomItem(_ item: ShortcutItem) -> Bool {
+        guard item.action.isValid, !items.contains(where: { $0.id == item.id }),
+              items.filter({ !Self.isBuiltIn($0.id) }).count < Self.maximumCustomItems else { return false }
+        let group = (items.map(\.group).max() ?? 0) + 1
+        items.append(FunctionTrayItemConfiguration(item: item, isVisible: true, group: group))
+        return true
+    }
+
+    /// Replaces a custom action's definition (its name, keys, face).
+    mutating func updateCustomItem(_ item: ShortcutItem) {
+        guard item.action.isValid, !Self.isBuiltIn(item.id),
+              let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[index].item = item
+    }
+
+    /// Built-in actions can't be deleted — they come back hidden on the
+    /// next refresh — so removing one hides it; custom actions are deleted.
+    mutating func removeItem(id: String) {
+        if Self.isBuiltIn(id) {
+            if let index = items.firstIndex(where: { $0.id == id }) { items[index].isVisible = false }
+        } else {
+            items.removeAll { $0.id == id }
+        }
+    }
+
+    mutating func rename(id: String, to title: String) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        if Self.isBuiltIn(id) {
+            items[index].customTitle = trimmed.isEmpty ? nil : trimmed
+        } else if !trimmed.isEmpty {
+            items[index].item.title = trimmed
+        }
+    }
+
+    mutating func setDisplay(id: String, _ display: ShortcutButtonDisplay?) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        if Self.isBuiltIn(id) { items[index].customDisplay = display } else { items[index].item.display = display }
+    }
+
     static func canonical(slot: ControlProfileSlot = .default) -> FunctionTrayProfile {
         let command = ModifierChord([.command])
         let commandShift = ModifierChord([.command, .shift])
@@ -497,10 +729,14 @@ extension FunctionTrayProfile {
         // Desktop besides the 4/5-finger pinch/spread, which can collide
         // with iPadOS's own multitasking gestures.
         let systemItems: [(ShortcutItem, Int)] = [
+            (ShortcutItem(id: "menu-bar", title: "Menu Bar", gesture: .menuBar,
+                          systemImage: "menubar.rectangle"), systemGroup),
             (ShortcutItem(id: "launchpad", title: "Launchpad", gesture: .launchpad,
                           systemImage: "square.grid.3x3"), systemGroup),
             (ShortcutItem(id: "show-desktop", title: "Show Desktop", gesture: .showDesktop,
                           systemImage: "rectangle.dashed"), systemGroup),
+            (ShortcutItem(id: "control-center", title: "Control Center", gesture: .controlCenter,
+                          systemImage: "switch.2"), systemGroup),
         ]
         return FunctionTrayProfile(slot: slot, items: items.map {
             FunctionTrayItemConfiguration(item: $0.0, isVisible: true, group: $0.1)
@@ -544,7 +780,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 16
+    static let schemaVersion = 18
 
     var version = schemaVersion
     var trayEnabled = true
@@ -618,6 +854,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// setting away.
     var rotateTarget = ReceiverGestureTarget.disabled
     var snapRotation = true
+    /// Remote scroll direction per axis. On (the default) is natural
+    /// scrolling: content follows the fingers. Diagonal scrolls apply both.
+    /// Never affects local viewport panning. See `ScrollDirectionPolicy`.
+    var invertVerticalScroll = true
+    var invertHorizontalScroll = true
     /// Prefer MeowDisplay Gestures: while the receiver surface controls the
     /// Mac, ask iPadOS/iOS to defer its screen-edge gestures and opt the
     /// surface out of UIKit's three-finger editing interactions. Only public
@@ -654,12 +895,20 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Strip and Overlay — the iPad replacement for `functionTrayPosition`.
     var padMainEdge = ControlEdge.trailing
     var padFunctionEdge = ControlEdge.trailing
-    /// Strip only: compact key/action captions beside the controls.
-    var padShowControlHints = true
+    /// Strip only: compact key/action captions beside the controls. Off by
+    /// default (schema 17): the rail reads cleaner without labels.
+    var padShowControlHints = false
     /// Multiplier on every iPad control, clamped to `PadControlScale.range`.
     var padControlScale = PadControlScale.defaultValue
-    /// Adds the Move View control to the Strip/Overlay Main controls.
-    var padShowMoveViewControl = true
+    /// Which standard system/utility controls the Strip and Overlay rails
+    /// show — see `PadRailComposition`. Custom layouts place their own.
+    var padStandardControls = PadStandardControlVisibility()
+    /// Local View Navigation: pan, zoom, rotate (when Rotation targets the
+    /// viewport), Move View and viewport reset — purely receiver-local, so
+    /// independent of Allow Input, which only gates what reaches the Mac.
+    var allowLocalViewNavigation = true
+    /// How Strip/Overlay chord palettes appear: separate keys, or a Wheel.
+    var padOverlayPaletteStyle = PadPaletteStyle.keys
     /// At most `CustomControlLayout.maximumCount`; none exist until the user
     /// creates one — see `createCustomLayout`.
     var customLayouts: [CustomControlLayout] = []
@@ -755,13 +1004,27 @@ struct ReceiverControlPreferences: Codable, Equatable {
         padFunctionEdge = try value(.padFunctionEdge, fallback.padFunctionEdge)
         padShowControlHints = try value(.padShowControlHints, fallback.padShowControlHints)
         padControlScale = PadControlScale.clamped(try value(.padControlScale, fallback.padControlScale))
-        padShowMoveViewControl = try value(.padShowMoveViewControl, fallback.padShowMoveViewControl)
+        padStandardControls = try value(.padStandardControls, fallback.padStandardControls)
+        // Schema 16 stored Move View's visibility on its own.
+        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        if try legacy.decodeIfPresent(Bool.self, forKey: .padShowMoveViewControl) == false {
+            padStandardControls.setVisible(false, .moveView)
+        }
+        allowLocalViewNavigation = try value(.allowLocalViewNavigation, fallback.allowLocalViewNavigation)
+        // Absent (schema < 18): natural scrolling on both axes, as before.
+        invertVerticalScroll = try value(.invertVerticalScroll, fallback.invertVerticalScroll)
+        invertHorizontalScroll = try value(.invertHorizontalScroll, fallback.invertHorizontalScroll)
+        padOverlayPaletteStyle = try value(.padOverlayPaletteStyle, fallback.padOverlayPaletteStyle)
         // Lossy: one layout written by a newer build (an unknown control
         // kind, say) is dropped on its own instead of resetting every
         // preference above.
         customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
             .elements.prefix(CustomControlLayout.maximumCount))
         activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case padShowMoveViewControl
     }
 
     /// Restores only the four App Gesture Commands to their canonical
@@ -929,6 +1192,20 @@ struct ReceiverControlPreferencesRepository {
             value.rotateTarget = defaults.rotateTarget
             value.version = 16
         }
+        // Schema 17 turns Strip Control Hints off by default. Schema 16 only
+        // ever existed on pre-release builds with hints on as its initial
+        // value, so those installs take the new default once. Local View
+        // Navigation and standard-control visibility are new keys the
+        // decoder already defaulted.
+        if value.version < 17 {
+            value.padShowControlHints = ReceiverControlPreferences().padShowControlHints
+            value.version = 17
+        }
+        // Schema 17 predates per-axis scroll direction and the Wheel palette;
+        // the decoder already defaulted them to the unchanged behavior.
+        if value.version < 18 {
+            value.version = 18
+        }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
         // user's visibility, order, or group choices.
@@ -1012,5 +1289,58 @@ struct ReceiverUIPreferenceUpdate: Equatable {
         if let rotateTarget { preferences.rotateTarget = rotateTarget }
         if let snapRotation { preferences.snapRotation = snapRotation }
         if let appGestureCommands { preferences.appGestureCommands = appGestureCommands }
+    }
+}
+
+/// Strip/Overlay chord palette presentation.
+enum PadPaletteStyle: String, Codable, CaseIterable, Identifiable {
+    /// Separate keys in a row or column beside the rail.
+    case keys
+    /// A segmented wheel — see `WheelPaletteGeometry`.
+    case wheel
+
+    var id: String { rawValue }
+    var title: String {
+        self == .keys ? String(localized: "Keys") : String(localized: "Wheel")
+    }
+}
+
+/// Per-axis remote scroll direction. The gesture pipeline delivers natural
+/// deltas (content follows the fingers); turning an axis's inversion off
+/// flips that axis alone.
+enum ScrollDirectionPolicy {
+    static func apply(dx: Double, dy: Double, invertVertical: Bool, invertHorizontal: Bool) -> (dx: Double, dy: Double) {
+        (invertHorizontal ? dx : -dx, invertVertical ? dy : -dy)
+    }
+}
+
+/// Software-keyboard typing while a MeowDisplay modifier chord is active:
+/// the typed key is sent as that chord (⌘ latched, then C → ⌘C) instead of
+/// as text. The chord state stays the overlay's `ControlInteractionState`.
+enum SoftwareKeyboardChordPolicy {
+    /// The key press for one typed character under `modifiers`, or `nil`
+    /// when no chord is active or the character has no key.
+    static func press(for text: String, modifiers: Set<ControlModifier>) -> (usage: Int, modifiers: [String])? {
+        guard !modifiers.isEmpty, text.count == 1, let character = text.first else { return nil }
+        var chord = modifiers
+        let usage: Int?
+        if character == " " {
+            usage = 44
+        } else if character == "\n" {
+            usage = 40
+        } else if character.isLetter, character.isASCII, let scalar = character.lowercased().unicodeScalars.first {
+            if character.isUppercase { chord.insert(.shift) }
+            usage = Int(scalar.value) - 97 + 4
+        } else {
+            usage = appGestureCommandEditableKeys.first { $0.0 == String(character) }?.1
+        }
+        guard let usage else { return nil }
+        return (usage, ControlModifier.allCases.filter(chord.contains).map(\.rawValue))
+    }
+
+    /// Modifier names for a special or hardware key: its own plus the chord.
+    static func modifiers(_ own: [String], chord: Set<ControlModifier>) -> [String] {
+        let combined = Set(own).union(chord.map(\.rawValue))
+        return ControlModifier.allCases.map(\.rawValue).filter(combined.contains)
     }
 }

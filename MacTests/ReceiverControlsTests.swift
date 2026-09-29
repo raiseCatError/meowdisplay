@@ -514,8 +514,9 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(launchpad.item.action, .receiverGesture(ReceiverGesture.launchpad.rawValue))
         XCTAssertEqual(showDesktop.item.action, .receiverGesture(ReceiverGesture.showDesktop.rawValue))
         XCTAssertEqual(launchpad.group, showDesktop.group)
-        XCTAssertFalse(profile.items.filter { $0.item.action != launchpad.item.action
-            && $0.item.action != showDesktop.item.action }.contains { $0.group == launchpad.group })
+        // The system group holds exactly the semantic system actions.
+        XCTAssertEqual(Set(profile.items.filter { $0.group == launchpad.group }.map(\.id)),
+                       ["menu-bar", "launchpad", "show-desktop", "control-center"])
     }
 
     func testSavedFunctionTrayGainsNewItemsHiddenWithoutChangingItsTray() throws {

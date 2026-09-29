@@ -56,9 +56,8 @@ struct ReceiverScreen: View {
     /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
     /// `nil` means the whole screen.
     @State private var padCanvas: CGRect?
-    /// Deliberately `@State`, not observed: only the control backdrop layer
-    /// observes the per-frame display footprint.
-    @State private var footprintStore = DisplayFootprintStore()
+    /// The on-surface Request Input affordance — see `ReceiverInputPrompt`.
+    @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @AppStorage("showAnalytics") private var showAnalytics = false
@@ -137,6 +136,60 @@ struct ReceiverScreen: View {
         isStreaming && model.receiver.session.allowsLiveInput && model.receiver.macSupportsKeyboardWire
     }
 
+    // MARK: Software keyboard + chord
+
+    /// Typed text goes to the Mac as text — unless an on-screen chord is
+    /// held or latched, when each typed key is sent as that chord (⌘ then C
+    /// → ⌘C). The chord itself stays in the overlay's interaction state.
+    private func commitKeyboardText(_ text: String) {
+        let chord = controlStore.activeChordModifiers
+        guard !chord.isEmpty else {
+            model.receiver.sendKeyboardText(text)
+            return
+        }
+        var plain = ""
+        for character in text {
+            if let press = SoftwareKeyboardChordPolicy.press(for: String(character), modifiers: chord) {
+                if !plain.isEmpty { model.receiver.sendKeyboardText(plain); plain = "" }
+                model.receiver.sendKeyboardPress(usage: press.usage, modifiers: press.modifiers)
+            } else {
+                plain.append(character)
+            }
+        }
+        if !plain.isEmpty { model.receiver.sendKeyboardText(plain) }
+    }
+
+    // MARK: Request Input
+
+    /// Relative UI timing only (the prompt's fade); a wall clock is plenty.
+    private var uptime: TimeInterval { Date().timeIntervalSinceReferenceDate }
+
+    /// A touch meant for the Mac was dropped: show (or refresh) the prompt.
+    /// It never changes any input preference. Only a Mac explicitly set to
+    /// Request Input Automatically (Paired Macs) gets the normal request
+    /// sent by itself — the connection Always Allow policy doesn't count —
+    /// and the Mac still decides.
+    private func noteBlockedInputAttempt() {
+        let autoRequest = InputAutoRequestPolicy.shouldAutoRequest(
+            peerOptedIn: InputAutoRequestStore.isEnabled(peerID: model.receiver.authenticatedPeerID))
+        withAnimation(.easeOut(duration: 0.2)) {
+            performPromptEffects(inputPrompt.blockedAttempt(now: uptime, userTurnedOff: controlStore.userTurnedOffInput,
+                                                            autoRequest: autoRequest))
+        }
+    }
+
+    private func requestInputFromPrompt() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            performPromptEffects(inputPrompt.requestTapped(now: uptime))
+        }
+    }
+
+    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) {
+        guard effects.contains(.sendRequest) else { return }
+        controlStore.noteInputTurnedOffByUser(false)
+        model.receiver.requestAllowInput(true)
+    }
+
     private var settingsView: some View {
         SettingsView(receiver: model.receiver, controlStore: controlStore,
                      pictureInPicture: model.pictureInPicture, haptics: haptics)
@@ -211,21 +264,25 @@ struct ReceiverScreen: View {
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: controlStore.moveViewActive,
                                    viewportResetGeneration: controlStore.viewportResetGeneration,
-                                   onDisplayFootprintChange: { footprintStore.update($0) })
+                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
+                                   invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
+                                   invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
+                                   onBlockedInputAttempt: { noteBlockedInputAttempt() })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
                         .ignoresSafeArea()
-                        // Allow Input OFF disables ALL touch/gesture
-                        // delivery to the video layer in one place — no
-                        // touch reaches `VideoView` or any of its gesture
-                        // recognizers to begin with, covering direct touch,
-                        // trackpad, clicks, drag, scroll, pinch and system
-                        // gestures together (SETTINGS / ALLOW INPUT
-                        // INVARIANTS). The Settings gear lives in
-                        // `ReceiverControlOverlay`, a sibling view outside
-                        // this hit-testing gate, so it stays reachable.
-                        .allowsHitTesting(inputReachesMac)
+                        // Allow Input OFF: touches still arrive (for Local
+                        // View Navigation and the Request Input prompt), but
+                        // `VideoView` routes nothing to the Mac: pointer/
+                        // touch/Pencil routing stops at `routeTouches`, the
+                        // remote-only recognizers are parked by
+                        // `ReceiverMultiFingerGestureGate`, two-finger routes
+                        // follow `TwoFingerRoutingPolicy`, and hover is
+                        // dropped (SETTINGS / ALLOW INPUT INVARIANTS).
+                        // The surface always takes touches so a blocked one
+                        // can offer Request Input; what they may do is
+                        // decided inside `VideoView`.
                     if model.pictureInPicture.isShowingWindow {
                         ReceiverPictureInPicturePlaceholder()
                     }
@@ -247,13 +304,18 @@ struct ReceiverScreen: View {
                     }
                     RemoteKeyboardInputView(
                         isActive: $keyboardActive,
-                        onCommitText: { model.receiver.sendKeyboardText($0) },
-                        onSpecialPress: { model.receiver.sendKeyboardPress(usage: $0) },
+                        onCommitText: { commitKeyboardText($0) },
+                        onSpecialPress: { usage in
+                            model.receiver.sendKeyboardPress(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                [], chord: controlStore.activeChordModifiers))
+                        },
                         onHardwareKeyDown: { usage, modifiers in
-                            model.receiver.sendKeyboardDown(usage: usage, modifiers: modifiers)
+                            model.receiver.sendKeyboardDown(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                modifiers, chord: controlStore.activeChordModifiers))
                         },
                         onHardwareKeyUp: { usage, modifiers in
-                            model.receiver.sendKeyboardUp(usage: usage, modifiers: modifiers)
+                            model.receiver.sendKeyboardUp(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                modifiers, chord: controlStore.activeChordModifiers))
                         },
                         onRequestDismiss: { keyboardActive = false }
                     )
@@ -273,8 +335,15 @@ struct ReceiverScreen: View {
                         reservedRegions: reservedRegions,
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 },
-                        footprintStore: footprintStore,
-                        onCanvasChange: { padCanvas = $0 })
+                        onCanvasChange: { padCanvas = $0 },
+                        surfaceOrigin: canvas.origin)
+                    if let kind = inputPrompt.kind {
+                        InputPromptButton(kind: kind) { requestInputFromPrompt() }
+                            .position(x: canvas.midX,
+                                      y: keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 } else {
                     IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings)
                 }
@@ -424,10 +493,26 @@ struct ReceiverScreen: View {
             Log.info("inputTrace: controlStore.preferences.allowInput -> \(allowed) "
                      + "displayState=\(model.receiver.displayState)")
             #endif
-            if !allowed {
-                keyboardActive = false
-                controlStore.setMoveViewActive(false)
-            }
+            if !allowed { keyboardActive = false }
+        }
+        .onAppear { inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput) }
+        .onChange(of: model.receiver.session.allowsLiveInput) { live in
+            withAnimation { inputPrompt.setSessionLive(live) }
+        }
+        .onChange(of: controlStore.sessionInputState) { state in
+            withAnimation { inputPrompt.inputStateChanged(state, now: uptime) }
+        }
+        // Fades the prompt once its time is up; each new attempt moves the
+        // deadline and restarts this.
+        .task(id: inputPrompt.visibleUntil) {
+            let delay = inputPrompt.visibleUntil - uptime
+            guard inputPrompt.kind != nil else { return }
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64((delay + 0.05) * 1_000_000_000)) }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.35)) { inputPrompt.tick(now: uptime) }
+        }
+        .onChange(of: controlStore.preferences.allowLocalViewNavigation) { allowed in
+            if !allowed { controlStore.setMoveViewActive(false) }
         }
         #if DEBUG
         .onAppear {
@@ -1651,8 +1736,12 @@ struct VideoLayerView: UIViewRepresentable {
     var moveViewActive = false
     /// Bumped to reset the local viewport (Move View's Reset).
     var viewportResetGeneration = 0
-    /// Where the Mac is drawn, in window coordinates — see `DisplayFootprint`.
-    var onDisplayFootprintChange: @MainActor (DisplayFootprint) -> Void = { _ in }
+    /// Local View Navigation — see `LocalViewNavigationPolicy`.
+    var allowLocalViewNavigation = true
+    var invertVerticalScroll = true
+    var invertHorizontalScroll = true
+    /// See `VideoView.onBlockedInputAttempt`.
+    var onBlockedInputAttempt: @MainActor () -> Void = {}
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
@@ -1665,6 +1754,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setTrackpadSensitivity(trackpadSensitivity)
         view.setSmartTouchEnabled(smartTouchEnabled)
         view.setAllowInput(allowInput)
+        view.setLocalNavigationAllowed(allowLocalViewNavigation)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -1676,7 +1766,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.onActivityEnded = onActivityEnded
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         view.preferMeowDisplayGestures = preferMeowDisplayGestures
-        view.onDisplayFootprintChange = onDisplayFootprintChange
+        view.onBlockedInputAttempt = onBlockedInputAttempt
+        view.setScrollDirection(invertVertical: invertVerticalScroll, invertHorizontal: invertHorizontalScroll)
         view.setViewportResetGeneration(viewportResetGeneration)
         receiver.onSmartTouchProbeResult = { [weak view] id, target in
             view?.resolveSmartTouchProbe(id: id, target: target)
@@ -1704,6 +1795,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         view.inputEngine.normalize = { [weak view] point in view?.normalized(point) }
         view.inputEngine.onPencil = { [weak receiver, weak view] phase, x, y, pressure, azimuth, altitude in
+            guard view?.remoteInputAllowed == true else { return }
             // M4 typing-focus anchor: a real pencil touch-down counts as a
             // meaningful primary interaction; hover does not (PRODUCT RULE).
             if phase == "down" { view?.noteAnchorFromNormalized(x: x, y: y) }
@@ -1711,7 +1803,8 @@ struct VideoLayerView: UIViewRepresentable {
                                  pressure: pressure, azimuth: azimuth,
                                  altitude: altitude)
         }
-        view.inputEngine.onProximity = { [weak receiver] entering, x, y in
+        view.inputEngine.onProximity = { [weak receiver, weak view] entering, x, y in
+            guard view?.remoteInputAllowed == true else { return }
             receiver?.sendProximity(entering: entering, x: x, y: y)
         }
         view.inputEngine.install(on: view)
@@ -1792,6 +1885,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setTrackpadSensitivity(trackpadSensitivity)
         uiView.setSmartTouchEnabled(smartTouchEnabled)
         uiView.setAllowInput(allowInput)
+        uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -1803,7 +1897,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.onActivityEnded = onActivityEnded
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         uiView.preferMeowDisplayGestures = preferMeowDisplayGestures
-        uiView.onDisplayFootprintChange = onDisplayFootprintChange
+        uiView.onBlockedInputAttempt = onBlockedInputAttempt
+        uiView.setScrollDirection(invertVertical: invertVerticalScroll, invertHorizontal: invertHorizontalScroll)
         uiView.setMoveViewActive(moveViewActive)
         uiView.setViewportResetGeneration(viewportResetGeneration)
         // videoSize arrives after the format description — re-fit the layers.
@@ -2040,7 +2135,7 @@ struct VideoLayerView: UIViewRepresentable {
                 let id = ObjectIdentifier(touch)
                 if ended { navigationTouches.removeValue(forKey: id) } else { navigationTouches[id] = touch }
             }
-            guard videoEnabled, !navigationTouches.isEmpty else {
+            guard videoEnabled, localNavigationAllowed, !navigationTouches.isEmpty else {
                 navigationSession.end()
                 return
             }
@@ -2061,31 +2156,79 @@ struct VideoLayerView: UIViewRepresentable {
             layoutIfNeeded()
         }
 
-        // MARK: - Display footprint
+        // MARK: - Blocked input attempts
 
-        var onDisplayFootprintChange: (@MainActor (DisplayFootprint) -> Void)?
-        private var lastFootprint = DisplayFootprint.none
+        /// A touch sequence that was meant for the Mac but couldn't be sent
+        /// (input not allowed) — see `BlockedInputAttemptPolicy`. Local
+        /// two-finger navigation never counts.
+        var onBlockedInputAttempt: (@MainActor () -> Void)?
+        private var blockedSequenceMaxTouches = 0
+        private var blockedSequenceTouchIDs = Set<ObjectIdentifier>()
 
-        override var frame: CGRect {
-            didSet { reportDisplayFootprint() }
+        private func trackBlockedSequence(_ touches: Set<UITouch>, began: Bool, ended: Bool) {
+            guard !allowsInput else {
+                blockedSequenceTouchIDs.removeAll()
+                blockedSequenceMaxTouches = 0
+                return
+            }
+            let fingers = touches.filter { $0.type == .direct || $0.type == .pencil }
+            if began {
+                blockedSequenceTouchIDs.formUnion(fingers.map(ObjectIdentifier.init))
+                blockedSequenceMaxTouches = max(blockedSequenceMaxTouches, blockedSequenceTouchIDs.count)
+            }
+            guard ended else { return }
+            for touch in fingers { blockedSequenceTouchIDs.remove(ObjectIdentifier(touch)) }
+            guard blockedSequenceTouchIDs.isEmpty else { return }
+            if BlockedInputAttemptPolicy.isRemoteIntent(maximumTouchCount: blockedSequenceMaxTouches,
+                                                        moveViewActive: moveViewActive) {
+                onBlockedInputAttempt?()
+            }
+            blockedSequenceMaxTouches = 0
         }
 
-        override var center: CGPoint {
-            didSet { reportDisplayFootprint() }
+        // MARK: - Scroll direction
+
+        private var invertVerticalScroll = true
+        private var invertHorizontalScroll = true
+
+        func setScrollDirection(invertVertical: Bool, invertHorizontal: Bool) {
+            invertVerticalScroll = invertVertical
+            invertHorizontalScroll = invertHorizontal
         }
 
-        /// Publishes where the Mac is drawn (window coordinates) whenever
-        /// it changes — the controls use it to decide where a soft backdrop
-        /// is warranted. Video off draws no Mac, so no footprint.
-        private func reportDisplayFootprint() {
-            guard window != nil else { return }
-            let footprint = videoEnabled
-                ? DisplayFootprint(transform: currentTransform, surfaceOrigin: convert(CGPoint.zero, to: nil),
-                                   surfaceSize: bounds.size)
-                : .none
-            guard footprint != lastFootprint else { return }
-            lastFootprint = footprint
-            onDisplayFootprintChange?(footprint)
+        /// Every remote scroll (two-finger, momentum, Smart Touch/Trackpad)
+        /// goes through here, so the per-axis direction applies everywhere
+        /// and local viewport panning never does.
+        private func sendRemoteScroll(dx: CGFloat, dy: CGFloat) {
+            let directed = ScrollDirectionPolicy.apply(dx: Double(dx), dy: Double(dy),
+                                                       invertVertical: invertVerticalScroll,
+                                                       invertHorizontal: invertHorizontalScroll)
+            receiver?.sendScroll(dx: directed.dx, dy: directed.dy)
+        }
+
+        // MARK: - Local View Navigation
+
+        /// Pan/zoom/rotate/reset of the local view — independent of
+        /// `allowsInput`, which gates only what reaches the Mac. See
+        /// `LocalViewNavigationPolicy`.
+        private var localNavigationAllowed = true
+
+        fileprivate var remoteInputAllowed: Bool { allowsInput }
+
+        func setLocalNavigationAllowed(_ allowed: Bool) {
+            guard allowed != localNavigationAllowed else { return }
+            localNavigationAllowed = allowed
+            if !allowed {
+                navigationTouches.removeAll()
+                navigationSession.end()
+            }
+            updateInputGate()
+        }
+
+        private func updateInputGate() {
+            if multiFingerGate.update(remoteInputAllowed: allowsInput, localNavigationAllowed: localNavigationAllowed) {
+                applyMultiFingerGate()
+            }
         }
 
         // VoiceOver gate for every multi-finger recognizer — see
@@ -2192,6 +2335,7 @@ struct VideoLayerView: UIViewRepresentable {
         func setAllowInput(_ allowed: Bool) {
             guard allowed != allowsInput else { return }
             allowsInput = allowed
+            updateInputGate()
             guard !allowed else { return }
             clearInputStateForPause()
         }
@@ -2356,7 +2500,6 @@ struct VideoLayerView: UIViewRepresentable {
             updateCursorLayout()
             updateSurfaceLayout()
             CATransaction.commit()
-            reportDisplayFootprint()
             // Rotation diagnostics — one line per layout change.
             let video = receiver?.videoSize ?? .zero
             let displayed = currentTransform.displayedRect
@@ -2670,6 +2813,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func takeGestureOwnershipAndSend(_ gesture: ReceiverGesture) {
+            guard allowsInput else { return }
             twoFingerActive = false
             cancelTouchForGestureOwnership()
             receiver?.sendGesture(name: gesture.rawValue)
@@ -2696,25 +2840,31 @@ struct VideoLayerView: UIViewRepresentable {
                      + "systemGestureSequenceOwned=\(systemGestureSequenceOwned)")
             #endif
             guard !systemGestureSequenceOwned else { return }
+            // Remote scroll and App Gesture Commands need Allow Input; the
+            // local viewport needs Local View Navigation.
+            let routes = TwoFingerRoutingPolicy.routes(
+                intent: recognizer.intent, remoteInputAllowed: allowsInput,
+                localNavigationAllowed: localNavigationAllowed, videoEnabled: videoEnabled,
+                pinchTarget: pinchTarget, rotateTarget: rotateTarget)
             switch recognizer.state {
             case .began:
                 switch recognizer.intent {
                 case .scroll:
-                    beginScroll(at: recognizer.midpoint)
+                    if routes.contains(.remoteScroll) { beginScroll(at: recognizer.midpoint) }
                 case .viewportZoomPan:
                     beginViewportManipulation()
-                    applyViewportPinchUpdate(recognizer)
-                    beginAppGesturesIfNeeded(recognizer)
+                    if routes.contains(.viewport) { applyViewportPinchUpdate(recognizer) }
+                    if routes.contains(.appCommands) { beginAppGesturesIfNeeded(recognizer) }
                 case .undecided:
                     break   // never begins while undecided — see the recognizer.
                 }
             case .changed:
                 switch recognizer.intent {
                 case .scroll:
-                    continueScroll(recognizer)
+                    if routes.contains(.remoteScroll) { continueScroll(recognizer) }
                 case .viewportZoomPan:
-                    applyViewportPinchUpdate(recognizer)
-                    updateAppGestures(recognizer)
+                    if routes.contains(.viewport) { applyViewportPinchUpdate(recognizer) }
+                    if routes.contains(.appCommands) { updateAppGestures(recognizer) }
                 case .undecided:
                     break
                 }
@@ -2880,7 +3030,7 @@ struct VideoLayerView: UIViewRepresentable {
             // Deltas in video pixels, natural-scrolling direction.
             let stepX = t.x - lastPan.x
             let stepY = t.y - lastPan.y
-            receiver?.sendScroll(dx: stepX / scale, dy: stepY / scale)
+            sendRemoteScroll(dx: stepX / scale, dy: stepY / scale)
             // Recorded in view points (pre-scale), matching the domain
             // `cancelScrollMomentum`/`beginScrollMomentum` convert from —
             // see `tickScrollMomentum`.
@@ -2911,7 +3061,7 @@ struct VideoLayerView: UIViewRepresentable {
             }
             let (delta, alive) = session.tick(now: CACurrentMediaTime())
             if delta.dx != 0 || delta.dy != 0 {
-                receiver?.sendScroll(dx: delta.dx / scale, dy: delta.dy / scale)
+                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale)
             }
             if !alive { cancelScrollMomentum() }
         }
@@ -2938,7 +3088,7 @@ struct VideoLayerView: UIViewRepresentable {
             // recognizer stays attached to a system gesture's leftover
             // touches too.
             guard !systemGestureSequenceOwned else { return }
-            guard recognizer.state == .ended, videoEnabled else { return }
+            guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
             let base = unzoomedBaseTransform().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
                 current: manualZoom, memory: manualZoomMemory, base: base) else { return }
@@ -3301,7 +3451,7 @@ struct VideoLayerView: UIViewRepresentable {
                     // Same units, direction, and momentum sampling as the
                     // two-finger scroll path (`continueScroll`).
                     guard let scale = pointsPerRemotePixel(video: video) else { continue }
-                    receiver.sendScroll(dx: dx / scale, dy: dy / scale)
+                    sendRemoteScroll(dx: CGFloat(dx) / scale, dy: CGFloat(dy) / scale)
                     scrollVelocityTracker.record(dx: CGFloat(dx), dy: CGFloat(dy), at: CACurrentMediaTime())
                 case .scrollEnded(let momentum):
                     if momentum {
@@ -3359,6 +3509,11 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func routeTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?, ended: Bool) {
+            // With Allow Input off the surface may still receive touches for
+            // Local View Navigation (the two-finger and double-tap
+            // recognizers see them independently), but nothing from here
+            // on — pointer, touch, Pencil — may reach the Mac.
+            guard allowsInput else { return }
             #if DEBUG
             // TEMP diagnostic for the "all input dead" regression report —
             // remove once root-caused. Checkpoint A/B: confirms touches are
@@ -3442,6 +3597,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            trackBlockedSequence(touches, began: true, ended: false)
             if moveViewActive {
                 onActivityBegan?()
                 routeNavigationTouches(touches, ended: false)
@@ -3467,6 +3623,7 @@ struct VideoLayerView: UIViewRepresentable {
             routeTouches("moved", touches, event, ended: false)
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: true)
                 if navigationTouches.isEmpty { onActivityEnded?() }
@@ -3479,6 +3636,7 @@ struct VideoLayerView: UIViewRepresentable {
             if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: true)
                 if navigationTouches.isEmpty { onActivityEnded?() }
@@ -3929,4 +4087,54 @@ private extension VerticalAlignment {
     }
 
     static let brandInkCenter = VerticalAlignment(BrandInkCenter.self)
+}
+
+/// The small Request Input / Enable Input affordance on the receiver
+/// surface — see `ReceiverInputPrompt`.
+private struct InputPromptButton: View {
+    let kind: ReceiverInputPrompt.Kind
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if kind == .requesting {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: symbol)
+                }
+                Text(title).font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActionable)
+        .accessibilityHint(isActionable ? Text("Asks your Mac to allow input from this device.") : Text(""))
+    }
+
+    private var isActionable: Bool { kind == .requestInput || kind == .enableInput }
+
+    private var title: String {
+        switch kind {
+        case .enableInput: return String(localized: "Enable Input")
+        case .requestInput: return String(localized: "Request Input")
+        case .requesting: return String(localized: "Requesting Input…")
+        case .enabled: return String(localized: "Input Enabled")
+        case .unavailable: return String(localized: "This Mac isn’t accepting input requests")
+        }
+    }
+
+    private var symbol: String {
+        switch kind {
+        case .enableInput, .requestInput: return "hand.tap"
+        case .requesting: return "hourglass"
+        case .enabled: return "checkmark.circle.fill"
+        case .unavailable: return "hand.raised.slash"
+        }
+    }
 }

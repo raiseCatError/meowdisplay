@@ -595,6 +595,12 @@ official receiver recognizes these gestures:
 * `"previousSpace"`: three-finger swipe right.
 * `"showDesktop"`: four- or five-finger spread.
 * `"launchpad"`: four- or five-finger pinch.
+* `"spotlight"`: three-finger tap.
+* `"controlCenter"`: a one-tap receiver control (no gesture).
+* `"menuBar"`: a one-tap receiver control that reveals and focuses the menu
+  bar (no gesture). Momentary; no visibility state is reported.
+
+The receiver may also send any of these from a one-tap control.
 
 Three-finger gestures require a directional movement rather than a tap; the
 four- and five-finger gestures require a meaningful change in fingertip

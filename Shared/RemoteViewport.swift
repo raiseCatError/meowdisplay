@@ -775,3 +775,70 @@ struct ViewportNavigationSession {
         atan2(points[1].y - points[0].y, points[1].x - points[0].x)
     }
 }
+
+/// Local View Navigation vs. Allow Input: two separate permissions. Allow
+/// Input gates everything that reaches the Mac (pointer, keyboard, remote
+/// scroll, gesture commands); Local View Navigation gates only the
+/// receiver-local view (pan, zoom, rotation, Move View, reset), which never
+/// sends anything. With input off and navigation on, the Mac can be
+/// inspected but not controlled; with both off, the view is locked.
+enum LocalViewNavigationPolicy {
+    /// Whether the receiver surface should receive touches at all.
+    static func surfaceAcceptsTouches(remoteInputAllowed: Bool, localNavigationAllowed: Bool,
+                                      videoEnabled: Bool) -> Bool {
+        remoteInputAllowed || allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                    videoEnabled: videoEnabled)
+    }
+
+    /// Manual viewport changes only apply to live video.
+    static func allowsViewportChanges(localNavigationAllowed: Bool, videoEnabled: Bool) -> Bool {
+        localNavigationAllowed && videoEnabled
+    }
+
+    /// The Move View control shows only when it's wanted and would work.
+    static func showsMoveView(controlVisible: Bool, localNavigationAllowed: Bool, videoEnabled: Bool) -> Bool {
+        controlVisible && allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                videoEnabled: videoEnabled)
+    }
+}
+
+/// What a committed two-finger gesture may do.
+enum TwoFingerRoute: Equatable, Hashable {
+    /// Remote Mac scrolling.
+    case remoteScroll
+    /// Local viewport pan/zoom/rotate.
+    case viewport
+    /// App Gesture Commands (keyboard chords sent to the Mac).
+    case appCommands
+}
+
+enum TwoFingerRoutingPolicy {
+    /// Routes for a committed intent. Anything that reaches the Mac requires
+    /// `remoteInputAllowed`; the local viewport requires Local View
+    /// Navigation. The effective targets already fold in video-off routing.
+    static func routes(intent: TwoFingerGestureIntent,
+                       remoteInputAllowed: Bool,
+                       localNavigationAllowed: Bool,
+                       videoEnabled: Bool,
+                       pinchTarget: ReceiverGestureTarget,
+                       rotateTarget: ReceiverGestureTarget) -> Set<TwoFingerRoute> {
+        switch intent {
+        case .undecided:
+            return []
+        case .scroll:
+            return remoteInputAllowed ? [.remoteScroll] : []
+        case .viewportZoomPan:
+            var routes: Set<TwoFingerRoute> = []
+            if LocalViewNavigationPolicy.allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                               videoEnabled: videoEnabled) {
+                routes.insert(.viewport)
+            }
+            let pinch = VideoInteractionPolicy.effectiveTarget(stored: pinchTarget, videoEnabled: videoEnabled)
+            let rotate = VideoInteractionPolicy.effectiveTarget(stored: rotateTarget, videoEnabled: videoEnabled)
+            if remoteInputAllowed, pinch == .app || rotate == .app {
+                routes.insert(.appCommands)
+            }
+            return routes
+        }
+    }
+}

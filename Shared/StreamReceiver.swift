@@ -1548,6 +1548,7 @@ final class StreamReceiver: ObservableObject {
     func forgetPeer(_ peerID: String) {
         TrustStore.shared.forget(peerID: peerID)
         IncomingSessionPolicyStore.removePolicy(peerID: peerID)
+        InputAutoRequestStore.remove(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
         revokeSessionAuthority(peerID: peerID, trustRemoved: true)

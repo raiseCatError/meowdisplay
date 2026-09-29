@@ -9,6 +9,13 @@ enum ReceiverGesture: String, CaseIterable {
     case showDesktop
     case launchpad
     case spotlight
+    /// macOS Control Center — a one-tap semantic action (no gesture maps to
+    /// it). Older senders ignore unknown names.
+    case controlCenter
+    /// Reveals and focuses the Mac's menu bar — also when a full-screen app
+    /// hides it. Momentary: macOS doesn't report menu bar visibility, so no
+    /// shown/hidden state is claimed. One-tap only.
+    case menuBar
 
     static let swipeMinimumDistance = 80.0
     static let swipeDominanceRatio = 1.5
@@ -72,15 +79,31 @@ enum ReceiverMultiFingerRecognizer: CaseIterable {
 /// blind `true` that would undo the VoiceOver gate. Move View (local
 /// viewport navigation) also parks them, so no Mac gesture fires while the
 /// user is only moving the view.
+///
+/// Remote-only recognizers (three-finger, pinch/spread) also need Allow
+/// Input; the viewport double tap needs Local View Navigation; the
+/// two-finger recognizer needs either (it both scrolls the Mac and moves
+/// the local view — see `TwoFingerRoutingPolicy`).
 struct ReceiverMultiFingerGestureGate: Equatable {
     private(set) var voiceOverRunning: Bool
     private(set) var viewportNavigationActive = false
+    private(set) var remoteInputAllowed = true
+    private(set) var localNavigationAllowed = true
 
     init(voiceOverRunning: Bool) {
         self.voiceOverRunning = voiceOverRunning
     }
 
     var recognizersEnabled: Bool { !voiceOverRunning && !viewportNavigationActive }
+
+    /// Returns whether availability changed.
+    mutating func update(remoteInputAllowed: Bool, localNavigationAllowed: Bool) -> Bool {
+        guard remoteInputAllowed != self.remoteInputAllowed
+                || localNavigationAllowed != self.localNavigationAllowed else { return false }
+        self.remoteInputAllowed = remoteInputAllowed
+        self.localNavigationAllowed = localNavigationAllowed
+        return true
+    }
 
     /// Returns whether availability changed.
     mutating func update(viewportNavigationActive: Bool) -> Bool {
@@ -90,7 +113,12 @@ struct ReceiverMultiFingerGestureGate: Equatable {
     }
 
     func isEnabled(_ recognizer: ReceiverMultiFingerRecognizer) -> Bool {
-        recognizersEnabled
+        guard recognizersEnabled else { return false }
+        switch recognizer {
+        case .twoFingerViewport: return remoteInputAllowed || localNavigationAllowed
+        case .viewportDoubleTap: return localNavigationAllowed
+        case .threeFingerSwipe, .threeFingerTap, .pinchSpread: return remoteInputAllowed
+        }
     }
 
     /// Returns whether availability changed (VoiceOver toggled at runtime).

@@ -2,7 +2,7 @@ import CoreGraphics
 import XCTest
 
 /// Receiver defaults (schema 16), iPad Strip/Overlay geometry, control
-/// scale, display-aware backdrop, Custom layouts, radial palettes and
+/// scale, Custom layouts, radial palettes and
 /// Two-Hand Assist — all pure policy, no UIKit.
 final class PadControlLayoutTests: XCTestCase {
     private let container = CGRect(x: 0, y: 0, width: 1194, height: 834)
@@ -18,7 +18,10 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(preferences.rotateTarget, .disabled)
         XCTAssertTrue(preferences.preferMeowDisplayGestures)
         XCTAssertEqual(preferences.padControlLayout, .strip)
-        XCTAssertTrue(preferences.padShowControlHints)
+        XCTAssertFalse(preferences.padShowControlHints, "hints default off (schema 17)")
+        XCTAssertTrue(preferences.allowLocalViewNavigation)
+        XCTAssertEqual(preferences.padStandardControls, PadStandardControlVisibility())
+        XCTAssertTrue(PadStandardControl.allCases.allSatisfy(preferences.padStandardControls.isVisible))
         XCTAssertEqual(preferences.padControlScale, 1)
         XCTAssertTrue(preferences.customLayouts.isEmpty, "no empty Custom layouts are pre-created")
         XCTAssertFalse(preferences.audioPreferred, "audio stays opt-in")
@@ -45,7 +48,7 @@ final class PadControlLayoutTests: XCTestCase {
                      forKey: ReceiverControlPreferencesRepository.defaultsKey)
 
         let loaded = repository.load()
-        XCTAssertEqual(loaded.version, 16)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
         XCTAssertTrue(loaded.smartTouchEnabled)
         XCTAssertTrue(loaded.autoHideEnabled)
         XCTAssertEqual(loaded.pinchTarget, .viewport)
@@ -74,6 +77,46 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(reloaded.rotateTarget, .viewport)
         XCTAssertFalse(reloaded.preferMeowDisplayGestures)
         XCTAssertEqual(reloaded.padControlLayout, .overlay)
+    }
+
+    func testSchema16InstallMigratesOnceToSchema17() throws {
+        let (repository, defaults, suite) = try makeRepository()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 16
+        old.padShowControlHints = true
+        old.inputMode = .trackpad
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        json.removeValue(forKey: "padStandardControls")
+        json.removeValue(forKey: "allowLocalViewNavigation")
+        json["padShowMoveViewControl"] = false   // schema 16's own Move View switch
+        defaults.set(try JSONSerialization.data(withJSONObject: json),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let loaded = repository.load()
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertFalse(loaded.padShowControlHints, "pre-release installs take the new default once")
+        XCTAssertTrue(loaded.allowLocalViewNavigation)
+        XCTAssertFalse(loaded.padStandardControls.isVisible(.moveView), "a hidden Move View stays hidden")
+        XCTAssertTrue(loaded.padStandardControls.isVisible(.showDesktop))
+        XCTAssertEqual(loaded.inputMode, .trackpad)
+    }
+
+    func testChoicesSavedUnderSchema17AreNeverRemigrated() throws {
+        let (repository, defaults, suite) = try makeRepository()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var chosen = repository.load()
+        chosen.padShowControlHints = true
+        chosen.allowLocalViewNavigation = false
+        chosen.padStandardControls.setVisible(false, .controlCenter)
+        repository.save(chosen)
+        for _ in 0..<2 {
+            let reloaded = repository.load()
+            XCTAssertTrue(reloaded.padShowControlHints)
+            XCTAssertFalse(reloaded.allowLocalViewNavigation)
+            XCTAssertFalse(reloaded.padStandardControls.isVisible(.controlCenter))
+            repository.save(reloaded)
+        }
     }
 
     func testPersistedControlScaleIsClampedOnLoad() throws {
@@ -134,128 +177,256 @@ final class PadControlLayoutTests: XCTestCase {
 
     // MARK: - Strip / Overlay geometry
 
+    private let railGroups = [3, 7, 2]   // system, keys, view
+    private let padSafe = ControlSafeInsets(top: 24, leading: 0, bottom: 20, trailing: 0)
+
+    private func layout(_ container: CGRect? = nil, strip: Bool = true, main: ControlEdge = .trailing,
+                        function: ControlEdge = .trailing, mainGroups: [Int]? = nil, functionGroups: [Int] = [2, 2],
+                        metrics: PadControlMetrics? = nil, safe: ControlSafeInsets = .zero,
+                        keyboardTop: CGFloat? = nil) -> PadEdgeLayout {
+        PadEdgeGeometry.layout(container: container ?? self.container, safeInsets: safe, reservesStrips: strip,
+                               mainEdge: main, functionEdge: function, mainGroupCounts: mainGroups ?? railGroups,
+                               functionGroupCounts: functionGroups, metrics: metrics ?? self.metrics,
+                               keyboardTop: keyboardTop)
+    }
+
+    private func assertNoOverlap(_ frames: [CGRect], gap: CGFloat, _ message: String,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        for i in frames.indices {
+            for j in frames.indices where j > i {
+                let a = frames[i].insetBy(dx: -gap / 2 + 0.01, dy: -gap / 2 + 0.01)
+                let b = frames[j].insetBy(dx: -gap / 2 + 0.01, dy: -gap / 2 + 0.01)
+                XCTAssertFalse(a.intersects(b), "\(message): \(frames[i]) vs \(frames[j])", file: file, line: line)
+            }
+        }
+    }
+
     func testStripReservesARailAndCentersTheMainControls() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: true,
-                                            mainEdge: .trailing, functionEdge: .trailing,
-                                            mainCount: 9, functionGroupCounts: [2, 2], metrics: metrics)
-        XCTAssertEqual(layout.strips.map(\.edge), [.trailing])
-        let strip = try XCTUnwrap(layout.strips.first).frame
+        let result = layout(function: .leading)
+        let strip = try XCTUnwrap(result.strips.first { $0.edge == .trailing }).frame
         XCTAssertEqual(strip, CGRect(x: 1130, y: 0, width: 64, height: 834))
-        XCTAssertEqual(layout.canvas, CGRect(x: 0, y: 0, width: 1130, height: 834))
-        let main = try XCTUnwrap(layout.mainFrame)
+        XCTAssertEqual(result.canvas, CGRect(x: 64, y: 0, width: 1066, height: 834))
+        let main = try XCTUnwrap(result.mainFrame)
         XCTAssertEqual(main.midY, container.midY, accuracy: 0.5)
         XCTAssertEqual(main.midX, strip.midX, accuracy: 0.5)
         XCTAssertTrue(strip.contains(main))
+        XCTAssertEqual(result.mainCells.count, 12)
+    }
+
+    func testMainGroupsKeepAVisibleGap() {
+        let result = layout(function: .leading)
+        XCTAssertEqual(result.mainSegments.map(\.cells.count), railGroups)
+        for (a, b) in zip(result.mainSegments, result.mainSegments.dropFirst()) {
+            XCTAssertEqual(b.frame.minY - a.frame.maxY, metrics.groupGap, accuracy: 0.01)
+        }
     }
 
     func testStripOnEachEdgeKeepsTheCanvasBesideIt() {
         for edge in ControlEdge.allCases {
-            let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: true,
-                                                mainEdge: edge, functionEdge: edge,
-                                                mainCount: 6, functionGroupCounts: [2], metrics: metrics)
-            XCTAssertEqual(layout.strips.count, 1, "\(edge)")
-            let strip = layout.strips[0].frame
-            XCTAssertFalse(strip.intersects(layout.canvas), "\(edge)")
-            XCTAssertEqual(strip.union(layout.canvas), container, "\(edge)")
-            if let main = layout.mainFrame {
-                XCTAssertTrue(strip.contains(main), "\(edge)")
-                if edge.stacksVertically {
-                    XCTAssertEqual(main.midY, container.midY, accuracy: 0.5)
-                } else {
-                    XCTAssertEqual(main.midX, container.midX, accuracy: 0.5)
-                }
+            let result = layout(main: edge, function: edge, functionGroups: [])
+            XCTAssertEqual(result.strips.count, 1, "\(edge)")
+            let strip = result.strips[0].frame
+            XCTAssertFalse(strip.intersects(result.canvas), "\(edge)")
+            XCTAssertEqual(strip.union(result.canvas), container, "\(edge)")
+            guard let main = result.mainFrame else { return XCTFail("missing main frame on \(edge)") }
+            XCTAssertTrue(strip.contains(main), "\(edge)")
+            if edge.stacksVertically {
+                XCTAssertEqual(main.midY, container.midY, accuracy: 0.5)
             } else {
-                XCTFail("missing main frame on \(edge)")
+                XCTAssertEqual(main.midX, container.midX, accuracy: 0.5)
             }
         }
     }
 
     func testStripIncludesTheSafeInsetButKeepsControlsClearOfIt() throws {
-        let safe = ControlSafeInsets(top: 0, leading: 0, bottom: 20, trailing: 0)
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: safe, reservesStrips: true,
-                                            mainEdge: .bottom, functionEdge: .bottom,
-                                            mainCount: 6, functionGroupCounts: [], metrics: metrics)
-        let strip = try XCTUnwrap(layout.strips.first).frame
+        let result = layout(main: .bottom, function: .bottom, functionGroups: [],
+                            safe: ControlSafeInsets(top: 0, leading: 0, bottom: 20, trailing: 0))
+        let strip = try XCTUnwrap(result.strips.first).frame
         XCTAssertEqual(strip.maxY, container.maxY)
         XCTAssertEqual(strip.height, metrics.stripThickness(on: .bottom) + 20)
-        XCTAssertLessThanOrEqual(try XCTUnwrap(layout.mainFrame).maxY, container.maxY - 20)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(result.mainFrame).maxY, container.maxY - 20)
     }
 
     func testOverlayUsesTheWholeCanvas() {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: false,
-                                            mainEdge: .leading, functionEdge: .trailing,
-                                            mainCount: 9, functionGroupCounts: [2, 2], metrics: metrics)
-        XCTAssertTrue(layout.strips.isEmpty)
-        XCTAssertEqual(layout.canvas, container)
+        let result = layout(strip: false, main: .leading, function: .trailing)
+        XCTAssertTrue(result.strips.isEmpty)
+        XCTAssertEqual(result.canvas, container)
     }
 
-    func testFunctionGroupsSplitTowardTopAndBottomOnAVerticalEdge() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: false,
-                                            mainEdge: .trailing, functionEdge: .trailing,
-                                            mainCount: 9, functionGroupCounts: [2, 2], metrics: metrics)
-        let main = try XCTUnwrap(layout.mainFrame)
-        XCTAssertEqual(layout.functionFrames.count, 2)
-        XCTAssertLessThanOrEqual(layout.functionFrames[0].maxY, main.minY - metrics.groupGap + 0.5)
-        XCTAssertGreaterThanOrEqual(layout.functionFrames[1].minY, main.maxY + metrics.groupGap - 0.5)
-        for frame in layout.functionFrames {
-            XCTAssertEqual(frame.midX, main.midX, accuracy: 0.5)
-            XCTAssertFalse(frame.intersects(main))
+    func testFunctionGroupsTakeTheEndsOfASharedVerticalEdge() throws {
+        let result = layout(strip: false, mainGroups: [3, 4, 1], safe: padSafe)
+        let main = try XCTUnwrap(result.mainFrame)
+        XCTAssertEqual(result.functionSegments.count, 2)
+        XCTAssertEqual(result.laneCounts[.trailing], 1)
+        XCTAssertEqual(result.functionSegments[0].frame.minY, 24 + PadControlMetrics.edgeMargin, accuracy: 0.01)
+        XCTAssertEqual(result.functionSegments[1].frame.maxY, 834 - 20 - PadControlMetrics.edgeMargin, accuracy: 0.01)
+        XCTAssertLessThan(result.functionSegments[0].frame.maxY, main.minY)
+        XCTAssertGreaterThan(result.functionSegments[1].frame.minY, main.maxY)
+    }
+
+    func testFunctionGroupsTakeTheEndsOfASharedHorizontalEdge() throws {
+        let result = layout(main: .bottom, function: .bottom, functionGroups: [2, 2, 2])
+        let main = try XCTUnwrap(result.mainFrame)
+        XCTAssertEqual(result.functionSegments.count, 3)
+        XCTAssertLessThan(result.functionSegments[0].frame.maxX, result.functionSegments[1].frame.minX)
+        XCTAssertLessThan(result.functionSegments[1].frame.maxX, main.minX)
+        XCTAssertGreaterThan(result.functionSegments[2].frame.minX, main.maxX)
+    }
+
+    func testMainShiftsOffCenterRatherThanOverlapping() throws {
+        // 766 pt of rail: Function (96) + gap + Main (640) fits only if Main
+        // leaves the exact center.
+        let result = layout(strip: false, main: .leading, function: .leading, functionGroups: [2], safe: padSafe)
+        let main = try XCTUnwrap(result.mainFrame)
+        let function = try XCTUnwrap(result.functionSegments.first).frame
+        XCTAssertEqual(result.laneCounts[.leading], 1)
+        XCTAssertEqual(main.minY, function.maxY + metrics.groupGap, accuracy: 0.01)
+        XCTAssertGreaterThan(main.midY, container.midY)
+        XCTAssertEqual(function.midX, main.midX, accuracy: 0.01)
+    }
+
+    func testOverflowMovesToAnotherLaneAndWidensTheStrip() throws {
+        let result = layout(main: .leading, function: .leading, functionGroups: [2, 2, 2], safe: padSafe)
+        XCTAssertEqual(result.laneCounts[.leading], 2)
+        let strip = try XCTUnwrap(result.strips.first).frame
+        XCTAssertEqual(strip.width, metrics.clusterThickness(on: .leading) * 2 + metrics.gap
+                       + PadControlMetrics.stripPadding * 2, accuracy: 0.01)
+        let main = try XCTUnwrap(result.mainFrame)
+        for segment in result.functionSegments {
+            XCTAssertGreaterThan(segment.frame.minX, main.maxX, "Function moved to the inner lane")
+            XCTAssertTrue(strip.contains(segment.frame))
         }
+        assertNoOverlap(result.mainCells + result.functionCells, gap: metrics.gap, "overflow")
     }
 
-    func testFunctionGroupsSplitTowardLeftAndRightOnAHorizontalEdge() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: true,
-                                            mainEdge: .bottom, functionEdge: .bottom,
-                                            mainCount: 9, functionGroupCounts: [2, 2, 2], metrics: metrics)
-        let main = try XCTUnwrap(layout.mainFrame)
-        XCTAssertEqual(layout.functionFrames.count, 3)
-        XCTAssertLessThan(layout.functionFrames[0].maxX, layout.functionFrames[1].minX)
-        XCTAssertLessThan(layout.functionFrames[1].maxX, main.minX)
-        XCTAssertGreaterThan(layout.functionFrames[2].minX, main.maxX)
-        for frame in layout.functionFrames {
-            XCTAssertEqual(frame.midY, main.midY, accuracy: 0.5)
+    func testAGroupLongerThanTheEdgeWrapsDeterministically() {
+        let portrait = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        let large = PadControlMetrics(scale: 1.4)
+        let first = layout(portrait, main: .top, function: .top, mainGroups: [20], functionGroups: [], metrics: large)
+        let second = layout(portrait, main: .top, function: .top, mainGroups: [20], functionGroups: [], metrics: large)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.mainCells.count, 20)
+        XCTAssertGreaterThan(first.laneCounts[.top] ?? 0, 1)
+        assertNoOverlap(first.mainCells, gap: large.gap, "wrapped group")
+    }
+
+    func testNothingOverlapsOnAnyEdgeScaleOrientationOrMode() {
+        let landscape = container
+        let portrait = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        for size in [landscape, portrait] {
+            for strip in [true, false] {
+                for scale in [0.85, 1.0, 1.4] {
+                    for hints in [false, true] where strip || !hints {
+                        let metrics = PadControlMetrics(scale: scale, showsHints: hints)
+                        for main in ControlEdge.allCases {
+                            for function in ControlEdge.allCases {
+                                let result = layout(size, strip: strip, main: main, function: function,
+                                                    functionGroups: [2, 2, 2], metrics: metrics, safe: padSafe)
+                                let label = "\(size.size) strip=\(strip) scale=\(scale) hints=\(hints) \(main)/\(function)"
+                                let cells = result.mainCells + result.functionCells
+                                XCTAssertEqual(result.mainCells.count, 12, label)
+                                XCTAssertEqual(result.functionCells.count, 6, label)
+                                assertNoOverlap(cells, gap: metrics.gap, label)
+                                let safeArea = CGRect(x: 0, y: 24, width: size.width, height: size.height - 44)
+                                for cell in cells {
+                                    XCTAssertTrue(safeArea.contains(cell), "\(label) outside safe area: \(cell)")
+                                    if strip {
+                                        XCTAssertFalse(cell.intersects(result.canvas.insetBy(dx: 0.5, dy: 0.5)),
+                                                       "\(label) control over the canvas")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
-
-    func testMainAndFunctionEdgesAreIndependent() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: true,
-                                            mainEdge: .trailing, functionEdge: .leading,
-                                            mainCount: 9, functionGroupCounts: [2, 2], metrics: metrics)
-        XCTAssertEqual(Set(layout.strips.map(\.edge)), [.leading, .trailing])
-        XCTAssertEqual(layout.canvas.minX, 64)
-        XCTAssertEqual(layout.canvas.maxX, 1130)
-        let leadingStrip = try XCTUnwrap(layout.strips.first { $0.edge == .leading }).frame
-        // Split to the two ends of the other edge, away from the center.
-        XCTAssertTrue(leadingStrip.contains(layout.functionFrames[0]))
-        XCTAssertTrue(leadingStrip.contains(layout.functionFrames[1]))
-        XCTAssertLessThan(layout.functionFrames[0].maxY, container.midY)
-        XCTAssertGreaterThan(layout.functionFrames[1].minY, container.midY)
-    }
-
-    func testPerpendicularEdgesDoNotCollideAtTheirSharedCorner() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: false,
-                                            mainEdge: .bottom, functionEdge: .trailing,
-                                            mainCount: 14, functionGroupCounts: [3, 3], metrics: metrics)
-        let main = try XCTUnwrap(layout.mainFrame)
-        for frame in layout.functionFrames { XCTAssertFalse(frame.intersects(main)) }
     }
 
     func testBottomControlsRiseAboveTheKeyboard() throws {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: false,
-                                            mainEdge: .bottom, functionEdge: .trailing,
-                                            mainCount: 6, functionGroupCounts: [2, 2], metrics: metrics,
-                                            keyboardTop: 500)
-        XCTAssertLessThanOrEqual(try XCTUnwrap(layout.mainFrame).maxY, 500)
-        for frame in layout.functionFrames { XCTAssertLessThanOrEqual(frame.maxY, 500) }
+        let result = layout(strip: false, main: .bottom, function: .trailing, keyboardTop: 500)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(result.mainFrame).maxY, 500)
+        for frame in result.functionSegments.map(\.frame) { XCTAssertLessThanOrEqual(frame.maxY, 500) }
     }
 
     func testHiddenControlsReserveNoStrip() {
-        let layout = PadEdgeGeometry.layout(container: container, safeInsets: .zero, reservesStrips: true,
-                                            mainEdge: .trailing, functionEdge: .leading,
-                                            mainCount: 0, functionGroupCounts: [], metrics: metrics)
-        XCTAssertTrue(layout.strips.isEmpty)
-        XCTAssertEqual(layout.canvas, container)
-        XCTAssertNil(layout.mainFrame)
+        let result = layout(main: .trailing, function: .leading, mainGroups: [], functionGroups: [])
+        XCTAssertTrue(result.strips.isEmpty)
+        XCTAssertEqual(result.canvas, container)
+        XCTAssertNil(result.mainFrame)
+    }
+
+    func testPaletteAnchorCoversEveryLaneOnTheMainEdge() throws {
+        let result = layout(main: .leading, function: .leading, functionGroups: [2, 2, 2], safe: padSafe)
+        let anchor = try XCTUnwrap(PadEdgeGeometry.paletteAnchor(for: result, mainEdge: .leading, functionEdge: .leading))
+        for segment in result.functionSegments { XCTAssertTrue(anchor.contains(segment.frame)) }
+    }
+
+    // MARK: - Standard rail
+
+    private let everything = PadRailComposition.Availability(modifiers: ControlModifier.allCases,
+                                                             keyboardAvailable: true, moveViewAvailable: true)
+
+    func testRailGroupsSystemThenKeysThenView() {
+        let groups = PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: everything)
+        XCTAssertEqual(groups, [
+            [.function("menu-bar"), .tray(.dock), .function("show-desktop"), .function("control-center")],
+            [.tray(.command), .tray(.option), .tray(.control), .tray(.shift), .tray(.escape), .tray(.tab), .tray(.keyboard)],
+            [.moveView, .tray(.settings)],
+        ])
+    }
+
+    func testEveryStandardControlCanBeHiddenButSettingsStays() {
+        var visibility = PadStandardControlVisibility()
+        for control in PadStandardControl.allCases { visibility.setVisible(false, control) }
+        let groups = PadRailComposition.mainGroups(visibility: visibility, availability: everything)
+        XCTAssertEqual(groups, [ControlModifier.allCases.map { .tray(ControlTrayItem.item(for: $0)) },
+                                [.tray(.settings)]])
+        let bare = PadRailComposition.mainGroups(
+            visibility: visibility,
+            availability: .init(modifiers: [], keyboardAvailable: false, moveViewAvailable: false))
+        XCTAssertEqual(bare, [[.tray(.settings)]])
+    }
+
+    func testMoveViewCanBeHiddenAndNeedsLocalNavigation() {
+        var visibility = PadStandardControlVisibility()
+        visibility.setVisible(false, .moveView)
+        XCTAssertFalse(PadRailComposition.mainGroups(visibility: visibility, availability: everything)
+            .joined().contains(.moveView))
+        var unavailable = everything
+        unavailable.moveViewAvailable = false
+        XCTAssertFalse(PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: unavailable)
+            .joined().contains(.moveView), "showing the button never bypasses Local View Navigation")
+        XCTAssertFalse(LocalViewNavigationPolicy.showsMoveView(controlVisible: true, localNavigationAllowed: false,
+                                                               videoEnabled: true))
+        XCTAssertTrue(LocalViewNavigationPolicy.showsMoveView(controlVisible: true, localNavigationAllowed: true,
+                                                              videoEnabled: true))
+    }
+
+    func testShowDesktopAndControlCenterAreSemanticFunctionActions() throws {
+        let items = FunctionTrayProfile.canonical().items
+        let desktop = try XCTUnwrap(items.first { $0.id == "show-desktop" })
+        let controlCenter = try XCTUnwrap(items.first { $0.id == "control-center" })
+        XCTAssertEqual(desktop.item.action, .receiverGesture(ReceiverGesture.showDesktop.rawValue))
+        XCTAssertEqual(controlCenter.item.action, .receiverGesture(ReceiverGesture.controlCenter.rawValue))
+        XCTAssertEqual(PadStandardControl.showDesktop.kind, .function(desktop.id))
+        XCTAssertEqual(PadStandardControl.controlCenter.kind, .function(controlCenter.id))
+        // A saved profile that predates Control Center gains it, hidden.
+        var saved = FunctionTrayProfile.canonical()
+        saved.items.removeAll { $0.id == "control-center" }
+        let resolved = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(resolved.items.first { $0.id == "control-center" }?.isVisible, false)
+        let mapping = SystemGestureShortcutMapping.shortcut(for: .controlCenter)
+        XCTAssertEqual(mapping.keyCode, 8)
+        XCTAssertEqual(mapping.flags, .maskSecondaryFn)
+    }
+
+    func testStandardControlVisibilityDecodesLossily() throws {
+        let decoded = try JSONDecoder().decode(PadStandardControlVisibility.self,
+                                               from: Data(#"["moveView","hologram","dock"]"#.utf8))
+        XCTAssertFalse(decoded.isVisible(.moveView))
+        XCTAssertFalse(decoded.isVisible(.dock))
+        XCTAssertTrue(decoded.isVisible(.controlCenter))
     }
 
     func testHintsWidenTheStrip() {
@@ -287,69 +458,6 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertTrue(ControlAutoHidePolicy.applies(isPad: true, layout: .overlay))
         XCTAssertTrue(ControlAutoHidePolicy.applies(isPad: true, layout: .custom))
         XCTAssertTrue(ControlAutoHidePolicy.applies(isPad: false, layout: .strip))
-    }
-
-    // MARK: - Display-aware backdrop
-
-    private func footprint(rotation: CGFloat = 0, origin: CGPoint = .zero) -> DisplayFootprint {
-        let base = RemoteViewportCalculator.normal(viewBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000),
-                                                   remoteAspectSize: CGSize(width: 16, height: 9))
-        let transform = RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: base.displayedRect,
-                                                rotationRadians: rotation)
-        return DisplayFootprint(transform: transform, surfaceOrigin: origin,
-                                surfaceSize: CGSize(width: 1000, height: 1000))
-    }
-
-    func testControlOverTheRenderedDisplayGetsAFullHalo() {
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 100, y: 400, width: 44, height: 44),
-                                                          footprint: footprint()), 1)
-    }
-
-    func testControlOverLetterboxingGetsNoHalo() {
-        // The 16:9 picture spans y 218.75...781.25; y 50 is the black bar.
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 100, y: 50, width: 44, height: 44),
-                                                          footprint: footprint()), 0)
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 100, y: 400, width: 44, height: 44),
-                                                          footprint: .none), 0)
-    }
-
-    func testPartialOverlapScalesTheHalo() {
-        let coverage = ControlBackdropPolicy.coverage(of: CGRect(x: 100, y: 196.75, width: 44, height: 44),
-                                                      footprint: footprint())
-        XCTAssertEqual(coverage, 0.6, accuracy: 0.001)
-        let strength = ControlBackdropPolicy.haloStrength(coverage: coverage)
-        XCTAssertEqual(strength, 1)
-        let sliver = ControlBackdropPolicy.haloStrength(coverage: 0.2)
-        XCTAssertGreaterThan(sliver, 0)
-        XCTAssertLessThan(sliver, 1)
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(coverage: 0.02), 0)
-    }
-
-    func testBackdropFollowsRotationAndTheSurfaceOrigin() {
-        let rotated = footprint(rotation: .pi / 2)
-        // Rotated a quarter turn, the picture covers the top of the view
-        // and no longer covers the left edge.
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 480, y: 60, width: 40, height: 40),
-                                                          footprint: rotated), 1)
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 40, y: 480, width: 40, height: 40),
-                                                          footprint: rotated), 0)
-        // A Strip on the left shifts the surface; overlay coordinates follow.
-        let shifted = footprint(origin: CGPoint(x: 64, y: 0))
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 20, y: 400, width: 40, height: 40),
-                                                          footprint: shifted), 0)
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 90, y: 400, width: 40, height: 40),
-                                                          footprint: shifted), 1)
-    }
-
-    func testBackdropFollowsZoomAndPan() {
-        let base = RemoteViewportCalculator.normal(viewBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000),
-                                                   remoteAspectSize: CGSize(width: 16, height: 9))
-        let zoomed = RemoteViewportCalculator.applyManualZoom(to: base, state: ManualViewportState(scale: 2))
-        let print = DisplayFootprint(transform: zoomed, surfaceOrigin: .zero,
-                                     surfaceSize: CGSize(width: 1000, height: 1000))
-        // Zoomed 2x, the picture now fills what was the letterbox bar.
-        XCTAssertEqual(ControlBackdropPolicy.haloStrength(for: CGRect(x: 100, y: 50, width: 44, height: 44),
-                                                          footprint: print), 1)
     }
 
     // MARK: - Custom layouts
@@ -444,8 +552,10 @@ final class PadControlLayoutTests: XCTestCase {
                 }
                 XCTAssertEqual(nearest?.kind, .tray(.settings))
                 XCTAssertEqual(Set(ControlModifier.allCases), Set(arrangement.placements.compactMap(\.kind.modifier)))
-                // The whole constellation stays in the corner's quadrant.
-                for placement in arrangement.placements {
+                // The constellation stays in the corner's quadrant (the
+                // system group sits on the opposite side on purpose).
+                for placement in arrangement.placements
+                where !CustomControlArrangement.templateSystem.contains(placement.kind) {
                     XCTAssertEqual(placement.x < 0.5, corner.isLeading)
                     XCTAssertEqual(placement.y < 0.5, corner.isTop)
                 }

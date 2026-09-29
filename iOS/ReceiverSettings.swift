@@ -20,30 +20,49 @@ struct SettingsView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: MobileSettingsCategory?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var query = ""
+    /// The setting a search result pointed at; its page scrolls to it and
+    /// tints it briefly.
+    @State private var highlight: String?
+
+    private static var debugBuild: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $selection) {
-                ForEach(MobileSettingsCategory.Group.allCases, id: \.self) { group in
-                    Section {
-                        ForEach(MobileSettingsCategory.visibleInThisBuild.filter { $0.group == group }) { category in
-                            NavigationLink(value: category) {
-                                Label(category.title, systemImage: category.systemImage)
+                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    ForEach(MobileSettingsCategory.Group.allCases, id: \.self) { group in
+                        Section {
+                            ForEach(MobileSettingsCategory.visibleInThisBuild.filter { $0.group == group }) { category in
+                                NavigationLink(value: category) {
+                                    Label(category.title, systemImage: category.systemImage)
+                                }
                             }
                         }
                     }
+                } else {
+                    searchResults
                 }
             }
             .navigationTitle("Settings")
+            .searchable(text: $query, placement: .sidebar, prompt: Text("Search Settings"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            .modifier(HidesSidebarToggle())
         } detail: {
             NavigationStack {
                 if let selection {
                     page(for: selection)
+                        .environment(\.settingsHighlight, highlight)
                 } else {
                     Text("Select a category")
                         .foregroundStyle(.secondary)
@@ -54,9 +73,48 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
+        // Settings owns its system chrome: the receiver surface behind it
+        // hides the status bar and home indicator, and a presentation that
+        // inherited that would lay its navigation bar out under the top
+        // system region. With the status bar shown here, the split view's
+        // own safe area keeps every header and toolbar below it — through
+        // rotation and re-presentation alike.
+        .statusBarHidden(false)
+        .persistentSystemOverlays(.automatic)
         .onAppear {
             if selection == nil {
                 selection = MobileSettingsCategory.initialSelection(regularWidth: horizontalSizeClass == .regular)
+            }
+        }
+        .task(id: highlight) {
+            guard highlight != nil else { return }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            withAnimation(.easeOut(duration: 0.4)) { highlight = nil }
+        }
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        let results = MobileSettingsSearchIndex.search(query, isPad: controlStore.isPad, debug: Self.debugBuild)
+        if results.isEmpty {
+            Text("No Results").foregroundStyle(.secondary)
+        } else {
+            ForEach(results) { item in
+                Button {
+                    highlight = item.isCategory ? nil : item.id
+                    selection = item.category
+                } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title).foregroundStyle(.primary)
+                            if !item.isCategory {
+                                Text(item.category.title).font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    } icon: {
+                        Image(systemName: item.category.systemImage)
+                    }
+                }
             }
         }
     }
@@ -106,6 +164,64 @@ private func preferenceBinding<Value>(_ store: ReceiverControlStore,
             set: { value in store.update { $0[keyPath: keyPath] = value } })
 }
 
+/// The setting a search result points at — see `SettingsForm`.
+private struct SettingsHighlightKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    var settingsHighlight: String? {
+        get { self[SettingsHighlightKey.self] }
+        set { self[SettingsHighlightKey.self] = newValue }
+    }
+}
+
+/// A settings page: a `Form` that scrolls to, and briefly tints, the row a
+/// search result pointed at (rows opt in with `settingsAnchor`).
+private struct SettingsForm<Content: View>: View {
+    @Environment(\.settingsHighlight) private var highlight
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            Form { content }
+                .task(id: highlight) {
+                    guard let highlight else { return }
+                    // Let the pushed page finish laying out first.
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    withAnimation { proxy.scrollTo(highlight, anchor: .center) }
+                }
+        }
+    }
+}
+
+private struct SettingsAnchor: ViewModifier {
+    let id: String
+    @Environment(\.settingsHighlight) private var highlight
+
+    func body(content: Content) -> some View {
+        content
+            .id(id)
+            .listRowBackground(highlight == id ? Color.accentColor.opacity(0.18) : nil)
+    }
+}
+
+private extension View {
+    /// Marks a row as the target of the search item with this id.
+    func settingsAnchor(_ id: String) -> some View { modifier(SettingsAnchor(id: id)) }
+}
+
+/// Settings' sidebar is its navigation, so it never collapses away.
+private struct HidesSidebarToggle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 17.0, *) {
+            content.toolbar(removing: .sidebarToggle)
+        } else {
+            content
+        }
+    }
+}
+
 /// A setting's secondary explanation line.
 private struct SettingNote: View {
     let text: LocalizedStringKey
@@ -122,12 +238,13 @@ private struct GeneralSettingsPage: View {
     @ObservedObject var controlStore: ReceiverControlStore
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 // Isolated from the receiver: a TextField that rebuilds
                 // mid-tap loses focus (the "tap twice to edit" bug). This
                 // subview owns its focus and doesn't observe the receiver.
                 DeviceNameField { receiver.setServiceName($0) }
+                    .settingsAnchor("deviceName")
             } header: {
                 Text("Name")
             } footer: {
@@ -135,6 +252,7 @@ private struct GeneralSettingsPage: View {
             }
             Section {
                 AutoReconnectToggle(receiver: receiver)
+                    .settingsAnchor("autoReconnect")
             } header: {
                 Text("Connection")
             } footer: {
@@ -142,6 +260,7 @@ private struct GeneralSettingsPage: View {
             }
             Section {
                 Toggle("Haptics", isOn: preferenceBinding(controlStore, \.hapticsEnabled))
+                    .settingsAnchor("haptics")
             }
         }
         .navigationTitle(MobileSettingsCategory.general.title)
@@ -181,7 +300,7 @@ private struct DisplaySettingsPage: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Video", isOn: Binding(
@@ -190,8 +309,10 @@ private struct DisplaySettingsPage: View {
                         .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
                     SettingNote("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
                 }
+                .settingsAnchor("video")
                 displayModeRows
                 Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
+                    .settingsAnchor("surfaceGrid")
             }
             Section {
                 VStack(alignment: .leading, spacing: 4) {
@@ -201,6 +322,7 @@ private struct DisplaySettingsPage: View {
                         Text(note).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
+                .settingsAnchor("pictureInPicture")
                 if pictureInPicture.isShowingWindow {
                     Button("Stop Picture in Picture") { pictureInPicture.stop() }
                 } else if pictureInPicture.availability == .available {
@@ -234,6 +356,7 @@ private struct DisplaySettingsPage: View {
             .disabled(!receiver.connected
                       || receiver.macProtocolVersion < WireProtocol.displayModeWireVersion
                       || receiver.pendingDisplayMode != nil)
+            .settingsAnchor("displayMode")
             if let pendingMode = receiver.pendingDisplayMode {
                 LabeledContent("Switching to \(pendingMode.title)") {
                     ProgressView()
@@ -363,6 +486,7 @@ private struct DisplaySettingsPage: View {
                     Text(profile.label).tag(profile)
                 }
             }
+            .settingsAnchor("streamingProfile")
             Text(receiver.streamingProfile.explanation).font(.footnote).foregroundStyle(.secondary)
             if receiver.streamingProfile == .custom {
                 let frameRateBinding = Binding<CustomFrameRateSelection>(
@@ -403,6 +527,7 @@ private struct DisplaySettingsPage: View {
                             receiver.requestMaxFPS(preference)
                         }))
                         .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
+                        .settingsAnchor("maxFPS")
                     if current.enabled {
                         let tiers = MaxFPSPicker.tiers(reported: receiver.lastMaxFPSState?.availableTiers)
                         Picker("Maximum FPS", selection: Binding(
@@ -452,18 +577,25 @@ private struct InputSettingsPage: View {
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 // Never optimistic: this only ever reflects the Mac's last
                 // CONFIRMED decision (`ReceiverControlStore.sessionInputState`).
                 LabeledContent("Control", value: controlStore.sessionInputState.receiverDisplayText)
+                    .settingsAnchor("control")
                 switch controlStore.sessionInputState {
                 case .off, .notAllowed:
-                    Button("Request Control") { receiver.requestAllowInput(true) }
+                    Button("Request Control") {
+                        controlStore.noteInputTurnedOffByUser(false)
+                        receiver.requestAllowInput(true)
+                    }
                 case .requesting:
                     EmptyView()
                 case .allowed:
-                    Button("Turn Off", role: .destructive) { receiver.requestAllowInput(false) }
+                    Button("Turn Off", role: .destructive) {
+                        controlStore.noteInputTurnedOffByUser(true)
+                        receiver.requestAllowInput(false)
+                    }
                 case .requestsDisabled:
                     SettingNote("This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings.")
                 }
@@ -475,6 +607,7 @@ private struct InputSettingsPage: View {
                     ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .settingsAnchor("inputMode")
                 Text(controlStore.preferences.inputMode.explanation)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -504,11 +637,22 @@ private struct InputSettingsPage: View {
                     Text("Fast")
                 }
                 .font(.footnote)
+                .settingsAnchor("trackpadSensitivity")
             } footer: {
                 Text("Sensitivity only affects Trackpad mode's one-finger pointer movement.")
             }
             Section {
+                Toggle("Invert Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
+                    .settingsAnchor("scrollDirection")
+                Toggle("Invert Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
+            } header: {
+                Text("Scrolling")
+            } footer: {
+                Text("On, content moves with your fingers, like a Mac trackpad’s natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn’t affected.")
+            }
+            Section {
                 Toggle("Zoom While Typing", isOn: $zoomWhileTyping)
+                    .settingsAnchor("zoomWhileTyping")
             } header: {
                 Text("Keyboard")
             } footer: {
@@ -534,6 +678,7 @@ private struct InputSettingsPage: View {
                 SettingNote("Scroll with one finger in any direction. Hold a title bar, then drag, to move its window. Elsewhere, touch and hold for normal Direct Touch. Falls back to Direct Touch when the Mac can't identify the area.")
             }
         }
+        .settingsAnchor("smartTouch")
         if controlStore.preferences.smartTouchEnabled {
             Toggle(isOn: preferenceBinding(controlStore, \.smartTouchLongPressHapticEnabled)) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -546,6 +691,7 @@ private struct InputSettingsPage: View {
                 }
             }
             .disabled(!controlStore.preferences.hapticsEnabled)
+            .settingsAnchor("smartTouchHaptics")
         }
     }
 }
@@ -556,10 +702,12 @@ private struct GestureSettingsPage: View {
     @ObservedObject var controlStore: ReceiverControlStore
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 targetPicker("Pinch / Zoom", \.pinchTarget)
+                    .settingsAnchor("pinch")
                 targetPicker("Rotation", \.rotateTarget)
+                    .settingsAnchor("rotation")
                 Toggle("Snap Rotation", isOn: preferenceBinding(controlStore, \.snapRotation))
                     .disabled(controlStore.preferences.rotateTarget != .viewport)
                 if controlStore.preferences.pinchTarget == .app || controlStore.preferences.rotateTarget == .app {
@@ -574,21 +722,28 @@ private struct GestureSettingsPage: View {
             }
             Section {
                 Toggle("Prefer MeowDisplay Gestures", isOn: preferenceBinding(controlStore, \.preferMeowDisplayGestures))
+                    .settingsAnchor("preferGestures")
             } footer: {
                 Text("While you’re controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren’t taken by editing shortcuts. Some \(deviceKind) and accessibility gestures always stay with the system, and VoiceOver always takes precedence.")
             }
             Section {
-                if controlStore.isPad {
-                    LabeledContent("Move View", value: String(localized: "Drag to move, pinch to zoom"))
+                Toggle("Allow Local View Navigation", isOn: preferenceBinding(controlStore, \.allowLocalViewNavigation))
+                    .settingsAnchor("localViewNavigation")
+                if controlStore.preferences.allowLocalViewNavigation {
+                    if controlStore.isPad {
+                        LabeledContent("Move View", value: String(localized: "Drag to move, pinch to zoom"))
+                            .settingsAnchor("moveView")
+                    }
+                    LabeledContent("Reset View", value: String(localized: "Double-tap with two fingers"))
+                        .settingsAnchor("resetView")
                 }
-                LabeledContent("Reset View", value: String(localized: "Double-tap with two fingers"))
             } header: {
                 Text("Viewport")
             } footer: {
                 if controlStore.isPad {
-                    Text("Move View lets one finger move the picture — at any zoom, until an edge of your Mac reaches the middle of the screen — without scrolling or clicking on the Mac. Two-finger scrolling always goes to the Mac.")
+                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Move View lets one finger move the picture without clicking or scrolling on the Mac; two-finger scrolling always goes to the Mac.")
                 } else {
-                    Text("Pinch to zoom and move the picture, until an edge of your Mac reaches the middle of the screen. Two-finger scrolling always goes to the Mac.")
+                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Two-finger scrolling always goes to the Mac.")
                 }
             }
         }
@@ -618,30 +773,40 @@ private struct ControlSettingsPage: View {
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
     @State private var confirmingFunctionTrayReset = false
+    @State private var customEditorRequest: CustomLayoutEditorRequest?
+    @State private var deletingCustomLayout: CustomControlLayout?
 
     private var visibility: PadControlSettingsVisibility {
         PadControlSettingsVisibility(isPad: controlStore.isPad, layout: controlStore.preferences.padControlLayout)
     }
 
     var body: some View {
-        Form {
+        SettingsForm {
             if visibility.showsLayoutPicker {
                 padLayoutSection
             }
             if visibility.showsCustomLayouts {
-                CustomLayoutListSection(store: controlStore)
+                CustomLayoutListSection(store: controlStore, editorRequest: $customEditorRequest,
+                                        deleting: $deletingCustomLayout)
+                    .settingsAnchor("customLayouts")
+            }
+            if visibility.showsEdgePickers {
+                standardControlsSection
             }
             Section {
                 Toggle("Show Control Tray", isOn: preferenceBinding(controlStore, \.trayEnabled))
                     .disabled(!controlStore.preferences.allowInput)
+                    .settingsAnchor("showTray")
                 Toggle("Show Keyboard Button", isOn: preferenceBinding(controlStore, \.keyboardButtonEnabled))
                 Toggle("Collapse Control Tray", isOn: preferenceBinding(controlStore, \.trayCollapsed))
                 Toggle("Auto-hide Control Trays", isOn: preferenceBinding(controlStore, \.autoHideEnabled))
+                    .settingsAnchor("autoHide")
                 if visibility.showsPhoneTrayPlacement {
                     Picker("Landscape Tray Side", selection: preferenceBinding(controlStore, \.preferredLandscapeSide)) {
                         ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    .settingsAnchor("trayPlacement")
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("Avoid Notch", isOn: preferenceBinding(controlStore, \.avoidNotch))
                         SettingNote("Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape.")
@@ -664,6 +829,7 @@ private struct ControlSettingsPage: View {
                     })) {
                     ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
                 }
+                .settingsAnchor("controlProfile")
                 NavigationLink("Edit Current Profile") {
                     ControlProfileEditor(store: controlStore, haptics: haptics)
                 }
@@ -678,6 +844,7 @@ private struct ControlSettingsPage: View {
             Section {
                 Toggle("Show Function Tray", isOn: preferenceBinding(controlStore, \.functionTrayEnabled))
                     .disabled(!controlStore.preferences.allowInput)
+                    .settingsAnchor("functionTray")
                 if visibility.showsPhoneTrayPlacement {
                     Picker("Function Tray Position", selection: preferenceBinding(controlStore, \.functionTrayPosition)) {
                         ForEach(FunctionTrayPosition.allCases) { Text($0.title).tag($0) }
@@ -693,7 +860,7 @@ private struct ControlSettingsPage: View {
                     ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
                 }
                 NavigationLink("Edit Function Tray") {
-                    FunctionTrayProfileEditor(store: controlStore)
+                    FunctionTrayEditor(store: controlStore, slot: controlStore.preferences.activeFunctionTrayProfile)
                 }
                 Button("Reset Function Tray to Default", role: .destructive) {
                     confirmingFunctionTrayReset = true
@@ -709,6 +876,8 @@ private struct ControlSettingsPage: View {
             }
         }
         .navigationTitle(MobileSettingsCategory.controls.title)
+        .modifier(CustomLayoutPresentations(store: controlStore, editorRequest: $customEditorRequest,
+                                            deleting: $deletingCustomLayout))
         .confirmationDialog("Reset \(controlStore.preferences.activeControlProfile.title)?",
                             isPresented: $confirmingReset, titleVisibility: .visible) {
             Button("Reset Profile", role: .destructive) {
@@ -729,6 +898,24 @@ private struct ControlSettingsPage: View {
         }
     }
 
+    /// Which standard controls the Strip/Overlay rail shows — one model
+    /// (`PadStandardControlVisibility`) for all of them. Settings is always
+    /// there; modifiers come from the Control Profile.
+    private var standardControlsSection: some View {
+        Section {
+            ForEach(PadStandardControl.allCases) { control in
+                Toggle(control.title, isOn: Binding(
+                    get: { controlStore.preferences.padStandardControls.isVisible(control) },
+                    set: { visible in controlStore.update { $0.padStandardControls.setVisible(visible, control) } }))
+            }
+        } header: {
+            Text("Standard Controls")
+        } footer: {
+            Text("Shown on the Strip and Overlay rail, grouped as system actions, then keys, then view controls. Settings always stays on the rail. Move View also needs Allow Local View Navigation.")
+        }
+        .settingsAnchor("standardControls")
+    }
+
     /// iPad only (see `PadControlSettingsVisibility`).
     @ViewBuilder
     private var padLayoutSection: some View {
@@ -747,17 +934,25 @@ private struct ControlSettingsPage: View {
                 ForEach(PadControlLayoutMode.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+            .settingsAnchor("controlLayout")
             if visibility.showsEdgePickers {
                 Picker("Main Controls", selection: preferenceBinding(controlStore, \.padMainEdge)) {
                     ForEach(ControlEdge.allCases) { Text($0.title).tag($0) }
                 }
+                .settingsAnchor("controlEdges")
                 Picker("Function Controls", selection: preferenceBinding(controlStore, \.padFunctionEdge)) {
                     ForEach(ControlEdge.allCases) { Text($0.title).tag($0) }
                 }
-                Toggle("Show Move View Control", isOn: preferenceBinding(controlStore, \.padShowMoveViewControl))
+            }
+            if visibility.showsEdgePickers {
+                Picker("Palette Style", selection: preferenceBinding(controlStore, \.padOverlayPaletteStyle)) {
+                    ForEach(PadPaletteStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .settingsAnchor("paletteStyle")
             }
             if visibility.showsControlHints {
                 Toggle("Show Control Hints", isOn: preferenceBinding(controlStore, \.padShowControlHints))
+                    .settingsAnchor("controlHints")
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -783,6 +978,7 @@ private struct ControlSettingsPage: View {
                     Image(systemName: "circle.fill").font(.system(size: 16)).accessibilityHidden(true)
                 }
             }
+            .settingsAnchor("controlSize")
         } header: {
             Text("Control Layout")
         } footer: {
@@ -805,7 +1001,7 @@ private struct AudioSettingsPage: View {
     @ObservedObject var controlStore: ReceiverControlStore
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Audio", isOn: Binding(
@@ -815,6 +1011,7 @@ private struct AudioSettingsPage: View {
                             receiver.requestAudioEnabled(value)
                         }))
                         .disabled(!receiver.connected || !receiver.macSupportsAudio)
+                        .settingsAnchor("audio")
                     SettingNote("Plays a copy of what the Mac is playing. It keeps playing there too — this never changes the Mac's output device.")
                 }
             }
@@ -867,10 +1064,11 @@ private struct ConnectionSettingsPage: View {
     @ObservedObject var receiver: StreamReceiver
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section("Status") {
                 LabeledContent("Connection",
                                value: receiver.connected ? receiver.status : receiver.canonicalPhaseTitle)
+                                   .settingsAnchor("connectionStatus")
                 if receiver.videoSize != .zero {
                     LabeledContent("Stream",
                                    value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
@@ -906,13 +1104,14 @@ private struct PairedMacsSettingsPage: View {
     @State private var forgetConfirmation = PeerForgetPrompt()
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 let peers = TrustStore.shared.pinnedPeers()
                 if peers.isEmpty {
                     Text("No paired Macs").foregroundStyle(.secondary)
                 } else {
                     AutomaticallyAllowConnectionsToggle()
+                        .settingsAnchor("pairedMacs")
                     ForEach(peers, id: \.peerID) { peer in
                         HStack {
                             Text(peer.displayName)
@@ -924,10 +1123,11 @@ private struct PairedMacsSettingsPage: View {
                         }
                         IncomingSessionPolicyPicker(peerID: peer.peerID, receiver: receiver)
                             .font(.subheadline)
+                        RequestInputAutomaticallyToggle(peerID: peer.peerID)
                     }
                 }
             } footer: {
-                Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired.")
+                Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired. Request Input Automatically lets a touch on the Mac’s screen ask that Mac for control without tapping Request Input first — the Mac still decides.")
             }
             .id(trustRefresh)
         }
@@ -949,6 +1149,24 @@ private struct PairedMacsSettingsPage: View {
     }
 }
 
+/// Per-Mac opt-in for sending the input request from a blocked touch. Kept
+/// separate from the connection policy on purpose.
+private struct RequestInputAutomaticallyToggle: View {
+    let peerID: String
+    @State private var enabled = false
+
+    var body: some View {
+        Toggle("Request Input Automatically", isOn: Binding(
+            get: { enabled },
+            set: { value in
+                enabled = value
+                InputAutoRequestStore.setEnabled(value, peerID: peerID)
+            }))
+        .font(.subheadline)
+        .onAppear { enabled = InputAutoRequestStore.isEnabled(peerID: peerID) }
+    }
+}
+
 // MARK: - Remote Access
 
 private struct RemoteAccessSettingsPage: View {
@@ -956,7 +1174,7 @@ private struct RemoteAccessSettingsPage: View {
 
     var body: some View {
         if TrustStore.shared.pinnedPeers().isEmpty {
-            Form {
+            SettingsForm {
                 Section {
                     Text("Pair with a Mac first, then set up Remote Access for it here.")
                         .foregroundStyle(.secondary)
@@ -973,13 +1191,14 @@ private struct RemoteAccessSettingsPage: View {
 
 private struct PermissionsSettingsPage: View {
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 Button("Open iOS Settings for MeowDisplay") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
                 }
+                .settingsAnchor("localNetwork")
             } footer: {
                 Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it.")
             }
@@ -995,7 +1214,7 @@ private struct DiagnosticsSettingsPage: View {
     @AppStorage("metalRenderer") private var metalRenderer = false
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 NavigationLink {
                     DiagnosticsLogView()
@@ -1007,7 +1226,9 @@ private struct DiagnosticsSettingsPage: View {
             }
             Section {
                 Toggle("Performance overlay", isOn: $showAnalytics)
+                    .settingsAnchor("performanceOverlay")
                 Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
+                    .settingsAnchor("metalRenderer")
             } header: {
                 Text("Analytics")
             } footer: {
@@ -1037,9 +1258,10 @@ private struct AboutSettingsPage: View {
     }
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 LabeledContent("Version", value: version)
+                    .settingsAnchor("version")
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance
                     // before unlock.
@@ -1108,9 +1330,10 @@ private struct DeveloperSettingsPage: View {
     @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
 
     var body: some View {
-        Form {
+        SettingsForm {
             Section {
                 Toggle("Notch Debug Overlay", isOn: $notchDebugOverlayEnabled)
+                    .settingsAnchor("notchDebug")
             } footer: {
                 Text("Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
             }
@@ -1123,6 +1346,7 @@ private struct DeveloperSettingsPage: View {
                 .onChange(of: audioPlaybackPath) { path in
                     Log.info("audioTrace: playbackPath=\(path)")
                 }
+                .settingsAnchor("audioDiagnostics")
                 Picker("PCM Scheduling", selection: $audioPCMSchedulingMode) {
                     Text("Continuous").tag("continuous")
                     Text("Precise Scheduled").tag("preciseScheduled")

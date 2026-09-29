@@ -34,6 +34,24 @@ final class ReceiverControlStore: ObservableObject {
     @Published private(set) var moveViewActive = false
     /// Bumped to ask the receiver surface to reset its local viewport.
     @Published private(set) var viewportResetGeneration = 0
+    /// The modifiers the on-screen chord currently holds down on the Mac —
+    /// a read-only projection of the overlay's `ControlInteractionState`,
+    /// so the software keyboard can type ⌘C after ⌘ is latched. Never a
+    /// second modifier state.
+    @Published private(set) var activeChordModifiers: Set<ControlModifier> = []
+    /// Whether the user turned input off themselves (Settings → Input →
+    /// Turn Off), so the on-surface prompt offers Enable rather than
+    /// Request. Transient.
+    @Published private(set) var userTurnedOffInput = false
+
+    func projectChord(_ modifiers: Set<ControlModifier>) {
+        guard modifiers != activeChordModifiers else { return }
+        activeChordModifiers = modifiers
+    }
+
+    func noteInputTurnedOffByUser(_ turnedOff: Bool) {
+        userTurnedOffInput = turnedOff
+    }
 
     init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository(),
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
@@ -273,20 +291,6 @@ final class SmartTouchHaptics {
     }
 }
 
-/// The live rendered-display footprint, published by the receiver surface
-/// (`VideoView`) on every layout pass that changes it. Kept out of every
-/// other observed object on purpose: during a pinch it changes per frame,
-/// and only the small control-backdrop layer observes it.
-@MainActor
-final class DisplayFootprintStore: ObservableObject {
-    @Published private(set) var footprint = DisplayFootprint.none
-
-    func update(_ footprint: DisplayFootprint) {
-        guard footprint != self.footprint else { return }
-        self.footprint = footprint
-    }
-}
-
 private struct ControlFramePreference: PreferenceKey {
     static let defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
@@ -311,13 +315,16 @@ struct ReceiverControlOverlay: View {
     let reservedRegions: [ControlReservedRegion]
     let haptics: ReceiverHaptics
     let onOccupiedFramesChange: ([CGRect]) -> Void
-    /// iPad only: the rendered-display footprint, for control halos.
-    var footprintStore: DisplayFootprintStore?
     /// iPad only: where the Mac canvas goes (the Strip reserves rails).
     var onCanvasChange: (CGRect) -> Void = { _ in }
+    /// Where the receiver surface starts in this overlay's coordinates —
+    /// `keyboardVisibleRect` is in the surface's own.
+    var surfaceOrigin: CGPoint = .zero
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
+    /// The Wheel palette on screen, for hit-testing its wedges.
+    @State private var wheelHit: WheelHitTarget?
     /// The modifier whose placement a Custom-layout palette blooms around.
     @State private var paletteAnchor: ControlModifier?
     @State private var frames: [String: CGRect] = [:]
@@ -397,17 +404,27 @@ struct ReceiverControlOverlay: View {
     /// presentation. Custom layouts place items themselves, independent of
     /// the profile's tray visibility.
     private var interactiveTrayItems: [ControlTrayItem] {
+        if presentation == .keyboardBar { return keyboardBarTrayItems }
         guard store.isPad, store.effectivePadLayout == .custom else { return controls }
         guard store.preferences.trayCanBeShown, !store.preferences.trayCollapsed else { return [.settings] }
         return ControlTrayItem.allCases.filter(capabilityAllows)
     }
 
+    private var presentation: ReceiverControlPresentation {
+        ReceiverControlPresentation.mode(softwareKeyboardVisible: keyboardVisibleRect != nil)
+    }
+
     var body: some View {
         Group {
-            if store.isPad {
-                padBody
-            } else {
-                phoneBody
+            switch presentation {
+            case .keyboardBar:
+                keyboardBarBody
+            case .normal:
+                if store.isPad {
+                    padBody
+                } else {
+                    phoneBody
+                }
             }
         }
         .onAppear {
@@ -473,6 +490,9 @@ struct ReceiverControlOverlay: View {
             store.resetAutoHide()
         }
         .onChange(of: store.preferences.activeCustomLayoutID) { _ in apply(interaction.resetAll()) }
+        .onChange(of: interaction.activeChord) { store.projectChord($0.modifiers) }
+        .onDisappear { store.projectChord([]) }
+        .onPreferenceChange(WheelHitPreference.self) { wheelHit = $0 }
     }
 
     @ViewBuilder
@@ -817,15 +837,7 @@ struct ReceiverControlOverlay: View {
     }
 
     private func functionButton(_ item: ShortcutItem) -> some View {
-        Group {
-            if let systemImage = item.systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17, weight: .semibold))
-            } else {
-                Text(item.displayKey)
-                    .font(.system(size: 15, weight: .semibold))
-            }
-        }
+        ShortcutButtonFaceView(face: item.face, diameter: Metrics.trayItem)
         .foregroundStyle(.white)
         .frame(width: Metrics.trayItem, height: Metrics.trayItem)
         .background(chip(selected: false))
@@ -835,14 +847,7 @@ struct ReceiverControlOverlay: View {
     }
 
     private func performFunctionAction(_ item: ShortcutItem) {
-        switch item.action {
-        case .keyboardShortcut(let shortcut):
-            receiver.sendKeyboardPress(usage: shortcut.usage,
-                                       modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
-        case .receiverGesture(let name):
-            guard ReceiverGesture(rawValue: name) != nil else { return }
-            receiver.sendGesture(name: name)
-        }
+        OneTapActionRunner.run(item.action, receiver: receiver, inputAllowed: { store.preferences.allowInput })
         haptics.play(.confirmation)
         store.scheduleAutoHide()
     }
@@ -906,11 +911,7 @@ struct ReceiverControlOverlay: View {
     private func shortcutButton(_ action: ShortcutItem, portrait: Bool,
                                 diameter: CGFloat = Metrics.paletteKey) -> some View {
         let selected = interaction.selectedActionID == action.id
-        let fontScale = diameter / Metrics.paletteKey
-        return Text(action.displayKey)
-        .font(.system(size: (action.displayKey.count > 2 ? 11 : 15) * fontScale, weight: .semibold))
-        .minimumScaleFactor(0.7)
-        .lineLimit(1)
+        return ShortcutButtonFaceView(face: action.face, diameter: diameter)
         .foregroundStyle(selected ? Color.black : Color.white)
         .frame(width: diameter, height: diameter)
         .background(frameReader("action:\(action.id)"))
@@ -1040,9 +1041,12 @@ struct ReceiverControlOverlay: View {
     }
 
     private func action(at point: CGPoint) -> ShortcutItem? {
-        profile.actions(for: interaction.activeChord).first {
-            frames["action:\($0.id)"]?.contains(point) == true
+        let actions = profile.actions(for: interaction.activeChord)
+        if let wheelHit, wheelHit.actionIDs == actions.map(\.id),
+           let index = wheelHit.layout.segmentIndex(at: point) {
+            return actions[index]
         }
+        return actions.first { frames["action:\($0.id)"]?.contains(point) == true }
     }
 
     private func selectedAction(in actions: [ShortcutItem]) -> ShortcutItem? {
@@ -1052,10 +1056,8 @@ struct ReceiverControlOverlay: View {
     /// The highlighted shortcut, but only if the finger actually lifted on it
     /// — sliding off a key must cancel it, not fire it.
     private func selectedAction(under point: CGPoint) -> ShortcutItem? {
-        profile.actions(for: interaction.activeChord).first {
-            $0.id == interaction.selectedActionID
-                && frames["action:\($0.id)"]?.contains(point) == true
-        }
+        guard let under = action(at: point), under.id == interaction.selectedActionID else { return nil }
+        return under
     }
 
     private func perform(_ item: ControlTrayItem) {
@@ -1088,12 +1090,152 @@ struct ReceiverControlOverlay: View {
             case .modifierDown(let modifier): receiver.sendModifier(modifier, down: true)
             case .modifierUp(let modifier): receiver.sendModifier(modifier, down: false)
             case .execute(let item):
-                if case .keyboardShortcut(let shortcut) = item.action {
+                if case .keyboardShortcut(let shortcut) = item.action, shortcut.additionalUsages.isEmpty {
                     receiver.sendKeyboardPress(usage: shortcut.usage,
                                                modifiers: shortcut.modifiers.modifiers.map(\.rawValue))
+                } else {
+                    // User-made palette actions: chords, sequences, system
+                    // actions — the same runner as one-tap buttons.
+                    OneTapActionRunner.run(item.action, receiver: receiver,
+                                           inputAllowed: { store.preferences.allowInput })
                 }
             case .haptic(let event): haptics.play(event)
             }
+        }
+    }
+}
+
+// MARK: - Keyboard accessory bar
+
+extension ReceiverControlOverlay {
+    /// The tray items the bar's gesture can start on — see `KeyboardBarItem`.
+    fileprivate var keyboardBarTrayItems: [ControlTrayItem] {
+        keyboardBarItems.map { item in
+            switch item {
+            case .modifier(let modifier): return ControlTrayItem.item(for: modifier)
+            case .escape: return .escape
+            case .tab: return .tab
+            case .dismissKeyboard: return .keyboard
+            }
+        }
+    }
+
+    private var keyboardBarItems: [KeyboardBarItem] {
+        KeyboardBarItem.defaultItems.filter { item in
+            if case .modifier = item { return capabilityAllows(.command) }
+            return true
+        }
+    }
+
+    /// While the software keyboard is up, a flat bar right above it holds
+    /// only keyboard companions — modifiers, Escape, Tab, and a dismiss
+    /// key — instead of the whole receiver UI squeezed into what's left.
+    /// Modifiers here are the same chord as everywhere else: latch ⌘, type
+    /// C, and the Mac gets ⌘C. The normal controls return, unchanged, when
+    /// the keyboard closes.
+    @ViewBuilder
+    var keyboardBarBody: some View {
+        let keyboardTop = (keyboardVisibleRect?.maxY ?? containerSize.height) + surfaceOrigin.y
+        let items = keyboardBarItems
+        let item: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
+        let gap: CGFloat = 8
+        let padding: CGFloat = 6
+        let barWidth = CGFloat(items.count) * item + CGFloat(items.count - 1) * gap + padding * 2
+        let bar = CGRect(x: containerSize.width / 2 - barWidth / 2, y: keyboardTop - 8 - item - padding * 2,
+                         width: barWidth, height: item + padding * 2)
+        let cells = items.indices.map { index in
+            CGRect(x: bar.minX + padding + CGFloat(index) * (item + gap), y: bar.minY + padding, width: item, height: item)
+        }
+        let paletteChord = interaction.paletteChord
+        let actions = paletteChord.map(profile.actions(for:)) ?? []
+        let key = item * 0.92
+        let perRow = max(1, Int((containerSize.width - 32 + gap) / (key + gap)))
+        let rows = Int(ceil(Double(max(actions.count, 1)) / Double(perRow)))
+        let columns = min(max(actions.count, 1), perRow)
+        let paletteSize = CGSize(width: CGFloat(columns) * key + CGFloat(columns - 1) * gap + padding * 2,
+                                 height: CGFloat(rows) * key + CGFloat(rows - 1) * gap + padding * 2)
+        let paletteFrame = CGRect(x: containerSize.width / 2 - paletteSize.width / 2,
+                                  y: bar.minY - 10 - paletteSize.height,
+                                  width: paletteSize.width, height: paletteSize.height)
+        let keys: [(action: ShortcutItem, frame: CGRect)] = actions.enumerated().map { index, action in
+            let row = index / perRow
+            let column = index % perRow
+            return (action, CGRect(x: paletteFrame.minX + padding + CGFloat(column) * (key + gap),
+                                   y: paletteFrame.minY + padding + CGFloat(row) * (key + gap), width: key, height: key))
+        }
+        ZStack(alignment: .topLeading) {
+            ControlTray()
+                .frame(width: bar.width, height: bar.height)
+                .position(x: bar.midX, y: bar.midY)
+                .allowsHitTesting(false)
+            ForEach(Array(zip(items, cells)), id: \.0) { entry, cell in
+                keyboardBarKey(entry, frame: cell)
+            }
+            if let paletteChord {
+                if actions.isEmpty {
+                    emptyPaletteLabel(paletteChord)
+                        .position(x: paletteFrame.midX, y: paletteFrame.maxY - 18)
+                } else {
+                    ControlTray()
+                        .frame(width: paletteFrame.width, height: paletteFrame.height)
+                        .position(x: paletteFrame.midX, y: paletteFrame.midY)
+                        .allowsHitTesting(false)
+                    ForEach(keys, id: \.action.id) { key in
+                        shortcutButton(key.action, portrait: true, diameter: key.frame.width)
+                            .position(x: key.frame.midX, y: key.frame.midY)
+                    }
+                }
+            }
+            if let selected = selectedAction(in: actions) {
+                shortcutHUD(selected)
+                    .position(x: containerSize.width / 2, y: max(safeInsets.top + 30, paletteFrame.minY - 26))
+            }
+            Color.clear
+                .frame(width: containerSize.width, height: containerSize.height)
+                .contentShape(ControlRegionShape(rects: [bar] + (paletteChord == nil ? [] : [paletteFrame])))
+                .gesture(controlGesture())
+        }
+        .coordinateSpace(name: "receiverControls")
+        .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
+        .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
+        .onAppear { onOccupiedFramesChange([bar]) }
+    }
+
+    @ViewBuilder
+    private func keyboardBarKey(_ entry: KeyboardBarItem, frame: CGRect) -> some View {
+        switch entry {
+        case .modifier(let modifier):
+            let selected = interaction.latchedModifiers.contains(modifier)
+                || interaction.temporaryModifiers.contains(modifier)
+                || interaction.phase == .pressed(modifier)
+            Text(modifier.symbol)
+                .font(.system(size: frame.width * 0.46, weight: .semibold))
+                .foregroundStyle(selected ? Color.black : Color.white)
+                .frame(width: frame.width, height: frame.height)
+                .background(frameReader("modifier:\(modifier.rawValue)"))
+                .background(PadChip(selected: selected, onRail: true))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityLabel(modifier.title)
+                .accessibilityValue(selected ? "On" : "Off")
+        case .escape, .tab:
+            let item: ControlTrayItem = entry == .escape ? .escape : .tab
+            Text(item.displayLabel)
+                .font(.system(size: frame.width * 0.3, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: frame.width, height: frame.height)
+                .background(frameReader("tray:\(item.rawValue)"))
+                .background(PadChip(selected: false, onRail: true))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityLabel(item.title)
+        case .dismissKeyboard:
+            Image(systemName: "keyboard.chevron.compact.down")
+                .font(.system(size: frame.width * 0.38, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: frame.width, height: frame.height)
+                .background(frameReader("tray:\(ControlTrayItem.keyboard.rawValue)"))
+                .background(PadChip(selected: false, onRail: true))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityLabel(Text("Hide Keyboard"))
         }
     }
 }
@@ -1114,9 +1256,12 @@ extension ReceiverControlOverlay {
     private var padMetricsScale: Double { store.preferences.padControlScale }
     private var padCollapsed: Bool { store.preferences.trayCollapsed || !store.preferences.trayCanBeShown }
 
-    /// Move View only matters while the picture is live.
+    /// Move View needs live video and Local View Navigation — the button
+    /// never bypasses that policy.
     private var padShowsMoveView: Bool {
-        !padCollapsed && receiver.videoEnabled
+        !padCollapsed && LocalViewNavigationPolicy.showsMoveView(
+            controlVisible: true, localNavigationAllowed: store.preferences.allowLocalViewNavigation,
+            videoEnabled: receiver.videoEnabled)
     }
 
     @ViewBuilder
@@ -1148,40 +1293,36 @@ extension ReceiverControlOverlay {
         let strip = mode == .strip
         let hints = strip && store.preferences.padShowControlHints
         let metrics = PadControlMetrics(scale: padMetricsScale, showsHints: hints)
-        let mainKinds = padMainKinds
+        let mainGroups = padCollapsed ? [] : padMainGroups
+        let mainKinds = mainGroups.flatMap { $0 }
         let groups = functionGroups
         let mainEdge = store.preferences.padMainEdge
         let functionEdge = store.preferences.padFunctionEdge
-        let firstPass = PadEdgeGeometry.layout(
-            container: container, safeInsets: safeInsets, reservesStrips: strip,
-            mainEdge: mainEdge, functionEdge: functionEdge,
-            mainCount: padCollapsed ? 0 : mainKinds.count,
-            functionGroupCounts: groups.map(\.count), metrics: metrics)
+        let pass: (CGFloat?) -> PadEdgeLayout = { keyboardTop in
+            PadEdgeGeometry.layout(container: container, safeInsets: safeInsets, reservesStrips: strip,
+                                   mainEdge: mainEdge, functionEdge: functionEdge,
+                                   mainGroupCounts: mainGroups.map(\.count),
+                                   mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
+                                   functionGroupCounts: groups.map(\.count), metrics: metrics,
+                                   keyboardTop: keyboardTop)
+        }
+        let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
-        let layout = keyboardTop == nil ? firstPass : PadEdgeGeometry.layout(
-            container: container, safeInsets: safeInsets, reservesStrips: strip,
-            mainEdge: mainEdge, functionEdge: functionEdge,
-            mainCount: padCollapsed ? 0 : mainKinds.count,
-            functionGroupCounts: groups.map(\.count), metrics: metrics, keyboardTop: keyboardTop)
+        let layout = keyboardTop == nil ? firstPass : pass(keyboardTop)
         // Collapsed (or the tray can't show): only the gear, floating at the
         // Main edge, never a rail.
         let gearFrame: CGRect? = padCollapsed ? PadEdgeGeometry.layout(
             container: container, safeInsets: safeInsets, reservesStrips: false,
-            mainEdge: mainEdge, functionEdge: functionEdge, mainCount: 1, functionGroupCounts: [],
+            mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1], mainGroupAlignments: [.end],
+            functionGroupCounts: [],
             metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop).mainFrame : nil
-        let mainControls: [PadPlacedControl] = layout.mainFrame.map { frame in
-            let cells = PadEdgeGeometry.cellFrames(in: frame, count: mainKinds.count, edge: mainEdge, metrics: metrics)
-            return zip(mainKinds, cells).map { kind, cell in
-                PadPlacedControl(id: padID(kind), kind: kind,
-                                 frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
-            }
-        } ?? []
-        let functionControls: [(item: ShortcutItem, frame: CGRect, cell: CGRect)] =
-            zip(groups, layout.functionFrames).flatMap { group, frame in
-                zip(group, PadEdgeGeometry.cellFrames(in: frame, count: group.count, edge: functionEdge,
-                                                     metrics: metrics)).map { item, cell in
-                    (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell)
-                }
+        let mainControls: [PadPlacedControl] = zip(mainKinds, layout.mainCells).map { kind, cell in
+            PadPlacedControl(id: padID(kind), kind: kind,
+                             frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
+        }
+        let functionControls: [(item: ShortcutItem, frame: CGRect)] =
+            zip(groups.flatMap { $0 }, layout.functionCells).map { item, cell in
+                (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics))
             }
         let autoHiding = store.autoHidden
         let paletteChord = interaction.paletteChord
@@ -1189,16 +1330,24 @@ extension ReceiverControlOverlay {
         let keySize = hints
             ? CGSize(width: 132 * metrics.scale, height: 36 * metrics.scale)
             : CGSize(width: metrics.item * 0.92, height: metrics.item * 0.92)
-        let paletteBounds = layout.canvas.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin)
+        let paletteBounds = Self.boundsAboveKeyboard(
+            layout.canvas.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
+            keyboardTop: keyboardTop)
+        let wheel: WheelPaletteLayout? = store.preferences.padOverlayPaletteStyle == .wheel && !actions.isEmpty
+            ? padWheelAnchor(mainControls: mainControls, gearFrame: gearFrame).flatMap {
+                WheelPaletteGeometry.layout(count: actions.count, anchor: $0, keyDiameter: metrics.item * 0.92,
+                                            spacing: metrics.gap, bounds: paletteBounds)
+            } : nil
         let grid = PadEdgeGeometry.paletteGrid(count: actions.count, key: keySize, gap: metrics.gap,
                                                edge: mainEdge, available: paletteBounds.size)
+        let paletteAnchor = PadEdgeGeometry.paletteAnchor(for: layout, mainEdge: mainEdge, functionEdge: functionEdge)
         let paletteFrame: CGRect? = paletteChord.flatMap { _ in
-            (layout.mainFrame ?? gearFrame).map {
+            (paletteAnchor ?? gearFrame).map {
                 PadEdgeGeometry.paletteFrame(size: actions.isEmpty ? CGSize(width: 220, height: 36) : grid.size,
                                              anchor: $0, edge: mainEdge, bounds: paletteBounds, gap: metrics.gap * 2)
             }
         }
-        let paletteKeys: [(action: ShortcutItem, frame: CGRect)] = paletteFrame.map { frame in
+        let paletteKeys: [(action: ShortcutItem, frame: CGRect)] = wheel != nil ? [] : paletteFrame.map { frame in
             actions.enumerated().map { index, action in
                 // Column-major along a vertical edge, row-major along a
                 // horizontal one — so keys read outward from the rail.
@@ -1209,7 +1358,12 @@ extension ReceiverControlOverlay {
                 return (action, CGRect(origin: origin, size: keySize))
             }
         } ?? []
-        let occupied = [layout.mainFrame, gearFrame, paletteFrame].compactMap { $0 } + layout.functionFrames
+        // Overlay groups sit in compact floating trays; the Strip's solid
+        // rail already holds its controls.
+        let trays: [CGRect] = strip ? [] : (layout.mainSegments + layout.functionSegments)
+            .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
+        let occupied = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
+            + [gearFrame, paletteFrame].compactMap { $0 }
 
         ZStack(alignment: .topLeading) {
             ForEach(Array(layout.strips.enumerated()), id: \.offset) { _, strip in
@@ -1217,13 +1371,10 @@ extension ReceiverControlOverlay {
                     .frame(width: strip.frame.width, height: strip.frame.height)
                     .position(x: strip.frame.midX, y: strip.frame.midY)
             }
-            // Halos: only floating controls and palette keys over the Mac.
-            if let footprintStore {
-                ControlBackdropLayer(store: footprintStore,
-                                     circles: (strip ? [] : mainControls.map(\.frame) + functionControls.map(\.frame)
-                                                + (gearFrame.map { [$0] } ?? []))
-                                        + paletteKeys.map(\.frame),
-                                     capsules: hints)
+            ForEach(Array(trays.enumerated()), id: \.offset) { _, tray in
+                ControlTray()
+                    .frame(width: tray.width, height: tray.height)
+                    .position(x: tray.midX, y: tray.midY)
                     .opacity(autoHiding ? 0 : 1)
                     .allowsHitTesting(false)
             }
@@ -1231,33 +1382,54 @@ extension ReceiverControlOverlay {
                 padControlChip(.tray(.settings), frame: gearFrame, onRail: false, hint: nil)
             }
             ForEach(mainControls) { control in
-                padControlChip(control.kind, frame: control.frame, onRail: strip,
-                               hint: hints ? padHint(control.kind) : nil)
-                    .opacity(autoHiding ? 0 : 1)
-                    .allowsHitTesting(!autoHiding)
+                Group {
+                    if case .function(let id) = control.kind, let item = functionItem(id) {
+                        padFunctionChip(item, frame: control.frame, onRail: true,
+                                        hint: hints ? item.title.lowercased() : nil)
+                    } else {
+                        padControlChip(control.kind, frame: control.frame, onRail: true,
+                                       hint: hints ? padHint(control.kind) : nil)
+                    }
+                }
+                .opacity(autoHiding ? 0 : 1)
+                .allowsHitTesting(!autoHiding)
             }
             ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
-                padFunctionChip(control.item, frame: control.frame, onRail: strip,
+                padFunctionChip(control.item, frame: control.frame, onRail: true,
                                 hint: hints ? control.item.title.lowercased() : nil)
                     .opacity(autoHiding ? 0 : 1)
                     .allowsHitTesting(!autoHiding)
             }
-            if let paletteChord, let paletteFrame {
+            if let paletteChord, let wheel {
+                WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
+                                 centerLabel: paletteChord.symbols)
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
+            } else if let paletteChord, let paletteFrame {
+                if !actions.isEmpty {
+                    ControlTray()
+                        .frame(width: paletteFrame.width + Self.trayPadding * 2,
+                               height: paletteFrame.height + Self.trayPadding * 2)
+                        .position(x: paletteFrame.midX, y: paletteFrame.midY)
+                        .allowsHitTesting(false)
+                }
                 padPalette(actions: actions, keys: paletteKeys, frame: paletteFrame, chord: paletteChord,
                            pills: hints)
             }
-            if let selected = selectedAction(in: actions), let paletteFrame {
+            if let selected = selectedAction(in: actions), let hudAnchor = wheel?.frame ?? paletteFrame {
                 shortcutHUD(selected)
-                    .position(x: paletteFrame.midX,
-                              y: max(safeInsets.top + 30, paletteFrame.minY - 28))
+                    .position(x: hudAnchor.midX,
+                              y: max(safeInsets.top + 30, hudAnchor.minY - 28))
                     .transition(.opacity.combined(with: .scale))
             }
+            // One-tap Function actions (Show Desktop, Control Center) sit
+            // outside this region and take their own taps.
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(
-                    rects: (autoHiding ? [] : mainControls.map { $0.frame.insetBy(dx: -4, dy: -4) })
+                    rects: (autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
+                                .map { $0.frame.insetBy(dx: -4, dy: -4) })
                         + (gearFrame.map { [$0.insetBy(dx: -4, dy: -4)] } ?? [])
-                        + (paletteFrame.map { [$0] } ?? [])))
+                        + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? paletteFrame.map { [$0] } ?? [])))
                 .gesture(controlGesture())
         }
         .onAppear {
@@ -1268,15 +1440,38 @@ extension ReceiverControlOverlay {
         .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
-    /// Main controls for Strip/Overlay: the profile's visible tray items,
-    /// with Move View before the Settings gear.
-    private var padMainKinds: [CustomControlKind] {
-        var kinds = controls.map(CustomControlKind.tray)
-        if padShowsMoveView, store.preferences.padShowMoveViewControl {
-            let index = kinds.firstIndex(of: .tray(.settings)) ?? kinds.endIndex
-            kinds.insert(.moveView, at: index)
-        }
-        return kinds
+    static let trayPadding: CGFloat = 6
+
+    /// Chord palettes and previews stay above the software keyboard.
+    static func boundsAboveKeyboard(_ bounds: CGRect, keyboardTop: CGFloat?) -> CGRect {
+        guard let keyboardTop, keyboardTop.isFinite, keyboardTop < bounds.maxY else { return bounds }
+        let limit = keyboardTop - PadControlMetrics.edgeMargin
+        return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(0, limit - bounds.minY))
+    }
+
+    /// The Wheel opens around the modifier that opened it.
+    private func padWheelAnchor(mainControls: [PadPlacedControl], gearFrame: CGRect?) -> CGRect? {
+        let modifier = paletteAnchor.flatMap { anchor in interaction.activeChord.contains(anchor) ? anchor : nil }
+            ?? ControlModifier.allCases.first(where: interaction.activeChord.contains)
+        return mainControls.first { $0.kind.modifier == modifier && modifier != nil }?.frame
+            ?? mainControls.first { $0.kind.modifier != nil }?.frame ?? gearFrame
+    }
+
+    /// The Strip/Overlay Main rail — see `PadRailComposition`: system
+    /// actions, then modifiers and keys, then Move View and Settings.
+    private var padMainGroups: [[CustomControlKind]] {
+        let modifiers = profile.visibleTrayItems.compactMap(\.modifier)
+            .filter { _ in capabilityAllows(.command) }
+        return PadRailComposition.mainGroups(
+            visibility: store.preferences.padStandardControls,
+            availability: .init(modifiers: modifiers,
+                                keyboardAvailable: capabilityAllows(.keyboard),
+                                moveViewAvailable: padShowsMoveView))
+    }
+
+    /// Any Function Tray item by id, visible in the tray or not.
+    private func functionItem(_ id: String) -> ShortcutItem? {
+        store.activeFunctionTrayProfile.allItems.first { $0.id == id }
     }
 
     // MARK: Custom
@@ -1284,15 +1479,23 @@ extension ReceiverControlOverlay {
     @ViewBuilder
     private func customLayoutContent(_ layout: CustomControlLayout, container: CGRect) -> some View {
         let portrait = containerSize.height > containerSize.width
-        let arrangement = layout.arrangement(portrait: portrait)
+        let arrangement = customArrangementWithSettings(layout.arrangement(portrait: portrait))
         let metrics = PadControlMetrics(scale: padMetricsScale)
-        let area = CustomLayoutGeometry.layoutArea(container: container, safeInsets: safeInsets)
-        let placements = customPlacements(arrangement)
-        let controlsPlaced: [PadPlacedControl] = placements.map { placement in
-            let frame = CustomLayoutGeometry.frame(for: placement, in: area, baseDiameter: metrics.item)
-            return PadPlacedControl(id: placement.id, kind: placement.kind, frame: frame, cell: frame)
+        // With the software keyboard up, the whole layout compresses into the
+        // space above it, so every control stays reachable, then returns.
+        let keyboardTop = keyboardVisibleRect?.maxY
+        let area = CustomLayoutGeometry.layoutArea(
+            container: Self.boundsAboveKeyboard(container, keyboardTop: keyboardTop.map { $0 + PadControlMetrics.edgeMargin }),
+            safeInsets: keyboardTop == nil ? safeInsets
+                : ControlSafeInsets(top: safeInsets.top, leading: safeInsets.leading, bottom: 0,
+                                    trailing: safeInsets.trailing))
+        let allFrames = CustomLayoutGeometry.frames(for: arrangement, in: area, baseDiameter: metrics.item)
+        let functionItems = store.preferences.functionTrayProfile(
+            for: layout.functionProfile ?? store.preferences.activeFunctionTrayProfile).allItems
+        let item: (String) -> ShortcutItem? = { id in functionItems.first { $0.id == id } }
+        let controlsPlaced: [PadPlacedControl] = customPlacements(arrangement).compactMap { placement in
+            allFrames[placement.id].map { PadPlacedControl(id: placement.id, kind: placement.kind, frame: $0, cell: $0) }
         }
-        let functionItems = store.activeFunctionTrayProfile.items.map(\.item)
         let autoHiding = store.autoHidden
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
@@ -1303,13 +1506,19 @@ extension ReceiverControlOverlay {
         let anchorControl = anchorModifier.flatMap { modifier in
             controlsPlaced.first { $0.kind.modifier == modifier }
         }
-        let anchorStyle = anchorModifier.flatMap { arrangement.placement(for: $0)?.palette } ?? PalettePresentation()
+        let anchorStyle = anchorControl.flatMap { control in
+            arrangement.placements.first { $0.id == control.id }?.palette
+        } ?? PalettePresentation()
+        let wheel: WheelPaletteLayout? = anchorStyle.shape == .wheel && paletteChord != nil && !actions.isEmpty
+            ? anchorControl.flatMap {
+                WheelPaletteGeometry.layout(count: actions.count, anchor: $0.frame, keyDiameter: keyDiameter,
+                                            spacing: metrics.gap, bounds: area)
+            } : nil
         let paletteKeys: [(action: ShortcutItem, frame: CGRect)] = {
-            guard paletteChord != nil, let anchorControl else { return [] }
-            let points = CustomLayoutGeometry.paletteCenters(
-                count: actions.count, anchor: anchorControl.frame, style: anchorStyle, area: area,
-                baseDiameter: metrics.item, spacing: metrics.gap,
-                obstacles: controlsPlaced.filter { $0.id != anchorControl.id }.map(\.frame))
+            guard paletteChord != nil, wheel == nil, let anchorControl else { return [] }
+            let points = CustomLayoutGeometry.palettePoints(
+                count: actions.count, anchorID: anchorControl.id, arrangement: arrangement,
+                frames: allFrames, area: area, baseDiameter: metrics.item, spacing: metrics.gap)
             return zip(actions, points).map { action, point in
                 (action, CGRect(x: point.x - keyDiameter / 2, y: point.y - keyDiameter / 2,
                                 width: keyDiameter, height: keyDiameter))
@@ -1318,7 +1527,7 @@ extension ReceiverControlOverlay {
         let assistState = TwoHandAssist.state(
             enabled: layout.twoHandAssist && !padCollapsed && store.preferences.allowInput,
             interaction: interaction)
-        let assistIdleItems = layout.assistActionIDs.compactMap { id in functionItems.first { $0.id == id } }
+        let assistIdleItems = layout.assistActionIDs.compactMap(item)
         let assistCount: Int = {
             switch assistState {
             case .hidden: return 0
@@ -1326,39 +1535,37 @@ extension ReceiverControlOverlay {
             case .helper: return TwoHandAssist.helperModifiers.count
             }
         }()
-        let assistPoints = TwoHandAssist.helperPoints(count: assistCount, clusterCentroid: arrangement.clusterCentroid,
-                                                      area: area, itemDiameter: metrics.item, spacing: metrics.gap * 1.5)
+        let assistPoints = TwoHandAssist.helperPoints(count: assistCount, arrangement: arrangement, frames: allFrames,
+                                                      area: area, itemDiameter: metrics.item, spacing: metrics.gap)
         let assistFrames = assistPoints.map {
             CGRect(x: $0.x - metrics.item / 2, y: $0.y - metrics.item / 2, width: metrics.item, height: metrics.item)
         }
-        let regionControls = controlsPlaced.filter {
-            if case .function = $0.kind { return false }
-            return true
-        }
+        let regionControls = controlsPlaced.filter { !$0.kind.isOneTapAction }
         let occupied = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
+            + (wheel.map { [$0.frame] } ?? [])
 
         ZStack(alignment: .topLeading) {
-            if let footprintStore {
-                ControlBackdropLayer(store: footprintStore,
-                                     circles: (autoHiding ? [] : controlsPlaced.map(\.frame) + assistFrames)
-                                        + paletteKeys.map(\.frame),
-                                     capsules: false)
-                    .allowsHitTesting(false)
-            }
             ForEach(controlsPlaced) { control in
                 Group {
-                    if case .function(let id) = control.kind {
-                        if let item = functionItems.first(where: { $0.id == id }) {
+                    switch control.kind {
+                    case .function(let id):
+                        if let item = item(id) {
                             padFunctionChip(item, frame: control.frame, onRail: false, hint: nil)
                         }
-                    } else {
+                    case .shortcut(let item):
+                        padFunctionChip(item, frame: control.frame, onRail: false, hint: nil)
+                    case .tray, .moveView:
                         padControlChip(control.kind, frame: control.frame, onRail: false, hint: nil)
                     }
                 }
                 .opacity(autoHiding && control.kind != .tray(.settings) ? 0 : 1)
                 .allowsHitTesting(!autoHiding || control.kind == .tray(.settings))
             }
-            if let paletteChord {
+            if let paletteChord, let wheel {
+                WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
+                                 centerLabel: paletteChord.symbols)
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
+            } else if let paletteChord {
                 if paletteKeys.isEmpty, let anchorControl {
                     emptyPaletteLabel(paletteChord)
                         .position(x: anchorControl.frame.midX,
@@ -1384,7 +1591,8 @@ extension ReceiverControlOverlay {
                 .contentShape(ControlRegionShape(
                     rects: regionControls.filter { !autoHiding || $0.kind == .tray(.settings) }
                         .map { $0.frame.insetBy(dx: -4, dy: -4) }
-                        + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }))
+                        + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }
+                        + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])))
                 .gesture(controlGesture())
         }
         .animation(.snappy(duration: 0.22), value: assistState)
@@ -1395,24 +1603,28 @@ extension ReceiverControlOverlay {
         .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
-    /// The placements to render: those whose control can act right now.
     /// Settings is permanent chrome, so a layout without it still gets one
     /// in its corner.
+    private func customArrangementWithSettings(_ arrangement: CustomControlArrangement) -> CustomControlArrangement {
+        guard !arrangement.placements.contains(where: { $0.kind == .tray(.settings) }) else { return arrangement }
+        var result = arrangement
+        let corner = arrangement.corner.unitPoint
+        result.placements.append(CustomControlPlacement(id: "settings", kind: .tray(.settings),
+                                                        x: Double(corner.x), y: Double(corner.y), size: 0.9))
+        return result
+    }
+
+    /// The placements to render: those whose control can act right now.
     private func customPlacements(_ arrangement: CustomControlArrangement) -> [CustomControlPlacement] {
         let allowed = Set(interactiveTrayItems)
-        var result = arrangement.placements.filter { placement in
+        return arrangement.placements.filter { placement in
             switch placement.kind {
             case .tray(let item): return allowed.contains(item)
             case .function: return store.preferences.functionTrayCanBeShown && !padCollapsed
+            case .shortcut: return store.preferences.trayCanBeShown && !padCollapsed
             case .moveView: return padShowsMoveView
             }
         }
-        if !result.contains(where: { $0.kind == .tray(.settings) }) {
-            let corner = arrangement.corner.unitPoint
-            result.append(CustomControlPlacement(id: "settings", kind: .tray(.settings),
-                                                 x: Double(corner.x), y: Double(corner.y), size: 0.9))
-        }
-        return result
     }
 
     /// The opposite side: idle Function actions, or — while a chord is in
@@ -1456,6 +1668,7 @@ extension ReceiverControlOverlay {
         case .tray(let item): return "tray-\(item.rawValue)"
         case .function(let id): return "function-\(id)"
         case .moveView: return "moveView"
+        case .shortcut(let item): return "shortcut-\(item.id)"
         }
     }
 
@@ -1474,6 +1687,7 @@ extension ReceiverControlOverlay {
             case .settings: return String(localized: "settings", comment: "Strip control hint.")
             }
         case .function(let id): return id
+        case .shortcut(let item): return item.title.lowercased()
         case .moveView: return String(localized: "move view", comment: "Strip control hint.")
         }
     }
@@ -1492,7 +1706,7 @@ extension ReceiverControlOverlay {
                     || interaction.temporaryModifiers.contains(modifier)
                     || interaction.phase == .pressed(modifier)
             case .moveView: return store.moveViewActive
-            case .function: return false
+            case .function, .shortcut: return false
             }
         }()
         let frameID: String = {
@@ -1501,6 +1715,7 @@ extension ReceiverControlOverlay {
                 return item.modifier.map { "modifier:\($0.rawValue)" } ?? "tray:\(item.rawValue)"
             case .moveView: return "control:moveView"
             case .function(let id): return "function:\(id)"
+            case .shortcut(let item): return "shortcut:\(item.id)"
             }
         }()
         VStack(spacing: 2) {
@@ -1516,7 +1731,7 @@ extension ReceiverControlOverlay {
                 case .moveView:
                     Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
                         .font(.system(size: diameter * 0.38, weight: .semibold))
-                case .function:
+                case .function, .shortcut:
                     EmptyView()
                 }
             }
@@ -1545,6 +1760,7 @@ extension ReceiverControlOverlay {
         case .tray(let item): return item.title
         case .moveView: return String(localized: "Move View")
         case .function(let id): return id
+        case .shortcut(let item): return item.title
         }
     }
 
@@ -1552,13 +1768,7 @@ extension ReceiverControlOverlay {
     private func padFunctionChip(_ item: ShortcutItem, frame: CGRect, onRail: Bool, hint: String?) -> some View {
         let diameter = frame.width
         return VStack(spacing: 2) {
-            Group {
-                if let systemImage = item.systemImage {
-                    Image(systemName: systemImage).font(.system(size: diameter * 0.4, weight: .semibold))
-                } else {
-                    Text(item.displayKey).font(.system(size: diameter * 0.34, weight: .semibold))
-                }
-            }
+            ShortcutButtonFaceView(face: item.face, diameter: diameter)
             .foregroundStyle(.white)
             .frame(width: diameter, height: diameter)
             .background(PadChip(selected: false, onRail: onRail))
@@ -1664,21 +1874,157 @@ extension ReceiverControlOverlay {
     }
 }
 
-/// The iPad control face. On a Strip rail it reads like a key on the rail;
-/// floating, a darker disc keeps white glyphs legible over any content —
-/// the soft blur comes from `ControlBackdropLayer`, only where the Mac is
-/// actually behind the control.
-private struct PadChip: View {
+/// The iPad control face, in the same restrained neutral language as the
+/// trackpad surface: a quiet key inside a rail or tray, and a solid neutral
+/// disc when floating on its own (Custom) — no glow, no halo.
+struct PadChip: View {
     let selected: Bool
     let onRail: Bool
 
     var body: some View {
         Circle()
             .fill(selected ? Color.white.opacity(0.92)
-                           : (onRail ? Color.white.opacity(0.1) : Color.black.opacity(0.42)))
-            .overlay(Circle().strokeBorder(.white.opacity(selected ? 0.5 : (onRail ? 0.1 : 0.22)),
+                           : (onRail ? Color.white.opacity(0.12) : Color(white: 0.2).opacity(0.88)))
+            .overlay(Circle().strokeBorder(.white.opacity(selected ? 0.5 : (onRail ? 0.08 : 0.16)),
                                            lineWidth: 0.75))
-            .shadow(color: .black.opacity(onRail ? 0 : 0.25), radius: 4, y: 1)
+            .shadow(color: .black.opacity(onRail ? 0 : 0.22), radius: 3, y: 1)
+    }
+}
+
+/// A compact floating tray holding one Overlay control group (or a chord
+/// palette): rounded, dark and translucent, with a hairline edge.
+struct ControlTray: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let radius = min(proxy.size.width, proxy.size.height) / 2
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Color.black.opacity(0.32)))
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+                .environment(\.colorScheme, .dark)
+        }
+    }
+}
+
+// MARK: - Wheel palette
+
+/// The Wheel on screen, for hit-testing its wedges in `controlGesture`.
+struct WheelHitTarget: Equatable {
+    var layout: WheelPaletteLayout
+    var actionIDs: [String]
+}
+
+struct WheelHitPreference: PreferenceKey {
+    static let defaultValue: WheelHitTarget? = nil
+    static func reduce(value: inout WheelHitTarget?, nextValue: () -> WheelHitTarget?) {
+        value = nextValue() ?? value
+    }
+}
+
+/// A ring of wedge segments around a center disc showing the held chord —
+/// the Wheel palette. Drawn in the overlay's coordinate space.
+struct WheelPaletteView: View {
+    let layout: WheelPaletteLayout
+    let actions: [ShortcutItem]
+    let selectedID: String?
+    let centerLabel: String
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(zip(layout.segments.indices, actions)), id: \.1.id) { index, action in
+                let segment = layout.segments[index]
+                let selected = action.id == selectedID
+                WheelWedge(center: layout.center, inner: layout.innerRadius, outer: layout.outerRadius,
+                           start: segment.startAngle, end: segment.endAngle)
+                    .fill(selected ? Color.white.opacity(0.92) : Color(white: 0.18).opacity(0.9))
+                WheelWedge(center: layout.center, inner: layout.innerRadius, outer: layout.outerRadius,
+                           start: segment.startAngle, end: segment.endAngle)
+                    .stroke(selected ? Color.accentColor : Color.white.opacity(0.14), lineWidth: selected ? 2 : 0.75)
+                ShortcutButtonFaceView(face: action.face, diameter: min(layout.outerRadius - layout.innerRadius, 52))
+                    .foregroundStyle(selected ? Color.black : Color.white)
+                    .frame(width: layout.outerRadius - layout.innerRadius,
+                           height: layout.outerRadius - layout.innerRadius)
+                    .scaleEffect(selected ? 1.12 : 1)
+                    .position(segment.labelPoint)
+                    .accessibilityLabel(action.title)
+            }
+            Circle()
+                .fill(Color(white: 0.12).opacity(0.92))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+                .overlay(Text(centerLabel).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white))
+                .frame(width: (layout.innerRadius - 4) * 2, height: (layout.innerRadius - 4) * 2)
+                .position(layout.center)
+                .accessibilityHidden(true)
+        }
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+        .allowsHitTesting(false)
+        .preference(key: WheelHitPreference.self, value: WheelHitTarget(layout: layout, actionIDs: actions.map(\.id)))
+    }
+}
+
+private struct WheelWedge: Shape {
+    let center: CGPoint
+    let inner: CGFloat
+    let outer: CGFloat
+    let start: CGFloat
+    let end: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        // A hairline of air between wedges.
+        let inset = min(0.04, (end - start) * 0.08)
+        var path = Path()
+        path.addArc(center: center, radius: outer, startAngle: .radians(start + inset),
+                    endAngle: .radians(end - inset), clockwise: false)
+        path.addArc(center: center, radius: inner, startAngle: .radians(end - inset),
+                    endAngle: .radians(start + inset), clockwise: true)
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Runs a one-tap action over the existing wire in plan order. Single
+/// actions go out at once; a sequence's pauses run on the main actor, and
+/// stop between steps if input is revoked — each step's keys are sent
+/// down and up together, so nothing is left held.
+@MainActor
+enum OneTapActionRunner {
+    static func run(_ action: ControlAction, receiver: StreamReceiver, inputAllowed: @escaping @MainActor () -> Bool) {
+        let operations = ControlActionPlan.operations(for: action)
+        guard !operations.isEmpty, inputAllowed() else { return }
+        let pauses = operations.contains { if case .pause = $0 { return true } else { return false } }
+        guard pauses else {
+            operations.forEach { perform($0, receiver: receiver) }
+            return
+        }
+        Task { @MainActor in
+            for operation in operations {
+                if case .pause(let milliseconds) = operation {
+                    try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+                    continue
+                }
+                guard inputAllowed() else { return }
+                perform(operation, receiver: receiver)
+            }
+        }
+    }
+
+    private static func perform(_ operation: ControlActionOperation, receiver: StreamReceiver) {
+        switch operation {
+        case .press(let usage, let modifiers):
+            receiver.sendKeyboardPress(usage: usage, modifiers: modifiers)
+        case .key(let event):
+            switch event.phase {
+            case .down: receiver.sendKeyboardDown(usage: event.usage, modifiers: event.modifiers)
+            case .up: receiver.sendKeyboardUp(usage: event.usage, modifiers: event.modifiers)
+            }
+        case .gesture(let name):
+            guard ReceiverGesture(rawValue: name) != nil else { return }
+            receiver.sendGesture(name: name)
+        case .pause:
+            break
+        }
     }
 }
 
@@ -1703,49 +2049,6 @@ private struct PadStripBackground: View {
         case .top: return .bottom
         case .bottom: return .top
         }
-    }
-}
-
-/// Small, soft material halos under floating controls — drawn only where a
-/// control actually covers rendered Mac content (see
-/// `ControlBackdropPolicy`), and never as one big panel. The only view that
-/// observes the per-frame display footprint.
-private struct ControlBackdropLayer: View {
-    @ObservedObject var store: DisplayFootprintStore
-    let circles: [CGRect]
-    /// Palette pills (Strip hints) are capsules, not circles.
-    let capsules: Bool
-
-    private static let spread: CGFloat = 14
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(Array(circles.enumerated()), id: \.offset) { _, rect in
-                let strength = ControlBackdropPolicy.haloStrength(for: rect, footprint: store.footprint)
-                if strength > 0 {
-                    let size = CGSize(width: rect.width + Self.spread * 2, height: rect.height + Self.spread * 2)
-                    halo(size: size, capsule: capsules && rect.width > rect.height * 1.5)
-                        .opacity(strength)
-                        .position(x: rect.midX, y: rect.midY)
-                }
-            }
-        }
-        .animation(.easeOut(duration: 0.15), value: store.footprint)
-    }
-
-    @ViewBuilder
-    private func halo(size: CGSize, capsule: Bool) -> some View {
-        let fade = RadialGradient(colors: [.black, .black, .black.opacity(0)], center: .center,
-                                  startRadius: 0, endRadius: max(size.width, size.height) / 2)
-        Group {
-            if capsule {
-                Capsule().fill(.ultraThinMaterial)
-            } else {
-                Circle().fill(.ultraThinMaterial)
-            }
-        }
-        .frame(width: size.width, height: size.height)
-        .mask(fade)
     }
 }
 
@@ -1804,157 +2107,116 @@ struct ControlProfileEditor: View {
     }
 }
 
-/// Editor for the Function Tray's own, independent profile — visibility
-/// and order only; items themselves aren't user-authored this milestone
-/// (see `FunctionTrayProfile.canonical`'s doc on staying generic for
-/// future actions).
-struct FunctionTrayProfileEditor: View {
-    @ObservedObject var store: ReceiverControlStore
-
-    var body: some View {
-        List {
-            Section("Function Tray") {
-                ForEach(store.activeFunctionTrayProfile.items) { configuration in
-                    Toggle(configuration.item.title, isOn: Binding(
-                        get: { configuration.isVisible },
-                        set: { visible in
-                            store.updateActiveFunctionTrayProfile { profile in
-                                if let index = profile.items.firstIndex(where: { $0.id == configuration.id }) {
-                                    profile.items[index].isVisible = visible
-                                }
-                            }
-                        }))
-                }
-                .onMove { source, destination in
-                    store.updateActiveFunctionTrayProfile { $0.moveItems(from: source, to: destination) }
-                }
-            }
-        }
-        .navigationTitle("Edit \(store.preferences.activeFunctionTrayProfile.title)")
-        .toolbar { EditButton() }
-    }
-}
-
+/// The actions in one modifier chord's palette — the same data the Strip,
+/// Overlay, Custom (every palette style, Wheel included) and the editor's
+/// Preview all show. Add keyboard chords, sequences, Function actions or
+/// system actions; remove, reorder, and change each one's face separately
+/// from what it does.
 struct ChordPaletteEditor: View {
     @ObservedObject var store: ReceiverControlStore
     let chord: ModifierChord
     let haptics: ReceiverHaptics
-    @State private var adding = false
+    @State private var editing: ShortcutEditorRequest?
+
+    private var actions: [ShortcutItem] { store.activeProfile.actions(for: chord) }
 
     var body: some View {
         List {
-            ForEach(store.activeProfile.actions(for: chord)) { action in
-                NavigationLink {
-                    ShortcutItemEditor(store: store, chord: chord, itemID: action.id)
-                } label: {
-                    LabeledContent(action.title, value: action.displayKey)
+            Section {
+                ForEach(actions) { action in
+                    Button {
+                        editing = ShortcutEditorRequest(placementID: action.id, item: action)
+                    } label: {
+                        HStack(spacing: 12) {
+                            ShortcutButtonFaceView(face: action.face, diameter: 30)
+                                .foregroundStyle(.white)
+                                .frame(width: 30, height: 30)
+                                .background(Circle().fill(Color(white: 0.22)))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(action.title).foregroundStyle(.primary)
+                                Text(action.keysDescription).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    }
                 }
+                .onMove { source, destination in
+                    store.updateActiveProfile { $0.moveActions(for: chord, from: source, to: destination) }
+                }
+                .onDelete { offsets in
+                    store.updateActiveProfile { profile in
+                        var actions = profile.actions(for: chord)
+                        actions.remove(atOffsets: offsets)
+                        profile.setActions(actions, for: chord)
+                    }
+                }
+            } footer: {
+                Text("Hold or latch \(chord.symbols) to show these. Tap one to change what it sends or how it looks; drag to reorder.")
             }
-            .onMove { source, destination in
-                store.updateActiveProfile { $0.moveActions(for: chord, from: source, to: destination) }
-            }
-            .onDelete { offsets in
-                store.updateActiveProfile { profile in
-                    var actions = profile.actions(for: chord)
-                    actions.remove(atOffsets: offsets)
-                    profile.setActions(actions, for: chord)
+            Section {
+                Button("Restore This Palette") {
+                    let defaults = ControlProfile.canonical().actions(for: chord)
+                    store.updateActiveProfile { $0.setActions(defaults, for: chord) }
+                    haptics.play(.reset)
                 }
             }
         }
         .navigationTitle(chord.displayName)
         .toolbar {
-            EditButton()
-            Button { adding = true } label: { Image(systemName: "plus") }
-        }
-        .sheet(isPresented: $adding) {
-            NavigationStack {
-                NewShortcutEditor(store: store, chord: chord, isPresented: $adding)
+            ToolbarItemGroup(placement: .primaryAction) {
+                addMenu
+                EditButton()
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            Button("Restore This Palette") {
-                let defaults = ControlProfile.canonical().actions(for: chord)
-                store.updateActiveProfile { $0.setActions(defaults, for: chord) }
-                haptics.play(.reset)
-            }
-            .buttonStyle(.bordered).padding(8)
-        }
-    }
-}
-
-private let editableShortcutKeys: [(String, Int)] = {
-    let letters = zip(Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 4...29).map { (String($0), $1) }
-    return letters + [("1", 30), ("2", 31), ("3", 32), ("4", 33), ("5", 34),
-                      ("Esc", 41), ("Space", 44), ("Return", 40), ("Tab", 43)]
-}()
-
-struct ShortcutItemEditor: View {
-    @ObservedObject var store: ReceiverControlStore
-    let chord: ModifierChord
-    let itemID: String
-
-    private var item: ShortcutItem? {
-        store.activeProfile.actions(for: chord).first(where: { $0.id == itemID })
-    }
-
-    var body: some View {
-        Form {
-            if let item {
-                TextField("Name", text: itemBinding(item, keyPath: \.title))
-                Picker("Key", selection: usageBinding(item)) {
-                    ForEach(editableShortcutKeys, id: \.1) { Text($0.0).tag($0.1) }
+        .sheet(item: $editing) { request in
+            ShortcutButtonEditor(initial: request.item, defaultModifiers: chord.modifiers) { item in
+                store.updateActiveProfile { profile in
+                    var actions = profile.actions(for: chord)
+                    if let index = actions.firstIndex(where: { $0.id == item.id }) {
+                        actions[index] = item
+                    } else {
+                        actions.append(item)
+                    }
+                    profile.setActions(actions, for: chord)
                 }
-                Section("Modifiers") {
-                    ForEach(ControlModifier.allCases) { modifier in
-                        Toggle(modifier.title, isOn: modifierBinding(item, modifier))
+            }
+        }
+    }
+
+    private var addMenu: some View {
+        Menu {
+            Button { editing = ShortcutEditorRequest(placementID: nil, item: nil) } label: {
+                Label("Shortcut or Sequence…", systemImage: "keyboard")
+            }
+            Menu("Function Action") {
+                ForEach(store.activeFunctionTrayProfile.allItems) { item in
+                    Button(item.title) { append(copy(of: item)) }
+                }
+            }
+            Menu("System Action") {
+                ForEach(ReceiverGesture.oneTapActions, id: \.self) { gesture in
+                    Button(gesture.title) {
+                        append(ShortcutItem(id: UUID().uuidString, title: gesture.title, gesture: gesture,
+                                            systemImage: "sparkles"))
                     }
                 }
             }
+        } label: {
+            Label("Add Action", systemImage: "plus")
         }
-        .navigationTitle("Shortcut")
     }
 
-    private func update(_ transform: (inout ShortcutItem) -> Void) {
+    /// Palette entries own their definition; a copied Function action is
+    /// independent of the tray it came from.
+    private func copy(of item: ShortcutItem) -> ShortcutItem {
+        var copy = item
+        copy.id = UUID().uuidString
+        return copy
+    }
+
+    private func append(_ item: ShortcutItem) {
         store.updateActiveProfile { profile in
-            var actions = profile.actions(for: chord)
-            guard let index = actions.firstIndex(where: { $0.id == itemID }) else { return }
-            transform(&actions[index])
-            profile.setActions(actions, for: chord)
+            profile.setActions(profile.actions(for: chord) + [item], for: chord)
         }
-    }
-
-    private func itemBinding(_ item: ShortcutItem, keyPath: WritableKeyPath<ShortcutItem, String>) -> Binding<String> {
-        Binding(get: { self.item?[keyPath: keyPath] ?? item[keyPath: keyPath] },
-                set: { value in update { $0[keyPath: keyPath] = value } })
-    }
-
-    private func usageBinding(_ item: ShortcutItem) -> Binding<Int> {
-        Binding(get: {
-            guard let current = self.item, case .keyboardShortcut(let shortcut) = current.action else { return 4 }
-            return shortcut.usage
-        }, set: { usage in
-            update {
-                let key = editableShortcutKeys.first(where: { $0.1 == usage })?.0 ?? "Key"
-                $0.displayKey = key
-                $0.action = .keyboardShortcut(KeyboardShortcut(usage: usage, modifiers: chord))
-            }
-        })
-    }
-
-    private func modifierBinding(_ item: ShortcutItem, _ modifier: ControlModifier) -> Binding<Bool> {
-        Binding(get: {
-            let current = self.item ?? item
-            guard case .keyboardShortcut(let shortcut) = current.action else { return false }
-            return shortcut.modifiers.contains(modifier)
-        }, set: { enabled in
-            update {
-                guard case .keyboardShortcut(var shortcut) = $0.action else { return }
-                var values = shortcut.modifiers.modifiers
-                if enabled { values.insert(modifier) } else { values.remove(modifier) }
-                shortcut.modifiers = ModifierChord(values)
-                $0.action = .keyboardShortcut(shortcut)
-            }
-        })
     }
 }
 
@@ -2065,35 +2327,21 @@ struct AppGestureCommandEditor: View {
     }
 }
 
-struct NewShortcutEditor: View {
-    @ObservedObject var store: ReceiverControlStore
-    let chord: ModifierChord
-    @Binding var isPresented: Bool
-    @State private var title = "Shortcut"
-    @State private var usage = 4
+/// A one-tap button's face: its SF Symbol, or its text, emoji or keys.
+struct ShortcutButtonFaceView: View {
+    let face: ShortcutButtonFace
+    let diameter: CGFloat
 
     var body: some View {
-        Form {
-            TextField("Name", text: $title)
-            Picker("Key", selection: $usage) {
-                ForEach(editableShortcutKeys, id: \.1) { Text($0.0).tag($0.1) }
-            }
-        }
-        .navigationTitle("Add Shortcut")
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { isPresented = false } }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Add") {
-                    let key = editableShortcutKeys.first(where: { $0.1 == usage })?.0 ?? "Key"
-                    store.updateActiveProfile { profile in
-                        var actions = profile.actions(for: chord)
-                        actions.append(ShortcutItem(title: title, displayKey: key,
-                                                    usage: usage, modifiers: chord))
-                        profile.setActions(actions, for: chord)
-                    }
-                    isPresented = false
-                }
-            }
+        switch face {
+        case .symbol(let name):
+            Image(systemName: name).font(.system(size: diameter * 0.4, weight: .semibold))
+        case .text(let text):
+            Text(text)
+                .font(.system(size: diameter * (text.count > 2 ? 0.28 : 0.36), weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .padding(.horizontal, diameter * 0.08)
         }
     }
 }

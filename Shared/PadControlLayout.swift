@@ -1,5 +1,5 @@
 // iPad-only control presentation: Strip / Overlay edge geometry, control
-// scale, palette placement, and the display-overlap backdrop policy.
+// scale, rail composition and palette placement.
 // CoreGraphics + Foundation only, so the hostless Mac test target covers
 // all of it (see MacTests/PadControlLayoutTests.swift). The iPhone keeps
 // `ControlTrayGeometry` and never reads anything here.
@@ -124,138 +124,348 @@ struct PadStrip: Equatable {
     var frame: CGRect
 }
 
+/// One placed run of controls: a whole group, or the part of one that had
+/// to continue in another lane.
+struct PadSegment: Equatable {
+    var group: Int
+    var cells: [CGRect]
+    var frame: CGRect {
+        cells.dropFirst().reduce(cells.first ?? .null) { $0.union($1) }
+    }
+}
+
 /// One Strip/Overlay layout pass.
 struct PadEdgeLayout: Equatable {
     /// Where the Mac display is presented: the container minus any Strip
     /// rails in Strip mode, the whole container in Overlay.
     var canvas: CGRect
     var strips: [PadStrip]
-    /// `nil` when no Main controls show.
-    var mainFrame: CGRect?
-    /// One frame per Function group, in group order.
-    var functionFrames: [CGRect]
+    var mainSegments: [PadSegment]
+    var functionSegments: [PadSegment]
+    /// Lanes per used edge (more than one only when an edge overflows).
+    var laneCounts: [ControlEdge: Int]
+
+    /// Main control cells, in item order.
+    var mainCells: [CGRect] { mainSegments.flatMap(\.cells) }
+    /// Function control cells, in item order.
+    var functionCells: [CGRect] { functionSegments.flatMap(\.cells) }
+    var mainFrame: CGRect? {
+        let frames = mainSegments.map(\.frame)
+        return frames.isEmpty ? nil : frames.dropFirst().reduce(frames[0]) { $0.union($1) }
+    }
+
+    static let empty = PadEdgeLayout(canvas: .zero, strips: [], mainSegments: [], functionSegments: [],
+                                     laneCounts: [:])
 }
 
 enum PadEdgeGeometry {
-    /// The iPad Strip/Overlay layout. Main controls are centered along
-    /// their edge and grow outward from the center. Function groups split
-    /// in two: the first half toward the start of their edge (top, or
-    /// left), the rest toward the end (bottom, or right). On the Main edge
-    /// they continue outward from the Main cluster; on any other edge they
-    /// sit at that edge's two ends.
+    /// The iPad Strip/Overlay layout, as lanes of control groups along each
+    /// used edge.
+    ///
+    /// - Main groups (system, keys, view — see `PadRailComposition`) keep
+    ///   their order with a group gap between them and sit centered on
+    ///   their edge.
+    /// - Function groups split in two: the first half toward the start of
+    ///   their edge (top, or left), the rest toward the end.
+    /// - On a shared edge, Function groups take the two ends and the Main
+    ///   run shifts off center as far as needed to clear them.
+    /// - Nothing ever overlaps. When an edge can't hold everything in one
+    ///   lane, the overflow moves to the next lane inward, deterministically:
+    ///   Main groups wrap at group boundaries (a group longer than the edge
+    ///   wraps at the last control that fits), and Function groups that
+    ///   don't fit beside the Main run get a lane of their own. A Strip
+    ///   widens to hold every lane.
     ///
     /// - Parameter keyboardTop: the docked software keyboard's top edge in
-    ///   `container` coordinates, if one is open. Bottom controls rise above
-    ///   it and side controls stop short of it; Strip rails don't move, so
-    ///   the canvas never jumps while typing.
+    ///   `container` coordinates, if one is open. Bottom lanes rise above it
+    ///   and side lanes stop short of it; Strip rails don't move.
     static func layout(container: CGRect,
                        safeInsets: ControlSafeInsets,
                        reservesStrips: Bool,
                        mainEdge: ControlEdge,
                        functionEdge: ControlEdge,
-                       mainCount: Int,
+                       mainGroupCounts: [Int],
+                       mainGroupAlignments: [PadGroupAlignment] = [],
                        functionGroupCounts: [Int],
                        metrics: PadControlMetrics,
                        keyboardTop: CGFloat? = nil) -> PadEdgeLayout {
         guard container.width > 0, container.height > 0 else {
-            return PadEdgeLayout(canvas: container, strips: [], mainFrame: nil, functionFrames: [])
+            return PadEdgeLayout(canvas: container, strips: [], mainSegments: [], functionSegments: [], laneCounts: [:])
         }
-        let groups = functionGroupCounts.filter { $0 > 0 }
+        let mainAlignments = mainGroupCounts.indices.filter { mainGroupCounts[$0] > 0 }.map {
+            $0 < mainGroupAlignments.count ? mainGroupAlignments[$0] : PadGroupAlignment.center
+        }
+        let main = mainGroupCounts.filter { $0 > 0 }
+        let function = functionGroupCounts.filter { $0 > 0 }
         var usedEdges: [ControlEdge] = []
-        if mainCount > 0 { usedEdges.append(mainEdge) }
-        if !groups.isEmpty, !usedEdges.contains(functionEdge) { usedEdges.append(functionEdge) }
+        if !main.isEmpty { usedEdges.append(mainEdge) }
+        if !function.isEmpty, !usedEdges.contains(functionEdge) { usedEdges.append(functionEdge) }
+
+        // Rails depend on the lanes of perpendicular edges and vice versa;
+        // settle lane counts with a few deterministic passes.
+        var lanes = Dictionary(uniqueKeysWithValues: usedEdges.map { ($0, 1) })
+        var packed: [ControlEdge: [PlacedBlock]] = [:]
+        for _ in 0..<4 {
+            var next: [ControlEdge: Int] = [:]
+            for edge in usedEdges {
+                let range = alongRange(edge: edge, container: container, safeInsets: safeInsets,
+                                       reservesStrips: reservesStrips, lanes: lanes, metrics: metrics,
+                                       keyboardTop: keyboardTop)
+                let blocks = pack(length: range.upperBound - range.lowerBound, edge: edge, metrics: metrics,
+                                  main: edge == mainEdge ? main : [], alignments: mainAlignments,
+                                  function: edge == functionEdge ? function : [])
+                packed[edge] = blocks
+                next[edge] = max(1, (blocks.map(\.lane).max() ?? 0) + 1)
+            }
+            if next == lanes { break }
+            lanes = next
+        }
 
         let strips = reservesStrips
-            ? stripFrames(container: container, safeInsets: safeInsets, edges: usedEdges, metrics: metrics)
+            ? stripFrames(container: container, safeInsets: safeInsets, lanes: lanes, metrics: metrics)
             : []
-        let canvas = canvasRect(container: container, strips: strips)
-
-        func rail(for edge: ControlEdge) -> CGRect {
-            var rail = railRect(edge: edge, container: container, safeInsets: safeInsets,
-                                strip: strips.first { $0.edge == edge }, metrics: metrics)
-            // Keep a corner shared with another used edge for that edge.
-            for other in usedEdges where other != edge && other.stacksVertically != edge.stacksVertically {
-                let clearance = metrics.clusterThickness(on: other) + metrics.gap
-                switch other {
-                case .leading: rail = trimStart(rail, by: clearance, vertical: false)
-                case .trailing: rail = trimEnd(rail, by: clearance, vertical: false)
-                case .top: rail = trimStart(rail, by: clearance, vertical: true)
-                case .bottom: rail = trimEnd(rail, by: clearance, vertical: true)
+        var mainSegments: [PadSegment] = []
+        var functionSegments: [PadSegment] = []
+        for edge in usedEdges {
+            let range = alongRange(edge: edge, container: container, safeInsets: safeInsets,
+                                   reservesStrips: reservesStrips, lanes: lanes, metrics: metrics,
+                                   keyboardTop: keyboardTop)
+            for block in packed[edge] ?? [] {
+                let cross = laneCenter(edge: edge, lane: block.lane, container: container, safeInsets: safeInsets,
+                                       reservesStrips: reservesStrips, metrics: metrics, keyboardTop: keyboardTop)
+                let cells = (0..<block.count).map { index -> CGRect in
+                    let along = range.lowerBound + block.start
+                        + CGFloat(index) * ((edge.stacksVertically ? metrics.cell.height : metrics.cell.width) + metrics.gap)
+                    return edge.stacksVertically
+                        ? CGRect(x: cross - metrics.cell.width / 2, y: along,
+                                 width: metrics.cell.width, height: metrics.cell.height)
+                        : CGRect(x: along, y: cross - metrics.cell.height / 2,
+                                 width: metrics.cell.width, height: metrics.cell.height)
                 }
+                let segment = PadSegment(group: block.group, cells: cells)
+                if block.isMain { mainSegments.append(segment) } else { functionSegments.append(segment) }
             }
-            return avoidingKeyboard(rail, edge: edge, keyboardTop: keyboardTop, metrics: metrics)
         }
-
-        var mainFrame: CGRect?
-        if mainCount > 0 {
-            let mainRail = rail(for: mainEdge)
-            let size = metrics.clusterSize(count: mainCount, on: mainEdge)
-            mainFrame = clamped(CGRect(x: mainRail.midX - size.width / 2, y: mainRail.midY - size.height / 2,
-                                       width: size.width, height: size.height),
-                                into: mainRail)
-        }
-
-        var functionFrames: [CGRect] = []
-        if !groups.isEmpty {
-            let functionRail = rail(for: functionEdge)
-            let vertical = functionEdge.stacksVertically
-            let startCount = (groups.count + 1) / 2
-            let startGroups = Array(groups.prefix(startCount))
-            let endGroups = Array(groups.dropFirst(startCount))
-            let sizes = groups.map { metrics.clusterSize(count: $0, on: functionEdge) }
-            func along(_ size: CGSize) -> CGFloat { vertical ? size.height : size.width }
-            func frame(start: CGFloat, size: CGSize) -> CGRect {
-                vertical
-                    ? CGRect(x: functionRail.midX - size.width / 2, y: start, width: size.width, height: size.height)
-                    : CGRect(x: start, y: functionRail.midY - size.height / 2, width: size.width, height: size.height)
-            }
-            var startFrames: [CGRect] = []
-            var endFrames: [CGRect] = []
-            let railStart = vertical ? functionRail.minY : functionRail.minX
-            let railEnd = vertical ? functionRail.maxY : functionRail.maxX
-            if let mainFrame, functionEdge == mainEdge {
-                var cursor = (vertical ? mainFrame.minY : mainFrame.minX) - metrics.groupGap
-                for index in startGroups.indices.reversed() {
-                    cursor -= along(sizes[index])
-                    startFrames.insert(frame(start: cursor, size: sizes[index]), at: 0)
-                    cursor -= metrics.groupGap
-                }
-                cursor = (vertical ? mainFrame.maxY : mainFrame.maxX) + metrics.groupGap
-                for offset in endGroups.indices {
-                    let size = sizes[startCount + offset]
-                    endFrames.append(frame(start: cursor, size: size))
-                    cursor += along(size) + metrics.groupGap
-                }
-            } else {
-                var cursor = railStart
-                for index in startGroups.indices {
-                    startFrames.append(frame(start: cursor, size: sizes[index]))
-                    cursor += along(sizes[index]) + metrics.groupGap
-                }
-                cursor = railEnd
-                for offset in endGroups.indices.reversed() {
-                    let size = sizes[startCount + offset]
-                    cursor -= along(size)
-                    endFrames.insert(frame(start: cursor, size: size), at: 0)
-                    cursor -= metrics.groupGap
-                }
-            }
-            functionFrames = (startFrames + endFrames).map { clamped($0, into: functionRail) }
-        }
-
-        return PadEdgeLayout(canvas: canvas, strips: strips, mainFrame: mainFrame, functionFrames: functionFrames)
+        // Item order: by group, then by the order the runs were placed.
+        mainSegments = mainSegments.enumerated().sorted { ($0.element.group, $0.offset) < ($1.element.group, $1.offset) }
+            .map(\.element)
+        functionSegments = functionSegments.enumerated()
+            .sorted { ($0.element.group, $0.offset) < ($1.element.group, $1.offset) }.map(\.element)
+        return PadEdgeLayout(canvas: canvasRect(container: container, strips: strips), strips: strips,
+                             mainSegments: mainSegments, functionSegments: functionSegments, laneCounts: lanes)
     }
 
-    /// Strip rails for `edges`. Left/right rails run the full height; top/
-    /// bottom rails run between them. Each includes its edge's safe inset.
-    static func stripFrames(container: CGRect, safeInsets: ControlSafeInsets,
-                            edges: [ControlEdge], metrics: PadControlMetrics) -> [PadStrip] {
-        func thickness(_ edge: ControlEdge) -> CGFloat {
-            metrics.stripThickness(on: edge) + inset(safeInsets, edge)
+    /// Where a palette opens: beyond everything on the Main edge.
+    static func paletteAnchor(for layout: PadEdgeLayout, mainEdge: ControlEdge, functionEdge: ControlEdge) -> CGRect? {
+        let frames = layout.mainSegments.map(\.frame)
+            + (functionEdge == mainEdge ? layout.functionSegments.map(\.frame) : [])
+        return frames.isEmpty ? nil : frames.dropFirst().reduce(frames[0]) { $0.union($1) }
+    }
+
+    // MARK: Packing
+
+    private struct PlacedBlock {
+        var isMain: Bool
+        var group: Int
+        var count: Int
+        var lane: Int
+        /// Along-edge offset from the start of the rail.
+        var start: CGFloat
+    }
+
+    private struct Run {
+        var isMain: Bool
+        var group: Int
+        var count: Int
+    }
+
+    /// Packs Main and Function runs into lanes along a rail `length` long.
+    ///
+    /// Lane 0 reads, from the rail's start: start-aligned Main groups, the
+    /// first half of the Function groups, the centered Main groups, the
+    /// other Function half, and the end-aligned Main groups (e.g. Settings
+    /// last). What doesn't fit moves inward, Function first.
+    private static func pack(length: CGFloat, edge: ControlEdge, metrics: PadControlMetrics,
+                             main: [Int], alignments: [PadGroupAlignment], function: [Int]) -> [PlacedBlock] {
+        guard length > 0 else { return [] }
+        let along = edge.stacksVertically ? metrics.cell.height : metrics.cell.width
+        let perLane = max(1, Int((length + metrics.gap) / (along + metrics.gap)))
+        let gap = metrics.groupGap
+        func runLength(_ run: Run) -> CGFloat { metrics.clusterLength(count: run.count, on: edge) }
+        func span(_ runs: [Run]) -> CGFloat {
+            runs.isEmpty ? 0 : runs.map(runLength).reduce(0, +) + CGFloat(runs.count - 1) * gap
         }
-        let leading = edges.contains(.leading) ? thickness(.leading) : 0
-        let trailing = edges.contains(.trailing) ? thickness(.trailing) : 0
-        return edges.map { edge in
+        func chunks(_ counts: [Int], isMain: Bool, groupOffset: Int = 0) -> [Run] {
+            counts.enumerated().flatMap { index, count -> [Run] in
+                stride(from: 0, to: count, by: perLane).map {
+                    Run(isMain: isMain, group: groupOffset + index, count: min(perLane, count - $0))
+                }
+            }
+        }
+        // Greedy lanes, in order, never splitting a run.
+        func lanesOf(_ runs: [Run]) -> [[Run]] {
+            var lanes: [[Run]] = []
+            for run in runs {
+                if let last = lanes.last, span(last) + gap + runLength(run) <= length + 0.001 {
+                    lanes[lanes.count - 1].append(run)
+                } else {
+                    lanes.append([run])
+                }
+            }
+            return lanes
+        }
+        func placed(_ runs: [Run], lane: Int, from start: CGFloat) -> [PlacedBlock] {
+            var cursor = start
+            return runs.map { run in
+                defer { cursor += runLength(run) + gap }
+                return PlacedBlock(isMain: run.isMain, group: run.group, count: run.count, lane: lane, start: cursor)
+            }
+        }
+        func joined(_ parts: [[Run]]) -> [Run] { parts.flatMap { $0 } }
+        /// Places head at the start, tail at the end, and middle centered
+        /// between them; `false` if they don't fit.
+        func fits(head: [Run], middle: [Run], tail: [Run]) -> Bool {
+            let pieces = [head, middle, tail].filter { !$0.isEmpty }
+            return pieces.map(span).reduce(0, +) + CGFloat(max(0, pieces.count - 1)) * gap <= length + 0.001
+        }
+        func place(head: [Run], middle: [Run], tail: [Run], lane: Int) -> [PlacedBlock] {
+            let headSpan = span(head)
+            let tailSpan = span(tail)
+            let middleSpan = span(middle)
+            let lower = head.isEmpty ? 0 : headSpan + gap
+            let upper = length - middleSpan - (tail.isEmpty ? 0 : tailSpan + gap)
+            let centered = (length - middleSpan) / 2
+            return placed(head, lane: lane, from: 0)
+                + placed(middle, lane: lane, from: min(max(centered, lower), max(lower, upper)))
+                + placed(tail, lane: lane, from: length - tailSpan)
+        }
+
+        let mainRuns = chunks(main, isMain: true)
+        let alignment = { (run: Run) -> PadGroupAlignment in
+            run.group < alignments.count ? alignments[run.group] : .center
+        }
+        let mainStart = mainRuns.filter { alignment($0) == .start }
+        let mainCenter = mainRuns.filter { alignment($0) == .center }
+        let mainEnd = mainRuns.filter { alignment($0) == .end }
+        let startCount = (function.count + 1) / 2
+        let startRuns = chunks(Array(function.prefix(startCount)), isMain: false)
+        let endRuns = chunks(Array(function.dropFirst(startCount)), isMain: false, groupOffset: startCount)
+
+        if fits(head: mainStart + startRuns, middle: mainCenter, tail: endRuns + mainEnd) {
+            return place(head: mainStart + startRuns, middle: mainCenter, tail: endRuns + mainEnd, lane: 0)
+        }
+        var result: [PlacedBlock] = []
+        var nextLane = 0
+        if !mainRuns.isEmpty {
+            if fits(head: mainStart, middle: mainCenter, tail: mainEnd) {
+                result = place(head: mainStart, middle: mainCenter, tail: mainEnd, lane: 0)
+                nextLane = 1
+            } else if !mainCenter.isEmpty, fits(head: mainStart, middle: [], tail: mainEnd) {
+                // Anchored groups keep the outer lane's ends (system actions
+                // first, Settings last); the centered groups move inward.
+                result = place(head: mainStart, middle: [], tail: mainEnd, lane: 0)
+                let lanes = lanesOf(mainCenter)
+                for (offset, runs) in lanes.enumerated() {
+                    result += placed(runs, lane: 1 + offset, from: (length - span(runs)) / 2)
+                }
+                nextLane = 1 + lanes.count
+            } else {
+                let lanes = lanesOf(joined([mainStart, mainCenter, mainEnd]))
+                for (lane, runs) in lanes.enumerated() {
+                    result += placed(runs, lane: lane, from: (length - span(runs)) / 2)
+                }
+                nextLane = lanes.count
+            }
+        }
+        if !function.isEmpty {
+            // Lanes of their own: ends first, then plain wrapping.
+            if fits(head: startRuns, middle: [], tail: endRuns) {
+                result += place(head: startRuns, middle: [], tail: endRuns, lane: nextLane)
+            } else {
+                for (offset, runs) in lanesOf(startRuns + endRuns).enumerated() {
+                    result += placed(runs, lane: nextLane + offset, from: 0)
+                }
+            }
+        }
+        return result
+    }
+
+    // MARK: Rails and lanes
+
+    private static func laneThickness(edge: ControlEdge, lanes: Int, metrics: PadControlMetrics) -> CGFloat {
+        let one = metrics.clusterThickness(on: edge)
+        return CGFloat(lanes) * one + CGFloat(max(0, lanes - 1)) * metrics.gap
+    }
+
+    /// The along-edge range controls may occupy on `edge`.
+    private static func alongRange(edge: ControlEdge, container: CGRect, safeInsets: ControlSafeInsets,
+                                   reservesStrips: Bool, lanes: [ControlEdge: Int], metrics: PadControlMetrics,
+                                   keyboardTop: CGFloat?) -> ClosedRange<CGFloat> {
+        let margin = PadControlMetrics.edgeMargin
+        func band(_ other: ControlEdge) -> CGFloat {
+            guard let count = lanes[other] else { return 0 }
+            return reservesStrips
+                ? laneThickness(edge: other, lanes: count, metrics: metrics) + PadControlMetrics.stripPadding * 2
+                    + inset(safeInsets, other)
+                : laneThickness(edge: other, lanes: count, metrics: metrics) + metrics.gap
+        }
+        var lower: CGFloat
+        var upper: CGFloat
+        if edge.stacksVertically {
+            lower = container.minY + safeInsets.top + margin
+            upper = container.maxY - safeInsets.bottom - margin
+            if !reservesStrips {
+                // Clear the corners any top/bottom lanes occupy.
+                lower += band(.top)
+                upper -= band(.bottom)
+            }
+            if let keyboardTop, keyboardTop.isFinite { upper = min(upper, keyboardTop - margin) }
+        } else {
+            lower = container.minX + safeInsets.leading + margin
+            upper = container.maxX - safeInsets.trailing - margin
+            if reservesStrips {
+                // Top/bottom strips run between the side strips.
+                if lanes[.leading] != nil { lower = max(lower, container.minX + band(.leading) + margin) }
+                if lanes[.trailing] != nil { upper = min(upper, container.maxX - band(.trailing) - margin) }
+            } else {
+                lower += band(.leading)
+                upper -= band(.trailing)
+            }
+        }
+        return lower...max(lower, upper)
+    }
+
+    /// Cross-edge center of `lane` (0 = outermost).
+    private static func laneCenter(edge: ControlEdge, lane: Int, container: CGRect, safeInsets: ControlSafeInsets,
+                                   reservesStrips: Bool, metrics: PadControlMetrics, keyboardTop: CGFloat?) -> CGFloat {
+        let one = metrics.clusterThickness(on: edge)
+        let offset = (reservesStrips ? PadControlMetrics.stripPadding : PadControlMetrics.edgeMargin)
+            + CGFloat(lane) * (one + metrics.gap) + one / 2
+        switch edge {
+        case .leading: return container.minX + safeInsets.leading + offset
+        case .trailing: return container.maxX - safeInsets.trailing - offset
+        case .top: return container.minY + safeInsets.top + offset
+        case .bottom:
+            var outer = container.maxY - safeInsets.bottom
+            if let keyboardTop, keyboardTop.isFinite {
+                outer = min(outer, keyboardTop)
+            }
+            return outer - offset
+        }
+    }
+
+    /// Strip rails for the used edges. Left/right rails run the full height;
+    /// top/bottom rails run between them. Each includes its edge's safe inset
+    /// and is as thick as its lanes need.
+    static func stripFrames(container: CGRect, safeInsets: ControlSafeInsets,
+                            lanes: [ControlEdge: Int], metrics: PadControlMetrics) -> [PadStrip] {
+        func thickness(_ edge: ControlEdge) -> CGFloat {
+            laneThickness(edge: edge, lanes: lanes[edge] ?? 1, metrics: metrics)
+                + PadControlMetrics.stripPadding * 2 + inset(safeInsets, edge)
+        }
+        let leading = lanes[.leading] != nil ? thickness(.leading) : 0
+        let trailing = lanes[.trailing] != nil ? thickness(.trailing) : 0
+        return ControlEdge.allCases.filter { lanes[$0] != nil }.map { edge in
             let t = thickness(edge)
             let frame: CGRect
             switch edge {
@@ -350,6 +560,11 @@ enum PadEdgeGeometry {
         }
     }
 
+    /// The span of a segment's control circles (captions excluded).
+    static func circleRun(of segment: PadSegment, metrics: PadControlMetrics) -> CGRect {
+        segment.cells.map { circleFrame(inCell: $0, metrics: metrics) }.reduce(CGRect.null) { $0.union($1) }
+    }
+
     /// The control circle within a cell (its caption, if any, sits below).
     static func circleFrame(inCell cell: CGRect, metrics: PadControlMetrics) -> CGRect {
         CGRect(x: cell.midX - metrics.item / 2, y: cell.minY, width: metrics.item, height: metrics.item)
@@ -366,70 +581,6 @@ enum PadEdgeGeometry {
         }
     }
 
-    /// The band a cluster on `edge` is centered in: inside its Strip rail
-    /// (clear of the safe inset), or — in Overlay — a margin inside the
-    /// safe area.
-    private static func railRect(edge: ControlEdge, container: CGRect, safeInsets: ControlSafeInsets,
-                                 strip: PadStrip?, metrics: PadControlMetrics) -> CGRect {
-        let safe = CGRect(x: container.minX + safeInsets.leading,
-                          y: container.minY + safeInsets.top,
-                          width: max(0, container.width - safeInsets.leading - safeInsets.trailing),
-                          height: max(0, container.height - safeInsets.top - safeInsets.bottom))
-        let thickness = metrics.clusterThickness(on: edge)
-        let margin = PadControlMetrics.edgeMargin
-        if let strip {
-            let frame = strip.frame
-            switch edge {
-            case .leading:
-                return CGRect(x: frame.minX + safeInsets.leading, y: safe.minY + margin,
-                              width: frame.width - safeInsets.leading, height: max(0, safe.height - margin * 2))
-            case .trailing:
-                return CGRect(x: frame.minX, y: safe.minY + margin,
-                              width: frame.width - safeInsets.trailing, height: max(0, safe.height - margin * 2))
-            case .top:
-                return CGRect(x: frame.minX + margin, y: frame.minY + safeInsets.top,
-                              width: max(0, frame.width - margin * 2), height: frame.height - safeInsets.top)
-            case .bottom:
-                return CGRect(x: frame.minX + margin, y: frame.minY,
-                              width: max(0, frame.width - margin * 2), height: frame.height - safeInsets.bottom)
-            }
-        }
-        let area = safe.insetBy(dx: margin, dy: margin)
-        switch edge {
-        case .leading: return CGRect(x: area.minX, y: area.minY, width: thickness, height: area.height)
-        case .trailing: return CGRect(x: area.maxX - thickness, y: area.minY, width: thickness, height: area.height)
-        case .top: return CGRect(x: area.minX, y: area.minY, width: area.width, height: thickness)
-        case .bottom: return CGRect(x: area.minX, y: area.maxY - thickness, width: area.width, height: thickness)
-        }
-    }
-
-    private static func avoidingKeyboard(_ rail: CGRect, edge: ControlEdge, keyboardTop: CGFloat?,
-                                         metrics: PadControlMetrics) -> CGRect {
-        guard let keyboardTop, keyboardTop.isFinite, keyboardTop < rail.maxY else { return rail }
-        let limit = keyboardTop - PadControlMetrics.edgeMargin
-        switch edge {
-        case .bottom:
-            let height = rail.height
-            return CGRect(x: rail.minX, y: max(rail.minY - (rail.maxY - limit), 0), width: rail.width, height: height)
-        case .leading, .trailing:
-            return CGRect(x: rail.minX, y: rail.minY, width: rail.width, height: max(0, limit - rail.minY))
-        case .top:
-            return rail
-        }
-    }
-
-    private static func trimStart(_ rect: CGRect, by amount: CGFloat, vertical: Bool) -> CGRect {
-        vertical
-            ? CGRect(x: rect.minX, y: rect.minY + amount, width: rect.width, height: max(0, rect.height - amount))
-            : CGRect(x: rect.minX + amount, y: rect.minY, width: max(0, rect.width - amount), height: rect.height)
-    }
-
-    private static func trimEnd(_ rect: CGRect, by amount: CGFloat, vertical: Bool) -> CGRect {
-        vertical
-            ? CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(0, rect.height - amount))
-            : CGRect(x: rect.minX, y: rect.minY, width: max(0, rect.width - amount), height: rect.height)
-    }
-
     /// Shifts `frame` inside `bounds` (centering it on any axis where it is
     /// larger), never resizing it.
     static func clamped(_ frame: CGRect, into bounds: CGRect) -> CGRect {
@@ -443,69 +594,148 @@ enum PadEdgeGeometry {
     }
 }
 
-// MARK: - Display-aware control backdrop
-
-/// Where the Mac is actually drawn, in the controls' coordinate space: the
-/// receiver surface's live `RemoteViewportTransform` (the same one input
-/// mapping uses), the surface's origin in that space, and its size (the
-/// video view clips to its bounds).
-struct DisplayFootprint: Equatable {
-    var transform: RemoteViewportTransform
-    var surfaceOrigin: CGPoint
-    var surfaceSize: CGSize
-
-    static let none = DisplayFootprint(transform: .invalid, surfaceOrigin: .zero, surfaceSize: .zero)
-
-    func contains(_ point: CGPoint) -> Bool {
-        let local = CGPoint(x: point.x - surfaceOrigin.x, y: point.y - surfaceOrigin.y)
-        guard local.x >= 0, local.y >= 0, local.x <= surfaceSize.width, local.y <= surfaceSize.height else {
-            return false
-        }
-        return transform.containsViewPoint(local)
-    }
-}
-
-/// Whether (and how strongly) a floating control gets its small material
-/// halo: only where it actually covers rendered Mac content — never over
-/// letterboxing, empty canvas, or a Strip rail.
-enum ControlBackdropPolicy {
-    /// Below this much coverage the halo is skipped entirely.
-    static let minimumCoverage: CGFloat = 0.05
-    /// Coverage at which the halo reaches full strength.
-    static let fullCoverage: CGFloat = 0.5
-
-    /// Fraction of `rect` over the rendered display, sampled on a grid so
-    /// rotation and partial overlap need no polygon clipping.
-    static func coverage(of rect: CGRect, footprint: DisplayFootprint, samples: Int = 5) -> CGFloat {
-        guard rect.width > 0, rect.height > 0, samples > 0, footprint.transform.isValid else { return 0 }
-        var inside = 0
-        for row in 0..<samples {
-            for column in 0..<samples {
-                let point = CGPoint(x: rect.minX + (CGFloat(column) + 0.5) / CGFloat(samples) * rect.width,
-                                    y: rect.minY + (CGFloat(row) + 0.5) / CGFloat(samples) * rect.height)
-                if footprint.contains(point) { inside += 1 }
-            }
-        }
-        return CGFloat(inside) / CGFloat(samples * samples)
-    }
-
-    /// Halo strength for a coverage fraction: none below
-    /// `minimumCoverage`, then rising linearly to 1 at `fullCoverage`.
-    static func haloStrength(coverage: CGFloat) -> Double {
-        guard coverage >= minimumCoverage else { return 0 }
-        let t = (coverage - minimumCoverage) / (fullCoverage - minimumCoverage)
-        return Double(min(max(t, 0), 1))
-    }
-
-    static func haloStrength(for rect: CGRect, footprint: DisplayFootprint) -> Double {
-        haloStrength(coverage: coverage(of: rect, footprint: footprint))
-    }
-}
-
 /// Auto-hide never applies to the iPad Strip: its rail is reserved space,
 /// and fading the controls would leave an empty black band.
 enum ControlAutoHidePolicy {
     static func applies(isPad: Bool, layout: PadControlLayoutMode) -> Bool {
         !(isPad && layout == .strip)
+    }
+}
+
+// MARK: - Standard rail controls
+
+/// The standard system and utility controls the iPad Strip/Overlay rail can
+/// show, each independently. Modifiers come from the Control Profile, and
+/// Settings is permanent, so neither is listed here.
+enum PadStandardControl: String, Codable, CaseIterable, Identifiable {
+    case menuBar
+    case dock
+    case showDesktop
+    case controlCenter
+    case escape
+    case tab
+    case keyboard
+    case moveView
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .menuBar: return String(localized: "Menu Bar")
+        case .dock: return String(localized: "Dock")
+        case .showDesktop: return String(localized: "Show Desktop")
+        case .controlCenter: return String(localized: "Control Center")
+        case .escape: return String(localized: "Escape")
+        case .tab: return String(localized: "Tab")
+        case .keyboard: return String(localized: "Keyboard")
+        case .moveView: return String(localized: "Move View")
+        }
+    }
+
+    static let systemKinds: Set<CustomControlKind> = [
+        PadStandardControl.menuBar.kind, PadStandardControl.dock.kind,
+        PadStandardControl.showDesktop.kind, PadStandardControl.controlCenter.kind,
+    ]
+
+    /// The existing control this entry shows. Dock, Escape, Tab and Keyboard
+    /// are Main tray items; Show Desktop and Control Center are the Function
+    /// Tray's semantic `ReceiverGesture` actions — one action system.
+    var kind: CustomControlKind {
+        switch self {
+        case .menuBar: return .function("menu-bar")
+        case .dock: return .tray(.dock)
+        case .showDesktop: return .function("show-desktop")
+        case .controlCenter: return .function("control-center")
+        case .escape: return .tray(.escape)
+        case .tab: return .tray(.tab)
+        case .keyboard: return .tray(.keyboard)
+        case .moveView: return .moveView
+        }
+    }
+}
+
+/// Which standard controls show. Stores the *hidden* set, so a control
+/// added by a later build appears by default, and decodes lossily.
+struct PadStandardControlVisibility: Codable, Equatable {
+    private(set) var hidden: Set<PadStandardControl> = []
+
+    init(hidden: Set<PadStandardControl> = []) { self.hidden = hidden }
+
+    func isVisible(_ control: PadStandardControl) -> Bool { !hidden.contains(control) }
+
+    mutating func setVisible(_ visible: Bool, _ control: PadStandardControl) {
+        if visible { hidden.remove(control) } else { hidden.insert(control) }
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode([String].self)
+        hidden = Set(raw.compactMap(PadStandardControl.init(rawValue:)))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(PadStandardControl.allCases.filter(hidden.contains).map(\.rawValue))
+    }
+}
+
+/// Where a Main group sits along its rail.
+enum PadGroupAlignment: Equatable {
+    /// At the rail's start (the top of a side rail).
+    case start
+    case center
+    /// At the rail's end (the bottom of a side rail).
+    case end
+}
+
+/// The Strip/Overlay Main rail, as visually separate groups in a fixed,
+/// Sidecar-like order: system actions at the rail's start (top-right by
+/// default), modifiers and keys centered, and view controls with the
+/// permanent Settings gear at the rail's end (bottom-right by default).
+/// Empty groups vanish; Settings keeps the last group from ever being empty.
+enum PadRailComposition {
+    /// Alignment for each of `mainGroups`' groups, in the same order.
+    static func alignments(for groups: [[CustomControlKind]]) -> [PadGroupAlignment] {
+        groups.map { group in
+            if group.contains(.tray(.settings)) { return .end }
+            if group.contains(where: { PadStandardControl.systemKinds.contains($0) }) { return .start }
+            return .center
+        }
+    }
+
+    struct Availability: Equatable {
+        /// Visible modifiers from the active Control Profile (the Mac must
+        /// also understand receiver controls).
+        var modifiers: [ControlModifier]
+        var keyboardAvailable: Bool
+        /// Move View needs live video and Local View Navigation.
+        var moveViewAvailable: Bool
+    }
+
+    static func mainGroups(visibility: PadStandardControlVisibility,
+                           availability: Availability) -> [[CustomControlKind]] {
+        func shown(_ control: PadStandardControl) -> Bool {
+            guard visibility.isVisible(control) else { return false }
+            switch control {
+            case .keyboard: return availability.keyboardAvailable
+            case .moveView: return availability.moveViewAvailable
+            default: return true
+            }
+        }
+        let system = [PadStandardControl.menuBar, .dock, .showDesktop, .controlCenter].filter(shown).map(\.kind)
+        let keys = availability.modifiers.map { CustomControlKind.tray(ControlTrayItem.item(for: $0)) }
+            + [PadStandardControl.escape, .tab, .keyboard].filter(shown).map(\.kind)
+        let view = [PadStandardControl.moveView].filter(shown).map(\.kind) + [.tray(.settings)]
+        return [system, keys, view].filter { !$0.isEmpty }
+    }
+}
+
+extension ControlTrayItem {
+    static func item(for modifier: ControlModifier) -> ControlTrayItem {
+        switch modifier {
+        case .command: return .command
+        case .option: return .option
+        case .control: return .control
+        case .shift: return .shift
+        }
     }
 }

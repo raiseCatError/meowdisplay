@@ -362,6 +362,14 @@ enum SystemGestureShortcutMapping {
         case .spotlight:
             // Command-Space opens Spotlight.
             return SystemGestureShortcut(keyCode: 49, flags: .maskCommand)
+        case .controlCenter:
+            // Fn/Globe-C: "Show or hide Control Center" (macOS 12+).
+            return SystemGestureShortcut(keyCode: 8, flags: .maskSecondaryFn)
+        case .menuBar:
+            // Control-F2: "Move focus to the menu bar" — reveals it even in
+            // full screen; Escape (or a click elsewhere) leaves it. F2 needs
+            // SecondaryFn in a posted CGEvent, like F11 above.
+            return SystemGestureShortcut(keyCode: 120, flags: [.maskControl, .maskSecondaryFn])
         }
     }
 }

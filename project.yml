@@ -252,6 +252,9 @@ targets:
       - Shared/PadControlLayout.swift
       - Shared/CustomControlLayout.swift
       - Shared/MobileSettingsCategory.swift
+      - Shared/MobileSettingsSearch.swift
+      - Shared/CustomLayoutSharing.swift
+      - Shared/ReceiverInputPrompt.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
       - Shared/RemotePairing.swift

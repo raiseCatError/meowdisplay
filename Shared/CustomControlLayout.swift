@@ -64,8 +64,11 @@ enum CustomControlKind: Hashable, Codable {
     case function(String)
     /// The receiver-local Move View mode toggle.
     case moveView
+    /// A user-made one-tap keyboard shortcut, owned by this placement. Uses
+    /// the same `ShortcutItem`/`KeyboardShortcut` model as every palette.
+    case shortcut(ShortcutItem)
 
-    private enum CodingKeys: String, CodingKey { case kind, value }
+    private enum CodingKeys: String, CodingKey { case kind, value, shortcut }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -81,6 +84,13 @@ enum CustomControlKind: Hashable, Codable {
             self = .function(try container.decode(String.self, forKey: .value))
         case "moveView":
             self = .moveView
+        case "shortcut":
+            let item = try container.decode(ShortcutItem.self, forKey: .shortcut)
+            guard case .keyboardShortcut(let shortcut) = item.action, shortcut.isValid else {
+                throw DecodingError.dataCorruptedError(forKey: .shortcut, in: container,
+                                                       debugDescription: "Invalid shortcut")
+            }
+            self = .shortcut(item)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: container,
                                                    debugDescription: "Unknown control kind")
@@ -98,12 +108,24 @@ enum CustomControlKind: Hashable, Codable {
             try container.encode(id, forKey: .value)
         case .moveView:
             try container.encode("moveView", forKey: .kind)
+        case .shortcut(let item):
+            try container.encode("shortcut", forKey: .kind)
+            try container.encode(item, forKey: .shortcut)
         }
     }
 
     var modifier: ControlModifier? {
         if case .tray(let item) = self { return item.modifier }
         return nil
+    }
+
+    /// Fires once on tap (a Function action or a one-tap shortcut), rather
+    /// than joining the chord gesture.
+    var isOneTapAction: Bool {
+        switch self {
+        case .function, .shortcut: return true
+        case .tray, .moveView: return false
+        }
     }
 }
 
@@ -112,11 +134,15 @@ enum PaletteShape: String, Codable, CaseIterable, Identifiable {
     case ring
     case row
     case column
+    /// A ring of wedge-shaped segments around the modifier — see
+    /// `WheelPaletteGeometry`.
+    case wheel
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .wheel: return String(localized: "Wheel", comment: "Chord palette shape.")
         case .arc: return String(localized: "Arc", comment: "Chord palette shape.")
         case .ring: return String(localized: "Ring", comment: "Chord palette shape.")
         case .row: return String(localized: "Row", comment: "Chord palette shape.")
@@ -217,6 +243,10 @@ struct CustomControlLayout: Codable, Equatable, Identifiable {
     var twoHandAssist: Bool
     /// Function Tray item ids shown on the opposite side while idle.
     var assistActionIDs: [String]
+    /// Which Function Tray profile this layout's Function controls come
+    /// from; `nil` follows the active one. The layout owns where; the
+    /// profile owns what.
+    var functionProfile: ControlProfileSlot?
 
     func arrangement(portrait isPortrait: Bool) -> CustomControlArrangement {
         isPortrait ? portrait : landscape
@@ -244,53 +274,269 @@ extension CustomControlArrangement {
     static let referenceLandscape = CGSize(width: 1150, height: 780)
     static let referencePortrait = CGSize(width: 780, height: 1150)
 
-    /// The radial corner constellation: Settings in the corner, the four
-    /// modifiers on an inner quarter arc, and Escape/Tab/Keyboard/Move View
-    /// on an outer one.
+    /// Where the template's Settings anchor sits, from each corner edge.
+    static let templateAnchorInset: CGFloat = 34
+    static let templateBaseDiameter: CGFloat = PadControlMetrics.baseItem
+    static let templateSpacing: CGFloat = 8
+    static let templateUtilities: [CustomControlKind] = [.tray(.keyboard), .tray(.escape), .tray(.tab), .moveView]
+    static let templateModifiers: [ControlTrayItem] = [.command, .option, .control, .shift]
+    /// Menu Bar, Dock, Show Desktop, Control Center — the Strip's system group.
+    static let templateSystem: [CustomControlKind] = [.function("menu-bar"), .tray(.dock),
+                                                     .function("show-desktop"), .function("control-center")]
+    static let utilitySize = 0.9
+    static let settingsSize = 0.9
+
+    /// The radial corner template, as true concentric arcs around Settings:
+    /// Settings (the anchor) → a utility arc (Keyboard, Escape, Tab, Move
+    /// View) → the modifier arc (⌘ ⌥ ⌃ ⇧). A held chord's palette blooms on
+    /// the next arc out (`CustomLayoutGeometry.palettePoints`).
     static func radialTemplate(corner: ControlCorner, portrait: Bool) -> CustomControlArrangement {
         let reference = portrait ? referencePortrait : referenceLandscape
-        let anchor = CGPoint(x: corner.isLeading ? 30 : reference.width - 30,
-                             y: corner.isTop ? 30 : reference.height - 30)
-        // Quarter arc from "along the horizontal edge" to "along the
-        // vertical edge", pointing into the screen.
-        let horizontal: CGFloat = corner.isLeading ? 0 : .pi
-        let vertical: CGFloat = corner.isTop ? .pi / 2 : -.pi / 2
-        func arcPoints(count: Int, radius: CGFloat) -> [CGPoint] {
-            (0..<count).map { index in
-                let t = CGFloat(index) / CGFloat(max(count - 1, 1))
-                // Interpolate the shorter way between the two edge angles.
-                var delta = vertical - horizontal
-                if delta > .pi { delta -= 2 * .pi }
-                if delta < -.pi { delta += 2 * .pi }
-                let inset: CGFloat = 0.05
-                let angle = horizontal + delta * (inset + t * (1 - 2 * inset))
-                return CGPoint(x: anchor.x + radius * cos(angle), y: anchor.y + radius * sin(angle))
-            }
-        }
+        let inset = templateAnchorInset
+        let origin = CGPoint(x: corner.isLeading ? inset : reference.width - inset,
+                             y: corner.isTop ? inset : reference.height - inset)
+        let edges = CGSize(width: inset, height: inset)
+        let base = templateBaseDiameter
+        let utilityDiameter = base * CGFloat(utilitySize)
+        let radii = CornerArcGeometry.layerRadii(
+            counts: [templateUtilities.count, templateModifiers.count],
+            diameters: [utilityDiameter, base],
+            innerDiameter: base * CGFloat(settingsSize), spacing: templateSpacing,
+            corner: corner, edgeDistances: edges)
         func normalized(_ point: CGPoint) -> (Double, Double) {
             (Double(point.x / reference.width), Double(point.y / reference.height))
         }
         var placements: [CustomControlPlacement] = []
-        let settings = normalized(anchor)
+        let settings = normalized(origin)
         placements.append(CustomControlPlacement(id: "settings", kind: .tray(.settings),
-                                                 x: settings.0, y: settings.1, size: 0.9))
-        let modifiers: [ControlTrayItem] = [.command, .option, .control, .shift]
-        for (item, point) in zip(modifiers, arcPoints(count: modifiers.count, radius: 100)) {
+                                                 x: settings.0, y: settings.1, size: settingsSize))
+        let utilityPoints = CornerArcGeometry.points(count: templateUtilities.count, radius: radii[0],
+                                                     origin: origin, corner: corner,
+                                                     diameter: utilityDiameter, edgeDistances: edges)
+        for (kind, point) in zip(templateUtilities, utilityPoints) {
+            let p = normalized(point)
+            placements.append(CustomControlPlacement(id: kind.stableID, kind: kind, x: p.0, y: p.1, size: utilitySize))
+        }
+        let modifierPoints = CornerArcGeometry.points(count: templateModifiers.count, radius: radii[1],
+                                                      origin: origin, corner: corner,
+                                                      diameter: base, edgeDistances: edges)
+        for (item, point) in zip(templateModifiers, modifierPoints) {
             let p = normalized(point)
             placements.append(CustomControlPlacement(id: item.rawValue, kind: .tray(item), x: p.0, y: p.1))
         }
-        let outer: [CustomControlKind] = [.tray(.escape), .tray(.tab), .tray(.keyboard), .moveView]
-        for (kind, point) in zip(outer, arcPoints(count: outer.count, radius: 172)) {
+        // System actions on the opposite corner's inner arc — inside the
+        // arc Two-Hand Assist uses there, so the two never collide.
+        let mirrored = CornerArcGeometry.mirroredHorizontally(corner)
+        let mirroredOrigin = CGPoint(x: reference.width - origin.x, y: origin.y)
+        let systemPoints = CornerArcGeometry.points(count: templateSystem.count, radius: radii[0],
+                                                    origin: mirroredOrigin, corner: mirrored,
+                                                    diameter: utilityDiameter, edgeDistances: edges)
+        for (kind, point) in zip(templateSystem, systemPoints) {
             let p = normalized(point)
-            let id: String
-            switch kind {
-            case .tray(let item): id = item.rawValue
-            case .function(let value): id = value
-            case .moveView: id = "move-view"
-            }
-            placements.append(CustomControlPlacement(id: id, kind: kind, x: p.0, y: p.1, size: 0.9))
+            placements.append(CustomControlPlacement(id: kind.stableID, kind: kind, x: p.0, y: p.1, size: utilitySize))
         }
         return CustomControlArrangement(corner: corner, placements: placements)
+    }
+}
+
+extension CustomControlKind {
+    /// A readable id for a template placement.
+    var stableID: String {
+        switch self {
+        case .tray(let item): return item.rawValue
+        case .function(let id): return id
+        case .moveView: return "move-view"
+        case .shortcut(let item): return item.id
+        }
+    }
+}
+
+/// Polar geometry for controls arranged on concentric quarter arcs around a
+/// corner origin. Angles are in radians in a y-down space (0 = right,
+/// π/2 = down). Each arc spans from the corner's horizontal edge to its
+/// vertical edge, trimmed so every control stays clear of both edges, with
+/// controls evenly spaced by angle.
+enum CornerArcGeometry {
+    /// Direction along the corner's horizontal edge, into the screen.
+    static func horizontalEdgeAngle(_ corner: ControlCorner) -> CGFloat { corner.isLeading ? 0 : .pi }
+
+    /// Signed sweep from the horizontal edge toward the vertical edge (±π/2).
+    static func sweep(_ corner: ControlCorner) -> CGFloat {
+        // leading+top: 0 → π/2 (+); trailing+top: π → π/2 (−);
+        // leading+bottom: 0 → −π/2 (−); trailing+bottom: π → 3π/2 (+).
+        (corner.isLeading == corner.isTop) ? .pi / 2 : -.pi / 2
+    }
+
+    /// Offsets from the horizontal edge (0...π/2) that keep a control of
+    /// `diameter` on an arc of `radius` inside both edges. `edgeDistances`
+    /// is the origin's distance to the vertical edge (width) and to the
+    /// horizontal edge (height).
+    static func usableOffsets(radius: CGFloat, diameter: CGFloat,
+                              edgeDistances: CGSize) -> ClosedRange<CGFloat> {
+        guard radius > 0 else { return (.pi / 4)...(.pi / 4) }
+        func clearance(_ distance: CGFloat) -> CGFloat {
+            asin(min(1, max(0, (diameter / 2 - distance) / radius)))
+        }
+        let lower = clearance(edgeDistances.height)
+        let upper = .pi / 2 - clearance(edgeDistances.width)
+        return lower <= upper ? lower...upper : ((lower + upper) / 2)...((lower + upper) / 2)
+    }
+
+    /// Evenly spaced angles for `count` controls on the arc of `radius`.
+    static func angles(count: Int, radius: CGFloat, corner: ControlCorner, diameter: CGFloat,
+                       edgeDistances: CGSize) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        let usable = usableOffsets(radius: radius, diameter: diameter, edgeDistances: edgeDistances)
+        let direction: CGFloat = sweep(corner) > 0 ? 1 : -1
+        return (0..<count).map { index in
+            let t = count == 1 ? 0.5 : CGFloat(index) / CGFloat(count - 1)
+            let offset = usable.lowerBound + t * (usable.upperBound - usable.lowerBound)
+            return horizontalEdgeAngle(corner) + direction * offset
+        }
+    }
+
+    static func points(count: Int, radius: CGFloat, origin: CGPoint, corner: ControlCorner,
+                       diameter: CGFloat, edgeDistances: CGSize) -> [CGPoint] {
+        angles(count: count, radius: radius, corner: corner, diameter: diameter, edgeDistances: edgeDistances)
+            .map { CGPoint(x: origin.x + radius * cos($0), y: origin.y + radius * sin($0)) }
+    }
+
+    /// Neighbors' center distance on an arc: the chord between angles.
+    static func chord(radius: CGFloat, angle: CGFloat) -> CGFloat { 2 * radius * sin(abs(angle) / 2) }
+
+    /// The smallest radius ≥ `minimum` whose arc holds `count` controls at
+    /// least `pitch` apart (center to center).
+    static func radius(count: Int, pitch: CGFloat, minimum: CGFloat, diameter: CGFloat,
+                       corner: ControlCorner, edgeDistances: CGSize) -> CGFloat {
+        guard count > 1 else { return minimum }
+        var radius = max(minimum, 1)
+        for _ in 0..<2000 {
+            let usable = usableOffsets(radius: radius, diameter: diameter, edgeDistances: edgeDistances)
+            let step = (usable.upperBound - usable.lowerBound) / CGFloat(count - 1)
+            if chord(radius: radius, angle: step) >= pitch - 0.01 { return radius }
+            radius += 1
+        }
+        return radius
+    }
+
+    /// How many controls fit on the arc of `radius` at least `pitch` apart.
+    static func capacity(radius: CGFloat, pitch: CGFloat, diameter: CGFloat, edgeDistances: CGSize) -> Int {
+        guard radius > 0, pitch > 0 else { return 1 }
+        let usable = usableOffsets(radius: radius, diameter: diameter, edgeDistances: edgeDistances)
+        let step = 2 * asin(min(1, pitch / (2 * radius)))
+        guard step > 0 else { return 1 }
+        return max(1, Int((usable.upperBound - usable.lowerBound) / step + 0.0001) + 1)
+    }
+
+    /// Radii for successive layers around an inner control of
+    /// `innerDiameter`: each layer sits one `spacing` clear of the previous
+    /// one, and is widened only as much as its own count requires.
+    static func layerRadii(counts: [Int], diameters: [CGFloat], innerDiameter: CGFloat, spacing: CGFloat,
+                           corner: ControlCorner, edgeDistances: CGSize) -> [CGFloat] {
+        var radii: [CGFloat] = []
+        var previousRadius: CGFloat = 0
+        var previousDiameter = innerDiameter
+        for (count, diameter) in zip(counts, diameters) {
+            let minimum = previousRadius + previousDiameter / 2 + diameter / 2 + spacing
+            let radius = self.radius(count: count, pitch: diameter + spacing, minimum: minimum,
+                                     diameter: diameter, corner: corner, edgeDistances: edgeDistances)
+            radii.append(radius)
+            previousRadius = radius
+            previousDiameter = diameter
+        }
+        return radii
+    }
+
+    static func mirroredHorizontally(_ corner: ControlCorner) -> ControlCorner {
+        switch corner {
+        case .topLeading: return .topTrailing
+        case .topTrailing: return .topLeading
+        case .bottomLeading: return .bottomTrailing
+        case .bottomTrailing: return .bottomLeading
+        }
+    }
+}
+
+/// A Custom arrangement read as a corner cluster: the Settings anchor as
+/// origin, and every modifier on the screen side of it, near its corner.
+/// When an arrangement isn't one (controls dragged elsewhere), palettes and
+/// Two-Hand Assist fall back to local geometry.
+struct CornerCluster: Equatable {
+    var origin: CGPoint
+    var corner: ControlCorner
+    /// The outermost modifier arc's radius.
+    var modifierRadius: CGFloat
+    /// The largest modifier diameter.
+    var modifierDiameter: CGFloat
+    /// The origin's distances to its vertical and horizontal area edges.
+    var edgeDistances: CGSize
+
+    static func resolve(arrangement: CustomControlArrangement, frames: [String: CGRect],
+                        area: CGRect) -> CornerCluster? {
+        guard let settings = arrangement.placements.first(where: { $0.kind == .tray(.settings) }),
+              let settingsFrame = frames[settings.id] else { return nil }
+        let origin = CGPoint(x: settingsFrame.midX, y: settingsFrame.midY)
+        // The corner the anchor actually sits in — the stored corner can be
+        // stale once the cluster has been dragged elsewhere.
+        let corner: ControlCorner = origin.y < area.midY
+            ? (origin.x < area.midX ? .topLeading : .topTrailing)
+            : (origin.x < area.midX ? .bottomLeading : .bottomTrailing)
+        let modifierFrames = arrangement.placements.filter { $0.kind.modifier != nil }.compactMap { frames[$0.id] }
+        guard !modifierFrames.isEmpty else { return nil }
+        let reach = min(area.width, area.height) * 0.5
+        let inward = CGPoint(x: corner.isLeading ? 1 : -1, y: corner.isTop ? 1 : -1)
+        var radius: CGFloat = 0
+        for frame in modifierFrames {
+            let dx = frame.midX - origin.x
+            let dy = frame.midY - origin.y
+            // On the screen side of the anchor (a little slack for edges).
+            guard dx * inward.x >= -frame.width / 2, dy * inward.y >= -frame.height / 2 else { return nil }
+            let distance = hypot(dx, dy)
+            guard distance <= reach else { return nil }
+            radius = max(radius, distance)
+        }
+        let edges = CGSize(width: corner.isLeading ? origin.x - area.minX : area.maxX - origin.x,
+                           height: corner.isTop ? origin.y - area.minY : area.maxY - origin.y)
+        return CornerCluster(origin: origin, corner: corner, modifierRadius: radius,
+                             modifierDiameter: modifierFrames.map(\.width).max() ?? 0,
+                             edgeDistances: CGSize(width: max(0, edges.width), height: max(0, edges.height)))
+    }
+
+    /// The same cluster mirrored across the area's vertical center line —
+    /// Two-Hand Assist's opposite side.
+    func mirrored(in area: CGRect) -> CornerCluster {
+        CornerCluster(origin: CGPoint(x: area.minX + area.maxX - origin.x, y: origin.y),
+                      corner: CornerArcGeometry.mirroredHorizontally(corner),
+                      modifierRadius: modifierRadius, modifierDiameter: modifierDiameter,
+                      edgeDistances: edgeDistances)
+    }
+
+    /// Palette keys on the arc(s) directly outside the modifier arc: the
+    /// first ring one `spacing` beyond it; more keys than fit continue on
+    /// the next ring out. Each ring's keys are spread evenly by angle.
+    func palettePoints(count: Int, keyDiameter: CGFloat, spacing: CGFloat) -> [CGPoint] {
+        guard count > 0 else { return [] }
+        let pitch = keyDiameter + spacing
+        var radius = modifierRadius + modifierDiameter / 2 + keyDiameter / 2 + spacing
+        var remaining = count
+        var result: [CGPoint] = []
+        while remaining > 0 {
+            let fits = CornerArcGeometry.capacity(radius: radius, pitch: pitch, diameter: keyDiameter,
+                                                  edgeDistances: edgeDistances)
+            let ring = min(fits, remaining)
+            result += CornerArcGeometry.points(count: ring, radius: radius, origin: origin, corner: corner,
+                                               diameter: keyDiameter, edgeDistances: edgeDistances)
+            remaining -= ring
+            radius += pitch
+        }
+        return result
+    }
+
+    /// Controls on the modifier arc itself (Two-Hand Assist helpers and idle
+    /// actions use the mirrored cluster's modifier arc).
+    func modifierArcPoints(count: Int, diameter: CGFloat) -> [CGPoint] {
+        CornerArcGeometry.points(count: count, radius: modifierRadius, origin: origin, corner: corner,
+                                 diameter: diameter, edgeDistances: edgeDistances)
     }
 }
 
@@ -401,6 +647,68 @@ enum CustomLayoutGeometry {
                                           direction: direction, bounds: area, obstacles: obstacles)
     }
 
+    /// Every placement's resolved circle, by placement id.
+    static func frames(for arrangement: CustomControlArrangement, in area: CGRect,
+                       baseDiameter: CGFloat) -> [String: CGRect] {
+        Dictionary(arrangement.placements.map { ($0.id, frame(for: $0, in: area, baseDiameter: baseDiameter)) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Where the palette of the modifier placed at `anchorID` goes — the one
+    /// source for the live overlay, the editor and Preview. A default
+    /// (automatic arc) palette on a corner cluster blooms on the arc right
+    /// outside the modifier arc; any other style blooms around its own
+    /// modifier, clear of the other controls.
+    static func palettePoints(count: Int, anchorID: String, arrangement: CustomControlArrangement,
+                              frames: [String: CGRect], area: CGRect, baseDiameter: CGFloat,
+                              spacing: CGFloat) -> [CGPoint] {
+        guard count > 0, let anchor = frames[anchorID],
+              let placement = arrangement.placements.first(where: { $0.id == anchorID }) else { return [] }
+        let style = placement.palette ?? PalettePresentation()
+        let keyDiameter = paletteKeyDiameter(baseDiameter: baseDiameter)
+        if style.shape == .arc, style.directionDegrees == nil,
+           let cluster = CornerCluster.resolve(arrangement: arrangement, frames: frames, area: area) {
+            let inner = area.insetBy(dx: keyDiameter / 2, dy: keyDiameter / 2)
+            return cluster.palettePoints(count: count, keyDiameter: keyDiameter, spacing: spacing * CGFloat(style.spacing))
+                .map { CGPoint(x: min(max($0.x, inner.minX), inner.maxX), y: min(max($0.y, inner.minY), inner.maxY)) }
+        }
+        return paletteCenters(count: count, anchor: anchor, style: style, area: area, baseDiameter: baseDiameter,
+                              spacing: spacing, obstacles: frames.filter { $0.key != anchorID }.map(\.value))
+    }
+
+    static let edgeSnapTolerance: CGFloat = 12
+
+    /// Where a control of `diameter` dropped at `point` is stored.
+    /// - Snap to Edges pulls it flush against the layout area's edges, or
+    ///   onto its center lines, when it lands within `edgeSnapTolerance`.
+    /// - Snap to Guides pulls it onto the nearest alignment-guide line.
+    /// Guide display (Dots / Grid Lines) is editor chrome and never reaches
+    /// the layout; only these stored positions do.
+    static func droppedPosition(for point: CGPoint, in area: CGRect, diameter: CGFloat,
+                                snapToEdges: Bool, snapToGuides: Bool) -> (x: Double, y: Double) {
+        func edgeSnap(_ value: CGFloat, lower: CGFloat, upper: CGFloat, middle: CGFloat) -> CGFloat? {
+            let tolerance = edgeSnapTolerance
+            if abs(value - diameter / 2 - lower) <= tolerance { return lower + diameter / 2 }
+            if abs(upper - value - diameter / 2) <= tolerance { return upper - diameter / 2 }
+            if abs(value - middle) <= tolerance { return middle }
+            return nil
+        }
+        var x = point.x
+        var y = point.y
+        var snappedX = false
+        var snappedY = false
+        if snapToEdges {
+            if let edge = edgeSnap(x, lower: area.minX, upper: area.maxX, middle: area.midX) { x = edge; snappedX = true }
+            if let edge = edgeSnap(y, lower: area.minY, upper: area.maxY, middle: area.midY) { y = edge; snappedY = true }
+        }
+        var position = normalizedPoint(for: CGPoint(x: x, y: y), in: area)
+        if snapToGuides {
+            if !snappedX { position.x = snapped(position.x) }
+            if !snappedY { position.y = snapped(position.y) }
+        }
+        return position
+    }
+
     /// Snaps a normalized coordinate to a 1/`divisions` grid when within
     /// `tolerance` of a line — the editor's alignment assist.
     static func snapped(_ value: Double, divisions: Int = 24, tolerance: Double = 0.012) -> Double {
@@ -427,6 +735,16 @@ enum RadialPaletteLayout {
                        minimumRadius: CGFloat, direction: CGFloat,
                        bounds: CGRect, obstacles: [CGRect] = []) -> [CGPoint] {
         guard count > 0, itemDiameter > 0, direction.isFinite, minimumRadius.isFinite else { return [] }
+        if shape == .arc {
+            return fan(count: count, center: center, itemDiameter: itemDiameter, spacing: spacing,
+                       minimumRadius: max(minimumRadius, itemDiameter), direction: direction,
+                       bounds: bounds, obstacles: obstacles)
+        }
+        if shape == .wheel {
+            return WheelPaletteGeometry.layout(count: count, anchor: CGRect(x: center.x, y: center.y, width: 0, height: 0),
+                                               keyDiameter: itemDiameter, spacing: spacing, bounds: bounds)?
+                .segments.map(\.labelPoint) ?? []
+        }
         var radius = max(minimumRadius, itemDiameter)
         var result = raw(count: count, center: center, shape: shape, diameter: itemDiameter,
                          spacing: spacing, radius: radius, direction: direction)
@@ -439,6 +757,89 @@ enum RadialPaletteLayout {
         guard inner.width >= 0, inner.height >= 0 else { return result }
         return result.map { CGPoint(x: min(max($0.x, inner.minX), inner.maxX),
                                     y: min(max($0.y, inner.minY), inner.maxY)) }
+    }
+
+    /// An arc of evenly spaced keys at one radius around `center`, fanned
+    /// into free space: the angular window closest to `direction` in which
+    /// every key stays inside `bounds` and clear of `obstacles`. When no
+    /// window is wide enough, the radius grows; more keys than one arc
+    /// holds (≤ `maximumArcSpan`) continue on the next arc out.
+    static func fan(count: Int, center: CGPoint, itemDiameter: CGFloat, spacing: CGFloat,
+                    minimumRadius: CGFloat, direction: CGFloat, bounds: CGRect,
+                    obstacles: [CGRect] = []) -> [CGPoint] {
+        let pitch = itemDiameter + spacing
+        let inner = bounds.insetBy(dx: itemDiameter / 2, dy: itemDiameter / 2)
+        let reach = itemDiameter / 2 + spacing / 2
+        func valid(_ angle: CGFloat, _ radius: CGFloat) -> Bool {
+            let point = CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
+            return inner.contains(point) && !obstacles.contains { $0.insetBy(dx: -reach, dy: -reach).contains(point) }
+        }
+        var result: [CGPoint] = []
+        var radius = minimumRadius
+        var remaining = count
+        var attempts = 0
+        while remaining > 0, attempts < 40 {
+            attempts += 1
+            let step = angularStep(pitch: pitch, radius: radius)
+            let capacity = max(1, Int(maximumArcSpan / step + 0.0001) + 1)
+            let inArc = min(capacity, remaining)
+            let needed = step * CGFloat(inArc - 1)
+            if let middle = window(needed: needed, preferred: direction, radius: radius, valid: valid) {
+                for index in 0..<inArc {
+                    let angle = middle + (CGFloat(index) - CGFloat(inArc - 1) / 2) * step
+                    result.append(CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle)))
+                }
+                remaining -= inArc
+                radius += pitch
+            } else {
+                radius += pitch / 2
+            }
+        }
+        if remaining > 0 {
+            // Nowhere fits (a tiny screen): fall back to the plain arc, clamped.
+            let rest = raw(count: remaining, center: center, shape: .ring, diameter: itemDiameter,
+                           spacing: spacing, radius: radius, direction: direction)
+            result += rest.map { CGPoint(x: min(max($0.x, inner.minX), inner.maxX),
+                                         y: min(max($0.y, inner.minY), inner.maxY)) }
+        }
+        return result
+    }
+
+    /// The center angle of a valid window `needed` radians wide, as close to
+    /// `preferred` as the free arcs at `radius` allow; `nil` if none fits.
+    private static func window(needed: CGFloat, preferred: CGFloat, radius: CGFloat,
+                               valid: (CGFloat, CGFloat) -> Bool) -> CGFloat? {
+        let samples = 720
+        let sample = 2 * CGFloat.pi / CGFloat(samples)
+        let flags = (0..<samples).map { valid(CGFloat($0) * sample, radius) }
+        if flags.allSatisfy({ $0 }) { return preferred }
+        guard let firstInvalid = flags.firstIndex(of: false) else { return preferred }
+        // Walk once around, starting just after an invalid sample, collecting
+        // the free arcs as [start, end] angles.
+        var arcs: [(start: CGFloat, end: CGFloat)] = []
+        var runStart: Int?
+        for offset in 1...samples {
+            let index = (firstInvalid + offset) % samples
+            if flags[index] {
+                if runStart == nil { runStart = firstInvalid + offset }
+            } else if let start = runStart {
+                arcs.append((CGFloat(start) * sample, CGFloat(firstInvalid + offset - 1) * sample))
+                runStart = nil
+            }
+        }
+        var best: (angle: CGFloat, distance: CGFloat)?
+        for arc in arcs where arc.end - arc.start >= needed {
+            // Closest angle to `preferred` (mod 2π) the window's middle may take.
+            let lower = arc.start + needed / 2
+            let upper = arc.end - needed / 2
+            var candidate = preferred
+            while candidate < lower - .pi { candidate += 2 * .pi }
+            while candidate > upper + .pi { candidate -= 2 * .pi }
+            let clamped = min(max(candidate, lower), upper)
+            let distance = abs(ManualViewportState.normalizedAngle(clamped - preferred))
+            if best == nil || distance < best!.distance { best = (clamped, distance) }
+        }
+        return best?.angle
     }
 
     /// Radians from `point` toward `target` (y-down).
@@ -476,6 +877,10 @@ enum RadialPaletteLayout {
                 let angle = direction + CGFloat(index) * 2 * .pi / CGFloat(count)
                 return CGPoint(x: center.x + ringRadius * cos(angle), y: center.y + ringRadius * sin(angle))
             }
+        case .wheel:
+            return WheelPaletteGeometry.layout(count: count, anchor: CGRect(x: center.x, y: center.y, width: 0, height: 0),
+                                               keyDiameter: diameter, spacing: spacing,
+                                               bounds: .infinite)?.segments.map(\.labelPoint) ?? []
         case .row, .column:
             let origin = CGPoint(x: center.x + radius * cos(direction), y: center.y + radius * sin(direction))
             return (0..<count).map { index in
@@ -557,6 +962,25 @@ enum TwoHandAssist {
                                           bounds: area)
     }
 
+    /// Two-Hand Assist positions for a Custom arrangement: on a corner
+    /// cluster, the modifier arc mirrored to the opposite side (same radius,
+    /// same angular spread); otherwise the compact arc of `helperPoints`.
+    static func helperPoints(count: Int, arrangement: CustomControlArrangement, frames: [String: CGRect],
+                             area: CGRect, itemDiameter: CGFloat, spacing: CGFloat) -> [CGPoint] {
+        guard count > 0 else { return [] }
+        guard let cluster = CornerCluster.resolve(arrangement: arrangement, frames: frames, area: area) else {
+            return helperPoints(count: count, clusterCentroid: arrangement.clusterCentroid, area: area,
+                                itemDiameter: itemDiameter, spacing: spacing)
+        }
+        var mirrored = cluster.mirrored(in: area)
+        // More controls than the modifier arc holds widen the arc, never
+        // crowd it.
+        mirrored.modifierRadius = CornerArcGeometry.radius(
+            count: count, pitch: itemDiameter + spacing, minimum: mirrored.modifierRadius,
+            diameter: itemDiameter, corner: mirrored.corner, edgeDistances: mirrored.edgeDistances)
+        return mirrored.modifierArcPoints(count: count, diameter: itemDiameter)
+    }
+
     /// The modifiers the helper offers, in canonical order.
     static let helperModifiers: [ControlModifier] = ControlModifier.allCases
 }
@@ -583,5 +1007,88 @@ extension ControlInteractionState {
         case .idle, .latched, .executing, .cancelled:
             return tap(modifier)
         }
+    }
+}
+
+// MARK: - Wheel palette
+
+/// A ring of wedge-shaped segments around a center disc — the Wheel palette
+/// style. Pure geometry: the renderer draws the wedges and the chord
+/// gesture hit-tests them with `segmentIndex(at:)`.
+struct WheelPaletteLayout: Equatable {
+    struct Segment: Equatable {
+        var startAngle: CGFloat
+        var endAngle: CGFloat
+        /// Where the segment's key label sits.
+        var labelPoint: CGPoint
+    }
+
+    var center: CGPoint
+    var innerRadius: CGFloat
+    var outerRadius: CGFloat
+    var segments: [Segment]
+
+    var frame: CGRect {
+        CGRect(x: center.x - outerRadius, y: center.y - outerRadius, width: outerRadius * 2, height: outerRadius * 2)
+    }
+
+    /// The segment under `point`, including a small slack outside the ring.
+    func segmentIndex(at point: CGPoint, slack: CGFloat = 14) -> Int? {
+        guard !segments.isEmpty else { return nil }
+        let distance = hypot(point.x - center.x, point.y - center.y)
+        guard distance >= innerRadius - slack, distance <= outerRadius + slack else { return nil }
+        let first = segments[0].startAngle
+        var angle = atan2(point.y - center.y, point.x - center.x) - first
+        while angle < 0 { angle += 2 * .pi }
+        while angle >= 2 * .pi { angle -= 2 * .pi }
+        return min(segments.count - 1, Int(angle / (2 * .pi / CGFloat(segments.count))))
+    }
+}
+
+enum WheelPaletteGeometry {
+    /// The wheel for `count` actions around `anchor` (a modifier, or a
+    /// rail): a ring just clear of the anchor, wide enough for a key per
+    /// segment, with the first segment centered at the top. The center
+    /// moves inward when the whole wheel wouldn't fit inside `bounds`.
+    static func layout(count: Int, anchor: CGRect, keyDiameter: CGFloat, spacing: CGFloat,
+                       bounds: CGRect) -> WheelPaletteLayout? {
+        guard count > 0, keyDiameter > 0 else { return nil }
+        // Generous wedges: deeper than a key, and at least a key and a bit
+        // wide at mid-ring, so a thumb hits them reliably.
+        let thickness = keyDiameter * 1.5
+        var inner = max(anchor.width, anchor.height) / 2 + spacing
+        let minimumMid = CGFloat(count) * keyDiameter * 1.15 / (2 * .pi)
+        inner = max(inner, minimumMid - thickness / 2, keyDiameter * 0.6)
+        let outer = inner + thickness
+        var center = CGPoint(x: anchor.midX, y: anchor.midY)
+        if !bounds.isInfinite, bounds.width >= outer * 2, bounds.height >= outer * 2 {
+            center.x = min(max(center.x, bounds.minX + outer), bounds.maxX - outer)
+            center.y = min(max(center.y, bounds.minY + outer), bounds.maxY - outer)
+        }
+        let sweep = 2 * CGFloat.pi / CGFloat(count)
+        let first = -CGFloat.pi / 2 - sweep / 2
+        let middle = (inner + outer) / 2
+        let segments = (0..<count).map { index -> WheelPaletteLayout.Segment in
+            let start = first + CGFloat(index) * sweep
+            let mid = start + sweep / 2
+            return .init(startAngle: start, endAngle: start + sweep,
+                         labelPoint: CGPoint(x: center.x + middle * cos(mid), y: center.y + middle * sin(mid)))
+        }
+        return WheelPaletteLayout(center: center, innerRadius: inner, outerRadius: outer, segments: segments)
+    }
+}
+
+// MARK: - Editor Two-Hand Assist
+
+/// Two-Hand Assist in the editor stays dormant while arranging: moving or
+/// selecting a modifier never triggers it. Only Preview runs the real
+/// projection; "Preview Two-Hand Assist" in Edit shows its helper arc
+/// statically.
+enum EditorTwoHandPresentation {
+    static func state(previewing: Bool, showingAssistPreview: Bool, enabled: Bool,
+                      interaction: ControlInteractionState) -> TwoHandAssistState {
+        guard enabled else { return .hidden }
+        if previewing { return TwoHandAssist.state(enabled: true, interaction: interaction) }
+        return showingAssistPreview ? .helper(active: [.command]) : .hidden
     }
 }
