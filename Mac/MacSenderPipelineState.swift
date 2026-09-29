@@ -273,6 +273,12 @@ final class MacSenderPipelineState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let logAction = encodeOutputFailureLogPolicy.record(status, at: time)
+        return (logAction, recordFailureStreakLocked(generation: generation))
+    }
+
+    /// Caller holds `lock`. One failed encode — asynchronous output or
+    /// synchronous submission — toward `generation`'s zero-success streak.
+    private func recordFailureStreakLocked(generation: UInt64) -> Bool {
         if encodeFailureStreakGeneration != generation {
             encodeFailureStreakGeneration = generation
             encodeFailureStreakCount = 0
@@ -282,7 +288,18 @@ final class MacSenderPipelineState: @unchecked Sendable {
             && encodeFailureStreakCount >= encodeFailureStreakLimit
             && encoderRecoveryDowngradedGeneration != generation
         if shouldAttemptRecovery { encoderRecoveryDowngradedGeneration = generation }
-        return (logAction, shouldAttemptRecovery)
+        return shouldAttemptRecovery
+    }
+
+    /// The failing encoder of `generation` was replaced by one of another
+    /// codec (the one-time HEVC -> H.264 fallback): give the replacement its
+    /// own streak and its own one-time recovery, as a fresh generation has.
+    func rearmEncodeFailureRecovery(generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard encodeFailureStreakGeneration == generation else { return }
+        encodeFailureStreakCount = 0
+        if encoderRecoveryDowngradedGeneration == generation { encoderRecoveryDowngradedGeneration = nil }
     }
 
     func recordEncodeSuccess(generation: UInt64) {
@@ -298,13 +315,19 @@ final class MacSenderPipelineState: @unchecked Sendable {
     /// failure and decrements `pendingEncodes` for the frame that never made
     /// it into the pipeline, atomically (matches the previous single locked
     /// region in `encode`).
+    ///
+    /// With a `generation`, the rejected submission also counts toward that
+    /// generation's zero-success streak: a session that refuses every frame
+    /// synchronously is as broken as one that fails every output.
     func recordEncodeSubmitFailure(
-        _ status: OSStatus, at time: TimeInterval
-    ) -> ThrottledLogPolicy<OSStatus>.Action {
+        _ status: OSStatus, at time: TimeInterval, generation: UInt64? = nil
+    ) -> (logAction: ThrottledLogPolicy<OSStatus>.Action, shouldAttemptRecovery: Bool) {
         lock.lock()
         defer { lock.unlock() }
         pendingEncodes = max(0, pendingEncodes - 1)
-        return encodeFailureLogPolicy.record(status, at: time)
+        let logAction = encodeFailureLogPolicy.record(status, at: time)
+        guard let generation else { return (logAction, false) }
+        return (logAction, recordFailureStreakLocked(generation: generation))
     }
 
     func flushEncodeSubmitFailureLog(at time: TimeInterval) -> ThrottledLogPolicy<OSStatus>.Report? {

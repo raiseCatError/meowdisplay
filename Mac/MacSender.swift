@@ -495,6 +495,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// read and wrong for output from a session that has since been replaced.
     private var activeCodec: StreamCodec = .h264
     private var activeCodecReason: String = CodecSelectionPolicy.Reason.explicitPreference.rawValue
+    /// An HEVC session was created and then produced no frames (the encode
+    /// failure safety net). Every later codec decision on this sender
+    /// recovers to H.264 (`CodecSelectionPolicy.Reason.runtimeFallback`).
+    /// On `queue`.
+    private var hevcFailedAtRuntime = false
     /// Cached once per process: whether this Mac has a real, usable
     /// hardware HEVC encoder (VideoToolbox's actual encoder list, never an
     /// OS-version guess). `VTCopyVideoEncoderList` enumerates every
@@ -1263,10 +1268,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// No-op while there is no live stream — the next `startCapture` picks
     /// up the new preference on its own, and one already starting applies
     /// it when it commits.
-    private func applyEffectiveFPSChange() {
+    ///
+    /// `rebuildEncoder` also rebuilds when the rate is unchanged — for a
+    /// codec decision that changed underneath the live encoder (a runtime
+    /// HEVC failure, or a hello that no longer offers HEVC).
+    private func applyEffectiveFPSChange(rebuildEncoder: Bool = false) {
         guard let stream = captureOwnership.liveStream, capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
         let fpsResult = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh)
-        guard fpsResult.fps != captureTargetFPS else { return }
+        guard rebuildEncoder || fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
         needsKeyframe = true
         let config = SCStreamConfiguration()
@@ -1285,6 +1294,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     do {
                         try self.setupEncoder(width: self.capturePixelsWide, height: self.capturePixelsHigh,
                                               fps: fpsResult.fps)
+                        if rebuildEncoder {
+                            self.pipelineState.rearmEncodeFailureRecovery(generation: self.captureGenerationNow)
+                        }
                     } catch {
                         Log.info("FPS-change encoder setup failed: \(error) — entering capture recovery")
                         guard self.updateCaptureState({ $0.unexpectedStop() }) else { return }
@@ -3407,9 +3419,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// means the size itself is the problem, not the rate — falls through
     /// to the ordinary capture-recovery/reconnect path instead of an
     /// infinite downgrade loop.
+    ///
+    /// An HEVC encoder in that state is recovered by codec first: once per
+    /// sender, the stream switches to H.264 (whose encoder then gets its own
+    /// safety net) before any rate is given up.
     private func recoverFromEncoderFailureStreak(generation: UInt64) {
         guard generation == captureGenerationNow, let stream,
               capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
+        if activeCodec == .hevc, !hevcFailedAtRuntime {
+            Log.info("encoder failure safety net: HEVC produced no frames after \(encodeFailureStreakLimit) "
+                + "attempts at \(capturePixelsWide)x\(capturePixelsHigh) — falling back to H.264 for this session")
+            hevcFailedAtRuntime = true
+            applyEffectiveFPSChange(rebuildEncoder: true)
+            return
+        }
         let tiers = EncoderCapability.supportedFPSTiers
         guard let currentIndex = tiers.firstIndex(where: { $0 >= captureTargetFPS }),
               currentIndex > 0 else {
@@ -4885,7 +4908,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // Mac's encoder stayed on HEVC. Without this resend, the
                 // receiver would misclassify the next HEVC keyframe's
                 // VPS/SPS/PPS using H.264's `&0x1F` NAL-type space.
-                sendStreamCodecState()
+                //
+                // Unless this hello no longer offers HEVC (a reconnect can
+                // land on an H.264-only build of the receiver): then the
+                // live encoder is rebuilt for the codec this hello allows,
+                // and that rebuild announces it.
+                if activeCodec == .hevc, !info.receiverSupportsHEVC,
+                   captureOwnership.liveStream != nil {
+                    Log.info("receiver no longer offers HEVC — re-selecting the codec for the live stream")
+                    applyEffectiveFPSChange(rebuildEncoder: true)
+                } else {
+                    sendStreamCodecState()
+                }
                 if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
                     sendMirrorDisplayState()
                 }
@@ -5497,7 +5531,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             preference: codecPreference,
             senderSupportsHEVC: Self.senderSupportsHEVC,
             receiverSupportsHEVC: receiverSupportsHEVC,
-            requestedWidth: width, requestedHeight: height, requestedFPS: fps)
+            requestedWidth: width, requestedHeight: height, requestedFPS: fps,
+            hevcFailedAtRuntime: hevcFailedAtRuntime)
         return CodecSelectionPolicy.select(input)
     }
 
@@ -5895,10 +5930,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // an unthrottled line here is ~60/sec for as long as the problem
             // lasts. Report at most once a second and carry the count: the
             // status code is the diagnosis, the rate is just a number.
-            let logAction = pipelineState.recordEncodeSubmitFailure(
-                submitStatus, at: ProcessInfo.processInfo.systemUptime
+            let (logAction, shouldAttemptRecovery) = pipelineState.recordEncodeSubmitFailure(
+                submitStatus, at: ProcessInfo.processInfo.systemUptime, generation: generation
             )
             handleEncodeFailureLogAction(logAction)
+            if shouldAttemptRecovery {
+                queue.async { selfBox.currentOnQueue()?.recoverFromEncoderFailureStreak(generation: generation) }
+            }
         }
     }
 
