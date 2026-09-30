@@ -33,7 +33,13 @@
 	<string>MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>SUEnableAutomaticChecks</key>
-	<false/>
+	<key>SUFeedURL</key>
+	<string>https://meowdisplay.app/appcast-receiver.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>M9Je3RXE9GYGv7ZvVmJj2xK2FrpSR/rQvbuZFfYORcU=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

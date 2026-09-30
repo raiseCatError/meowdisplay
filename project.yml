@@ -3,15 +3,14 @@ options:
   createIntermediateGroups: true
 # Swift Package Manager dependencies. Sparkle is the macOS apps' out-of-store
 # auto-update framework (issue #52): embedded open-source code + CLI tooling,
-# not a hosted service. Its checks are currently switched off — MeowDisplay
-# has no appcast or signing key of its own yet (see SUEnableAutomaticChecks
-# on the Mac targets below).
+# not a hosted service. Feed URLs and the EdDSA public key are set on the Mac
+# targets below.
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    # 2.x is the current major (latest 2.9.x) and the first Sparkle line to
-    # support SPM. `from:` allows compatible 2.x updates.
-    from: "2.6.0"
+    # 2.9 is the first release that supports signed feeds
+    # (SURequireSignedFeed below). `from:` allows compatible 2.x updates.
+    from: "2.9.0"
   SwiftCertificates:
     url: https://github.com/apple/swift-certificates
     from: "1.19.1"
@@ -75,13 +74,20 @@ targets:
         NSLocalNetworkUsageDescription: MeowDisplay connects to your iPad or iPhone over the local network in WiFi mode.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
-        # --- Sparkle auto-update ---
-        # Disabled: MeowDisplay does not yet have its own appcast + signing
-        # infrastructure, and must not consume upstream OpenDisplay's feed or
-        # trust its signing key. Re-add SUFeedURL + SUPublicEDKey (a fresh
-        # MeowDisplay-owned key pair — never reuse upstream's) and flip this
-        # back to true once MeowDisplay hosts its own appcast.
-        SUEnableAutomaticChecks: false
+        # --- Sparkle auto-update (see RELEASE.md) ---
+        # MeowDisplay's own feed and EdDSA public key — never upstream
+        # OpenDisplay's. Both Mac apps trust the same key; each has its own
+        # feed so neither is offered the other app's update.
+        # SUEnableAutomaticChecks is deliberately unset: Sparkle then asks the
+        # user before turning on background checks.
+        SUFeedURL: https://meowdisplay.app/appcast.xml
+        SUPublicEDKey: M9Je3RXE9GYGv7ZvVmJj2xK2FrpSR/rQvbuZFfYORcU=
+        # Check the EdDSA signature before extracting an update, and only
+        # accept an appcast/release notes signed with that key (a compromised
+        # feed host can't redirect users elsewhere). generate_appcast signs
+        # the feed when it sees these keys in the archived app.
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac
@@ -138,9 +144,11 @@ targets:
         NSLocalNetworkUsageDescription: MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
-        # Disabled: see the sender target's Sparkle comment above — no
-        # MeowDisplay-owned appcast/signing infrastructure exists yet.
-        SUEnableAutomaticChecks: false
+        # Sparkle: see the sender target's comment above. Own feed, same key.
+        SUFeedURL: https://meowdisplay.app/appcast-receiver.xml
+        SUPublicEDKey: M9Je3RXE9GYGv7ZvVmJj2xK2FrpSR/rQvbuZFfYORcU=
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac.receiver

@@ -142,6 +142,15 @@ other end. It does not by itself admit a session:
   Remote Access, your traffic does traverse whatever private network you've
   chosen (e.g. Tailscale's infrastructure, per Tailscale's own security
   model) — that's a property of the network you picked, not of MeowDisplay.
+- **Update checks (Mac apps only)**: Sparkle fetches
+  `https://meowdisplay.app/appcast.xml` (the Receiver fetches
+  `appcast-receiver.xml`). That URL redirects to the feed on the project's
+  GitHub Releases page. Checks happen only after the user allows automatic
+  checks (Sparkle asks), or when the user chooses **Check for Updates…**.
+  No system profile is sent. Both the feed and the downloaded update must
+  carry a valid signature from MeowDisplay's EdDSA key, and macOS code
+  signing still applies to the updated app. The iOS app makes no
+  update-check request.
 
 ## What this doesn't claim
 

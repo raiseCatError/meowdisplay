@@ -23,7 +23,7 @@ We cut Mac and iOS from one release tag, but distribution is not simultaneous:
 
 | | Update channel | Time to reach a user |
 |---|---|---|
-| **Mac** | Sparkle appcast (upstream: `opendisplay.app/appcast.xml`; MeowDisplay's Sparkle checks are off until it hosts its own) | hours — auto, silent |
+| **Mac** | Sparkle appcast (`meowdisplay.app/appcast.xml`, `appcast-receiver.xml`) | within a day once the user allows automatic checks (Sparkle asks); installs when the user accepts, unless they opted into automatic installs |
 | **iOS** | App Store (review + user tapping Update) | days → weeks, with a **long tail** |
 
 So at any moment the field holds many version pairings. The dominant one is

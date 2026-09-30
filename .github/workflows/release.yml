@@ -7,9 +7,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # Lets the build-mac job dispatch the Pages deploy after committing the
-  # Sparkle appcast (a GITHUB_TOKEN push won't auto-trigger pages.yml).
-  actions: write
 
 # Serialize release runs on the same ref so two quick merges can't race two
 # uploads. Never cancel an in-flight run — it may be mid-upload or notarizing.
@@ -37,11 +34,6 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: macos-26
-    # The `secrets` context can't be referenced in a step-level `if:` (it's a
-    # workflow-validation error). Map the Sparkle key to a job env var so the
-    # appcast step can guard on its presence via the allowed `env` context.
-    env:
-      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v6
 
@@ -72,9 +64,13 @@ jobs:
           APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          APP_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           export APP_MARKETING_VERSION="${TAG_NAME#v}"
+          # Sparkle orders updates by CFBundleVersion, so the Mac build number
+          # must grow with every release, including the first one (1.20.0),
+          # which was built by hand. The marketing version does; this
+          # workflow's run number restarts at 1 on the fork and would not.
+          export APP_BUILD_NUMBER="$APP_MARKETING_VERSION"
           bundle exec fastlane mac build_release
           bundle exec fastlane mac build_receiver_release
 
@@ -90,79 +86,70 @@ jobs:
 
       # --- Sparkle auto-update: generate + publish the appcasts (issue #52) ---
       # Builds appcast.xml (sender) and appcast-receiver.xml (receiver app)
-      # from the just-released, notarized DMGs and commits them to public/ on
-      # main. One feed per app: each bundle has its own SUFeedURL, and a mixed
-      # feed would offer the wrong app's update.
+      # from the just-released, notarized DMGs and uploads them to the same
+      # GitHub Release. One feed per app: each bundle has its own SUFeedURL,
+      # and a mixed feed would offer the wrong app's update.
       #
-      # Currently a no-op regardless: client-side Sparkle checks are disabled
-      # (no SUFeedURL/SUPublicEDKey in project.yml — see its Sparkle comment)
-      # until MeowDisplay has its own hosted domain and a signing key pair
-      # that isn't upstream OpenDisplay's. Re-wire this step's target URL/feed
-      # once that infrastructure exists.
+      # The apps' SUFeedURLs (https://meowdisplay.app/appcast.xml and
+      # /appcast-receiver.xml) redirect on Cloudflare to
+      # releases/latest/download/<feed>, so the feed goes live together with
+      # the release and needs no website deploy. See RELEASE.md.
       #
-      # No-ops gracefully until the maintainer adds the SPARKLE_PRIVATE_KEY
-      # secret (the EdDSA private key from Sparkle's `generate_keys`), so this
-      # never hard-fails a release before auto-update is switched on.
-      - name: Publish Sparkle appcast to GitHub Pages
-        if: ${{ env.SPARKLE_PRIVATE_KEY != '' }}
+      # The apps require signed feeds (SURequireSignedFeed), which
+      # generate_appcast produces when it finds that key in the archived app.
+      # Required: without SPARKLE_PRIVATE_KEY no feed can be signed, and
+      # installed apps would never be offered this release.
+      - name: Publish Sparkle appcasts to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          # Sparkle release that ships the generate_appcast / sign_update tools.
-          SPARKLE_TOOLS_VERSION: "2.6.4"
+          # Only this step sees the signing key.
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          # Sparkle release that ships the generate_appcast / sign_update
+          # tools, and the SHA-256 GitHub publishes for its tarball.
+          SPARKLE_TOOLS_VERSION: "2.10.0"
+          SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
         run: |
           set -euo pipefail
 
-          # Sparkle's CLI tools (generate_appcast, sign_update) ship in the
-          # official release tarball — download the matching version.
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY is not set; cannot sign the appcasts"
+            exit 1
+          fi
+
           curl -fsSL -o /tmp/sparkle.tar.xz \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          echo "${SPARKLE_TOOLS_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
-          GEN_APPCAST="$(find /tmp/sparkle -name generate_appcast -type f | head -1)"
-          echo "Using $GEN_APPCAST"
-
-          # The EdDSA private key (CI secret) → file for --ed-key-file.
-          printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_ed_priv
+          SPARKLE_BIN=/tmp/sparkle/bin
 
           # generate_appcast wants a directory of update archives per feed.
-          # Point the download links at the GitHub Release assets where the
-          # DMGs live.
+          # Download links point at this release's immutable per-tag assets.
           mkdir -p /tmp/appcast-updates /tmp/appcast-receiver-updates
           cp build/export/MeowDisplay.dmg /tmp/appcast-updates/
           cp build/export/MeowDisplayReceiver.dmg /tmp/appcast-receiver-updates/
 
-          "$GEN_APPCAST" \
-            --ed-key-file /tmp/sparkle_ed_priv \
+          # The key goes in on stdin (`--ed-key-file -`), never to disk.
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/generate_appcast" \
+            --ed-key-file - \
             --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/" \
+            --link "https://meowdisplay.app/" \
             -o /tmp/appcast-updates/appcast.xml \
             /tmp/appcast-updates
-          "$GEN_APPCAST" \
-            --ed-key-file /tmp/sparkle_ed_priv \
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/generate_appcast" \
+            --ed-key-file - \
             --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/" \
+            --link "https://meowdisplay.app/" \
             -o /tmp/appcast-receiver-updates/appcast-receiver.xml \
             /tmp/appcast-receiver-updates
 
-          # Commit the feed into public/ on main; Pages picks it up from there.
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git checkout main
-          mkdir -p public
-          cp /tmp/appcast-updates/appcast.xml public/appcast.xml
-          cp /tmp/appcast-receiver-updates/appcast-receiver.xml public/appcast-receiver.xml
-          rm -f /tmp/sparkle_ed_priv
-          git add public/appcast.xml public/appcast-receiver.xml
-          # Compare the STAGED files: plain `git diff` ignores untracked files,
-          # so the first-ever appcast (a brand-new public/appcast.xml) looked
-          # "unchanged" and was never committed. `--cached` sees the staged add.
-          if ! git diff --cached --quiet -- public/appcast.xml public/appcast-receiver.xml; then
-            git commit -m "chore(release): publish Sparkle appcasts for ${TAG_NAME} [skip ci]"
-            git push origin main
-            # Pushes made with GITHUB_TOKEN do NOT trigger other workflows
-            # (GitHub blocks recursive runs), so kick the Pages deploy
-            # explicitly via its workflow_dispatch entry point.
-            gh workflow run pages.yml --ref main || \
-              echo "could not dispatch pages.yml — deploy it manually"
-          else
-            echo "appcast.xml unchanged — nothing to publish"
-          fi
+          # The apps reject an unsigned feed or update, so check both
+          # signatures with Sparkle's own verifier before publishing.
+          for feed in /tmp/appcast-updates/appcast.xml /tmp/appcast-receiver-updates/appcast-receiver.xml; do
+            grep -q 'sparkle:edSignature=' "$feed"
+            printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - --verify "$feed"
+          done
+
+          gh release upload "$TAG_NAME" --clobber \
+            /tmp/appcast-updates/appcast.xml \
+            /tmp/appcast-receiver-updates/appcast-receiver.xml
