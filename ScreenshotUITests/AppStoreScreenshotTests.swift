@@ -19,12 +19,12 @@ final class AppStoreScreenshotTests: XCTestCase {
     // MARK: - iPad (landscape)
 
     func testIPad01Home() throws {
-        try launchOnPad()
+        try launch(on: .pad, orientation: .landscapeLeft)
         capture("ipad-01-home")
     }
 
     func testIPad02Settings() throws {
-        try launchOnPad()
+        try launch(on: .pad, orientation: .landscapeLeft)
         openSettings()
         tapElement(labeled: "Input")
         waitForNavigationTitle("Input")
@@ -32,7 +32,7 @@ final class AppStoreScreenshotTests: XCTestCase {
     }
 
     func testIPad03CustomKeymapping() throws {
-        try launchOnPad()
+        try launch(on: .pad, orientation: .landscapeLeft)
         openSettings()
         tapElement(labeled: "Controls")
         waitForNavigationTitle("Controls")
@@ -63,16 +63,33 @@ final class AppStoreScreenshotTests: XCTestCase {
         capture("ipad-03-custom-keymapping")
     }
 
+    // MARK: - iPhone (portrait)
+
+    func testIPhone01Home() throws {
+        try launch(on: .phone, orientation: .portrait)
+        capture("iphone-01-home")
+    }
+
+    func testIPhone02Settings() throws {
+        try launch(on: .phone, orientation: .portrait)
+        openSettings()
+        tapElement(labeled: "Input")
+        waitForNavigationTitle("Input")
+        capture("iphone-02-settings")
+    }
+
     // MARK: - Steps
 
-    private func launchOnPad() throws {
-        guard UIDevice.current.userInterfaceIdiom == .pad else {
-            throw XCTSkip("iPad screenshot")
+    /// Skips on the other device family, so one run per destination
+    /// captures only that family's screenshots.
+    private func launch(on idiom: UIUserInterfaceIdiom, orientation: UIDeviceOrientation) throws {
+        guard UIDevice.current.userInterfaceIdiom == idiom else {
+            throw XCTSkip("Screenshot for another device family")
         }
-        XCUIDevice.shared.orientation = .landscapeLeft
+        XCUIDevice.shared.orientation = orientation
         app = XCUIApplication()
         app.launch()
-        XCUIDevice.shared.orientation = .landscapeLeft
+        XCUIDevice.shared.orientation = orientation
 
         // First launch shows the real Welcome / "One more app to go" sheet.
         let close = app.buttons["Close"]
