@@ -106,10 +106,10 @@ locally instead of by the workflows:
 
 Values still to fill in before or at release:
 
-- [ ] `AppStore.iOSAppID` in `Shared/AppStore.swift` — the app's numeric
-      Apple ID from App Store Connect (see `fastlane/APP_STORE_LISTING.md`).
+- [x] `AppStore.iOSAppID` in `Shared/AppStore.swift` — `6817552864`, the
+      app's Apple ID from App Store Connect.
 - [ ] `ProjectLinks.koFiPage` in `Shared/ProjectLinks.swift` — the Ko-fi page
-      URL, once it exists. Until then no app shows a support link. Add the
+      URL, once it exists (deferred past 1.20.0). Until then no app shows a support link. Add the
       same URL to the README's Contributing section and `SUPPORT.md` then.
 
 ## Required secrets

@@ -69,6 +69,13 @@ final class AppStoreTests: XCTestCase {
         }
     }
 
+    func testTheShippingListingIsMeowDisplaysOwn() {
+        XCTAssertEqual(AppStore.iOSAppID, "6817552864")
+        XCTAssertEqual(AppStore.updateURL?.absoluteString, "itms-apps://apps.apple.com/app/id6817552864")
+        XCTAssertEqual(AppStore.webURL?.absoluteString, "https://apps.apple.com/app/id6817552864")
+        XCTAssertEqual(AppStore.receiverUpdateURL, AppStore.updateURL)
+    }
+
     // MARK: - With a listing
 
     func testOwnListingIsLinkedOnceConfigured() {

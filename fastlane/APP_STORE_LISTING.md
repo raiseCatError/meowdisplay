@@ -16,6 +16,18 @@ that is not recorded in this repository.
 
 ---
 
+## App identity
+
+| Field | Value |
+|---|---|
+| Name | MeowDisplay |
+| Bundle ID | `com.raisecaterror.meowdisplay.ios` |
+| Apple ID (App Store Connect) | `6817552864` |
+| First version / build | 1.20.0 (1) |
+| Source | `https://github.com/raiseCatError/meowdisplay` |
+
+No donation or support-payment link ships in 1.20.0.
+
 ## App Information (applies to all versions)
 
 **Name**
@@ -139,13 +151,11 @@ Work through this before pressing **Submit for Review**.
 
 ### Before the first submission
 
-- [ ] **Set `AppStore.iOSAppID`** in `Shared/AppStore.swift` to this app's
-      Apple ID from App Store Connect (the digits only). It is `nil` until
-      then, so the iOS update screen and the Mac's `updateRequired` message
-      link to the GitHub project page instead of any App Store listing. It
-      must never be upstream OpenDisplay's ID — `AppStoreTests` fails if that
-      appears anywhere in the repository. Set it in the build that ships, or
-      the first release still points users at GitHub to update.
+- [x] **`AppStore.iOSAppID`** in `Shared/AppStore.swift` is this app's Apple
+      ID, `6817552864`, so the iOS update screen and the Mac's
+      `updateRequired` message open MeowDisplay's own listing. It must never be
+      upstream OpenDisplay's ID — `AppStoreTests` fails if that appears
+      anywhere in the repository.
 - [ ] **Provide a Mac build App Review can install.** There is no public
       notarized Mac download yet. Publish one (for example an unlisted or
       pre-release GitHub Release asset) or attach a download link in the review

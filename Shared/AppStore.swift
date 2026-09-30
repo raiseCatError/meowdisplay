@@ -2,10 +2,9 @@
 // an out-of-date receiver is sent to update, centralized so the iOS app's
 // update screen AND the Mac's `updateRequired` message use the same link.
 //
-// There is deliberately no listing yet: the ID this file used to carry was
-// upstream OpenDisplay's, and no MeowDisplay build may send anyone to another
-// app's listing. Until `iOSAppID` is set, every update link resolves to the
-// project page instead.
+// The ID this file once carried was upstream OpenDisplay's; no MeowDisplay
+// build may send anyone to another app's listing. Without `iOSAppID`, every
+// update link resolves to the project page instead.
 
 import Foundation
 
@@ -14,7 +13,7 @@ enum AppStore {
     /// `apps.apple.com/app/id…`), or nil while it has none. The one place to
     /// configure: set it once App Store Connect assigns the app its Apple ID,
     /// and every URL below follows.
-    static let iOSAppID: String? = nil
+    static let iOSAppID: String? = "6817552864"
 
     /// The project page: how to get and update every MeowDisplay app, and
     /// where an update link points while there is no App Store listing.
