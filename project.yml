@@ -322,6 +322,11 @@ targets:
         UIRequiresFullScreen: true
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
+        # Export compliance, as declared in App Store Connect: the app uses
+        # only standard, exempt encryption (TLS and pairing through Apple's
+        # frameworks), so no non-exempt encryption. It does not mean the app
+        # has no cryptography. Revisit if the cryptography ever changes.
+        ITSAppUsesNonExemptEncryption: false
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         # "Audio, AirPlay, and Picture in Picture": required for the receiver's
         # Picture in Picture window to keep showing the stream in the background.

@@ -136,12 +136,12 @@ Work through this before pressing **Submit for Review**.
 | Marketing URL | Above |
 | Privacy Policy URL | Above |
 | Pricing | **[MAINTAINER INPUT]** — price tier |
-| Regions / availability | **[MAINTAINER INPUT]** |
+| Regions / availability | **[MAINTAINER INPUT]** — 1.20.0 excludes France (export compliance) |
 | Content-rights declaration | Draft above — confirm |
 | Age-rating questionnaire | **[MAINTAINER INPUT]** — the app shows only the user's own Mac screen; no built-in web browsing, user-generated content, or purchases |
 | App Privacy questionnaire | See [App Privacy](#app-privacy) — confirm |
 | Privacy manifest | `iOS/PrivacyInfo.xcprivacy`, bundled by `project.yml` — see [App Privacy](#app-privacy) |
-| Export-compliance questionnaire | See [Export compliance](#export-compliance) — **needs a maintainer/legal determination** |
+| Export-compliance questionnaire | Answered for 1.20.0 (standard encryption, no documentation); `ITSAppUsesNonExemptEncryption = NO` — see [Export compliance](#export-compliance) |
 | App Review contact (name, email, phone) | **[MAINTAINER INPUT]** — enter in App Store Connect only |
 | App Review notes | See [App Review notes](#app-review-notes) |
 | Sign-in required | No — there is no account |
@@ -264,9 +264,12 @@ answer is a maintainer/legal decision — this section does not make it.
 
 ### Current declarations
 
-- `ITSAppUsesNonExemptEncryption` is **not set** in `project.yml` or
-  `iOS/Info.plist`, so App Store Connect will ask the export-compliance
-  questions for each uploaded build until it is answered.
+- `ITSAppUsesNonExemptEncryption` is **`NO`** (the iOS target's
+  `info.properties` in `project.yml`), matching the maintainer's App Store
+  Connect answer for 1.20.0: standard encryption only, no documentation
+  required. It means no *non-exempt* encryption, not no cryptography. No
+  `ITSEncryptionExportComplianceCode` applies. This version is not
+  distributed in France.
 
 ### What App Store Connect is likely to ask
 
