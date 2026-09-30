@@ -39,12 +39,15 @@ final class AppStoreScreenshotTests: XCTestCase {
 
         let layoutRow = element(labeled: "Custom Layout 1")
         if !layoutRow.waitForExistence(timeout: 2) {
-            let picker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Control Layout")).firstMatch
-            XCTAssertTrue(picker.waitForExistence(timeout: timeout), "Control Layout picker not found")
-            picker.tap()
-            let custom = app.buttons["Custom"].firstMatch
-            XCTAssertTrue(custom.waitForExistence(timeout: timeout), "Custom option not found")
+            // Control Layout is a segmented Picker: its segments (Strip,
+            // Overlay, Custom) are buttons inside a segmented control.
+            let custom = app.segmentedControls
+                .containing(NSPredicate(format: "label == %@", "Strip"))
+                .buttons["Custom"]
+            XCTAssertTrue(custom.waitForExistence(timeout: timeout), "Control Layout Custom segment not found")
+            scrollUntilHittable(custom)
             custom.tap()
+            XCTAssertTrue(layoutRow.waitForExistence(timeout: timeout), "Custom Layout 1 not created")
         }
         scrollUntilHittable(layoutRow)
         layoutRow.tap()
