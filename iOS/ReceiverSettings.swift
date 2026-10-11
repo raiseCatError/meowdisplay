@@ -16,6 +16,9 @@ struct SettingsView: View {
     let controlStore: ReceiverControlStore
     let pictureInPicture: ReceiverPictureInPictureController
     let haptics: ReceiverHaptics
+    /// Demo Mode: sample session state. Pages that need a real Mac show
+    /// demo pages instead (see `DemoSettingsPresentation`).
+    var demo: DemoSession?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: MobileSettingsCategory?
@@ -50,6 +53,7 @@ struct SettingsView: View {
                     searchResults
                 }
             }
+            .modifier(DemoSettingsBannerInset(active: demo != nil))
             .navigationTitle("Settings")
             .searchable(text: $query, placement: .sidebar, prompt: Text("Search Settings"))
             .toolbar {
@@ -63,6 +67,7 @@ struct SettingsView: View {
                 if let selection {
                     page(for: selection)
                         .environment(\.settingsHighlight, highlight)
+                        .modifier(DemoSettingsBannerInset(active: demo != nil))
                 } else {
                     Text("Select a category")
                         .foregroundStyle(.secondary)
@@ -121,13 +126,24 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func page(for category: MobileSettingsCategory) -> some View {
+        if let demo, DemoSettingsPresentation.presentation(for: category) == .demo {
+            DemoSettingsPage(category: category, demo: demo, controlStore: controlStore)
+        } else {
+            realPage(for: category)
+        }
+    }
+
+    @ViewBuilder
+    private func realPage(for category: MobileSettingsCategory) -> some View {
         switch category {
         case .general:
             GeneralSettingsPage(receiver: receiver, controlStore: controlStore)
         case .display:
             DisplaySettingsPage(receiver: receiver, controlStore: controlStore, pictureInPicture: pictureInPicture)
         case .input:
-            InputSettingsPage(receiver: receiver, controlStore: controlStore)
+            InputSettingsPage(controlStore: controlStore, isDemo: demo != nil) { [demo] allowed in
+                if let demo { demo.setInputAllowed(allowed) } else { receiver.requestAllowInput(allowed) }
+            }
         case .gestures:
             GestureSettingsPage(controlStore: controlStore)
         case .controls:
@@ -145,7 +161,7 @@ struct SettingsView: View {
         case .diagnostics:
             DiagnosticsSettingsPage()
         case .about:
-            AboutSettingsPage()
+            AboutSettingsPage(defaults: DemoSession.preferenceDefaults(demoActive: demo != nil))
         case .developer:
             #if DEBUG
             DeveloperSettingsPage(receiver: receiver)
@@ -158,7 +174,7 @@ struct SettingsView: View {
 
 /// Binds one receiver preference through `ReceiverControlStore.update`.
 @MainActor
-private func preferenceBinding<Value>(_ store: ReceiverControlStore,
+func preferenceBinding<Value>(_ store: ReceiverControlStore,
                                       _ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
     Binding(get: { store.preferences[keyPath: keyPath] },
             set: { value in store.update { $0[keyPath: keyPath] = value } })
@@ -178,7 +194,7 @@ extension EnvironmentValues {
 
 /// A settings page: a `Form` that scrolls to, and briefly tints, the row a
 /// search result pointed at (rows opt in with `settingsAnchor`).
-private struct SettingsForm<Content: View>: View {
+struct SettingsForm<Content: View>: View {
     @Environment(\.settingsHighlight) private var highlight
     @ViewBuilder let content: Content
 
@@ -206,7 +222,7 @@ private struct SettingsAnchor: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     /// Marks a row as the target of the search item with this id.
     func settingsAnchor(_ id: String) -> some View { modifier(SettingsAnchor(id: id)) }
 }
@@ -223,7 +239,7 @@ private struct HidesSidebarToggle: ViewModifier {
 }
 
 /// A setting's secondary explanation line.
-private struct SettingNote: View {
+struct SettingNote: View {
     let text: LocalizedStringKey
     init(_ text: LocalizedStringKey) { self.text = text }
     var body: some View {
@@ -572,9 +588,20 @@ private struct DisplaySettingsPage: View {
 // MARK: - Input
 
 private struct InputSettingsPage: View {
-    let receiver: StreamReceiver
     @ObservedObject var controlStore: ReceiverControlStore
-    @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    /// Demo Mode: Allow Input is a local sample state, never a Mac request.
+    let isDemo: Bool
+    let requestInput: (Bool) -> Void
+    /// Demo Mode keeps this in the demo domain, never the real preference.
+    @AppStorage private var zoomWhileTyping: Bool
+
+    init(controlStore: ReceiverControlStore, isDemo: Bool, requestInput: @escaping (Bool) -> Void) {
+        self.controlStore = controlStore
+        self.isDemo = isDemo
+        self.requestInput = requestInput
+        _zoomWhileTyping = AppStorage(wrappedValue: true, "zoomWhileTyping",
+                                      store: DemoSession.preferenceDefaults(demoActive: isDemo))
+    }
 
     var body: some View {
         SettingsForm {
@@ -585,22 +612,26 @@ private struct InputSettingsPage: View {
                     .settingsAnchor("control")
                 switch controlStore.sessionInputState {
                 case .off, .notAllowed:
-                    Button("Request Control") {
+                    Button(isDemo ? String(localized: "Allow Input (Demo)") : String(localized: "Request Control")) {
                         controlStore.noteInputTurnedOffByUser(false)
-                        receiver.requestAllowInput(true)
+                        requestInput(true)
                     }
                 case .requesting:
                     EmptyView()
                 case .allowed:
-                    Button("Turn Off", role: .destructive) {
+                    Button(isDemo ? String(localized: "Turn Off Input (Demo)") : String(localized: "Turn Off"), role: .destructive) {
                         controlStore.noteInputTurnedOffByUser(true)
-                        receiver.requestAllowInput(false)
+                        requestInput(false)
                     }
                 case .requestsDisabled:
                     SettingNote("This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings.")
                 }
             } footer: {
-                Text("Settings always stays reachable, even with input turned off.")
+                if isDemo {
+                    Text("Demo: Allow Input is simulated on this \(deviceKind). No Mac is asked and nothing is sent. Settings always stays reachable, even with input turned off.")
+                } else {
+                    Text("Settings always stays reachable, even with input turned off.")
+                }
             }
             Section {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {
@@ -1243,10 +1274,17 @@ private struct DiagnosticsSettingsPage: View {
 
 private struct AboutSettingsPage: View {
     // Cat Mode (hidden easter egg — nine taps on the version row). Local-only
-    // presentation state: never synced, never on the wire.
-    @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
-    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
-    @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
+    // presentation state: never synced, never on the wire. Demo Mode passes
+    // the demo domain, so its taps never reach the real Cat Mode state.
+    @AppStorage private var catModeUnlocked: Bool
+    @AppStorage private var catModeEnabledStorage: Bool
+    @AppStorage private var catModeTapCount: Int
+
+    init(defaults: UserDefaults = .standard) {
+        _catModeUnlocked = AppStorage(wrappedValue: false, CatMode.unlockedDefaultsKey, store: defaults)
+        _catModeEnabledStorage = AppStorage(wrappedValue: false, CatMode.enabledDefaultsKey, store: defaults)
+        _catModeTapCount = AppStorage(wrappedValue: 0, CatMode.tapCountDefaultsKey, store: defaults)
+    }
     @State private var showCatModeUnlockedAlert = false
 
     private var catModeEnabled: Bool {

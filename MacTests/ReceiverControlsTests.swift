@@ -630,12 +630,18 @@ final class ReceiverControlsTests: XCTestCase {
         let repository = ReceiverControlPreferencesRepository(defaults: defaults)
         var old = ReceiverControlPreferences()
         old.version = 5
-        defaults.set(try JSONEncoder().encode(old),
+        // Schema 5 had no Function Tray, so its saves carry none of its keys.
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        for key in ["functionTrayEnabled", "activeFunctionTrayProfile", "functionTrayPosition", "functionTrayProfiles"] {
+            json.removeValue(forKey: key)
+        }
+        defaults.set(try JSONSerialization.data(withJSONObject: json),
                      forKey: ReceiverControlPreferencesRepository.defaultsKey)
 
         let migrated = repository.load()
         XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
         XCTAssertTrue(migrated.functionTrayEnabled)
+        // Older saves keep the earlier same-side placement.
         XCTAssertEqual(migrated.functionTrayPosition, .sameSide)
         XCTAssertEqual(migrated.functionTrayProfile(for: .default), .canonical(slot: .default))
     }

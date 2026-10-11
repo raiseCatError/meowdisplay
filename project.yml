@@ -29,6 +29,9 @@ schemes:
     build:
       targets:
         OpenSidecariOS: all
+    test:
+      targets:
+        - OpenSidecariOSUITests
   OpenSidecarMacReceiver:
     build:
       targets:
@@ -261,6 +264,9 @@ targets:
       - Shared/PadControlLayout.swift
       - Shared/CustomControlLayout.swift
       - Shared/MobileSettingsCategory.swift
+      # iOS Demo Mode boundary (Foundation only, no UIKit).
+      - iOS/DemoSession.swift
+      - iOS/DemoDesktop.swift
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift
@@ -349,3 +355,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.ios
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  # Demo Mode smoke path for App Review (launch, Explore Demo, Settings, exit).
+  OpenSidecariOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.4"
+    sources:
+      - iOSUITests
+    dependencies:
+      - target: OpenSidecariOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.ios.uitests
