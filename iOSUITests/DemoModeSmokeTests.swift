@@ -25,11 +25,12 @@ final class DemoModeSmokeTests: XCTestCase {
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
         // Let the onboarding sheet finish closing before the next tap.
         waitForNonExistence(app.buttons["Close"])
+        sleep(1)
 
         let explore = app.buttons["Explore Demo"]
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
         snapshot(app, "01-home")
-        explore.tap()
+        tapWhenSettled(explore, in: app)
 
         let exit = app.buttons["Exit Demo"]
         XCTAssertTrue(exit.waitForExistence(timeout: 5))
@@ -65,6 +66,19 @@ final class DemoModeSmokeTests: XCTestCase {
         exit.tap()
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
         XCTAssertFalse(exit.exists)
+    }
+
+    /// Explore Demo can sit below the fold of the home column in iPhone
+    /// landscape. Scroll it in slowly and let the scroll settle first: a tap
+    /// during scroll deceleration only stops the scroll.
+    @MainActor
+    private func tapWhenSettled(_ button: XCUIElement, in app: XCUIApplication) {
+        let column = app.scrollViews.containing(.button, identifier: "exploreDemo").firstMatch
+        for _ in 0..<4 where !button.isHittable {
+            (column.exists ? column : app).swipeUp(velocity: .slow)
+        }
+        sleep(1)
+        button.tap()
     }
 
     private func waitForNonExistence(_ element: XCUIElement) {

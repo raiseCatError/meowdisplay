@@ -266,6 +266,7 @@ targets:
       - Shared/MobileSettingsCategory.swift
       # iOS Demo Mode boundary (Foundation only, no UIKit).
       - iOS/DemoSession.swift
+      - iOS/DemoDesktop.swift
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift

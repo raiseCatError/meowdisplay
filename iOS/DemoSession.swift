@@ -105,10 +105,14 @@ final class DemoSession: ObservableObject {
     @Published var showPerformanceOverlay = false
     @Published var remoteAccessEnabled = true
     @Published var requestInputAutomatically = false
+    /// Extend Shape, demo-local. Uses the real `ExtendDisplayShapePreference`.
+    @Published var extendShape = ExtendDisplayShapePreference.standard {
+        didSet { if extendShape != oldValue { log("Demo Extend shape set to \(extendShape.shape.title)") } }
+    }
     @Published private(set) var events: [Event] = []
-    /// The last control the reviewer used, shown as local feedback only.
-    @Published private(set) var lastAction: String?
-    @Published private(set) var actionGeneration = 0
+    /// The interactive sample desktop. Its own object, so touches and
+    /// pointer movement never re-render Settings.
+    let workspace = DemoWorkspace()
     private var clock = 0
 
     init(videoSize: CGSize = CGSize(width: 2732, height: 2048), deviceName: String = "Sample iPad") {
@@ -138,12 +142,6 @@ final class DemoSession: ObservableObject {
         log(enabled ? "Demo video on" : "Demo video off")
     }
 
-    /// Records a control the reviewer used, in place of sending it.
-    func noteAction(_ description: String) {
-        lastAction = description
-        actionGeneration &+= 1
-    }
-
     /// Adds a line to the in-memory demo diagnostics.
     func log(_ message: String) {
         events.append(Event(id: events.count, secondsIntoSession: clock, message: message))
@@ -158,34 +156,41 @@ extension DemoSession: ReceiverControlSource {
     var inputResetGeneration: Int { 0 }
     var controlResetGeneration: Int { 0 }
 
+    // Every "send" lands on the sample desktop or becomes a preview of what
+    // a real session would send. Nothing leaves the device.
+
     func sendKeyboardPress(usage: Int, modifiers: [String]) {
-        noteAction(Self.describe(usage: usage, modifiers: modifiers))
+        guard inputAllowed else { return workspace.show(.inputOff) }
+        workspace.key(usage: usage, modifiers: modifiers)
     }
 
     func sendKeyboardDown(usage: Int, modifiers: [String]) {
-        noteAction(Self.describe(usage: usage, modifiers: modifiers))
+        sendKeyboardPress(usage: usage, modifiers: modifiers)
     }
 
     func sendKeyboardUp(usage: Int, modifiers: [String]) {}
 
     func sendModifier(_ modifier: ControlModifier, down: Bool) {
-        if down { noteAction(modifier.rawValue.capitalized) }
+        if down, inputAllowed { workspace.show(.modifierHeld(modifier)) }
     }
 
     func sendGesture(name: String) {
-        noteAction(name)
+        guard inputAllowed else { return workspace.show(.inputOff) }
+        workspace.gesture(name: name)
     }
 
-    func noteTyped(_ text: String) {
-        noteAction(String(localized: "Typed “\(text)”"))
+    func typeText(_ text: String) {
+        guard inputAllowed else { return workspace.show(.inputOff) }
+        workspace.type(text)
     }
 
-    private static let symbols: [String: String] = [
+    static let symbols: [String: String] = [
         "control": "⌃", "option": "⌥", "shift": "⇧", "command": "⌘",
     ]
 
     private static let keyNames: [Int: String] = [
         40: "Return", 41: "Esc", 42: "Delete", 43: "Tab", 44: "Space",
+        45: "-", 46: "=", 47: "[", 48: "]",
         79: "→", 80: "←", 81: "↓", 82: "↑",
     ]
 
@@ -206,5 +211,43 @@ extension DemoSession: ReceiverControlSource {
             key = String(localized: "Key")
         }
         return prefix + key
+    }
+}
+
+/// The interactive sample desktop: the desktop, pointer and local view, plus
+/// the latest feedback for the screen's chip. In memory only.
+@MainActor
+final class DemoWorkspace: ObservableObject {
+    @Published var interaction = DemoInteraction(
+        desktop: DemoDesktop(mode: .extend, size: DemoDesktop.size(forAspect: ExtendDisplayShape.defaultAutomaticAspect)))
+    @Published private(set) var feedback: DemoFeedback?
+    @Published private(set) var feedbackGeneration = 0
+
+    func show(_ feedback: DemoFeedback) {
+        self.feedback = feedback
+        feedbackGeneration &+= 1
+    }
+
+    func key(usage: Int, modifiers: [String]) {
+        show(interaction.desktop.key(usage: usage, modifiers: modifiers)
+             ?? .macShortcut(usage: usage, modifiers: modifiers))
+    }
+
+    func gesture(name: String) {
+        if name == ReceiverGesture.showDesktop.rawValue {
+            show(interaction.desktop.toggleShowDesktop())
+        } else {
+            show(.macGesture(name))
+        }
+    }
+
+    func type(_ text: String) {
+        show(interaction.desktop.type(text) ? .local(String(localized: "Typed in Notes")) : .macTyping)
+    }
+
+    /// The keyboard opened: typing has somewhere visible to go.
+    func focusNotesForTyping() {
+        guard interaction.desktop.window(.notes) != nil else { return }
+        interaction.desktop.raise(.notes)
     }
 }

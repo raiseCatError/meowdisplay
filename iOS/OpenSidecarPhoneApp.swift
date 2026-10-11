@@ -961,9 +961,9 @@ struct IdleView: View {
             logo(width: 132)
             titleAndStatus
             autoReconnectToggle
+            ExploreDemoCard(onExplore: onExploreDemo)
             instructionsSection
             deviceSections
-            ExploreDemoCard(onExplore: onExploreDemo)
             Spacer()
             settingsButton
             tip.padding(.bottom, 8)

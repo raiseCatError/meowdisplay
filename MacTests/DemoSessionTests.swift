@@ -51,19 +51,46 @@ final class DemoSessionTests: XCTestCase {
         XCTAssertEqual(demo.events.suffix(2).map(\.message), ["Demo input turned off", "Demo input allowed"])
     }
 
-    /// Demo controls produce local feedback only. The type holds no
-    /// `StreamReceiver`, so there is no wire to reach.
-    func testDemoSendsBecomeLocalFeedbackOnly() {
+    /// Demo controls act on the sample desktop or preview what a Mac would
+    /// get. The type holds no `StreamReceiver`, so there is no wire to reach.
+    func testDemoSendsBecomeLocalActionsOrMacPreviews() {
         let demo = DemoSession()
-        let generation = demo.actionGeneration
         demo.sendKeyboardPress(usage: 6, modifiers: ["command"])
-        XCTAssertEqual(demo.lastAction, "⌘C")
+        XCTAssertEqual(demo.workspace.feedback, .macShortcut(usage: 6, modifiers: ["command"]))
+        XCTAssertEqual(DemoFeedback.shortcutName(usage: 6, modifiers: ["command"]), "Copy")
         demo.sendModifier(.option, down: true)
-        XCTAssertEqual(demo.lastAction, "Option")
-        demo.sendKeyboardPress(usage: 41)
-        XCTAssertEqual(demo.lastAction, "Esc")
-        XCTAssertEqual(demo.actionGeneration, generation + 3)
+        XCTAssertEqual(demo.workspace.feedback, .modifierHeld(.option))
+        demo.sendGesture(name: ReceiverGesture.missionControl.rawValue)
+        XCTAssertEqual(demo.workspace.feedback, .macGesture("missionControl"))
+        // Show Desktop and Undo are carried out locally.
+        demo.sendGesture(name: ReceiverGesture.showDesktop.rawValue)
+        XCTAssertTrue(demo.workspace.interaction.desktop.showingDesktop)
+        demo.workspace.interaction.desktop.reconfigure(mode: .mirror, size: DemoDesktop.size(forAspect: 1.6))
+        demo.workspace.focusNotesForTyping()
+        demo.typeText("Hi")
+        XCTAssertTrue(demo.workspace.interaction.desktop.notes.hasSuffix("Hi"))
+        demo.sendKeyboardPress(usage: 29, modifiers: ["command"])
+        XCTAssertEqual(demo.workspace.feedback, .local("Undo"))
+        XCTAssertFalse(demo.workspace.interaction.desktop.notes.hasSuffix("Hi"))
         XCTAssertFalse(Mirror(reflecting: demo).children.contains { $0.value is StreamReceiver })
+    }
+
+    func testInputOffBlocksSimulatedMacInput() {
+        let demo = DemoSession()
+        demo.setInputAllowed(false)
+        let before = demo.workspace.interaction.desktop
+        demo.sendKeyboardPress(usage: 6, modifiers: ["command"])
+        XCTAssertEqual(demo.workspace.feedback, .inputOff)
+        demo.typeText("x")
+        demo.sendGesture(name: ReceiverGesture.showDesktop.rawValue)
+        XCTAssertEqual(demo.workspace.interaction.desktop, before)
+    }
+
+    func testExtendShapeIsDemoLocalAndStartsAutomatic() {
+        let demo = DemoSession()
+        XCTAssertEqual(demo.extendShape, .standard)
+        demo.extendShape = ExtendDisplayShapePreference(shape: .r21x9, useFullDisplay: false)
+        XCTAssertEqual(DemoSession().extendShape, .standard)
     }
 
     func testDiagnosticsAreSampleAndPerInstance() {
