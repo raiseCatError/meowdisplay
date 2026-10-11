@@ -1308,6 +1308,9 @@ private struct AboutSettingsPage: View {
                 Link(destination: ProjectLinks.gitHub) {
                     Label("MeowDisplay on GitHub", systemImage: "link")
                 }
+                Link(destination: ProjectLinks.privacyPolicy) {
+                    Label("Privacy Policy", systemImage: "hand.raised")
+                }
                 if let support = ProjectLinks.support {
                     Link(destination: support) {
                         Label("Support MeowDisplay", systemImage: "heart")

@@ -8,6 +8,10 @@ enum ProjectLinks {
     /// report issues for every MeowDisplay app.
     static let gitHub = URL(string: "https://github.com/raiseCatError/meowdisplay")!
 
+    /// The privacy policy, linked from Settings > About (normal and Demo Mode
+    /// share that page) and given to App Store Connect.
+    static let privacyPolicy = URL(string: "https://meowdisplay.app/privacy")!
+
     /// The Ko-fi page (e.g. "https://ko-fi.com/<name>"), or nil while there
     /// is none. The one place to configure: set it once the page exists, and
     /// every "Support MeowDisplay" action appears. Until then those actions

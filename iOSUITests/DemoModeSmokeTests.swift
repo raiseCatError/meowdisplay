@@ -53,6 +53,10 @@ final class DemoModeSmokeTests: XCTestCase {
             cell.tap()
             XCTAssertTrue(app.navigationBars[category].waitForExistence(timeout: 3), category)
             snapshot(app, "settings-\(category)")
+            if category == "About" {
+                XCTAssertTrue(app.descendants(matching: .any)["Privacy Policy"].firstMatch.exists,
+                              "About links the privacy policy in Demo Mode")
+            }
             if app.navigationBars[category].buttons.firstMatch.exists,
                UIDevice.current.userInterfaceIdiom == .phone {
                 app.navigationBars[category].buttons.firstMatch.tap()

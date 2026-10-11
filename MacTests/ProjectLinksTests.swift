@@ -6,6 +6,26 @@ final class ProjectLinksTests: XCTestCase {
         XCTAssertEqual(AppStore.projectURL, ProjectLinks.gitHub)
     }
 
+    func testPrivacyPolicyIsMeowDisplaysOwnPage() {
+        XCTAssertEqual(ProjectLinks.privacyPolicy.absoluteString, "https://meowdisplay.app/privacy")
+        XCTAssertEqual(ProjectLinks.privacyPolicy.scheme, "https")
+    }
+
+    /// Settings > About links the privacy policy, and Demo Mode shows that
+    /// same About page (not a demo copy), so the link is there in both modes.
+    func testAboutLinksThePrivacyPolicyInNormalAndDemoMode() throws {
+        XCTAssertEqual(DemoSettingsPresentation.presentation(for: .about), .shared)
+        let root = URL(fileURLWithPath: #filePath).resolvingSymlinksInPath()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let settings = try String(contentsOf: root.appendingPathComponent("iOS/ReceiverSettings.swift"), encoding: .utf8)
+        let about = try XCTUnwrap(settings.range(of: "private struct AboutSettingsPage"))
+        let page = settings[about.lowerBound...]
+        // The struct ends at the first closing brace in column 0.
+        let end = page.range(of: "\n}\n")?.lowerBound ?? page.endIndex
+        XCTAssertTrue(page[..<end].contains("Link(destination: ProjectLinks.privacyPolicy)"),
+                      "the About page must link the privacy policy")
+    }
+
     func testNoSupportActionShipsWithoutAConfiguredPage() {
         // Until the Ko-fi page exists, no "Support MeowDisplay" action is shown.
         XCTAssertEqual(ProjectLinks.support, ProjectLinks.supportURL(from: ProjectLinks.koFiPage))
