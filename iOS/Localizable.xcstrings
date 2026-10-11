@@ -4,6 +4,9 @@
     "" : {
 
     },
+    "· Sample session" : {
+
+    },
     "%@  %@" : {
       "localizations" : {
         "en" : {
@@ -14,14 +17,27 @@
         }
       }
     },
-    "%@ · Demo, not sent" : {
-
-    },
     "%@ (Main)" : {
       "comment" : "A display name, marked as the Mac's main display."
     },
     "%@ (Sample)" : {
       "comment" : "A demo value, such as 60 fps (Sample)."
+    },
+    "%@ built-in display" : {
+
+    },
+    "%@ command · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ command · %2$@"
+          }
+        }
+      }
+    },
+    "%@ held. Choose a shortcut." : {
+
     },
     "%@ requests %lld FPS. Limited to %lld FPS at this display size." : {
       "comment" : "The first value is a streaming profile name, such as Performance.",
@@ -52,6 +68,9 @@
     "%lld ms" : {
 
     },
+    "|" : {
+
+    },
     "⌘ ⌥ ⌃ ⇧ form the next arc out. Hold or tap a modifier to use it." : {
 
     },
@@ -65,9 +84,6 @@
 
     },
     "A newer version of MeowDisplay is available." : {
-
-    },
-    "A second screen for your Mac" : {
 
     },
     "A second, independent set of one-tap shortcuts (Undo, Redo, …), separate from the Main controls." : {
@@ -115,6 +131,9 @@
     "Active Profile" : {
 
     },
+    "Actual size" : {
+
+    },
     "Add Action" : {
 
     },
@@ -140,6 +159,9 @@
 
     },
     "Allow" : {
+
+    },
+    "Allow Input" : {
 
     },
     "Allow Input (Demo)" : {
@@ -205,6 +227,9 @@
     "Automatic" : {
 
     },
+    "Automatic uses 16:10. Use Full Display matches this %@'s screen in its current orientation. The sample desktop changes shape to match." : {
+
+    },
     "Automatically Allow Connections" : {
 
     },
@@ -265,10 +290,16 @@
     "Choose Another Mac" : {
 
     },
-    "Click" : {
+    "Click at pointer" : {
 
     },
     "Close" : {
+
+    },
+    "Close Window" : {
+
+    },
+    "Closed %@" : {
 
     },
     "Codec" : {
@@ -382,10 +413,10 @@
     "Controls" : {
 
     },
-    "Controls and input keep working." : {
+    "Copied" : {
 
     },
-    "Copied" : {
+    "Copy" : {
 
     },
     "Copy Share Code" : {
@@ -409,6 +440,9 @@
     "Custom Layouts" : {
 
     },
+    "Cut" : {
+
+    },
     "Default" : {
 
     },
@@ -427,16 +461,19 @@
     "Delete this layout?" : {
 
     },
-    "DEMO" : {
+    "Deleted" : {
 
     },
-    "Demo content drawn on this device. Taps show locally and are not sent." : {
+    "DEMO" : {
 
     },
     "Demo Diagnostics" : {
 
     },
     "Demo Mode" : {
+
+    },
+    "Demo Options" : {
 
     },
     "Demo: %@ is a sample and isn't saved as a paired Mac. Forget is unavailable for it. Your real paired Macs aren't shown in the demo. Pairing with a real Mac is confirmed on both devices." : {
@@ -472,6 +509,15 @@
     "Direct Touch" : {
       "comment" : "Input mode: touch where you want the pointer to go."
     },
+    "Direct Touch maps your finger to the Mac's screen" : {
+
+    },
+    "Direct Touch. Touch the desktop directly." : {
+
+    },
+    "Direct Touch. Touch the desktop where you want to click." : {
+
+    },
     "Disabled" : {
 
     },
@@ -493,6 +539,9 @@
     "Display Paused" : {
 
     },
+    "Displays" : {
+
+    },
     "dock" : {
       "comment" : "Strip control hint."
     },
@@ -506,6 +555,9 @@
 
     },
     "Dots or grid lines for lining controls up while you edit. They aren’t part of your Mac’s screen and never appear during normal use." : {
+
+    },
+    "Double-click to zoom" : {
 
     },
     "Double-tap to %@" : {
@@ -595,16 +647,28 @@
     "Explore Demo" : {
 
     },
-    "Explore MeowDisplay" : {
-
-    },
     "Extend" : {
       "comment" : "Display mode: add the device as a second, separate screen (not the verb \"to extend\")."
     },
-    "Extend (Demo)" : {
+    "Extend Automatic: 16:10." : {
+
+    },
+    "Extend fills this display." : {
 
     },
     "Extend Shape" : {
+
+    },
+    "Extend shape %@." : {
+
+    },
+    "Extend. This device adds a second desktop beside the Mac." : {
+
+    },
+    "Extended" : {
+
+    },
+    "Extended display" : {
 
     },
     "Far" : {
@@ -617,6 +681,18 @@
 
     },
     "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+
+    },
+    "File" : {
+
+    },
+    "Files" : {
+
+    },
+    "Find" : {
+
+    },
+    "Focused %@" : {
 
     },
     "Forget" : {
@@ -721,19 +797,22 @@
     "Importing adds a new layout. Its shortcut buttons do nothing until you tap them." : {
 
     },
-    "In Extend, this device adds space beside your Mac’s own display. Move windows here to use both." : {
+    "Input" : {
 
     },
-    "Input" : {
+    "Input allowed (Demo)." : {
 
     },
     "Input Enabled" : {
 
     },
-    "Input is off (Demo). Allow Input" : {
+    "Input is off (Demo)." : {
 
     },
     "Input Mode" : {
+
+    },
+    "Input off (Demo). Controls are hidden; view navigation still works." : {
 
     },
     "Install the MeowDisplay Mac app on your Mac" : {
@@ -832,6 +911,9 @@
     "Left" : {
 
     },
+    "Local View Navigation is off" : {
+
+    },
     "Lower power/bandwidth, up to 60 FPS." : {
 
     },
@@ -851,6 +933,9 @@
 
     },
     "Main Controls" : {
+
+    },
+    "Main display" : {
 
     },
     "Main Tray" : {
@@ -895,7 +980,7 @@
     "Mirror" : {
       "comment" : "Display mode: duplicate the Mac's screen onto the device."
     },
-    "Mirror (Demo)" : {
+    "Mirror and Extend" : {
 
     },
     "Mirror Display" : {
@@ -907,6 +992,12 @@
     "Mirror requires an active physical display." : {
 
     },
+    "Mirror shows the Mac's own display at its own shape. Extend Shape applies only to Extend." : {
+
+    },
+    "Mirror. You see the Mac's own screen." : {
+
+    },
     "Mission Control" : {
 
     },
@@ -914,6 +1005,9 @@
 
     },
     "Modifiers" : {
+
+    },
+    "Move one finger" : {
 
     },
     "Move the pointer relative to your finger." : {
@@ -935,6 +1029,9 @@
 
     },
     "New Button" : {
+
+    },
+    "New line" : {
 
     },
     "Next Space" : {
@@ -967,6 +1064,15 @@
     "Notch Debug Overlay" : {
 
     },
+    "Notes" : {
+
+    },
+    "Nothing to redo" : {
+
+    },
+    "Nothing to undo" : {
+
+    },
     "Off" : {
 
     },
@@ -995,6 +1101,9 @@
 
     },
     "Open iOS Settings for MeowDisplay" : {
+
+    },
+    "Opened %@" : {
 
     },
     "Opens a sample session. Nothing connects to another device." : {
@@ -1093,6 +1202,9 @@
     "Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Two-finger scrolling always goes to the Mac." : {
 
     },
+    "Paste" : {
+
+    },
     "Paste a code someone shared with you. It starts with MDL1-." : {
 
     },
@@ -1121,6 +1233,12 @@
 
     },
     "Pinch and Rotation" : {
+
+    },
+    "Pinch is off in Settings, Gestures" : {
+
+    },
+    "Pinch to zoom, drag with two fingers to pan, double-tap with two fingers to reset." : {
 
     },
     "Place every control yourself, with separate landscape and portrait layouts." : {
@@ -1174,6 +1292,12 @@
     "Preview Two-Hand Assist" : {
 
     },
+    "Preview zoomed in" : {
+
+    },
+    "Preview zoomed out" : {
+
+    },
     "Previous Space" : {
 
     },
@@ -1184,6 +1308,9 @@
 
     },
     "Profile 2" : {
+
+    },
+    "Quit" : {
 
     },
     "Radial Template" : {
@@ -1199,6 +1326,9 @@
 
     },
     "Record from Keyboard" : {
+
+    },
+    "Redo" : {
 
     },
     "Reject for This Session" : {
@@ -1267,6 +1397,9 @@
     "Reset Profile to Default" : {
 
     },
+    "Reset Sample Desktop" : {
+
+    },
     "Reset to Defaults" : {
 
     },
@@ -1286,6 +1419,9 @@
 
     },
     "Returns to the home screen." : {
+
+    },
+    "Review Mac" : {
 
     },
     "Right" : {
@@ -1321,19 +1457,13 @@
     "Same Side" : {
 
     },
-    "Sample" : {
-
-    },
     "Sample %@" : {
 
     },
     "Sample configuration. Nothing is saved and no connection is attempted." : {
 
     },
-    "Sample Mac display" : {
-
-    },
-    "Sample session" : {
+    "Sample Mac desktop" : {
 
     },
     "Sample Session" : {
@@ -1366,7 +1496,7 @@
     "Search Settings" : {
 
     },
-    "See how display, input, controls, audio and connections work using a sample Mac. The demo uses sample content and doesn’t connect to another device." : {
+    "Secondary click · %@" : {
 
     },
     "Select a category" : {
@@ -1375,10 +1505,19 @@
     "Select a modifier to choose how its shortcuts appear. By default they bloom on the arc just outside the modifiers." : {
 
     },
+    "Select All" : {
+
+    },
     "Select…" : {
 
     },
+    "Selected %@" : {
+
+    },
     "Selected display unavailable" : {
+
+    },
+    "Selection cleared" : {
 
     },
     "Sends" : {
@@ -1406,6 +1545,12 @@
 
     },
     "Settings always stays reachable, even with input turned off." : {
+
+    },
+    "Settings, Display: switch modes and try Extend Shape." : {
+
+    },
+    "Settings, Input: switch to Trackpad and move the pointer with one finger." : {
 
     },
     "Share Code" : {
@@ -1453,10 +1598,16 @@
     "Show Keyboard Button" : {
 
     },
+    "Show or Hide Dock" : {
+
+    },
     "Show Surface Grid" : {
 
     },
     "Showing in Picture in Picture" : {
+
+    },
+    "Showing the desktop" : {
 
     },
     "Shown for reference in the demo. These are granted on the Mac when you set up the Mac app. The demo hasn't checked or changed any permission." : {
@@ -1543,6 +1694,9 @@
     "Swipe left to remove (built-in actions are hidden instead), swipe right to show or hide. Tap an action to rename it or change how it looks." : {
 
     },
+    "Switch Apps" : {
+
+    },
     "Switching to %@" : {
 
     },
@@ -1571,6 +1725,15 @@
 
     },
     "Tap a control on the canvas to edit it, or drag it to move it." : {
+
+    },
+    "Tap a window to focus it, drag its title bar, scroll the Files list, double-click a file." : {
+
+    },
+    "Tap and drag" : {
+
+    },
+    "Tap to click" : {
 
     },
     "Template" : {
@@ -1636,9 +1799,6 @@
     "This restores its tray layout and shortcut palettes. Other receiver settings stay unchanged." : {
 
     },
-    "This sample workspace is drawn on this device. With the Mac app, your Mac’s real screen appears here." : {
-
-    },
     "This share code is damaged or incomplete. Copy it again." : {
 
     },
@@ -1681,7 +1841,16 @@
     "Trackpad" : {
       "comment" : "Input mode: relative pointer control like a laptop trackpad, not the physical accessory."
     },
+    "Trackpad Preview" : {
+
+    },
     "Trackpad Sensitivity" : {
+
+    },
+    "Trackpad. Move one finger to move the pointer, tap to click." : {
+
+    },
+    "Trackpad. Move your finger to control the pointer." : {
 
     },
     "Trust changed during pairing. Try again" : {
@@ -1693,7 +1862,16 @@
     "Try Again" : {
 
     },
+    "Try MeowDisplay with an interactive sample Mac. No connection required." : {
+
+    },
+    "Try the controls with a sample Mac. No connection required." : {
+
+    },
     "Try the layout exactly as it will look. Preview never sends anything to your Mac." : {
+
+    },
+    "Try Trackpad" : {
 
     },
     "Trying to restore the connection to your Mac." : {
@@ -1705,7 +1883,16 @@
     "Turn Off Input (Demo)" : {
 
     },
+    "Turn video off to use the surface as a trackpad." : {
+
+    },
+    "Turn Video On" : {
+
+    },
     "Turning video off keeps the connection, keyboard, controls, and selected input mode active." : {
+
+    },
+    "Two fingers to scroll" : {
 
     },
     "Two-Hand Assist" : {
@@ -1714,13 +1901,19 @@
     "Type" : {
 
     },
-    "Typed “%@”" : {
+    "Typed in Notes" : {
+
+    },
+    "Typing %@. Open Notes to type here." : {
 
     },
     "Unavailable" : {
 
     },
     "Unavailable while the experimental Metal renderer is on." : {
+
+    },
+    "Undo" : {
 
     },
     "Up to %lld characters" : {
@@ -1768,6 +1961,9 @@
     "Use Template" : {
 
     },
+    "Use the control trays and keyboard. Mac-only actions show what would be sent." : {
+
+    },
     "Use This Layout" : {
 
     },
@@ -1789,10 +1985,25 @@
     "Video" : {
 
     },
-    "Video is off (Demo)" : {
+    "Video is off. With a connected Mac, this surface can still control the pointer." : {
+
+    },
+    "Video Off" : {
 
     },
     "Video Off temporarily routes pinch and rotate to App without changing these saved choices. App mode is experimental: instead of injecting native gestures into the foreground app, it sends the keyboard commands configured in App Gesture Commands." : {
+
+    },
+    "Video off. The surface still works as a trackpad." : {
+
+    },
+    "Video on." : {
+
+    },
+    "View" : {
+
+    },
+    "View reset" : {
 
     },
     "Viewport" : {
@@ -1822,7 +2033,7 @@
     "Welcome" : {
 
     },
-    "Welcome to the MeowDisplay demo" : {
+    "What can I try?" : {
 
     },
     "What this %@ saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the %@ unless you share it. Attach it to a GitHub issue if a connection won't come up." : {
@@ -1868,6 +2079,15 @@
     "WiFi: both devices on the same network, then pick this %@ in the Mac app's Connection menu." : {
 
     },
+    "Window" : {
+
+    },
+    "Windows restored" : {
+
+    },
+    "would be sent to the Mac" : {
+
+    },
     "You already have %lld Custom layouts. Delete one first, then import this one." : {
 
     },
@@ -1902,6 +2122,12 @@
 
     },
     "Zoom While Typing" : {
+
+    },
+    "Zoom your view" : {
+
+    },
+    "Zoomed in" : {
 
     }
   },
