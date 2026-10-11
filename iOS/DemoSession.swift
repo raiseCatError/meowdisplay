@@ -35,6 +35,30 @@ enum ReceiverPresentationRoute: Equatable {
         if realSurfaceShown { return .receiver }
         return demoActive ? .demo : .idle
     }
+
+    /// The demo only starts from the home screen. While a real session's
+    /// surface is up, entering would leave a hidden demo that appears once
+    /// the session ends.
+    static func canEnterDemo(realSurfaceShown: Bool) -> Bool { !realSurfaceShown }
+}
+
+/// How the home screen offers Demo Mode. Decided by whether any Mac is
+/// paired right now (trusted pins), not by whether one ever connected:
+/// forgetting the last paired Mac brings the prominent entry back.
+enum ExploreDemoPresentation: Equatable {
+    /// No paired Mac: a card ahead of the connection instructions, visible
+    /// without scrolling in every phone layout.
+    case prominent
+    /// At least one paired Mac: a collapsed Demo Mode section after the
+    /// connection sections, so it doesn't compete with them.
+    case compact
+
+    static func resolve(pairedMacCount: Int) -> ExploreDemoPresentation {
+        pairedMacCount > 0 ? .compact : .prominent
+    }
+
+    /// Whether the entry sits ahead of the connection instructions.
+    var leadsConnectionSetup: Bool { self == .prominent }
 }
 
 /// How a Settings category is presented in Demo Mode: the real page with

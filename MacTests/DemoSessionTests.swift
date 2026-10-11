@@ -159,6 +159,34 @@ final class DemoSessionTests: XCTestCase {
         XCTAssertEqual(ReceiverPresentationRoute.resolve(demoActive: false, realSurfaceShown: true), .receiver)
     }
 
+    func testDemoNeverStartsBehindARealSession() {
+        XCTAssertTrue(ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: false))
+        XCTAssertFalse(ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: true))
+    }
+
+    // MARK: Home screen entry
+
+    func testExploreDemoIsProminentWithoutAPairedMac() {
+        let presentation = ExploreDemoPresentation.resolve(pairedMacCount: 0)
+        XCTAssertEqual(presentation, .prominent)
+        XCTAssertTrue(presentation.leadsConnectionSetup, "ahead of the instructions, so it is visible without scrolling")
+    }
+
+    func testExploreDemoIsCompactOnceAMacIsPaired() {
+        for count in [1, 2, 5] {
+            let presentation = ExploreDemoPresentation.resolve(pairedMacCount: count)
+            XCTAssertEqual(presentation, .compact, "\(count) paired")
+            XCTAssertFalse(presentation.leadsConnectionSetup, "after the connection sections")
+        }
+    }
+
+    func testForgettingTheLastPairedMacBringsBackTheProminentEntry() {
+        // Two paired Macs, forgotten one at a time.
+        XCTAssertEqual(ExploreDemoPresentation.resolve(pairedMacCount: 2), .compact)
+        XCTAssertEqual(ExploreDemoPresentation.resolve(pairedMacCount: 1), .compact, "one Mac is still paired")
+        XCTAssertEqual(ExploreDemoPresentation.resolve(pairedMacCount: 0), .prominent)
+    }
+
     func testEveryReleaseSettingsCategoryHasDemoPresentation() {
         let release = MobileSettingsCategory.visible(debug: false)
         XCTAssertFalse(release.contains(.developer))

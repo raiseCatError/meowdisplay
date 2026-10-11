@@ -101,6 +101,8 @@ struct ReceiverScreen: View {
     private var fullScreenSurface: Bool { route != .idle }
 
     private func enterDemo() {
+        // A real session always wins (see `route`); never start a demo behind it.
+        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface) else { return }
         demoControlStore = DemoControlStoreFactory.make()
         demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
         Log.info("demo mode entered")
@@ -900,6 +902,21 @@ struct IdleView: View {
     // while locked.
     @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabled = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// Paired Macs, read from the trust store's in-memory pin snapshot (no
+    /// Keychain or network I/O). Re-read whenever pairing can have changed.
+    @State private var pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
+
+    private var demoPresentation: ExploreDemoPresentation {
+        .resolve(pairedMacCount: pairedMacCount)
+    }
+
+    private var demoEntry: some View {
+        ExploreDemoEntry(presentation: demoPresentation, onExplore: onExploreDemo)
+    }
+
+    private func refreshPairedMacCount() {
+        pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -943,6 +960,13 @@ struct IdleView: View {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
             }
         }
+        // Pairing can change through a pairing ceremony, Forget (Settings or
+        // Remote Access) or a reset in Settings; re-read after each.
+        .onAppear(perform: refreshPairedMacCount)
+        .onChange(of: receiver.pairingSuccessCount) { _ in refreshPairedMacCount() }
+        .onChange(of: receiver.lastForgottenPeerID) { _ in refreshPairedMacCount() }
+        .onChange(of: remoteRefresh) { _ in refreshPairedMacCount() }
+        .onChange(of: showSettings) { shown in if !shown { refreshPairedMacCount() } }
     }
 
     /// Scrolls only when the content is taller than the screen; when it fits,
@@ -961,9 +985,10 @@ struct IdleView: View {
             logo(width: 132)
             titleAndStatus
             autoReconnectToggle
-            ExploreDemoCard(onExplore: onExploreDemo)
+            if demoPresentation.leadsConnectionSetup { demoEntry }
             instructionsSection
             deviceSections
+            if !demoPresentation.leadsConnectionSetup { demoEntry }
             Spacer()
             settingsButton
             tip.padding(.bottom, 8)
@@ -971,40 +996,27 @@ struct IdleView: View {
         .padding()
     }
 
-    /// Two fixed columns for landscape. Neither column scrolls as a whole;
-    /// only the device sections scroll if they outgrow the space.
+    /// Two columns for landscape. The left one scrolls only when its content
+    /// is taller than the screen (small phones, large text, instructions
+    /// expanded); when it fits, `minHeight` keeps it vertically centered.
+    /// Explore Demo comes before the instructions there, so it is on screen
+    /// without scrolling while no Mac is paired. The right column's device
+    /// sections scroll on their own.
     private var landscapeLayout: some View {
         HStack(alignment: .top, spacing: 24) {
-            // Left: brand + setup, vertically centered in the available height.
-            VStack(spacing: 12) {
-                Spacer(minLength: 0)
-                if instructionsExpanded {
-                    HStack(spacing: 0) {
-                        brandHeader(logoWidth: 68, titleFont: .title.bold(), titleStyle: .title1)
-                        Spacer(minLength: 0)
-                    }
-                } else {
-                    // Freed space: larger, centered branding like portrait.
-                    VStack(spacing: 8) {
-                        logo(width: 104)
-                        titleAndStatus(font: .title.bold())
-                    }
-                    .frame(maxWidth: .infinity)
+            GeometryReader { column in
+                ScrollView(showsIndicators: false) {
+                    landscapeSetupColumn
+                        .frame(maxWidth: .infinity, minHeight: column.size.height)
                 }
-                autoReconnectToggle
-                instructionsSection
-                Spacer(minLength: 0)
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Right: devices fill the top, Settings & tip sit at the bottom.
             VStack(spacing: 12) {
                 ScrollView {
-                    VStack(spacing: 12) {
-                        deviceSections
-                        ExploreDemoCard(onExplore: onExploreDemo)
-                    }
-                    .padding(.top, 12)
+                    deviceSections
+                        .padding(.top, 12)
                 }
                     .scrollBounceBehavior(.basedOnSize)
                 settingsButton
@@ -1015,6 +1027,33 @@ struct IdleView: View {
         .padding(.horizontal, 16)
         .padding(.top, 20)
         .padding(.bottom, 12)
+    }
+
+    /// Left landscape column: brand, Auto-Reconnect, Explore Demo while no
+    /// Mac is paired, then the instructions (and the compact Demo Mode
+    /// section once one is).
+    private var landscapeSetupColumn: some View {
+        VStack(spacing: 12) {
+            Spacer(minLength: 0)
+            if instructionsExpanded {
+                HStack(spacing: 0) {
+                    brandHeader(logoWidth: 68, titleFont: .title.bold(), titleStyle: .title1)
+                    Spacer(minLength: 0)
+                }
+            } else {
+                // Freed space: larger, centered branding like portrait.
+                VStack(spacing: 8) {
+                    logo(width: 104)
+                    titleAndStatus(font: .title.bold())
+                }
+                .frame(maxWidth: .infinity)
+            }
+            autoReconnectToggle
+            if demoPresentation.leadsConnectionSetup { demoEntry }
+            instructionsSection
+            if !demoPresentation.leadsConnectionSetup { demoEntry }
+            Spacer(minLength: 0)
+        }
     }
 
     private func logo(width: CGFloat) -> some View {
@@ -1083,7 +1122,9 @@ struct IdleView: View {
                     HStack(alignment: .top, spacing: 24) {
                         VStack(spacing: 20) {
                             statusCard
+                            if demoPresentation.leadsConnectionSetup { demoEntry }
                             instructionsSection
+                            if !demoPresentation.leadsConnectionSetup { demoEntry }
                         }
                         .frame(maxWidth: .infinity)
                         devicesCard
@@ -1092,13 +1133,14 @@ struct IdleView: View {
                 } else {
                     VStack(spacing: 20) {
                         statusCard
+                        if demoPresentation.leadsConnectionSetup { demoEntry }
                         devicesCard
                         instructionsSection
+                        if !demoPresentation.leadsConnectionSetup { demoEntry }
                     }
                     .frame(maxWidth: 560)
                 }
                 VStack(spacing: 10) {
-                    ExploreDemoCard(onExplore: onExploreDemo)
                     settingsButton
                     tip
                 }

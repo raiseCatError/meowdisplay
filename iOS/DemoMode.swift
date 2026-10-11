@@ -37,28 +37,119 @@ func demoVideoSize() -> CGSize {
 
 // MARK: - Home entry point
 
+/// The home screen's entry while no Mac is paired: one row-shaped button,
+/// compact enough to sit ahead of the connection instructions in iPhone
+/// landscape without pushing anything off screen.
 struct ExploreDemoCard: View {
+    let onExplore: () -> Void
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    var body: some View {
+        Button(action: onExplore) {
+            HStack(spacing: 12) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Explore Demo")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text("Try MeowDisplay with an interactive sample Mac. No connection required.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            // iPad's grouped page needs the grouped card color to stand apart;
+            // the phone page is plain, like the instructions card.
+            .background(horizontalSizeClass == .regular ? Color(.secondarySystemGroupedBackground)
+                                                        : Color(.secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        // As wide as the status card on iPad; the phone column's width elsewhere.
+        .frame(maxWidth: horizontalSizeClass == .regular ? .infinity : 420)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Explore Demo"))
+        .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+        .accessibilityIdentifier("exploreDemo")
+    }
+}
+
+/// The home screen's entry once a Mac is paired: a collapsed section in the
+/// Connection Instructions style, with the one Explore Demo action inside.
+struct ExploreDemoSection: View {
+    let onExplore: () -> Void
+    /// Persisted like the instructions section; starts collapsed.
+    @AppStorage("home.demoSectionExpanded") private var expanded = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) { expanded.toggle() }
+            } label: {
+                HStack {
+                    Text("Demo Mode")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.footnote.weight(.semibold))
+                }
+                .foregroundStyle(expanded ? HierarchicalShapeStyle.primary : .secondary)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            .accessibilityHint("Double-tap to \(expanded ? "collapse" : "expand")")
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Try the controls with a sample Mac. No connection required.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(action: onExplore) {
+                        Label("Explore Demo", systemImage: "play.rectangle")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("exploreDemo")
+                    .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(horizontalSizeClass == .regular ? Color(.secondarySystemGroupedBackground)
+                                                            : Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 16))
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: 420)
+    }
+}
+
+/// The home screen's Demo Mode entry for the current presentation.
+struct ExploreDemoEntry: View {
+    let presentation: ExploreDemoPresentation
     let onExplore: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Explore MeowDisplay").font(.headline)
-            Text("See how display, input, controls, audio and connections work using a sample Mac. The demo uses sample content and doesn’t connect to another device.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(action: onExplore) {
-                Label("Explore Demo", systemImage: "play.rectangle")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .accessibilityIdentifier("exploreDemo")
-            .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+        switch presentation {
+        case .prominent: ExploreDemoCard(onExplore: onExplore)
+        case .compact: ExploreDemoSection(onExplore: onExplore)
         }
-        .padding(16)
-        .frame(maxWidth: 560, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
