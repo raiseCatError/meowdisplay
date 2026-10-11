@@ -16,6 +16,9 @@ struct SettingsView: View {
     let controlStore: ReceiverControlStore
     let pictureInPicture: ReceiverPictureInPictureController
     let haptics: ReceiverHaptics
+    /// Demo Mode: sample session state. Pages that need a real Mac show
+    /// demo pages instead (see `DemoSettingsPresentation`).
+    var demo: DemoSession?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: MobileSettingsCategory?
@@ -73,6 +76,9 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if demo != nil { DemoSettingsBanner() }
+        }
         // Settings owns its system chrome: the receiver surface behind it
         // hides the status bar and home indicator, and a presentation that
         // inherited that would lay its navigation bar out under the top
@@ -121,13 +127,24 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func page(for category: MobileSettingsCategory) -> some View {
+        if let demo, DemoSettingsPresentation.presentation(for: category) == .demo {
+            DemoSettingsPage(category: category, demo: demo, controlStore: controlStore)
+        } else {
+            realPage(for: category)
+        }
+    }
+
+    @ViewBuilder
+    private func realPage(for category: MobileSettingsCategory) -> some View {
         switch category {
         case .general:
             GeneralSettingsPage(receiver: receiver, controlStore: controlStore)
         case .display:
             DisplaySettingsPage(receiver: receiver, controlStore: controlStore, pictureInPicture: pictureInPicture)
         case .input:
-            InputSettingsPage(receiver: receiver, controlStore: controlStore)
+            InputSettingsPage(controlStore: controlStore, isDemo: demo != nil) { [demo] allowed in
+                if let demo { demo.setInputAllowed(allowed) } else { receiver.requestAllowInput(allowed) }
+            }
         case .gestures:
             GestureSettingsPage(controlStore: controlStore)
         case .controls:
@@ -158,7 +175,7 @@ struct SettingsView: View {
 
 /// Binds one receiver preference through `ReceiverControlStore.update`.
 @MainActor
-private func preferenceBinding<Value>(_ store: ReceiverControlStore,
+func preferenceBinding<Value>(_ store: ReceiverControlStore,
                                       _ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
     Binding(get: { store.preferences[keyPath: keyPath] },
             set: { value in store.update { $0[keyPath: keyPath] = value } })
@@ -178,7 +195,7 @@ extension EnvironmentValues {
 
 /// A settings page: a `Form` that scrolls to, and briefly tints, the row a
 /// search result pointed at (rows opt in with `settingsAnchor`).
-private struct SettingsForm<Content: View>: View {
+struct SettingsForm<Content: View>: View {
     @Environment(\.settingsHighlight) private var highlight
     @ViewBuilder let content: Content
 
@@ -206,7 +223,7 @@ private struct SettingsAnchor: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     /// Marks a row as the target of the search item with this id.
     func settingsAnchor(_ id: String) -> some View { modifier(SettingsAnchor(id: id)) }
 }
@@ -223,7 +240,7 @@ private struct HidesSidebarToggle: ViewModifier {
 }
 
 /// A setting's secondary explanation line.
-private struct SettingNote: View {
+struct SettingNote: View {
     let text: LocalizedStringKey
     init(_ text: LocalizedStringKey) { self.text = text }
     var body: some View {
@@ -572,8 +589,10 @@ private struct DisplaySettingsPage: View {
 // MARK: - Input
 
 private struct InputSettingsPage: View {
-    let receiver: StreamReceiver
     @ObservedObject var controlStore: ReceiverControlStore
+    /// Demo Mode: Allow Input is a local sample state, never a Mac request.
+    let isDemo: Bool
+    let requestInput: (Bool) -> Void
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
 
     var body: some View {
@@ -585,22 +604,26 @@ private struct InputSettingsPage: View {
                     .settingsAnchor("control")
                 switch controlStore.sessionInputState {
                 case .off, .notAllowed:
-                    Button("Request Control") {
+                    Button(isDemo ? String(localized: "Allow Input (Demo)") : String(localized: "Request Control")) {
                         controlStore.noteInputTurnedOffByUser(false)
-                        receiver.requestAllowInput(true)
+                        requestInput(true)
                     }
                 case .requesting:
                     EmptyView()
                 case .allowed:
-                    Button("Turn Off", role: .destructive) {
+                    Button(isDemo ? String(localized: "Turn Off Input (Demo)") : String(localized: "Turn Off"), role: .destructive) {
                         controlStore.noteInputTurnedOffByUser(true)
-                        receiver.requestAllowInput(false)
+                        requestInput(false)
                     }
                 case .requestsDisabled:
                     SettingNote("This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings.")
                 }
             } footer: {
-                Text("Settings always stays reachable, even with input turned off.")
+                if isDemo {
+                    Text("Demo: Allow Input is simulated on this \(deviceKind). No Mac is asked and nothing is sent. Settings always stays reachable, even with input turned off.")
+                } else {
+                    Text("Settings always stays reachable, even with input turned off.")
+                }
             }
             Section {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {

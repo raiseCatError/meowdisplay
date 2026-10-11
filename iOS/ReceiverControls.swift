@@ -298,9 +298,9 @@ private struct ControlFramePreference: PreferenceKey {
     }
 }
 
-struct ReceiverControlOverlay: View {
+struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     @ObservedObject var store: ReceiverControlStore
-    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var receiver: Receiver
     @Binding var keyboardActive: Bool
     @Binding var showSettings: Bool
     let keyboardAvailable: Bool
@@ -347,14 +347,14 @@ struct ReceiverControlOverlay: View {
     /// themselves. The geometry below has to agree with the chip sizes — the
     /// tray/palette frames it produces are what the gesture region hit-tests.
     private enum Metrics {
-        static let trayItem: CGFloat = 40
-        static let trayGap: CGFloat = 4
-        static let collapsed: CGFloat = 46
-        static let paletteKey: CGFloat = 38
-        static let paletteGap: CGFloat = 5
+        static var trayItem: CGFloat { 40 }
+        static var trayGap: CGFloat { 4 }
+        static var collapsed: CGFloat { 46 }
+        static var paletteKey: CGFloat { 38 }
+        static var paletteGap: CGFloat { 5 }
         /// Slack around the chips so a slightly-off finger still lands inside
         /// the gesture region.
-        static let touchSlack: CGFloat = 4
+        static var touchSlack: CGFloat { 4 }
     }
 
     private var profile: ControlProfile { store.activeProfile }
@@ -446,7 +446,7 @@ struct ReceiverControlOverlay: View {
         // Any session interruption — pause, recovery, a failed recovery or a
         // plain disconnect — drops every latched modifier/held control, so no
         // transient control state survives into the next live session.
-        .onChange(of: receiver.session.phase) { phase in
+        .onChange(of: receiver.controlSessionPhase) { phase in
             if phase != .connected {
                 apply(interaction.resetAll())
                 store.setMoveViewActive(false)
@@ -1440,7 +1440,7 @@ extension ReceiverControlOverlay {
         .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
-    static let trayPadding: CGFloat = 6
+    static var trayPadding: CGFloat { 6 }
 
     /// Chord palettes and previews stay above the software keyboard.
     static func boundsAboveKeyboard(_ bounds: CGRect, keyboardTop: CGFloat?) -> CGRect {
@@ -1990,7 +1990,7 @@ private struct WheelWedge: Shape {
 /// down and up together, so nothing is left held.
 @MainActor
 enum OneTapActionRunner {
-    static func run(_ action: ControlAction, receiver: StreamReceiver, inputAllowed: @escaping @MainActor () -> Bool) {
+    static func run(_ action: ControlAction, receiver: some ReceiverControlSource, inputAllowed: @escaping @MainActor () -> Bool) {
         let operations = ControlActionPlan.operations(for: action)
         guard !operations.isEmpty, inputAllowed() else { return }
         let pauses = operations.contains { if case .pause = $0 { return true } else { return false } }
@@ -2010,7 +2010,7 @@ enum OneTapActionRunner {
         }
     }
 
-    private static func perform(_ operation: ControlActionOperation, receiver: StreamReceiver) {
+    private static func perform(_ operation: ControlActionOperation, receiver: some ReceiverControlSource) {
         switch operation {
         case .press(let usage, let modifiers):
             receiver.sendKeyboardPress(usage: usage, modifiers: modifiers)
@@ -2344,4 +2344,9 @@ struct ShortcutButtonFaceView: View {
                 .padding(.horizontal, diameter * 0.08)
         }
     }
+}
+
+/// The real control source: the live session's state and wire.
+extension StreamReceiver: ReceiverControlSource {
+    var controlSessionPhase: ReceiverSessionPhase { session.phase }
 }

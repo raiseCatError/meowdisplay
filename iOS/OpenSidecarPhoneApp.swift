@@ -70,6 +70,10 @@ struct ReceiverScreen: View {
     @State private var keyboardActive = false
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    // Demo Mode (see DemoMode.swift): a sample session with its own
+    // control store. Both are nil outside the demo.
+    @State private var demo: DemoSession?
+    @State private var demoControlStore: ReceiverControlStore?
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
@@ -87,6 +91,29 @@ struct ReceiverScreen: View {
     /// (`videoSize`) deliberately survives a disconnect.
     private var showsReceiverSurface: Bool {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
+    }
+
+    private var route: ReceiverPresentationRoute {
+        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface)
+    }
+
+    /// Full-screen chrome rules apply to the demo surface as well.
+    private var fullScreenSurface: Bool { route != .idle }
+
+    private func enterDemo() {
+        demoControlStore = DemoControlStoreFactory.make()
+        demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
+        Log.info("demo mode entered")
+    }
+
+    private func exitDemo() {
+        guard demo != nil else { return }
+        showSettings = false
+        keyboardActive = false
+        demo = nil
+        demoControlStore = nil
+        DemoControlStoreFactory.discard()
+        Log.info("demo mode exited")
     }
 
     /// Input may only leave this device while the session is genuinely live.
@@ -190,9 +217,16 @@ struct ReceiverScreen: View {
         model.receiver.requestAllowInput(true)
     }
 
+    @ViewBuilder
     private var settingsView: some View {
-        SettingsView(receiver: model.receiver, controlStore: controlStore,
-                     pictureInPicture: model.pictureInPicture, haptics: haptics)
+        if let demo, let demoControlStore {
+            SettingsView(receiver: model.receiver, controlStore: demoControlStore,
+                         pictureInPicture: model.pictureInPicture,
+                         haptics: ReceiverHaptics { demoControlStore.preferences.hapticsEnabled }, demo: demo)
+        } else {
+            SettingsView(receiver: model.receiver, controlStore: controlStore,
+                         pictureInPicture: model.pictureInPicture, haptics: haptics)
+        }
     }
 
     // Below the force floor → present the blocking gate (issue #135). The
@@ -344,8 +378,14 @@ struct ReceiverScreen: View {
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                } else if route == .demo, let demo, let demoControlStore {
+                    DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
+                                       keyboardActive: $keyboardActive,
+                                       haptics: ReceiverHaptics { demoControlStore.preferences.hapticsEnabled },
+                                       onExit: { exitDemo() })
                 } else {
-                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings)
+                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
+                             onExploreDemo: { enterDemo() })
                 }
             }
             .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
@@ -356,9 +396,13 @@ struct ReceiverScreen: View {
                 OnboardingView { onboardingDismissed = true }
             }
         }
-        .ignoresSafeArea(edges: showsReceiverSurface ? .all : [])
-        .statusBarHidden(showsReceiverSurface)
-        .persistentSystemOverlays(showsReceiverSurface ? .hidden : .automatic)
+        .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
+        .statusBarHidden(fullScreenSurface)
+        .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
+        // A real session always wins: a Mac connecting ends the demo.
+        .onChange(of: showsReceiverSurface) { shown in
+            if shown { exitDemo() }
+        }
         // SwiftUI forwards this to the hosting controller's
         // `preferredScreenEdgesDeferringSystemGestures` and invalidates it
         // (`setNeedsUpdateOfScreenEdgesDeferringSystemGestures`) whenever the
@@ -841,6 +885,7 @@ struct IdleView: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
+    let onExploreDemo: () -> Void
     @State private var showRemoteAccessSetup = false
     @State private var showRemotePairing = false
     /// Persisted expand/collapse state of the Connection Instructions section.
@@ -918,6 +963,7 @@ struct IdleView: View {
             autoReconnectToggle
             instructionsSection
             deviceSections
+            ExploreDemoCard(onExplore: onExploreDemo)
             Spacer()
             settingsButton
             tip.padding(.bottom, 8)
@@ -953,7 +999,13 @@ struct IdleView: View {
 
             // Right: devices fill the top, Settings & tip sit at the bottom.
             VStack(spacing: 12) {
-                ScrollView { deviceSections.padding(.top, 12) }
+                ScrollView {
+                    VStack(spacing: 12) {
+                        deviceSections
+                        ExploreDemoCard(onExplore: onExploreDemo)
+                    }
+                    .padding(.top, 12)
+                }
                     .scrollBounceBehavior(.basedOnSize)
                 settingsButton
                 tip
@@ -1046,6 +1098,7 @@ struct IdleView: View {
                     .frame(maxWidth: 560)
                 }
                 VStack(spacing: 10) {
+                    ExploreDemoCard(onExplore: onExploreDemo)
                     settingsButton
                     tip
                 }
