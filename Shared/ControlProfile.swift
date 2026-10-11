@@ -837,7 +837,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Tray's; only `allowInput` gates both.
     var functionTrayEnabled = true
     var activeFunctionTrayProfile = ControlProfileSlot.default
-    var functionTrayPosition = FunctionTrayPosition.sameSide
+    /// New preferences start on the opposite side of the Main Tray. A saved
+    /// value always wins, and a saved blob without this key keeps the
+    /// earlier `.sameSide` (see `init(from:)`).
+    var functionTrayPosition = FunctionTrayPosition.oppositeSide
     var functionTrayProfiles: [FunctionTrayProfile]
     /// Global (never profile-specific) layout preference: whether tray/
     /// control geometry conditionally shifts inward to clear the notch/
@@ -894,7 +897,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Independent edges for the Main controls and the Function controls in
     /// Strip and Overlay — the iPad replacement for `functionTrayPosition`.
     var padMainEdge = ControlEdge.trailing
-    var padFunctionEdge = ControlEdge.trailing
+    /// New preferences start opposite the Main controls; a saved blob
+    /// without this key keeps the earlier `.trailing` (see `init(from:)`).
+    var padFunctionEdge = ControlEdge.leading
     /// Strip only: compact key/action captions beside the controls. Off by
     /// default (schema 17): the rail reads cleaner without labels.
     var padShowControlHints = false
@@ -965,7 +970,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // preserve for a tray that didn't exist yet.
         functionTrayEnabled = try value(.functionTrayEnabled, fallback.functionTrayEnabled)
         activeFunctionTrayProfile = try value(.activeFunctionTrayProfile, fallback.activeFunctionTrayProfile)
-        functionTrayPosition = try value(.functionTrayPosition, fallback.functionTrayPosition)
+        // Older saves predate the opposite-side default: keep what they had.
+        functionTrayPosition = try value(.functionTrayPosition, FunctionTrayPosition.sameSide)
         functionTrayProfiles = try value(.functionTrayProfiles, fallback.functionTrayProfiles)
         // Absent (schema < 7) means "written before Avoid Notch existed" —
         // default true, matching a brand-new install (and the explicit
@@ -1001,7 +1007,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         preferMeowDisplayGestures = try value(.preferMeowDisplayGestures, fallback.preferMeowDisplayGestures)
         padControlLayout = try value(.padControlLayout, fallback.padControlLayout)
         padMainEdge = try value(.padMainEdge, fallback.padMainEdge)
-        padFunctionEdge = try value(.padFunctionEdge, fallback.padFunctionEdge)
+        padFunctionEdge = try value(.padFunctionEdge, ControlEdge.trailing)
         padShowControlHints = try value(.padShowControlHints, fallback.padShowControlHints)
         padControlScale = PadControlScale.clamped(try value(.padControlScale, fallback.padControlScale))
         padStandardControls = try value(.padStandardControls, fallback.padStandardControls)
