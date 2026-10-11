@@ -23,6 +23,8 @@ final class DemoModeSmokeTests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
+        // Let the onboarding sheet finish closing before the next tap.
+        waitForNonExistence(app.buttons["Close"])
 
         let explore = app.buttons["Explore Demo"]
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
@@ -53,6 +55,7 @@ final class DemoModeSmokeTests: XCTestCase {
             if app.navigationBars[category].buttons.firstMatch.exists,
                UIDevice.current.userInterfaceIdiom == .phone {
                 app.navigationBars[category].buttons.firstMatch.tap()
+                XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3), category)
             }
         }
         XCTAssertFalse(app.buttons["Developer"].exists && !isDebug)
@@ -62,6 +65,11 @@ final class DemoModeSmokeTests: XCTestCase {
         exit.tap()
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
         XCTAssertFalse(exit.exists)
+    }
+
+    private func waitForNonExistence(_ element: XCUIElement) {
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
+        wait(for: [gone], timeout: 5)
     }
 
     private var isDebug: Bool {

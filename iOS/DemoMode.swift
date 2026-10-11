@@ -15,8 +15,8 @@ import UIKit
 @MainActor
 enum DemoControlStoreFactory {
     static func make() -> ReceiverControlStore {
-        let defaults = UserDefaults(suiteName: DemoSession.controlDefaultsSuite) ?? UserDefaults()
-        defaults.removePersistentDomain(forName: DemoSession.controlDefaultsSuite)
+        DemoSession.discardPreferences()
+        let defaults = DemoSession.preferenceDefaults(demoActive: true)
         let store = ReceiverControlStore(repository: ReceiverControlPreferencesRepository(defaults: defaults))
         store.update { $0.audioPreferred = true }
         store.applySessionInputState(.allowed)
@@ -24,8 +24,7 @@ enum DemoControlStoreFactory {
     }
 
     static func discard() {
-        UserDefaults(suiteName: DemoSession.controlDefaultsSuite)?
-            .removePersistentDomain(forName: DemoSession.controlDefaultsSuite)
+        DemoSession.discardPreferences()
     }
 }
 
@@ -760,6 +759,18 @@ struct DemoSettingsPage: View {
             Text("Analytics")
         } footer: {
             Text("Shows FPS, bitrate, frame timing and latency graphs over the display. In the demo the numbers are samples.")
+        }
+    }
+}
+
+/// Adds the Demo Settings banner inside a scrolling column, so the column
+/// insets its content and no row is left under the banner.
+struct DemoSettingsBannerInset: ViewModifier {
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            if active { DemoSettingsBanner() }
         }
     }
 }

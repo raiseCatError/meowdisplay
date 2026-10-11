@@ -76,7 +76,53 @@ final class DemoSessionTests: XCTestCase {
     }
 
     func testSampleRemoteHostIsReservedDomain() {
-        XCTAssertTrue(DemoSession.remoteHost.hasSuffix(".example.ts.net"))
+        XCTAssertEqual(DemoSession.remoteHost, "review-mac.example")
+        XCTAssertTrue(DemoSession.remoteHost.hasSuffix(".example"))
+    }
+
+    func testRealModeKeepsStandardPreferences() {
+        XCTAssertTrue(DemoSession.preferenceDefaults(demoActive: false) === UserDefaults.standard)
+        XCTAssertFalse(DemoSession.preferenceDefaults(demoActive: true) === UserDefaults.standard)
+    }
+
+    /// Zoom While Typing in Demo Mode lives in the demo domain only, and
+    /// exiting discards it.
+    func testDemoZoomWhileTypingIsIsolatedAndDiscarded() {
+        let key = "zoomWhileTyping"
+        let realBefore = UserDefaults.standard.object(forKey: key) as? Bool
+        DemoSession.discardPreferences()
+        let demo = DemoSession.preferenceDefaults(demoActive: true)
+        demo.set(!(realBefore ?? true), forKey: key)
+        XCTAssertEqual(UserDefaults.standard.object(forKey: key) as? Bool, realBefore)
+        XCTAssertNotNil(DemoSession.preferenceDefaults(demoActive: true).object(forKey: key))
+        DemoSession.discardPreferences()
+        XCTAssertNil(DemoSession.preferenceDefaults(demoActive: true).object(forKey: key))
+        XCTAssertEqual(UserDefaults.standard.object(forKey: key) as? Bool, realBefore)
+    }
+
+    /// Nine demo taps unlock Cat Mode in the demo domain only.
+    func testDemoCatModeTapsDoNotTouchRealCatMode() {
+        let keys = [CatMode.unlockedDefaultsKey, CatMode.enabledDefaultsKey, CatMode.tapCountDefaultsKey]
+        let realBefore = keys.map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }
+        DemoSession.discardPreferences()
+        let demo = DemoSession.preferenceDefaults(demoActive: true)
+        var count = 0
+        var unlocked = false
+        for _ in 0..<9 {
+            let result = CatMode.registerTap(tapCount: count, alreadyUnlocked: unlocked)
+            count = result.tapCount
+            demo.set(count, forKey: CatMode.tapCountDefaultsKey)
+            if result.justUnlocked {
+                unlocked = true
+                demo.set(true, forKey: CatMode.unlockedDefaultsKey)
+                demo.set(true, forKey: CatMode.enabledDefaultsKey)
+            }
+        }
+        XCTAssertTrue(unlocked)
+        XCTAssertTrue(demo.bool(forKey: CatMode.unlockedDefaultsKey))
+        XCTAssertEqual(keys.map { UserDefaults.standard.object(forKey: $0).map { String(describing: $0) } }, realBefore)
+        DemoSession.discardPreferences()
+        XCTAssertFalse(DemoSession.preferenceDefaults(demoActive: true).bool(forKey: CatMode.unlockedDefaultsKey))
     }
 
     func testRealSessionAlwaysWinsAndExitRestoresIdle() {

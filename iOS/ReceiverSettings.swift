@@ -53,6 +53,7 @@ struct SettingsView: View {
                     searchResults
                 }
             }
+            .modifier(DemoSettingsBannerInset(active: demo != nil))
             .navigationTitle("Settings")
             .searchable(text: $query, placement: .sidebar, prompt: Text("Search Settings"))
             .toolbar {
@@ -66,6 +67,7 @@ struct SettingsView: View {
                 if let selection {
                     page(for: selection)
                         .environment(\.settingsHighlight, highlight)
+                        .modifier(DemoSettingsBannerInset(active: demo != nil))
                 } else {
                     Text("Select a category")
                         .foregroundStyle(.secondary)
@@ -76,9 +78,6 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if demo != nil { DemoSettingsBanner() }
-        }
         // Settings owns its system chrome: the receiver surface behind it
         // hides the status bar and home indicator, and a presentation that
         // inherited that would lay its navigation bar out under the top
@@ -162,7 +161,7 @@ struct SettingsView: View {
         case .diagnostics:
             DiagnosticsSettingsPage()
         case .about:
-            AboutSettingsPage()
+            AboutSettingsPage(defaults: DemoSession.preferenceDefaults(demoActive: demo != nil))
         case .developer:
             #if DEBUG
             DeveloperSettingsPage(receiver: receiver)
@@ -593,7 +592,16 @@ private struct InputSettingsPage: View {
     /// Demo Mode: Allow Input is a local sample state, never a Mac request.
     let isDemo: Bool
     let requestInput: (Bool) -> Void
-    @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    /// Demo Mode keeps this in the demo domain, never the real preference.
+    @AppStorage private var zoomWhileTyping: Bool
+
+    init(controlStore: ReceiverControlStore, isDemo: Bool, requestInput: @escaping (Bool) -> Void) {
+        self.controlStore = controlStore
+        self.isDemo = isDemo
+        self.requestInput = requestInput
+        _zoomWhileTyping = AppStorage(wrappedValue: true, "zoomWhileTyping",
+                                      store: DemoSession.preferenceDefaults(demoActive: isDemo))
+    }
 
     var body: some View {
         SettingsForm {
@@ -1266,10 +1274,17 @@ private struct DiagnosticsSettingsPage: View {
 
 private struct AboutSettingsPage: View {
     // Cat Mode (hidden easter egg — nine taps on the version row). Local-only
-    // presentation state: never synced, never on the wire.
-    @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
-    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
-    @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
+    // presentation state: never synced, never on the wire. Demo Mode passes
+    // the demo domain, so its taps never reach the real Cat Mode state.
+    @AppStorage private var catModeUnlocked: Bool
+    @AppStorage private var catModeEnabledStorage: Bool
+    @AppStorage private var catModeTapCount: Int
+
+    init(defaults: UserDefaults = .standard) {
+        _catModeUnlocked = AppStorage(wrappedValue: false, CatMode.unlockedDefaultsKey, store: defaults)
+        _catModeEnabledStorage = AppStorage(wrappedValue: false, CatMode.enabledDefaultsKey, store: defaults)
+        _catModeTapCount = AppStorage(wrappedValue: 0, CatMode.tapCountDefaultsKey, store: defaults)
+    }
     @State private var showCatModeUnlockedAlert = false
 
     private var catModeEnabled: Bool {

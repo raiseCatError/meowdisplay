@@ -63,11 +63,25 @@ final class DemoSession: ObservableObject {
     static let macName = "Review Mac"
     /// Never a real paired peer ID (those are SPKI hashes).
     static let peerID = "demo.review-mac"
-    /// RFC 2606 reserved domain, so it can never resolve to a real host.
-    static let remoteHost = "review-mac.example.ts.net"
+    /// Under the RFC 2606 reserved `.example` TLD, so it can never be a real
+    /// host. Shown only; nothing resolves or dials it.
+    static let remoteHost = "review-mac.example"
     static let remotePort = 7300
     /// Separate defaults domain for the demo's control preferences.
     static let controlDefaultsSuite = "com.raisecaterror.meowdisplay.demo"
+
+    /// Where shared Settings pages keep their `@AppStorage` values: the
+    /// real `.standard` domain, or the demo domain (wiped on entry and exit)
+    /// so Demo Mode never reads or writes a real preference.
+    static func preferenceDefaults(demoActive: Bool) -> UserDefaults {
+        guard demoActive else { return .standard }
+        return UserDefaults(suiteName: controlDefaultsSuite) ?? UserDefaults()
+    }
+
+    /// Drops everything Demo Mode saved.
+    static func discardPreferences() {
+        UserDefaults(suiteName: controlDefaultsSuite)?.removePersistentDomain(forName: controlDefaultsSuite)
+    }
 
     struct Event: Identifiable, Equatable {
         let id: Int
