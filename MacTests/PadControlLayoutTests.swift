@@ -776,3 +776,40 @@ final class PadControlLayoutTests: XCTestCase {
         return (ReceiverControlPreferencesRepository(defaults: defaults), defaults, suite)
     }
 }
+
+/// A fresh iPad starts on the radial Custom layout around a bottom-right
+/// Settings anchor; Strip and Overlay stay one setting away. Nothing a
+/// user already saved changes, and the iPhone is unaffected.
+final class PadDefaultLayoutTests: XCTestCase {
+    private func emptyDefaults() -> UserDefaults {
+        let suite = "PadDefaultLayoutTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    func testFreshPadStartsOnTheRadialCustomLayout() {
+        let preferences = ReceiverControlPreferences.initial(isPad: true)
+        XCTAssertEqual(preferences.padControlLayout, .custom)
+        let layout = try? XCTUnwrap(preferences.activeCustomLayout)
+        XCTAssertEqual(layout?.landscape, .radialTemplate(corner: .bottomTrailing, portrait: false))
+        XCTAssertEqual(layout?.portrait, .radialTemplate(corner: .bottomTrailing, portrait: true))
+        XCTAssertEqual(preferences.customLayouts.count, 1)
+    }
+
+    func testFreshPhoneKeepsTheStandardDefaults() {
+        XCTAssertEqual(ReceiverControlPreferences.initial(isPad: false), ReceiverControlPreferences())
+    }
+
+    func testRepositoryUsesTheInitialPreferencesOnlyWhenNothingIsSaved() {
+        let defaults = emptyDefaults()
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        XCTAssertEqual(repository.load(initial: .initial(isPad: true)).padControlLayout, .custom)
+
+        var saved = ReceiverControlPreferences()
+        saved.padControlLayout = .strip
+        repository.save(saved)
+        XCTAssertEqual(repository.load(initial: .initial(isPad: true)).padControlLayout, .strip)
+        XCTAssertTrue(repository.load(initial: .initial(isPad: true)).customLayouts.isEmpty)
+    }
+}

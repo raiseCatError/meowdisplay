@@ -545,6 +545,18 @@ struct CornerCluster: Equatable {
 extension ReceiverControlPreferences {
     var canCreateCustomLayout: Bool { customLayouts.count < CustomControlLayout.maximumCount }
 
+    /// What a device starts with before anything is saved. iPad opens on
+    /// the radial Custom layout around a bottom-right Settings anchor, with
+    /// Strip and Overlay one setting away; iPhone keeps the standard
+    /// defaults. Saved preferences are never replaced by this.
+    static func initial(isPad: Bool) -> ReceiverControlPreferences {
+        var preferences = ReceiverControlPreferences()
+        guard isPad else { return preferences }
+        preferences.createCustomLayout(corner: .bottomTrailing)
+        preferences.padControlLayout = .custom
+        return preferences
+    }
+
     /// The selected Custom layout, falling back to the first one.
     var activeCustomLayout: CustomControlLayout? {
         customLayouts.first { $0.id == activeCustomLayoutID } ?? customLayouts.first

@@ -57,7 +57,7 @@ final class ReceiverControlStore: ObservableObject {
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
         self.isPad = isPad
-        preferences = repository.load()
+        preferences = repository.load(initial: .initial(isPad: isPad))
     }
 
     /// The iPad layout mode actually in effect: Custom needs a layout to

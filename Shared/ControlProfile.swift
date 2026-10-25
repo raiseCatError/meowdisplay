@@ -1080,11 +1080,13 @@ struct ReceiverControlPreferencesRepository {
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
-    func load() -> ReceiverControlPreferences {
+    /// `initial` is what a device starts with while nothing usable is saved
+    /// (see `ReceiverControlPreferences.initial(isPad:)`).
+    func load(initial: ReceiverControlPreferences = ReceiverControlPreferences()) -> ReceiverControlPreferences {
         guard let data = defaults.data(forKey: Self.defaultsKey),
               var value = try? JSONDecoder().decode(ReceiverControlPreferences.self, from: data),
               value.version <= ReceiverControlPreferences.schemaVersion else {
-            return ReceiverControlPreferences()
+            return initial
         }
         if value.version < 2 {
             for index in value.profiles.indices
