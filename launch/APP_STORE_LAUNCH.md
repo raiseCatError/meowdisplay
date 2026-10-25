@@ -1,11 +1,15 @@
-# MeowDisplay is now on the App Store
+# MeowDisplay is now available
 
 *October 25, 2026*
 
 **Your Mac. Another screen. Anywhere.**
 
-MeowDisplay for iPhone and iPad is now available, free, on the App Store:
-<https://apps.apple.com/us/app/meowdisplay/id6817552864>
+MeowDisplay is out: the iPhone and iPad app is free on the App Store, and the
+Mac app is a free, signed and notarized download.
+
+- **Mac:** [Download MeowDisplay for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg)
+  ([release notes and checksums](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0))
+- **iPhone and iPad:** [MeowDisplay on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864)
 
 MeowDisplay turns your iPhone or iPad into a mirrored or extended display for
 your Mac, and lets you control the Mac from it: Direct Touch, a trackpad-style
@@ -21,16 +25,16 @@ Free and open source. No MeowDisplay account required.
 
 | | |
 |---|---|
+| **Mac** | macOS 14 or later, Apple silicon or Intel. [MeowDisplay.dmg](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg), free |
 | **iPhone or iPad** | iOS or iPadOS 16.4 or later. [MeowDisplay on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864), free |
-| **Mac** | macOS 14 or later, running the MeowDisplay Mac app |
 
-**The Mac app is not on the App Store and has no signed download yet.** For now
-you build it from source with Xcode (a free Apple account is enough to sign
-it). The [`release/app-store-rc`](https://github.com/raiseCatError/meowdisplay/tree/release/app-store-rc)
-branch matches App Store version 1.20.0. Setup:
-<https://meowdisplay.app/docs#status>. A signed, notarized Mac download will
-follow through the project's release workflow; this note will be updated when
-it exists.
+Open the DMG, drag MeowDisplay to Applications, and open it. Then open
+MeowDisplay on your iPhone or iPad, connect, and confirm the pairing code.
+Setup guide: <https://meowdisplay.app/docs>
+
+Want to use a spare Mac as a display instead? The optional
+[MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplayReceiver.dmg)
+(macOS 12 or later) is on the same release.
 
 ## Good to know
 
@@ -41,7 +45,7 @@ it exists.
 - Controlling the Mac needs Accessibility permission, **Allow Input** turned on,
   and a control request from the device each session. Connecting alone never
   grants control.
-- The app is in English for now.
+- The apps are in English for now.
 
 ## Thank you, OpenDisplay
 
@@ -52,9 +56,9 @@ open source under GPL-3.0.
 
 ## Links
 
+- Mac download: <https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg>
 - App Store: <https://apps.apple.com/us/app/meowdisplay/id6817552864>
 - Website: <https://meowdisplay.app/>
 - Setup: <https://meowdisplay.app/docs>
-- Features: <https://meowdisplay.app/features>
 - Support: <https://meowdisplay.app/support>
 - Source: <https://github.com/raiseCatError/meowdisplay>
