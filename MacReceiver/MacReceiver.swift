@@ -64,6 +64,10 @@ final class ReceiverController: ObservableObject {
 
     private var window: NSWindow?
     private var retiringReceiver: StreamReceiver?
+    /// `start()` arrived while the previous receiver was still tearing down
+    /// (MeowDisplay's display role turned off and straight back on). It
+    /// runs once that receiver has released its listeners and services.
+    private var startWhenRetired = false
     private var cancellables = Set<AnyCancellable>()
     private var sleepActivity: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
@@ -75,6 +79,10 @@ final class ReceiverController: ObservableObject {
 
     func start() {
         guard receiver == nil else { return }
+        guard retiringReceiver == nil else {
+            startWhenRetired = true
+            return
+        }
         // 4096x2304 is H.264's practical hardware-decode ceiling: end-to-end
         // playback stops below 5120 wide on every Mac measured, including an
         // M4 Pro — a format limit, not an age one. A 5K/6K panel still gets
@@ -191,6 +199,7 @@ final class ReceiverController: ObservableObject {
     /// to a live sender (or a second has passed) — the quit path waits on it
     /// so the sender ends its session instead of retrying a dead peer.
     func stop(completion: (@Sendable () -> Void)? = nil) {
+        startWhenRetired = false
         guard let receiver else { completion?(); return }
         cancellables.removeAll()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
@@ -207,7 +216,14 @@ final class ReceiverController: ObservableObject {
         // observing it are released as soon as `receiver` goes nil below.
         retiringReceiver = receiver
         receiver.stop { [weak self] in
-            Task { @MainActor in self?.retiringReceiver = nil }
+            Task { @MainActor in
+                guard let self else { return }
+                self.retiringReceiver = nil
+                if self.startWhenRetired {
+                    self.startWhenRetired = false
+                    self.start()
+                }
+            }
             completion?()
         }
         self.receiver = nil

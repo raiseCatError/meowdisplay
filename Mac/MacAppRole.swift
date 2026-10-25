@@ -62,3 +62,13 @@ enum StandaloneReceiverConflict {
         runningBundleIdentifiers.contains { $0.map(bundleIdentifiers.contains) ?? false }
     }
 }
+
+/// The unified app is a menu-bar (accessory) app unless the user chose a
+/// Dock icon. While the display role's video window is up it is a regular
+/// app, so it has a Dock icon and Command-Tab can leave the full-screen
+/// display; changing the presentation setting meanwhile must not undo that.
+enum MacAppActivationPolicy {
+    static func isRegular(showsDockIcon: Bool, displayWindowVisible: Bool) -> Bool {
+        showsDockIcon || displayWindowVisible
+    }
+}

@@ -351,7 +351,7 @@ final class SenderController: ObservableObject {
         didSet {
             guard presentation != oldValue else { return }
             UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
-            NSApp.setActivationPolicy(presentation.showsDockIcon ? .regular : .accessory)
+            applyActivationPolicy()
             // Live switch: create/destroy the single status item right here,
             // rather than only reading the setting at launch — this is the
             // fix for the mode never actually gaining a menu-bar icon.
@@ -450,6 +450,18 @@ final class SenderController: ObservableObject {
         applyRoleEffects(roleState.launchEffects)
     }
 
+    /// Whether the display role's video window is on screen.
+    private var displayWindowVisible = false
+
+    /// Dock and Command-Tab: the user's presentation choice, overridden to a
+    /// regular app while the display window is up so Command-Tab is always a
+    /// way out of it (`MacAppActivationPolicy`).
+    private func applyActivationPolicy() {
+        NSApp.setActivationPolicy(MacAppActivationPolicy.isRegular(
+            showsDockIcon: presentation.showsDockIcon, displayWindowVisible: displayWindowVisible)
+            ? .regular : .accessory)
+    }
+
     private func applyRoleEffects(_ effects: [MacAppRoleState.Effect]) {
         for effect in effects {
             switch effect {
@@ -470,8 +482,13 @@ final class SenderController: ObservableObject {
                 // a regular one, so Command-Tab is always the way out.
                 receiver.onVideoWindowVisibilityChanged = { [weak self] visible in
                     guard let self else { return }
-                    NSApp.setActivationPolicy(visible || self.presentation.showsDockIcon ? .regular : .accessory)
+                    self.displayWindowVisible = visible
+                    self.applyActivationPolicy()
                 }
+                // The Mirror-unavailable offer: bring Settings up, where its
+                // alert shows (MirrorUnavailableOfferAlert), as the
+                // standalone receiver does with its own window.
+                receiver.onNeedsAttention = { MacSettingsWindow.show() }
                 receiver.start()
                 Log.info("roleDebug: receiver started")
             case .stopReceiver:

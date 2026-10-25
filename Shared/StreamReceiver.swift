@@ -1549,12 +1549,20 @@ final class StreamReceiver: ObservableObject {
     }
 
     func forgetPeer(_ peerID: String) {
-        TrustStore.receiverRole.forget(peerID: peerID)
-        IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
-        InputAutoRequestStore.remove(peerID: peerID)
+        Self.removeStoredTrust(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
         revokeSessionAuthority(peerID: peerID, trustRemoved: true)
+    }
+
+    /// What Forget removes from storage: the receiver role's pin for the
+    /// peer and its per-peer preferences. `forgetPeer` also revokes live
+    /// authority; with no receiver running (the unified Mac app's display
+    /// role turned off) there is none, and this alone is a complete Forget.
+    static func removeStoredTrust(peerID: String) {
+        TrustStore.receiverRole.forget(peerID: peerID)
+        IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
+        InputAutoRequestStore.remove(peerID: peerID)
     }
 
     /// The per-Mac Connection Requests override (`IncomingSessionPolicyPicker`).
@@ -5337,9 +5345,11 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// In the unified Mac app, this Mac's own sender role — never a Mac to
-    /// pair with. Empty in a receiver-only app.
-    private static let sameAppSenderIDs: Set<String> = ReceiverRoleConfiguration.separateTrust
-        ? Set([TrustStore.shared.installID()].compactMap { $0 }) : []
+    /// pair with. Empty in a receiver-only app. Read on every update, not
+    /// once: the sender's identity may not exist yet the first time.
+    private static var sameAppSenderIDs: Set<String> {
+        ReceiverRoleConfiguration.separateTrust ? Set([TrustStore.shared.installID()].compactMap { $0 }) : []
+    }
 
     /// `pairingSuccessCount`'s external-boundary mutator for the pairing
     /// listener's `newConnectionHandler`/nested `Task` — see `ReceiverUISink.

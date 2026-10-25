@@ -164,4 +164,46 @@ final class UnifiedMacAppTests: XCTestCase {
         XCTAssertTrue(receiver.contains("SUFeedURL: https://meowdisplay.app/appcast-receiver.xml"))
         XCTAssertFalse(receiver.contains("MeowDisplayReceiverRoleTrust"), "its users keep their identity and pins")
     }
+
+    // MARK: - Dock and Command-Tab
+
+    func testTheDisplayWindowAlwaysMakesTheAppRegular() {
+        XCTAssertFalse(MacAppActivationPolicy.isRegular(showsDockIcon: false, displayWindowVisible: false),
+                       "menu-bar-only, as the user chose")
+        XCTAssertTrue(MacAppActivationPolicy.isRegular(showsDockIcon: true, displayWindowVisible: false))
+        XCTAssertTrue(MacAppActivationPolicy.isRegular(showsDockIcon: false, displayWindowVisible: true),
+                      "Command-Tab must leave a full-screen display window, whatever the presentation setting")
+        XCTAssertTrue(MacAppActivationPolicy.isRegular(showsDockIcon: true, displayWindowVisible: true))
+    }
+
+    // MARK: - Settings
+
+    func testTheDisplayRoleHasItsOwnSettingsPage() {
+        let categories = Array(SettingsCategory.allCases)
+        let index = categories.firstIndex(of: .displayRole)
+        XCTAssertNotNil(index)
+        XCTAssertEqual(index.flatMap { categories.indices.contains($0 + 1) ? categories[$0 + 1] : nil }, .system,
+                       "beside the sender's pages, before System")
+        XCTAssertEqual(SettingsCategory.displayRole.label, "This Mac as a Display")
+        XCTAssertFalse(SettingsCategory.displayRole.systemImage.isEmpty)
+        for query in ["This Mac as a Display", "paired macs", "receiver name"] {
+            XCTAssertEqual(SettingsSearchIndex.shared.search(query: query).first?.category, .displayRole, query)
+        }
+    }
+
+    /// The display role's settings page and the receiver views it reuses
+    /// only ever touch the receiver role's trust and settings.
+    func testReceiverSettingsNeverReachTheSendersTrustOrKeys() throws {
+        let files = ["Mac/DisplayRoleSection.swift", "Shared/SessionInvitationViews.swift"]
+            + (try FileManager.default.contentsOfDirectory(atPath: Self.repoRoot.appendingPathComponent("MacReceiver").path))
+                .filter { $0.hasSuffix(".swift") }.map { "MacReceiver/\($0)" }
+        for file in files {
+            let source = try String(contentsOf: Self.repoRoot.appendingPathComponent(file), encoding: .utf8)
+            for forbidden in ["TrustStore.shared", "role: .sender", "\"incomingSessionAutomaticallyAllow\"",
+                              "\"incomingSessionPeerPolicy.v1\"", "\"remoteEndpointHints.v1\"",
+                              "\"wakeMetadataHints.v1\""] {
+                XCTAssertFalse(source.contains(forbidden), "\(file) uses \(forbidden)")
+            }
+        }
+    }
 }

@@ -5,7 +5,7 @@ import Combine
 /// used across Mac Receiver and iOS where it applies — see their own
 /// category types for the (smaller) sets that make sense there.
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case overview, displays, streaming, input, devices, remoteAccess, system
+    case overview, displays, streaming, input, devices, remoteAccess, displayRole, system
     #if DEBUG
     case developer
     #endif
@@ -20,6 +20,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .input: return String(localized: "Input")
         case .devices: return String(localized: "Devices")
         case .remoteAccess: return String(localized: "Remote Access")
+        case .displayRole: return String(localized: "This Mac as a Display")
         case .system: return String(localized: "System")
         #if DEBUG
         case .developer: return String(localized: "Developer")
@@ -35,6 +36,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .input: return "hand.tap"
         case .devices: return "list.bullet.rectangle"
         case .remoteAccess: return "network"
+        case .displayRole: return "display.and.arrow.down"
         case .system: return "gearshape"
         #if DEBUG
         case .developer: return "wrench.and.screwdriver"
@@ -94,6 +96,9 @@ struct SettingsSearchIndex {
                 keywords = ["devices", "device", "ipad", "iphone", "connected", "known devices", "pair"]
             case .remoteAccess:
                 keywords = ["remote", "remote access", "tailscale", "magicdns", "endpoint", "private network"]
+            case .displayRole:
+                keywords = ["use this mac as a display", "receiver", "display role", "paired macs", "forget",
+                            "receiver name", "audio", "a/v sync", "automatically allow"]
             case .system:
                 keywords = ["system", "preferences", "settings", "meowdisplay", "app", "permissions", "available"]
             #if DEBUG

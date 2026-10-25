@@ -20,15 +20,6 @@ struct ReceiverDevicesSettingsView: View {
 private struct ReceiverDevicesPage: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var wakeConnect: WakeConnectCoordinator
-    @State private var forgetConfirmation = PeerForgetPrompt()
-    // TrustStore isn't observable; bumped after a local Forget. Pairing
-    // successes and forgets also republish the receiver itself.
-    @State private var trustRefresh = 0
-
-    private var pairedMacs: [(peerID: String, displayName: String)] {
-        _ = trustRefresh
-        return ReceiverMacList.paired()
-    }
 
     private var unpairedNearby: [NWBrowser.Result] {
         ReceiverMacList.unpairedNearby(receiver)
@@ -36,31 +27,7 @@ private struct ReceiverDevicesPage: View {
 
     var body: some View {
         ReceiverSettingsForm {
-            Section {
-                if let status = receiver.pairingPrompt.status {
-                    ReceiverCaption(verbatim: status)
-                }
-                if pairedMacs.isEmpty {
-                    ReceiverCaption("No paired Macs")
-                } else {
-                    AutomaticallyAllowConnectionsToggle()
-                    ForEach(pairedMacs, id: \.peerID) { mac in
-                        ReceiverPairedMacRow(receiver: receiver, wakeConnect: wakeConnect,
-                                             peerID: mac.peerID, name: mac.displayName) {
-                            Button("Forget…", role: .destructive) {
-                                forgetConfirmation.request(peerID: mac.peerID, name: mac.displayName)
-                            }
-                            .controlSize(.small)
-                        }
-                        IncomingSessionPolicyPicker(peerID: mac.peerID, receiver: receiver)
-                            .controlSize(.small)
-                    }
-                }
-            } header: {
-                Text("Paired Macs")
-            } footer: {
-                ReceiverCaption("Connect asks that Mac to start streaming to this one. Connection Requests: Default follows Automatically Allow Connections; blocking keeps the Mac paired. Forgetting a Mac removes its pairing; you'll need to pair again before connecting.")
-            }
+            ReceiverPairedMacsSection(receiver: receiver, wakeConnect: wakeConnect)
 
             Section {
                 if unpairedNearby.isEmpty {
@@ -75,6 +42,52 @@ private struct ReceiverDevicesPage: View {
             } footer: {
                 ReceiverCaption("Macs on this network running MeowDisplay. Pairing shows a code on both Macs — confirm only if they match. You can also start pairing from the other Mac's Devices list.")
             }
+        }
+    }
+}
+
+/// The Macs this receiver trusts, with Automatically Allow Connections, each
+/// Mac's Connection Requests override, Connect and Forget. Shared by the
+/// standalone receiver's Devices page and MeowDisplay's "This Mac as a
+/// Display" page, so both manage the receiver role's trust the same way.
+struct ReceiverPairedMacsSection: View {
+    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var wakeConnect: WakeConnectCoordinator
+    @State private var forgetConfirmation = PeerForgetPrompt()
+    // TrustStore isn't observable; bumped after a local Forget. Pairing
+    // successes and forgets also republish the receiver itself.
+    @State private var trustRefresh = 0
+
+    private var pairedMacs: [(peerID: String, displayName: String)] {
+        _ = trustRefresh
+        return ReceiverMacList.paired()
+    }
+
+    var body: some View {
+        Section {
+            if let status = receiver.pairingPrompt.status {
+                ReceiverCaption(verbatim: status)
+            }
+            if pairedMacs.isEmpty {
+                ReceiverCaption("No paired Macs")
+            } else {
+                AutomaticallyAllowConnectionsToggle()
+                ForEach(pairedMacs, id: \.peerID) { mac in
+                    ReceiverPairedMacRow(receiver: receiver, wakeConnect: wakeConnect,
+                                         peerID: mac.peerID, name: mac.displayName) {
+                        Button("Forget…", role: .destructive) {
+                            forgetConfirmation.request(peerID: mac.peerID, name: mac.displayName)
+                        }
+                        .controlSize(.small)
+                    }
+                    IncomingSessionPolicyPicker(peerID: mac.peerID, receiver: receiver)
+                        .controlSize(.small)
+                }
+            }
+        } header: {
+            Text("Paired Macs")
+        } footer: {
+            ReceiverCaption("Connect asks that Mac to start streaming to this one. Connection Requests: Default follows Automatically Allow Connections; blocking keeps the Mac paired. Forgetting a Mac removes its pairing; you'll need to pair again before connecting.")
         }
         .alert(Text("Forget “\(forgetConfirmation.candidate?.name ?? String(localized: "This Mac"))”?"),
                isPresented: Binding(get: { forgetConfirmation.isPresented },
