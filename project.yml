@@ -179,6 +179,7 @@ targets:
       - Mac/SmartTouchTargetClassifier.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
+      - MacReceiver/ReceiverInputForwarding.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift

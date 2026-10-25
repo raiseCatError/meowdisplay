@@ -6,8 +6,9 @@
 // keeping the machine awake while it serves as a screen. It ships as its own
 // app (OpenSidecarMacReceiver target, macOS 12+) so old Macs can be displays.
 //
-// Display-only for now: the receiving Mac's keyboard/trackpad are not
-// forwarded to the sender (KVM-style input is a follow-up).
+// Input (issue #12): once the sending Mac grants this session control, this
+// Mac's own keyboard and trackpad drive it while the video window is in
+// front — see ReceiverInputForwarding.swift for the rules.
 
 import AppKit
 import AVFoundation
@@ -42,6 +43,9 @@ final class ReceiverController: ObservableObject {
     /// Wake & Connect for a paired Mac (the same shared coordinator the
     /// iPhone app drives). Lives exactly as long as `receiver`.
     @Published private(set) var wakeConnect: WakeConnectCoordinator?
+    /// Keyboard/trackpad forwarding for this receiver's sessions. Lives
+    /// exactly as long as `receiver`.
+    @Published private(set) var input: ReceiverInputController?
     /// The receiver-local manual A/V Sync offset (`AVSyncOffset.range`),
     /// persisted here and applied to the shared receiver's
     /// `avSyncPreference` — the one value its audio scheduling and video
@@ -87,6 +91,7 @@ final class ReceiverController: ObservableObject {
         receiver.avSyncPreference.set(avSyncOffsetMs)
         self.receiver = receiver
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
+        input = ReceiverInputController(receiver: receiver)
         receiver.start()
 
         receiver.$connected
@@ -192,6 +197,8 @@ final class ReceiverController: ObservableObject {
         screenSleepObservers = []
         wakeConnect?.cancel()
         wakeConnect = nil
+        input?.invalidate()
+        input = nil
         // The receiver finishes its teardown on its own queue and only calls
         // back while it still exists, so keep it alive until it has — views
         // observing it are released as soon as `receiver` goes nil below.
@@ -281,7 +288,7 @@ final class ReceiverController: ObservableObject {
     /// Bring the video window (back) up — also bound to Show Window in Settings for
     /// when the user closed the window while the stream keeps running.
     func showWindow() {
-        guard let receiver, streaming || window != nil else { return }
+        guard let receiver, let input, streaming || window != nil else { return }
         // Streaming again within the grace period keeps this window, in
         // whatever full screen state it's already in.
         if streaming { windowLifecycle.cancelPendingClose() }
@@ -291,12 +298,23 @@ final class ReceiverController: ObservableObject {
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
             w.title = "MeowDisplay"
-            w.contentView = ReceiverVideoView(receiver: receiver)
+            let videoView = ReceiverVideoView(receiver: receiver, input: input)
+            w.contentView = videoView
+            w.initialFirstResponder = videoView
             w.isReleasedWhenClosed = false
+            // A fixed slot (macOS 12 has no hosting-view sizing options):
+            // the indicator right-aligns inside it as its text changes.
+            let indicator = NSTitlebarAccessoryViewController()
+            let indicatorView = NSHostingView(rootView: ReceiverControlIndicator(input: input))
+            indicatorView.frame = NSRect(x: 0, y: 0, width: 340, height: 28)
+            indicator.view = indicatorView
+            indicator.layoutAttribute = .trailing
+            w.addTitlebarAccessoryViewController(indicator)
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.center()
             window = w
             observeWindow(w)
+            input.attach(to: w)
             enterFullscreen = windowLifecycle.windowCreated()
         }
         // Resizes keep the stream's shape; re-set on every show because a
@@ -411,8 +429,10 @@ final class ReceiverController: ObservableObject {
 /// extended desktop would have no visible pointer.
 final class ReceiverVideoView: NSView {
     private weak var receiver: StreamReceiver?
+    private let input: ReceiverInputController
     private let displayLayer: AVSampleBufferDisplayLayer
     private var videoSizeObserver: AnyCancellable?
+    private var cursorEcho = CursorEchoPolicy()
 
     private let cursorLayer: CALayer = {
         let layer = CALayer()
@@ -428,8 +448,9 @@ final class ReceiverVideoView: NSView {
     private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
     private var cursorVisible = false
 
-    init(receiver: StreamReceiver) {
+    init(receiver: StreamReceiver, input: ReceiverInputController) {
         self.receiver = receiver
+        self.input = input
         self.displayLayer = receiver.displayLayer
         super.init(frame: .zero)
         wantsLayer = true
@@ -440,7 +461,16 @@ final class ReceiverVideoView: NSView {
         layer?.addSublayer(cursorLayer)
 
         receiver.onCursor = { [weak self] x, y, visible in
-            self?.moveCursor(x: x, y: y, visible: visible)
+            guard let self else { return }
+            // While this Mac drives the pointer the sprite already sits at
+            // the local pointer; the sending Mac's (older) reports take over
+            // once local movement stops.
+            if self.input.echoesCursor,
+               !self.cursorEcho.appliesRemotePosition(at: ProcessInfo.processInfo.systemUptime) {
+                self.setCursorVisible(visible)
+                return
+            }
+            self.moveCursor(x: x, y: y, visible: visible)
         }
         receiver.onCursorImage = { [weak self] image, anchor, normSize in
             self?.setCursorSprite(image, anchor: anchor, normSize: normSize)
@@ -464,7 +494,7 @@ final class ReceiverVideoView: NSView {
         // required constraints that size drove the *window*, which collapsed
         // to 0 × titlebar with the HUD hidden. Springs and struts never feed
         // back into the window, on any macOS the app supports.
-        let overlay = OverlayHostingView(rootView: ReceiverPerfOverlay(receiver: receiver))
+        let overlay = OverlayHostingView(rootView: ReceiverPerfOverlay(receiver: receiver, input: input))
         overlay.frame = bounds
         overlay.autoresizingMask = [.width, .height]
         addSubview(overlay)
@@ -474,6 +504,68 @@ final class ReceiverVideoView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: blankCursor)
+    }
+
+    // MARK: Input (issue #12)
+
+    private var geometry: ReceiverVideoGeometry {
+        ReceiverVideoGeometry(viewSize: bounds.size, videoSize: receiver?.videoSize ?? .zero)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) { pointerMoved(event) }
+    override func mouseDragged(with event: NSEvent) { pointerMoved(event) }
+    override func rightMouseDragged(with event: NSEvent) { pointerMoved(event) }
+
+    override func mouseDown(with event: NSEvent) {
+        input.mouseDown(event, button: .left, geometry: geometry, in: self)
+        echoCursor(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        input.mouseUp(event, button: .left, geometry: geometry, in: self)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        input.mouseDown(event, button: .right, geometry: geometry, in: self)
+        echoCursor(event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        input.mouseUp(event, button: .right, geometry: geometry, in: self)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        input.scrollWheel(event, geometry: geometry, in: self)
+    }
+
+    override func magnify(with event: NSEvent) { input.magnify(event) }
+    override func rotate(with event: NSEvent) { input.rotate(event) }
+
+    private func pointerMoved(_ event: NSEvent) {
+        input.mouseMoved(event, geometry: geometry, in: self)
+        echoCursor(event)
+    }
+
+    /// Draws the streamed cursor at the local pointer while controlling.
+    private func echoCursor(_ event: NSEvent) {
+        guard input.echoesCursor,
+              let (point, _) = geometry.normalized(convert(event.locationInWindow, from: nil)) else { return }
+        cursorEcho.localMove(at: ProcessInfo.processInfo.systemUptime)
+        moveCursor(x: Double(point.x), y: Double(point.y), visible: cursorVisible)
+    }
+
+    private func setCursorVisible(_ visible: Bool) {
+        guard visible != cursorVisible else { return }
+        moveCursor(x: Double(cursorNorm.x), y: Double(cursorNorm.y), visible: visible)
     }
 
     override func layout() {
@@ -550,23 +642,30 @@ final class ReceiverVideoView: NSView {
 /// same "showAnalytics" default the iOS app uses (Settings → System).
 struct ReceiverPerfOverlay: View {
     @ObservedObject var receiver: StreamReceiver
+    let input: ReceiverInputController
     @AppStorage("showAnalytics") private var showAnalytics = false
 
     var body: some View {
-        if showAnalytics {
-            VStack {
-                Spacer()
-                PerfOverlay(stats: receiver.perf, videoSize: receiver.videoSize)
-                    .padding(.bottom, 10)
+        ZStack {
+            ReceiverControlHint(input: input)
+            if showAnalytics {
+                VStack {
+                    Spacer()
+                    PerfOverlay(stats: receiver.perf, videoSize: receiver.videoSize)
+                        .padding(.bottom, 10)
+                }
+                .allowsHitTesting(false)
             }
-            .allowsHitTesting(false)
         }
     }
 }
 
-/// Full-bleed, non-interactive layer above the video. Subclassed only so the
-/// blank-cursor rect covers the HUD area too.
+/// Full-bleed, non-interactive layer above the video. Subclassed so the
+/// blank-cursor rect covers the HUD area too, and so it never takes a click,
+/// scroll or drag meant for the video view (and the other Mac) underneath.
 private final class OverlayHostingView: NSHostingView<ReceiverPerfOverlay> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     required init(rootView: ReceiverPerfOverlay) {
         super.init(rootView: rootView)
     }
