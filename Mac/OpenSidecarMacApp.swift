@@ -678,7 +678,7 @@ final class SenderController: ObservableObject {
         case .rejected(let rejection):
             Log.info("routeDebug: rejected \(session.id) mode request — \(rejection)")
             session.displayModeNotice = switch rejection {
-            case .noPhysicalDisplay: String(localized: "Mirror needs an active physical display. This device stays in Extend.")
+            case .noPhysicalDisplay: String(localized: "Mirror needs an active physical display. This device keeps its current mode.")
             case .videoOff: String(localized: "Extend needs video. Turn video back on to extend onto this device.")
             case .unknownSession: nil
             }

@@ -9,8 +9,8 @@ import XCTest
 /// a session — with synthetic receivers and fake display IDs standing in for
 /// real devices and `CGVirtualDisplay`s. It proves the decision logic for the
 /// combinations below; it does not prove real WindowServer, ScreenCaptureKit
-/// or multi-device hardware behavior (see docs/PER_DEVICE_DISPLAY_MODE.md's
-/// physical checklist for that).
+/// or multi-device hardware behavior (see MULTI_DEVICE.md's physical
+/// checklist for that).
 final class DisplayModeAssignmentTests: XCTestCase {
     private var store: UserDefaults!
     private var suiteName: String!
