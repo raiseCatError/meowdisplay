@@ -79,7 +79,8 @@ struct ExploreDemoCard: View {
         .buttonStyle(.plain)
         // As wide as the status card on iPad; the phone column's width elsewhere.
         .frame(maxWidth: horizontalSizeClass == .regular ? .infinity : 420)
-        .accessibilityElement(children: .ignore)
+        // Label the button itself: wrapping it in its own element hid the
+        // button trait (and the button from UI tests) behind a plain group.
         .accessibilityLabel(Text("Explore Demo"))
         .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
         .accessibilityIdentifier("exploreDemo")

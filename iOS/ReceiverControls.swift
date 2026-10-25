@@ -626,6 +626,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .background(frameReader("tray:more"))
                     .background(chip(selected: false))
                     .accessibilityLabel(ControlTrayItem.settings.title)
+                    .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
@@ -844,6 +845,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .contentShape(Circle())
         .onTapGesture { performFunctionAction(item) }
         .accessibilityLabel(item.title)
+        .accessibilityAddTraits(.isButton)
     }
 
     private func performFunctionAction(_ item: ShortcutItem) {
@@ -863,6 +865,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .background(chip(selected: selected))
             .accessibilityLabel(modifier.title)
             .accessibilityValue(selected ? "On" : "Off")
+            .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
     }
 
     private func actionButton(_ item: ControlTrayItem) -> some View {
@@ -879,6 +882,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .background(frameReader("tray:\(item.rawValue)"))
         .background(chip(selected: false))
         .accessibilityLabel(item.title)
+        .trayButtonAccessibility { activateForAccessibility(item) }
     }
 
     private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool,
@@ -925,6 +929,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .scaleEffect(selected ? 1.12 : 1)
         .animation(.snappy(duration: 0.14), value: selected)
         .accessibilityLabel(action.title)
+        .trayButtonAccessibility { apply(interaction.finish(with: action)) }
     }
 
     /// Shows the combination the finger is currently on — the live chord,
@@ -1084,6 +1089,20 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         }
     }
 
+    /// What a tap on a Main control does, for VoiceOver, Voice Control and
+    /// Switch Control. The chips are only drawn; taps reach them through
+    /// `controlGesture`'s hit-testing, which those technologies don't use.
+    /// A modifier latches, exactly like a quick tap.
+    fileprivate func activateForAccessibility(_ item: ControlTrayItem) {
+        store.beginAutoHideActivity()
+        if let modifier = item.modifier {
+            apply(interaction.tap(modifier))
+        } else {
+            perform(item)
+        }
+        store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+    }
+
     private func apply(_ effects: [ControlInteractionEffect]) {
         for effect in effects {
             switch effect {
@@ -1217,6 +1236,7 @@ extension ReceiverControlOverlay {
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(modifier.title)
                 .accessibilityValue(selected ? "On" : "Off")
+                .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
         case .escape, .tab:
             let item: ControlTrayItem = entry == .escape ? .escape : .tab
             Text(item.displayLabel)
@@ -1227,6 +1247,7 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: false, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(item.title)
+                .trayButtonAccessibility { activateForAccessibility(item) }
         case .dismissKeyboard:
             Image(systemName: "keyboard.chevron.compact.down")
                 .font(.system(size: frame.width * 0.38, weight: .semibold))
@@ -1236,6 +1257,7 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: false, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(Text("Hide Keyboard"))
+                .trayButtonAccessibility { activateForAccessibility(.keyboard) }
         }
     }
 }
@@ -1753,6 +1775,17 @@ extension ReceiverControlOverlay {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(padAccessibilityLabel(kind))
         .accessibilityValue(kind.modifier != nil || kind == .moveView ? (selected ? "On" : "Off") : "")
+        .trayButtonAccessibility {
+            switch kind {
+            case .tray(let item):
+                activateForAccessibility(item)
+            case .moveView:
+                store.setMoveViewActive(!store.moveViewActive)
+                haptics.play(.selection)
+            case .function, .shortcut:
+                break
+            }
+        }
     }
 
     private func padAccessibilityLabel(_ kind: CustomControlKind) -> String {
@@ -1835,6 +1868,7 @@ extension ReceiverControlOverlay {
         .scaleEffect(selected ? 1.05 : 1)
         .animation(.snappy(duration: 0.14), value: selected)
         .accessibilityLabel(action.title)
+        .trayButtonAccessibility { apply(interaction.finish(with: action)) }
     }
 
     private func emptyPaletteLabel(_ chord: ModifierChord) -> some View {
@@ -2349,4 +2383,13 @@ struct ShortcutButtonFaceView: View {
 /// The real control source: the live session's state and wire.
 extension StreamReceiver: ReceiverControlSource {
     var controlSessionPhase: ReceiverSessionPhase { session.phase }
+}
+
+private extension View {
+    /// Marks a drawn control as a button and gives assistive technologies
+    /// its tap action directly — see `activateForAccessibility`.
+    func trayButtonAccessibility(_ action: @escaping () -> Void) -> some View {
+        accessibilityAddTraits(.isButton)
+            .accessibilityAction { action() }
+    }
 }
