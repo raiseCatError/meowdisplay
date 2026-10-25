@@ -43,9 +43,9 @@ tracked — edit `project.yml`, never the generated project.
 
 | Target | Sources | Role |
 | --- | --- | --- |
-| `OpenSidecarMac` | `Mac/`, `Shared/` | Mac Sender app |
+| `OpenSidecarMac` | `Mac/`, `Shared/`, `MacReceiver/` (minus its entry point and resources) | MeowDisplay: the sender, plus Use This Mac as a Display ([UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md)) |
 | `OpenSidecariOS` | `iOS/`, `Shared/` (bundles `iOS/PrivacyInfo.xcprivacy`) | iPhone/iPad Receiver app |
-| `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Mac Receiver app |
+| `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Standalone Mac Receiver app, for macOS 12–13 and existing users |
 | `OpenSidecarMacTests` | `MacTests/` plus selected pure-logic files | Hostless unit tests (run by `.github/workflows/tests.yml`) |
 
 The `OpenSidecar*` names are inherited from OpenDisplay and are kept for
@@ -389,3 +389,4 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
 - [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
 - [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, and its physical test checklist
+- [UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md) — one Mac app for both roles: design, migration and its physical test checklist
