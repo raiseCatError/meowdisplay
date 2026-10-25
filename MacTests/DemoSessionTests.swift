@@ -23,7 +23,7 @@ final class DemoSessionTests: XCTestCase {
 
         XCTAssertFalse(TrustStore.shared.hasPin(peerID: DemoSession.peerID))
         XCTAssertFalse(TrustStore.shared.pinnedPeers().contains { $0.peerID == DemoSession.peerID })
-        XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: DemoSession.peerID))
+        XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: DemoSession.peerID, role: .receiverRole))
         XCTAssertFalse(InputAutoRequestStore.isEnabled(peerID: DemoSession.peerID))
         XCTAssertEqual(standardDefaultsSnapshot(), before)
     }

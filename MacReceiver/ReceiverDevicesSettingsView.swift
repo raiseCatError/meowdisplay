@@ -140,7 +140,7 @@ private struct ReceiverRemoteEndpointEditor: View {
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
-        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) != nil
     }
 
     var body: some View {
@@ -185,7 +185,7 @@ private struct ReceiverRemoteEndpointEditor: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) else {
             host = ""
             port = String(WireCrypto.remoteRequestPort)
             return
@@ -197,8 +197,8 @@ private struct ReceiverRemoteEndpointEditor: View {
     private func save() {
         switch RemoteEndpointValidation.validate(host: host, port: port) {
         case .success(let value):
-            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
-            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
+            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .receiverRole)
+            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole),
                   readBack.host == value.host, readBack.port == value.port else {
                 errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
@@ -219,7 +219,7 @@ private struct ReceiverRemoteEndpointEditor: View {
 
     /// Removing the saved endpoint never touches the pairing itself.
     private func remove() {
-        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
         host = ""
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil
@@ -263,7 +263,7 @@ struct ReceiverPairedMacRow<Trailing: View>: View {
     var body: some View {
         let isConnected = receiver.connected && receiver.authenticatedPeerID == peerID
         let isNearby = receiver.discoveredMacs.contains { receiver.pairingMacPeerID($0) == peerID }
-        let canWake = WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil
+        let canWake = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole)?.broadcastAddress != nil
         HStack(alignment: .firstTextBaseline) {
             Circle()
                 .fill(isConnected ? Color.green : Color.secondary.opacity(0.5))
@@ -312,7 +312,7 @@ struct ReceiverPairedMacRow<Trailing: View>: View {
             }
         }
         if isNearby { return String(localized: "Paired · Nearby") }
-        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil { return String(localized: "Paired · Remote Access") }
+        if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) != nil { return String(localized: "Paired · Remote Access") }
         return String(localized: "Paired · Not nearby")
     }
 }

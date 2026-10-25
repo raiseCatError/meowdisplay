@@ -50,10 +50,10 @@ final class WakeMetadataStoreTests: XCTestCase {
         let metadata = WakeMetadata(macAddress: "aa:bb:cc:dd:ee:ff", interfaceName: "en0",
                                     ipv4: "192.168.1.5", subnetMask: "255.255.255.0",
                                     broadcastAddress: "192.168.1.255", updatedAt: Date())
-        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: peer))
-        WakeMetadataStore.setMetadata(metadata, forPeerID: peer)
-        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer)?.macAddress, "aa:bb:cc:dd:ee:ff")
-        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer)?.broadcastAddress, "192.168.1.255")
+        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: peer, role: .sender))
+        WakeMetadataStore.setMetadata(metadata, forPeerID: peer, role: .sender)
+        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer, role: .sender)?.macAddress, "aa:bb:cc:dd:ee:ff")
+        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer, role: .sender)?.broadcastAddress, "192.168.1.255")
     }
 
     func testChangedAddressOverwritesOnlyTheHintForThatPeer() {
@@ -64,9 +64,9 @@ final class WakeMetadataStoreTests: XCTestCase {
         let second = WakeMetadata(macAddress: "bb:bb:bb:bb:bb:bb", interfaceName: "en1",
                                   ipv4: "10.0.0.5", subnetMask: nil, broadcastAddress: nil,
                                   updatedAt: Date())
-        WakeMetadataStore.setMetadata(first, forPeerID: peer)
-        WakeMetadataStore.setMetadata(second, forPeerID: peer)
-        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer)?.macAddress, "bb:bb:bb:bb:bb:bb")
+        WakeMetadataStore.setMetadata(first, forPeerID: peer, role: .sender)
+        WakeMetadataStore.setMetadata(second, forPeerID: peer, role: .sender)
+        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: peer, role: .sender)?.macAddress, "bb:bb:bb:bb:bb:bb")
     }
 
     func testRemoveMetadataClearsOnlyThatPeer() {
@@ -74,11 +74,11 @@ final class WakeMetadataStoreTests: XCTestCase {
         let peerB = peerID()
         let metadata = WakeMetadata(macAddress: "aa:aa:aa:aa:aa:aa", interfaceName: "en0",
                                     ipv4: nil, subnetMask: nil, broadcastAddress: nil, updatedAt: Date())
-        WakeMetadataStore.setMetadata(metadata, forPeerID: peerA)
-        WakeMetadataStore.setMetadata(metadata, forPeerID: peerB)
-        WakeMetadataStore.removeMetadata(forPeerID: peerA)
-        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: peerA))
-        XCTAssertNotNil(WakeMetadataStore.metadata(forPeerID: peerB))
+        WakeMetadataStore.setMetadata(metadata, forPeerID: peerA, role: .sender)
+        WakeMetadataStore.setMetadata(metadata, forPeerID: peerB, role: .sender)
+        WakeMetadataStore.removeMetadata(forPeerID: peerA, role: .sender)
+        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: peerA, role: .sender))
+        XCTAssertNotNil(WakeMetadataStore.metadata(forPeerID: peerB, role: .sender))
     }
 }
 

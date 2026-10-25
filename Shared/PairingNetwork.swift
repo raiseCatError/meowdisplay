@@ -94,7 +94,9 @@ enum PairingNetwork {
         try PairingClassifier.check(pending, allowIdentityChange: allowIdentityChange)
         if let remoteHost {
             pending.changesRemoteEndpoint = RemoteHintChange.wouldChange(
-                existing: RemoteEndpointStore.endpoint(forPeerID: pending.peerID), newHost: remoteHost)
+                existing: RemoteEndpointStore.endpoint(forPeerID: pending.peerID,
+                                                       role: RolePreferences(trustNamespace: store.namespace)),
+                newHost: remoteHost)
         }
         onHandshakeReached?()
         // A cancelled/superseded attempt must never surface a SAS prompt.
@@ -112,7 +114,8 @@ enum PairingNetwork {
             onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
             onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
             store: store, isCurrent: isCurrent, remoteHost: remoteHost,
-            hints: remoteHost == nil ? nil : RemoteEndpointStoreHints())
+            hints: remoteHost == nil ? nil
+                : RemoteEndpointStoreHints(role: RolePreferences(trustNamespace: store.namespace)))
         logFinalized(pending)
         return pending
     }

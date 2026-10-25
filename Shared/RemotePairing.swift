@@ -236,8 +236,11 @@ protocol RemoteEndpointHinting {
 }
 
 struct RemoteEndpointStoreHints: RemoteEndpointHinting {
+    /// The role whose pin this hint sits beside.
+    let role: RolePreferences
+
     func setEndpoint(_ host: String, port: UInt16, forPeerID peerID: String) {
-        RemoteEndpointStore.setEndpoint(host, port: port, forPeerID: peerID)
+        RemoteEndpointStore.setEndpoint(host, port: port, forPeerID: peerID, role: role)
     }
 }
 

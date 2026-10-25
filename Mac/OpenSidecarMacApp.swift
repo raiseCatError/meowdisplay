@@ -651,8 +651,8 @@ final class SenderController: ObservableObject {
     /// Incoming session requests from paired receivers connect without a
     /// prompt unless a per-device policy overrides this. Not input
     /// permission, not Auto-Reconnect.
-    @Published var automaticallyAllowConnections = IncomingSessionPolicyStore.automaticallyAllow() {
-        didSet { IncomingSessionPolicyStore.setAutomaticallyAllow(automaticallyAllowConnections) }
+    @Published var automaticallyAllowConnections = IncomingSessionPolicyStore.automaticallyAllow(role: .sender) {
+        didSet { IncomingSessionPolicyStore.setAutomaticallyAllow(automaticallyAllowConnections, role: .sender) }
     }
 
     @Published var allowInput = InputPolicy.allowsInput() {
@@ -1495,7 +1495,7 @@ final class SenderController: ObservableObject {
         if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
             if dial(.wifi(localResult), via: "local Bonjour") { return }
         }
-        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil {
+        if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil {
             if dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
         }
         guard let observedHost else {
@@ -1591,7 +1591,7 @@ final class SenderController: ObservableObject {
             if localStarted { continue }
             // A present-but-blocked/unusable local record must not end
             // route evaluation: fall through to a configured Remote hint.
-            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
             guard endpointFound else { continue }
             connect(to: .remote(peerID: peerID), userInitiated: true, initiator: .receiver,
                     needsSenderApproval: needsApproval)
@@ -1624,7 +1624,7 @@ final class SenderController: ObservableObject {
         if let hostOverride, let portOverride {
             resolvedHost = hostOverride
             resolvedPort = portOverride
-        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) {
+        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) {
             resolvedHost = hint.host
             resolvedPort = hint.port
         } else {
@@ -1776,15 +1776,15 @@ final class SenderController: ObservableObject {
     func forgetPairing(peerID: String) {
         Log.info("trustDebug: forgetPairingCalled peerID=\(peerID)")
         Log.info("trustDebug: trustBefore=\(TrustStore.shared.hasPin(peerID: peerID))")
-        Log.info("trustDebug: remoteEndpointBefore=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
-        Log.info("trustDebug: wakeMetadataBefore=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: remoteEndpointBefore=\(RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil)")
+        Log.info("trustDebug: wakeMetadataBefore=\(WakeMetadataStore.metadata(forPeerID: peerID, role: .sender) != nil)")
         ForgetDeviceAction.perform(
             peerID: peerID,
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
-            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
-            removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
+            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0, role: .sender) },
+            removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0, role: .sender) },
             removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) },
-            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0) },
+            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender) },
             removeNetworkTransportState: {
                 NetworkTransportPreferenceStore.remove(peerID: $0)
                 PeerQUICCapabilityStore.remove(peerID: $0)
@@ -1815,8 +1815,8 @@ final class SenderController: ObservableObject {
         Log.info("trustDebug: trustDeleteResult=\(!trustAfter)")
         Log.info("trustDebug: trustAfter=\(trustAfter)")
         Log.info("trustDebug: pinnedPeersContainsAfter=\(TrustStore.shared.pinnedPeers().contains { $0.peerID == peerID })")
-        Log.info("trustDebug: remoteEndpointAfter=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
-        Log.info("trustDebug: wakeMetadataAfter=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: remoteEndpointAfter=\(RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil)")
+        Log.info("trustDebug: wakeMetadataAfter=\(WakeMetadataStore.metadata(forPeerID: peerID, role: .sender) != nil)")
         Log.info("deviceUI: knownPeer removed peerID=\(peerID)")
         pairingMessage = "Device forgotten"
         objectWillChange.send()
@@ -1969,7 +1969,7 @@ final class SenderController: ObservableObject {
         // hint for, and only when no better local candidate for the same
         // logical device exists (the priority sort + de-dupe in autoConnect()
         // handles that).
-        candidates += RemoteEndpointStore.allPeerIDs().compactMap { peerID -> AutoConnectCandidate? in
+        candidates += RemoteEndpointStore.allPeerIDs(role: .sender).compactMap { peerID -> AutoConnectCandidate? in
             guard TrustStore.shared.hasPin(peerID: peerID) else { return nil }
             let target = ConnectionTarget.remote(peerID: peerID)
             let logicalID = logicalID(for: target)
@@ -3096,7 +3096,7 @@ final class SenderController: ObservableObject {
     /// `ReceiverInputAuthorizationStore.setPolicy`.
     @discardableResult
     func sessionPolicy(peerID: String) -> IncomingSessionPeerPolicy? {
-        IncomingSessionPolicyStore.policy(peerID: peerID)
+        IncomingSessionPolicyStore.policy(peerID: peerID, role: .sender)
     }
 
     /// Same self-authorization guard as `setInputPolicy`: while any device
@@ -3104,7 +3104,7 @@ final class SenderController: ObservableObject {
     @discardableResult
     func setSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) -> Bool {
         guard policy != .alwaysAllow || !anySessionHasEffectiveInput else { return false }
-        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID, role: .sender)
         if policy == .blocked { revokeIncomingSessionAuthority(peerID: peerID) }
         objectWillChange.send()
         return true
@@ -3280,7 +3280,7 @@ final class SenderController: ObservableObject {
         // after it was raised: a late answer neither admits nor persists.
         guard PendingApprovalRevalidation.isStillAuthorized(
             isPinned: TrustStore.shared.hasPin(peerID: approval.peerID),
-            currentPolicy: IncomingSessionPolicyStore.policy(peerID: approval.peerID)) else {
+            currentPolicy: IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .sender)) else {
             Log.info("sessionInvite: late answer for revoked peer \(approval.peerID) ignored id=\(approval.id)")
             session.sender.resolveSenderApproval(accept: false)
             disconnect(session)

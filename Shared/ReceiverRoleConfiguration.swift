@@ -27,6 +27,44 @@ enum ReceiverRoleConfiguration {
     }
 }
 
+/// Whose settings a per-role store reads and writes. Stores that hold a
+/// role's authorization decisions or peer data (`IncomingSessionPolicyStore`,
+/// `RemoteEndpointStore`, `WakeMetadataStore`) take one explicitly, so every
+/// call site names its role.
+///
+/// The sender and the receiver-only apps (iPhone/iPad, standalone Mac
+/// Receiver) use the original key names, exactly as before. The unified Mac
+/// app's receiver role uses its own keys: an approval, a per-Mac policy or a
+/// routing hint set for one role is never read by the other, whatever peer
+/// ids the two roles see. Separate install ids alone don't guarantee that: a
+/// peer chooses the id it pairs with.
+struct RolePreferences: Equatable, Sendable {
+    /// `true` only for the unified Mac app's receiver role.
+    let isSeparateReceiverRole: Bool
+
+    /// The Mac sender: original key names.
+    static let sender = RolePreferences(isSeparateReceiverRole: false)
+
+    /// This app's receiver role. The same key space as `sender` in a
+    /// receiver-only app (it has no sender), separate in the unified app.
+    static let receiverRole = RolePreferences(isSeparateReceiverRole: ReceiverRoleConfiguration.separateTrust)
+
+    init(isSeparateReceiverRole: Bool) {
+        self.isSeparateReceiverRole = isSeparateReceiverRole
+    }
+
+    /// The settings that belong with a trust namespace, for code handed a
+    /// role's `TrustStore`: pairing records a routing hint beside the pin it
+    /// just made.
+    init(trustNamespace: TrustStore.Namespace) {
+        isSeparateReceiverRole = trustNamespace == .macReceiverRole
+    }
+
+    func key(_ name: String) -> String {
+        ReceiverRoleConfiguration.defaultsKey(name, separate: isSeparateReceiverRole)
+    }
+}
+
 /// The unified app's two roles advertise on the same network under
 /// different install ids. Neither may discover, list, pair with or dial the
 /// other: the sender would otherwise see "this Mac" as a nearby display and

@@ -1550,7 +1550,7 @@ final class StreamReceiver: ObservableObject {
 
     func forgetPeer(_ peerID: String) {
         TrustStore.receiverRole.forget(peerID: peerID)
-        IncomingSessionPolicyStore.removePolicy(peerID: peerID)
+        IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
         InputAutoRequestStore.remove(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
@@ -1564,7 +1564,7 @@ final class StreamReceiver: ObservableObject {
     /// acceptance, or this device's own pending request can no longer admit
     /// that Mac.
     func setIncomingSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) {
-        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID, role: .receiverRole)
         guard policy == .blocked else { return }
         Log.info("sessionInvite: blocked peer=\(peerID)")
         revokeSessionAuthority(peerID: peerID, trustRemoved: false)
@@ -2609,7 +2609,7 @@ final class StreamReceiver: ObservableObject {
                                         subnetMask: obj["subnet"] as? String,
                                         broadcastAddress: obj["broadcast"] as? String,
                                         updatedAt: Date())
-            WakeMetadataStore.setMetadata(metadata, forPeerID: peerID)
+            WakeMetadataStore.setMetadata(metadata, forPeerID: peerID, role: .receiverRole)
         case WireMessage.promoteInteractiveWakeResult:
             let text: String
             if obj["success"] as? Bool == true {
@@ -4210,7 +4210,7 @@ final class StreamReceiver: ObservableObject {
             sendControl(SessionInvitationResponse(id: invitation.id, result: .declined).message)
             return
         }
-        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent)
+        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent, role: .receiverRole)
         let decision: IncomingSessionDecision
         if policy == .block {
             decision = .block
@@ -4268,7 +4268,7 @@ final class StreamReceiver: ObservableObject {
         // since then withdrew it (normally by removing the prompt, but the
         // pin or policy change can land first): the answer is inert — no
         // policy persisted, nothing admitted.
-        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID)
+        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .receiverRole)
         guard PendingApprovalRevalidation.isStillAuthorized(
             isPinned: isPeerPinned(approval.peerID), currentPolicy: currentPolicy) else {
             Log.info("sessionInvite: id=\(approval.id) answer ignored reason=revoked")
@@ -4280,7 +4280,7 @@ final class StreamReceiver: ObservableObject {
         let plan = SessionApprovalPlan.plan(for: decision)
         if let policy = plan.persistPolicy {
             // Connection policy only; never a display mode or input.
-            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID)
+            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID, role: .receiverRole)
         }
         if plan.accept {
             admitSession(invitationID: approval.id, peerID: approval.peerID)
@@ -4560,7 +4560,7 @@ final class StreamReceiver: ObservableObject {
     // needs no `self` capture, matching the "static helper + stable owner"
     // idiom used by `startTLSListener` above.
     private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue) {
-        guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
+        guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID, role: .receiverRole),
               let port = NWEndpoint.Port(rawValue: hint.port),
               let pin = TrustStore.receiverRole.pin(peerID: peerID),
               let identity = TrustStore.receiverRole.ownIdentity(),

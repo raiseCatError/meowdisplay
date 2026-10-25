@@ -21,17 +21,17 @@ import os
 @MainActor
 final class StreamReceiverSessionAuthorityTests: XCTestCase {
     private let savedAutomaticallyAllow: Any? =
-        UserDefaults.standard.object(forKey: IncomingSessionPolicyStore.automaticallyAllowKey)
+        UserDefaults.standard.object(forKey: IncomingSessionPolicyStore.automaticallyAllowKey(.receiverRole))
     private var peers: [String] = []
     private let pinned = OSAllocatedUnfairLock<Set<String>>(initialState: [])
 
     override func tearDown() async throws {
         if let savedAutomaticallyAllow {
-            UserDefaults.standard.set(savedAutomaticallyAllow, forKey: IncomingSessionPolicyStore.automaticallyAllowKey)
+            UserDefaults.standard.set(savedAutomaticallyAllow, forKey: IncomingSessionPolicyStore.automaticallyAllowKey(.receiverRole))
         } else {
-            UserDefaults.standard.removeObject(forKey: IncomingSessionPolicyStore.automaticallyAllowKey)
+            UserDefaults.standard.removeObject(forKey: IncomingSessionPolicyStore.automaticallyAllowKey(.receiverRole))
         }
-        for peer in peers { IncomingSessionPolicyStore.removePolicy(peerID: peer) }
+        for peer in peers { IncomingSessionPolicyStore.removePolicy(peerID: peer, role: .receiverRole) }
         try await super.tearDown()
     }
 
@@ -40,10 +40,10 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testForgetDismissesPromptsAndRevokesRememberedAcceptance() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("accepted", .sender, .automatic), authenticatedPeerID: peer)
         _ = await probe(receiver)
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("prompt", .sender, .manual), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertTrue(state.admitted)
@@ -59,7 +59,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
         receiver.respondToSessionInvitation(id: "prompt", decision: .allowPermanently)
         state = await probe(receiver)
         XCTAssertFalse(state.admitted, "a late Allow after Forget must not admit")
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: peer), "a late Allow after Forget must not persist Always Allow")
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: peer, role: .receiverRole), "a late Allow after Forget must not persist Always Allow")
 
         // The session the Mac had accepted can no longer continue without a decision.
         receiver.receiveControlMessageForTesting(try invite("accepted", .sender, .automatic), authenticatedPeerID: peer)
@@ -70,7 +70,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testLateAllowAfterBlockIsInertAndKeepsTheBlock() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("prompt", .sender, .manual), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertEqual(state.pendingApprovalIDs, ["prompt"])
@@ -82,14 +82,14 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
         receiver.respondToSessionInvitation(id: "prompt", decision: .allowPermanently)
         state = await probe(receiver)
         XCTAssertFalse(state.admitted)
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer), .blocked,
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer, role: .receiverRole), .blocked,
                        "a late Allow Permanently must never overwrite Block with Always Allow")
     }
 
     func testBlockRevokesTheRememberedAcceptance() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("accepted", .sender, .automatic), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertTrue(state.admitted)
@@ -101,7 +101,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
 
         // Unblocking later must not quietly resume the old acceptance.
         receiver.setIncomingSessionPolicy(nil, peerID: peer)
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("accepted", .sender, .automatic), authenticatedPeerID: peer)
         state = await probe(receiver)
         XCTAssertFalse(state.admitted)
@@ -112,24 +112,24 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testAllowLandingAfterABlockWasPersistedIsInert() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("prompt", .sender, .manual), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertEqual(state.pendingApprovalIDs, ["prompt"])
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: peer)
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: peer, role: .receiverRole)
 
         receiver.respondToSessionInvitation(id: "prompt", decision: .allowPermanently)
         state = await probe(receiver)
         XCTAssertFalse(state.admitted)
         XCTAssertEqual(state.pendingApprovalIDs, [])
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer), .blocked)
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer, role: .receiverRole), .blocked)
     }
 
     /// Forget's pin removal lands before its revocation reaches the prompt.
     func testAllowLandingAfterThePinWasRemovedIsInert() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("prompt", .sender, .manual), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertEqual(state.pendingApprovalIDs, ["prompt"])
@@ -138,7 +138,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
         receiver.respondToSessionInvitation(id: "prompt", decision: .allowPermanently)
         state = await probe(receiver)
         XCTAssertFalse(state.admitted)
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: peer))
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: peer, role: .receiverRole))
     }
 
     /// Positive control for the late-answer tests: still pinned, not
@@ -146,7 +146,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testAllowWhileStillAuthorizedAdmits() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("prompt", .sender, .manual), authenticatedPeerID: peer)
         var state = await probe(receiver)
         XCTAssertEqual(state.pendingApprovalIDs, ["prompt"])
@@ -154,13 +154,13 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
         receiver.respondToSessionInvitation(id: "prompt", decision: .allowPermanently)
         state = await probe(receiver)
         XCTAssertTrue(state.admitted)
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer), .alwaysAllow)
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: peer, role: .receiverRole), .alwaysAllow)
     }
 
     func testInvitationWithoutAPinnedPeerIsDeclinedEvenWhenAutomaticallyAllowed() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .receiverRole)
 
         receiver.receiveControlMessageForTesting(try invite("unpinned", .sender, .automatic), authenticatedPeerID: nil)
         var state = await probe(receiver)
@@ -179,7 +179,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testCancelWithdrawsTheConnectRequestAndItsRecoveryRun() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
 
         receiver.connectPrimary(peerID: peer, mode: .extend)
         var state = await waitForProbe(receiver) { $0.connectRequestToken != nil && $0.phase == .reconnecting }
@@ -229,7 +229,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testOwnStandingRequestIsAnsweredWithoutASecondPrompt() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.connectPrimary(peerID: peer, mode: .mirror)
         _ = await waitForProbe(receiver) { $0.connectRequestToken != nil && $0.hasOutgoingSessionRequest }
 
@@ -249,7 +249,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
     func testAdmittedSessionEndsTheOwnRequestWindow() async throws {
         let peer = makePinnedPeer()
         let receiver = makeReceiver()
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .receiverRole)
         receiver.connectPrimary(peerID: peer, mode: .mirror)
         var state = await waitForProbe(receiver) { $0.connectRequestToken != nil && $0.hasOutgoingSessionRequest }
         XCTAssertEqual(state.requestedMode, .mirror)
@@ -260,7 +260,7 @@ final class StreamReceiverSessionAuthorityTests: XCTestCase {
         XCTAssertFalse(state.hasOutgoingSessionRequest)
         XCTAssertNil(state.requestedMode)
 
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole)
         receiver.receiveControlMessageForTesting(try invite("later", .receiver, .manual), authenticatedPeerID: peer)
         state = await probe(receiver)
         XCTAssertEqual(state.pendingApprovalIDs, ["later"], "the shortcut must not survive the session that answered it")

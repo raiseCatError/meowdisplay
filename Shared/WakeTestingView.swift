@@ -15,7 +15,7 @@ struct WakeTestingView: View {
 
     private var selectedMetadata: WakeMetadata? {
         guard !selectedPeerID.isEmpty else { return nil }
-        return WakeMetadataStore.metadata(forPeerID: selectedPeerID)
+        return WakeMetadataStore.metadata(forPeerID: selectedPeerID, role: .receiverRole)
     }
 
     var body: some View {
