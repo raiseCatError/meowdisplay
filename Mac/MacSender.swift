@@ -5110,7 +5110,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             case "down":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                      isRepeat: obj["repeat"] as? Bool == true)
                 }
             case "up":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {

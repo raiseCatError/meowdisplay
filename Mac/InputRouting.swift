@@ -96,6 +96,58 @@ enum HIDKeyUsage: Int, CaseIterable {
     case leftArrow = 80
     case downArrow = 81
     case upArrow = 82
+    // A physical keyboard on a receiving Mac (issue #12) names every key;
+    // older senders ignore these, as an unrecognized usage must be.
+    case grave = 53
+    case f1 = 58
+    case f2 = 59
+    case f3 = 60
+    case f4 = 61
+    case f5 = 62
+    case f6 = 63
+    case f7 = 64
+    case f8 = 65
+    case f9 = 66
+    case f10 = 67
+    case f11 = 68
+    case f12 = 69
+    case f13 = 104
+    case f14 = 105
+    case f15 = 106
+    case f16 = 107
+    case f17 = 108
+    case f18 = 109
+    case f19 = 110
+    case f20 = 111
+    case insertOrHelp = 73
+    case home = 74
+    case pageUp = 75
+    case end = 77
+    case pageDown = 78
+    case nonUSBackslash = 100
+    case international1 = 135
+    case international3 = 137
+    case lang1 = 144
+    case lang2 = 145
+    case keypadNumLockOrClear = 83
+    case keypadSlash = 84
+    case keypadAsterisk = 85
+    case keypadMinus = 86
+    case keypadPlus = 87
+    case keypadEnter = 88
+    case keypad1 = 89
+    case keypad2 = 90
+    case keypad3 = 91
+    case keypad4 = 92
+    case keypad5 = 93
+    case keypad6 = 94
+    case keypad7 = 95
+    case keypad8 = 96
+    case keypad9 = 97
+    case keypad0 = 98
+    case keypadPeriod = 99
+    case keypadEqual = 103
+    case keypadComma = 133
 
     /// The macOS virtual key code (`CGKeyCode`, US ANSI layout) this usage
     /// injects as.
@@ -157,6 +209,56 @@ enum HIDKeyUsage: Int, CaseIterable {
         case .leftArrow: return 123
         case .downArrow: return 125
         case .upArrow: return 126
+        case .grave: return 50
+        case .f1: return 122
+        case .f2: return 120
+        case .f3: return 99
+        case .f4: return 118
+        case .f5: return 96
+        case .f6: return 97
+        case .f7: return 98
+        case .f8: return 100
+        case .f9: return 101
+        case .f10: return 109
+        case .f11: return 103
+        case .f12: return 111
+        case .f13: return 105
+        case .f14: return 107
+        case .f15: return 113
+        case .f16: return 106
+        case .f17: return 64
+        case .f18: return 79
+        case .f19: return 80
+        case .f20: return 90
+        case .insertOrHelp: return 114
+        case .home: return 115
+        case .pageUp: return 116
+        case .end: return 119
+        case .pageDown: return 121
+        case .nonUSBackslash: return 10
+        case .international1: return 94
+        case .international3: return 93
+        case .lang1: return 104
+        case .lang2: return 102
+        case .keypadNumLockOrClear: return 71
+        case .keypadSlash: return 75
+        case .keypadAsterisk: return 67
+        case .keypadMinus: return 78
+        case .keypadPlus: return 69
+        case .keypadEnter: return 76
+        case .keypad1: return 83
+        case .keypad2: return 84
+        case .keypad3: return 85
+        case .keypad4: return 86
+        case .keypad5: return 87
+        case .keypad6: return 88
+        case .keypad7: return 89
+        case .keypad8: return 91
+        case .keypad9: return 92
+        case .keypad0: return 82
+        case .keypadPeriod: return 65
+        case .keypadEqual: return 81
+        case .keypadComma: return 95
         }
     }
 
@@ -325,6 +427,36 @@ struct HeldKeyTracker {
     mutating func releaseAll() -> Set<HIDKeyUsage> {
         defer { held.removeAll() }
         return held
+    }
+
+    /// A `down` marked `repeat` (a receiving Mac's own key repeat) posts an
+    /// auto-repeat key-down only for a key that is actually held — never a
+    /// fresh press, so a repeat can't outlive its key's release.
+    func allowsRepeat(_ usage: HIDKeyUsage) -> Bool {
+        held.contains(usage)
+    }
+}
+
+/// Scroll arrives in video pixels and posts in whole points, so a single
+/// small delta used to round away: a slow trackpad scroll from a receiving
+/// Mac (fractions of a point per event) barely moved. The rounding error is
+/// carried into the next event instead, so the total scrolled always matches
+/// the total sent. Single events still round to nearest, as before.
+struct ScrollRemainder {
+    private(set) var x = 0.0
+    private(set) var y = 0.0
+
+    mutating func take(dxPoints: Double, dyPoints: Double) -> (dx: Int32, dy: Int32) {
+        let totalX = x + dxPoints, totalY = y + dyPoints
+        let wholeX = totalX.rounded(), wholeY = totalY.rounded()
+        x = totalX - wholeX
+        y = totalY - wholeY
+        return (Int32(clamping: Int(wholeX)), Int32(clamping: Int(wholeY)))
+    }
+
+    mutating func reset() {
+        x = 0
+        y = 0
     }
 }
 

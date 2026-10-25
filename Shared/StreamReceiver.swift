@@ -3324,9 +3324,19 @@ final class StreamReceiver: ObservableObject {
     /// A hardware key going down, for keys the Mac must hold (arrows,
     /// modified shortcuts). `modifiers` are named protocol modifiers, not
     /// raw UIKit flags.
+    ///
+    /// `isRepeat`: the receiving Mac's own key repeat for a key already sent
+    /// down (additive `repeat` field; an older Mac ignores the duplicate
+    /// down, as it always did).
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String]) {
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: false)
+    }
+
+    @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendUIControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
+        var message: [String: Any] = ["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers]
+        if isRepeat { message["repeat"] = true }
+        sendUIControl(message)
     }
 
     /// The matching release for `sendKeyboardDown`.
