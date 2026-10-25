@@ -195,6 +195,7 @@ targets:
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
       - MacReceiver/ReceiverInputForwarding.swift
+      - MacReceiver/ReceiverOwnership.swift
       - Shared/ReceiverRoleConfiguration.swift
       - Mac/MacAppRole.swift
       - Shared/ReceiverGesture.swift

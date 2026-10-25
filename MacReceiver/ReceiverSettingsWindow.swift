@@ -485,6 +485,10 @@ struct WithReceiver<Content: View>: View {
     var body: some View {
         if let receiver = controller.receiver {
             content(receiver)
+        } else if controller.waitingForOtherReceiver {
+            ReceiverSettingsForm {
+                ReceiverCaption(verbatim: controller.statusTitle)
+            }
         } else {
             ReceiverSettingsForm {
                 ReceiverCaption("The receiver is not running.")

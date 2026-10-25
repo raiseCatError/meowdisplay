@@ -62,6 +62,20 @@ final class ReceiverController: ObservableObject {
 
     var active: Bool { receiver != nil }
 
+    /// Another receiver owns this Mac's receiver ports (`ReceiverOwnershipLock`):
+    /// `start()` is waiting for it and retries by itself. `statusTitle`
+    /// says what to do.
+    @Published private(set) var waitingForOtherReceiver = false
+    /// What the user can do about the other receiver. The standalone
+    /// receiver's wording by default; MeowDisplay sets its own.
+    var otherReceiverMessage = String(localized: "MeowDisplay is already using this Mac as a display. Turn off Use This Mac as a Display there, or quit it, and this receiver starts by itself.")
+    /// A receiver that predates the ownership lock is running (MeowDisplay
+    /// checks for already-released MeowDisplay Receiver builds by bundle id). Nil: none to
+    /// check.
+    var otherReceiverRunning: (() -> Bool)?
+    private let ownership = ReceiverOwnershipLock()
+    private var ownershipRetry: Timer?
+
     private var window: NSWindow?
     private var retiringReceiver: StreamReceiver?
     /// `start()` arrived while the previous receiver was still tearing down
@@ -83,6 +97,17 @@ final class ReceiverController: ObservableObject {
             startWhenRetired = true
             return
         }
+        // Never bind or advertise next to another receiver: whichever
+        // started second waits here, with a status saying why, until the
+        // owner lets go.
+        let decision = ReceiverStartGate.decide(otherReceiverRunning: otherReceiverRunning?() ?? false) {
+            ownership.tryAcquire()
+        }
+        guard decision == .start else {
+            waitForOtherReceiver()
+            return
+        }
+        stopWaitingForOtherReceiver()
         // 4096x2304 is H.264's practical hardware-decode ceiling: end-to-end
         // playback stops below 5120 wide on every Mac measured, including an
         // M4 Pro — a format limit, not an age one. A 5K/6K panel still gets
@@ -195,11 +220,34 @@ final class ReceiverController: ObservableObject {
         Log.info("receiver mode started (advertising \"\(receiver.serviceName)\")")
     }
 
+    private func waitForOtherReceiver() {
+        if !waitingForOtherReceiver { Log.info("receiver mode waiting: another receiver owns this Mac's receiver ports") }
+        waitingForOtherReceiver = true
+        statusTitle = otherReceiverMessage
+        statusColor = .orange
+        guard ownershipRetry == nil else { return }
+        ownershipRetry = Timer.scheduledTimer(withTimeInterval: ReceiverStartGate.retryInterval,
+                                              repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.start() }
+        }
+    }
+
+    private func stopWaitingForOtherReceiver() {
+        ownershipRetry?.invalidate()
+        ownershipRetry = nil
+        waitingForOtherReceiver = false
+    }
+
     /// Leave receiver mode. `completion` fires once "closing" has gone out
     /// to a live sender (or a second has passed) — the quit path waits on it
     /// so the sender ends its session instead of retrying a dead peer.
     func stop(completion: (@Sendable () -> Void)? = nil) {
         startWhenRetired = false
+        if waitingForOtherReceiver {
+            stopWaitingForOtherReceiver()
+            statusTitle = String(localized: "Waiting for a Mac…")
+            statusColor = .secondary
+        }
         guard let receiver else { completion?(); return }
         cancellables.removeAll()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
@@ -219,6 +267,9 @@ final class ReceiverController: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.retiringReceiver = nil
+                // Only now have its listeners and services gone: a waiting
+                // receiver may take over.
+                self.ownership.release()
                 if self.startWhenRetired {
                     self.startWhenRetired = false
                     self.start()

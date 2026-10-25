@@ -373,9 +373,29 @@ final class TLSListenerState: @unchecked Sendable {
         return current
     }
 
-    func install(_ listener: NWListener) {
+    /// Set once by `StreamReceiver.stop()`: this receiver is finished, so
+    /// a retry scheduled before the stop (after a failed bind, for example)
+    /// must never open a listener again.
+    private var retired = false
+
+    func retire() {
         lock.lock(); defer { lock.unlock() }
+        retired = true
+    }
+
+    func isRetired() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    /// Installs `listener` as current, or refuses (and returns `false`) once
+    /// retired; the caller then drops the listener without starting it.
+    @discardableResult
+    func install(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return false }
         current = listener
+        return true
     }
 
     /// Exact `===` identity check — no generation token, matching the
@@ -422,9 +442,29 @@ final class PairingListenerState: @unchecked Sendable {
         return current != nil
     }
 
-    func install(_ listener: NWListener) {
+    /// Set once by `StreamReceiver.stop()`: this receiver is finished, so
+    /// a retry scheduled before the stop (after a failed bind, for example)
+    /// must never open a listener again.
+    private var retired = false
+
+    func retire() {
         lock.lock(); defer { lock.unlock() }
+        retired = true
+    }
+
+    func isRetired() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    /// Installs `listener` as current, or refuses (and returns `false`) once
+    /// retired; the caller then drops the listener without starting it.
+    @discardableResult
+    func install(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return false }
         current = listener
+        return true
     }
 
     /// Exact `===` identity check — matches the original
@@ -437,6 +477,17 @@ final class PairingListenerState: @unchecked Sendable {
     func currentListener() -> NWListener? {
         lock.lock(); defer { lock.unlock() }
         return current
+    }
+
+    /// Clears the stored reference only if it is still exactly `listener`,
+    /// as `TLSListenerState.clearIfCurrent`.
+    @discardableResult
+    func clearIfCurrent(_ listener: NWListener) -> Bool {
+        lock.lock()
+        let matched = current === listener
+        if matched { current = nil }
+        lock.unlock()
+        return matched
     }
 
     func cancelCurrent() {
@@ -1537,6 +1588,12 @@ final class StreamReceiver: ObservableObject {
     /// app calls this when the user leaves receiver mode or quits; the
     /// instance is discarded afterwards (start() re-arms if it isn't).
     func stop(completion: (@Sendable () -> Void)? = nil) {
+        // Final: no listener of this receiver may open again, even from a
+        // retry already scheduled. The close below still cancels the open
+        // ones after "closing" has gone out.
+        tlsListenerState.retire()
+        tlsListenerState.quic.retire()
+        pairingListenerState.retire()
         let pipeline = self.pipeline
         Task { await pipeline.teardownForStop() }
         let selfBox = self.selfBox
@@ -2136,7 +2193,7 @@ final class StreamReceiver: ObservableObject {
             params.serviceClass = .interactiveVideo
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!)
-            tlsListenerState.install(listener)
+            guard tlsListenerState.install(listener) else { return }
             listener.service = advertisementState.mediaService(
                 installID: installID, protocolVersion: advertisedProtocolVersion)
             listener.newConnectionHandler = { [weak listener] connection in
@@ -2247,7 +2304,7 @@ final class StreamReceiver: ObservableObject {
             params.allowLocalEndpointReuse = true
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.pairingPort)!)
-            pairingListenerState.install(listener)
+            guard pairingListenerState.install(listener) else { return }
             listener.service = advertisedPairingService
             #if DEBUG
             Log.info("pairing listener starting: type=_opendisplay-pair._tcp port=\(WireCrypto.pairingPort) id=\(Self.installID) peerToPeer=true")
@@ -2282,16 +2339,25 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             }
-            listener.stateUpdateHandler = { state in
-                #if DEBUG
+            let selfBox = self.selfBox
+            listener.stateUpdateHandler = { [weak listener] state in
                 switch state {
+                case .failed(let error):
+                    Log.info("pairing listener failed: \(error)")
+                    // Same recovery as the TLS listener: a port that was
+                    // busy (another receiver, a sleep/wake rebind) is tried
+                    // again, so pairing comes back with the media listener.
+                    guard let listener, pairingListenerState.clearIfCurrent(listener) else { return }
+                    queue.asyncAfter(deadline: .now() + 1) {
+                        selfBox.currentOnQueue()?.startPairingListener()
+                    }
+                #if DEBUG
                 case .ready: Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
-                case .failed(let error): Log.info("pairing listener failed: \(error)")
                 case .waiting(let error): Log.info("pairing listener waiting: \(error)")
                 case .cancelled: Log.info("pairing listener cancelled")
+                #endif
                 default: break
                 }
-                #endif
             }
             listener.start(queue: queue)
         } catch {
