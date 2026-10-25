@@ -15,6 +15,8 @@ right from it.
 [Support](https://meowdisplay.app/support.html) ·
 [Privacy](https://meowdisplay.app/privacy.html)
 
+**[Download for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+
 <br>
 
 <img src="assets/readme/hero.webp" alt="The MeowDisplay Mac app open to Overview, beside the MeowDisplay receiver on iPhone" width="760">
@@ -32,9 +34,10 @@ you control, with devices paired and every session encrypted.
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
 
-<sub>Public release builds are being prepared. There is no public download or
-App Store release yet. The source is available here and can be
-[built from source](#build-from-source).</sub>
+**Get MeowDisplay:** the [Mac app](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg) (macOS 14 or later; signed and
+notarized, from [GitHub Releases](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0)) and
+[MeowDisplay for iPhone and iPad on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) (iOS/iPadOS 16.4 or
+later). Both are free.
 
 ## At a glance
 
@@ -387,8 +390,10 @@ display needs Screen Recording.
 
 ## Getting started
 
-1. Run MeowDisplay on your Mac.
-2. Open the MeowDisplay receiver on your iPhone or iPad.
+1. [Download MeowDisplay for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg), open the DMG, drag MeowDisplay to
+   Applications and open it.
+2. Install [MeowDisplay from the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) on your iPhone or iPad
+   and open it.
 3. Connect over USB or Wi-Fi, and pair the devices by confirming the matching
    code.
 4. Choose **Mirror** or **Extend**.
@@ -408,8 +413,10 @@ echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
 ./generate.sh
 ```
 
-Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac) and
-`OpenSidecariOS` (iPhone/iPad receiver) schemes. Signing, permissions and
+Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` scheme for the Mac
+app, or `OpenSidecariOS` for the iPhone/iPad receiver. The released 1.20.0
+apps (Mac download and App Store) were built from
+[`release/app-store-rc`](https://github.com/raiseCatError/meowdisplay/tree/release/app-store-rc). Signing, permissions and
 troubleshooting are in [SETUP.md](SETUP.md); release process in
 [RELEASE.md](RELEASE.md).
 
