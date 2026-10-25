@@ -136,7 +136,7 @@ private struct ReceiverRemoteEndpointEditor: View {
     @State private var savedConfirmation = false
 
     private var pairedMacs: [(peerID: String, displayName: String)] {
-        TrustStore.shared.pinnedPeers()
+        TrustStore.receiverRole.pinnedPeers()
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
@@ -233,7 +233,7 @@ private struct ReceiverRemoteEndpointEditor: View {
 @MainActor
 enum ReceiverMacList {
     static func paired() -> [(peerID: String, displayName: String)] {
-        TrustStore.shared.pinnedPeers()
+        TrustStore.receiverRole.pinnedPeers()
     }
 
     static func unpairedNearby(_ receiver: StreamReceiver) -> [NWBrowser.Result] {

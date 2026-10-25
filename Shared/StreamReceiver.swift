@@ -768,12 +768,15 @@ final class StreamReceiver: ObservableObject {
     /// Wake & Connect on top of them — always bypass it. iOS's Home screen
     /// and Settings both bind this same published property, so the two stay
     /// in sync with no separate storage.
-    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: "autoReconnectEnabled") == nil
-        || UserDefaults.standard.bool(forKey: "autoReconnectEnabled") {
+    static let autoReconnectKey = ReceiverRoleConfiguration.defaultsKey("autoReconnectEnabled")
+    // The unified Mac app's sender role owns the plain key (its own
+    // Auto-Reconnect), so the receiver role's is scoped there.
+    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: StreamReceiver.autoReconnectKey) == nil
+        || UserDefaults.standard.bool(forKey: StreamReceiver.autoReconnectKey) {
         didSet {
             guard autoReconnectEnabled != oldValue else { return }
             reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
-            UserDefaults.standard.set(autoReconnectEnabled, forKey: "autoReconnectEnabled")
+            UserDefaults.standard.set(autoReconnectEnabled, forKey: Self.autoReconnectKey)
             Log.info("reconnectPolicy: autoReconnect enabled=\(autoReconnectEnabled)")
             if autoReconnectEnabled {
                 Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
@@ -1463,7 +1466,7 @@ final class StreamReceiver: ObservableObject {
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
          maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil,
-         isPeerPinned: @escaping @Sendable (String) -> Bool = { TrustStore.shared.hasPin(peerID: $0) }) {
+         isPeerPinned: @escaping @Sendable (String) -> Bool = { TrustStore.receiverRole.hasPin(peerID: $0) }) {
         self.displayLayer = displayLayer
         self.deviceKind = deviceKind
         self.fallbackServiceName = fallbackServiceName
@@ -1496,7 +1499,7 @@ final class StreamReceiver: ObservableObject {
         tlsListenerState.quic.setAvailabilityObserver { helloState.setQUICAvailable($0) }
         uiSink.target = self
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
-        pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
+        pairingPrompt.trustPinLookup = { TrustStore.receiverRole.pin(peerID: $0) }
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1516,7 +1519,7 @@ final class StreamReceiver: ObservableObject {
         let advertisedProtocolVersion = self.advertisedProtocolVersion
         let selfBox = self.selfBox
         queue.async {
-            TrustStore.shared.refreshSnapshot()
+            TrustStore.receiverRole.refreshSnapshot()
             Self.startTLSListener(
                 queue: queue, tlsListenerState: tlsListenerState,
                 pairingSuppressionState: pairingSuppressionState,
@@ -1546,7 +1549,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     func forgetPeer(_ peerID: String) {
-        TrustStore.shared.forget(peerID: peerID)
+        TrustStore.receiverRole.forget(peerID: peerID)
         IncomingSessionPolicyStore.removePolicy(peerID: peerID)
         InputAutoRequestStore.remove(peerID: peerID)
         let uiSink = self.uiSink
@@ -1625,7 +1628,8 @@ final class StreamReceiver: ObservableObject {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: Self.installID,
                     localName: serviceName, prompt: pairingPrompt,
-                    expectedPeerID: expectedPeerID, allowIdentityChange: false)
+                    expectedPeerID: expectedPeerID, allowIdentityChange: false,
+                    store: .receiverRole)
                 pairingPrompt.finish(String(localized: "Paired with \(paired.peerName)"))
                 notePairingSucceeded()
                 finishExplicitPairing(success: true)
@@ -1677,6 +1681,7 @@ final class StreamReceiver: ObservableObject {
                     localName: serviceName, prompt: pairingPrompt,
                     allowIdentityChange: false, isCurrent: { validity.isValid },
                     remoteHost: endpoint.host, attemptToken: token,
+                    store: .receiverRole,
                     onHandshakeReached: { handshakeReached.set() })
                 Log.info("remotePairing: attempt generation=\(generation) completed peer=\(paired.peerID)")
                 scheduleTLSListenerRefresh()
@@ -1785,7 +1790,7 @@ final class StreamReceiver: ObservableObject {
 
     func pairingMacIsPaired(_ result: NWBrowser.Result) -> Bool {
         guard case .bonjour(let txt) = result.metadata, let id = txt["id"] else { return false }
-        return TrustStore.shared.hasPin(peerID: id)
+        return TrustStore.receiverRole.hasPin(peerID: id)
     }
 
     /// The peer install ID a discovered Mac's Bonjour TXT record advertises —
@@ -2086,10 +2091,10 @@ final class StreamReceiver: ObservableObject {
     /// the `pipeline` actor reference, `queue`, and plain wire-identity
     /// values, so its `newConnectionHandler`/`stateUpdateHandler`/retry
     /// closures below carry the same zero-`StreamReceiver` capture graph.
-    /// Trust material stays live and self-free via `TrustStore.shared`/
+    /// Trust material stays live and self-free via `TrustStore.receiverRole`/
     /// `TLSConfigurator` (both already self-free singletons/statics) — in
     /// particular `pinnedSPKIs` stays a live closure calling
-    /// `TrustStore.shared.allPinnedPeerSPKIs()` at handshake time, never a
+    /// `TrustStore.receiverRole.allPinnedPeerSPKIs()` at handshake time, never a
     /// snapshotted array, so a pin added mid-session is honored without a
     /// listener rebuild. The `guard !hasCurrent()` and `install(_:)` below
     /// happen synchronously with no `await`/`Task`/queue hop between them,
@@ -2101,16 +2106,16 @@ final class StreamReceiver: ObservableObject {
     ) {
         // The QUIC sibling first: it keeps its own "already listening" guard,
         // so this also re-arms QUIC whenever the TLS listener is re-armed.
-        if let identity = TrustStore.shared.ownIdentity() {
+        if let identity = TrustStore.receiverRole.ownIdentity() {
             QUICReceiverListener.startIfNeeded(
                 context: tlsListenerState.quic, identity: identity, queue: queue,
                 pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
                 pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
         }
-        guard !tlsListenerState.hasCurrent(), let identity = TrustStore.shared.ownIdentity(),
+        guard !tlsListenerState.hasCurrent(), let identity = TrustStore.receiverRole.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
-                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                pinnedSPKIs: { TrustStore.receiverRole.allPinnedPeerSPKIs() },
                 isListener: true, queue: queue) else {
             Log.info("secure listener unavailable — refusing network media")
             return
@@ -2247,7 +2252,8 @@ final class StreamReceiver: ObservableObject {
                     do {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: installID,
-                            localName: localName, prompt: prompt, allowIdentityChange: false)
+                            localName: localName, prompt: prompt, allowIdentityChange: false,
+                            store: .receiverRole)
                         await prompt.finish(String(localized: "Paired with \(paired.peerName)"))
                         await uiSink.publishPairingSucceeded()
                         Self.finishExplicitPairing(
@@ -2440,7 +2446,7 @@ final class StreamReceiver: ObservableObject {
         // TLS metadata for TCP, QUIC metadata for a QUIC Control stream —
         // the same pinned SPKI either way (`TLSConfigurator`).
         guard let spki = TLSConfigurator.authenticatedPeerSPKI(of: connection) else { return nil }
-        return TrustStore.shared.peerID(forSPKI: spki)
+        return TrustStore.receiverRole.peerID(forSPKI: spki)
     }
 
     // MARK: - Liveness (ping + watchdog)
@@ -4393,7 +4399,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func peerName(_ peerID: String?) -> String {
-        peerID.flatMap { id in TrustStore.shared.pinnedPeers().first { $0.peerID == id }?.displayName }
+        peerID.flatMap { id in TrustStore.receiverRole.pinnedPeers().first { $0.peerID == id }?.displayName }
             ?? String(localized: "Your Mac")
     }
 
@@ -4556,8 +4562,8 @@ final class StreamReceiver: ObservableObject {
     private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue) {
         guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
               let port = NWEndpoint.Port(rawValue: hint.port),
-              let pin = TrustStore.shared.pin(peerID: peerID),
-              let identity = TrustStore.shared.ownIdentity(),
+              let pin = TrustStore.receiverRole.pin(peerID: peerID),
+              let identity = TrustStore.receiverRole.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
                 pinnedSPKIs: { [pin] },
@@ -5324,8 +5330,16 @@ final class StreamReceiver: ObservableObject {
     /// `private(set)`-admitting shape as `applyAuthenticatedPeerIDUpdate`
     /// above.
     @MainActor func applyDiscoveredMacsUpdate(_ results: [NWBrowser.Result]) {
-        discoveredMacs = results
+        discoveredMacs = SameAppPeerFilter.excludingSameApp(results, ownIDs: Self.sameAppSenderIDs) { result in
+            if case .bonjour(let txt) = result.metadata { return txt["id"] }
+            return nil
+        }
     }
+
+    /// In the unified Mac app, this Mac's own sender role — never a Mac to
+    /// pair with. Empty in a receiver-only app.
+    private static let sameAppSenderIDs: Set<String> = ReceiverRoleConfiguration.separateTrust
+        ? Set([TrustStore.shared.installID()].compactMap { $0 }) : []
 
     /// `pairingSuccessCount`'s external-boundary mutator for the pairing
     /// listener's `newConnectionHandler`/nested `Task` — see `ReceiverUISink.

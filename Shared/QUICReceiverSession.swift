@@ -497,7 +497,7 @@ enum QUICReceiverListener {
         guard QUICRuntimeAvailability.isAvailable, !context.hasCurrent(),
               let quic = TLSConfigurator.pinnedQUICOptions(
                 identity: identity,
-                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                pinnedSPKIs: { TrustStore.receiverRole.allPinnedPeerSPKIs() },
                 isListener: true, queue: queue) else { return }
         configureStreamLimits(quic)
         do {
@@ -541,7 +541,7 @@ enum QUICReceiverListener {
                     Log.info("QUIC listener failed: \(error)")
                     guard let listener, context.clearIfCurrent(listener) else { return }
                     queue.asyncAfter(deadline: .now() + 1) {
-                        guard let identity = TrustStore.shared.ownIdentity() else { return }
+                        guard let identity = TrustStore.receiverRole.ownIdentity() else { return }
                         startIfNeeded(
                             context: context, identity: identity, queue: queue,
                             pairingSuppressionState: pairingSuppressionState,

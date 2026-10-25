@@ -25,7 +25,7 @@ private struct ReceiverOverviewPage: View {
 
     private var connectedMacName: String? {
         guard receiver.connected, let peerID = receiver.authenticatedPeerID else { return nil }
-        return TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }?.displayName
+        return TrustStore.receiverRole.pinnedPeers().first { $0.peerID == peerID }?.displayName
     }
 
     /// Compatibility copy from the sender (issue #132) — surfaced inline;
