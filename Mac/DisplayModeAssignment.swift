@@ -244,13 +244,23 @@ struct DisplayModeCoordinator {
         return apply(preference, to: sessionID)
     }
 
-    /// One device asks for a Mirror source. Rebuilds only if that device is
-    /// mirroring and the source actually changes.
-    mutating func requestMirrorSource(_ source: MirrorSourcePreference,
+    /// One device asks for a Mirror source (`nil`: follow the Mac default
+    /// source again). Rebuilds only if that device is mirroring and the
+    /// source actually changes.
+    mutating func requestMirrorSource(_ source: MirrorSourcePreference?,
                                       sessionID: String) -> DisplayModeChangeOutcome {
         guard let entry = live[sessionID] else { return .rejected(.unknownSession) }
         var preference = preference(peerID: entry.peerID)
         preference.mirrorSource = source
+        return apply(preference, to: sessionID)
+    }
+
+    /// The device's mode follows the Mac default again; its Mirror source
+    /// choice is kept.
+    mutating func followDefaultMode(sessionID: String) -> DisplayModeChangeOutcome {
+        guard let entry = live[sessionID] else { return .rejected(.unknownSession) }
+        var preference = preference(peerID: entry.peerID)
+        preference.mode = nil
         return apply(preference, to: sessionID)
     }
 
@@ -455,29 +465,34 @@ final class VirtualDisplayRegistry: @unchecked Sendable {
     static let shared = VirtualDisplayRegistry()
 
     struct Entry: Equatable {
+        let displayID: CGDirectDisplayID
         let identity: VirtualDisplayIdentity
         let owner: ObjectIdentifier?
     }
 
     private let lock = NSLock()
-    private var entries: [CGDirectDisplayID: Entry] = [:]
+    /// Keyed by the registering `VirtualDisplay` instance, not its display
+    /// ID: a late release of an old display must never remove a newer one
+    /// that WindowServer gave the same ID.
+    private var entries: [ObjectIdentifier: Entry] = [:]
 
-    func register(displayID: CGDirectDisplayID, identity: VirtualDisplayIdentity, owner: ObjectIdentifier?) {
+    func register(_ instance: ObjectIdentifier, displayID: CGDirectDisplayID,
+                  identity: VirtualDisplayIdentity, owner: ObjectIdentifier?) {
         lock.lock()
         defer { lock.unlock() }
-        entries[displayID] = Entry(identity: identity, owner: owner)
+        entries[instance] = Entry(displayID: displayID, identity: identity, owner: owner)
     }
 
-    func unregister(displayID: CGDirectDisplayID) {
+    func unregister(_ instance: ObjectIdentifier) {
         lock.lock()
         defer { lock.unlock() }
-        entries.removeValue(forKey: displayID)
+        entries.removeValue(forKey: instance)
     }
 
     var displayIDs: Set<CGDirectDisplayID> {
         lock.lock()
         defer { lock.unlock() }
-        return Set(entries.keys)
+        return Set(entries.values.map(\.displayID))
     }
 
     var count: Int {
@@ -498,7 +513,7 @@ final class VirtualDisplayRegistry: @unchecked Sendable {
     func displayIDs(ownedBy owner: ObjectIdentifier) -> Set<CGDirectDisplayID> {
         lock.lock()
         defer { lock.unlock() }
-        return Set(entries.filter { $0.value.owner == owner }.keys)
+        return Set(entries.values.filter { $0.owner == owner }.map(\.displayID))
     }
 }
 

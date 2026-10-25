@@ -42,6 +42,8 @@ final class DisplayModeAssignmentTests: XCTestCase {
         private(set) var builds: [String: Int] = [:]
         private var nextDisplayID: CGDirectDisplayID = 100
         private var owners: [String: NSObject] = [:]
+        /// Stands in for each live `VirtualDisplay` instance.
+        private var displays: [String: NSObject] = [:]
         var hasUsablePhysicalDisplay = true
 
         init(defaults: DisplayModeDefaults = .init(mode: .extend, mirrorDisplayUUID: nil),
@@ -117,7 +119,9 @@ final class DisplayModeAssignmentTests: XCTestCase {
                 owners[sessionID] = owner
                 let id = nextDisplayID
                 nextDisplayID += 1
-                registry.register(displayID: id,
+                let display = NSObject()
+                displays[sessionID] = display
+                registry.register(ObjectIdentifier(display), displayID: id,
                                   identity: VirtualDisplayIdentity(serial: id, productID: 0x4F53),
                                   owner: ObjectIdentifier(owner))
                 displayID = id
@@ -126,7 +130,7 @@ final class DisplayModeAssignmentTests: XCTestCase {
         }
 
         private func releaseDisplay(_ sessionID: String) {
-            if let id = pipelines[sessionID]?.virtualDisplayID { registry.unregister(displayID: id) }
+            if let display = displays.removeValue(forKey: sessionID) { registry.unregister(ObjectIdentifier(display)) }
         }
     }
 
@@ -437,6 +441,19 @@ final class DisplayModeAssignmentTests: XCTestCase {
         XCTAssertNil(store.dictionary(forKey: "displayMode.A"), "nothing left to remember")
     }
 
+    func testFollowDefaultModeKeepsTheDevicesMirrorSource() {
+        let mac = SyntheticMac(defaults: .init(mode: .mirror, mirrorDisplayUUID: nil), store: store)
+        mac.connect("a", peer: "A")
+        _ = mac.requestMode(.extend, "a")
+        _ = mac.requestMirrorSource(.display(uuid: "STUDIO"), "a")
+        mac.apply(mac.coordinator.followDefaultMode(sessionID: "a"), "a")
+        XCTAssertEqual(mac.mode("a"), .mirror)
+        XCTAssertEqual(mac.pipelines["a"]?.assignment.mirrorDisplayUUID, "STUDIO")
+        mac.apply(mac.coordinator.requestMirrorSource(nil, sessionID: "a"), "a")
+        XCTAssertNil(mac.pipelines["a"]?.assignment.mirrorDisplayUUID)
+        XCTAssertNil(store.dictionary(forKey: "displayMode.A"))
+    }
+
     // MARK: - Video Off
 
     func testVideoOffTransitionsEveryExtendSessionAndRemembersMirror() {
@@ -544,15 +561,25 @@ final class DisplayModeAssignmentTests: XCTestCase {
 
     func testRegistryTracksOwnershipAndCleanup() {
         let registry = VirtualDisplayRegistry()
-        let a = NSObject(), b = NSObject()
+        let a = NSObject(), b = NSObject(), display = NSObject()
         let identity = VirtualDisplayIdentity(serial: 7, productID: 0x4F53)
-        registry.register(displayID: 100, identity: identity, owner: ObjectIdentifier(a))
+        registry.register(ObjectIdentifier(display), displayID: 100, identity: identity, owner: ObjectIdentifier(a))
         XCTAssertTrue(registry.isClaimed(identity, byOtherThan: ObjectIdentifier(b)))
         XCTAssertFalse(registry.isClaimed(identity, byOtherThan: ObjectIdentifier(a)), "a session's own display")
         XCTAssertEqual(registry.displayIDs(ownedBy: ObjectIdentifier(a)), [100])
-        registry.unregister(displayID: 100)
+        registry.unregister(ObjectIdentifier(display))
         XCTAssertFalse(registry.isClaimed(identity, byOtherThan: ObjectIdentifier(b)))
         XCTAssertEqual(registry.count, 0)
+    }
+
+    func testLateReleaseOfAnOldDisplayKeepsANewerOneWithTheSameID() {
+        let registry = VirtualDisplayRegistry()
+        let old = NSObject(), new = NSObject(), owner = NSObject()
+        let identity = VirtualDisplayIdentity(serial: 7, productID: 0x4F53)
+        registry.register(ObjectIdentifier(old), displayID: 100, identity: identity, owner: ObjectIdentifier(owner))
+        registry.register(ObjectIdentifier(new), displayID: 100, identity: identity, owner: ObjectIdentifier(owner))
+        registry.unregister(ObjectIdentifier(old))
+        XCTAssertEqual(registry.displayIDs, [100])
     }
 
     func testIdentityPlannerProbesTheUsualOffsetsWhenNothingCollides() {
@@ -576,8 +603,8 @@ final class DisplayModeAssignmentTests: XCTestCase {
 
     func testIdentityPlannerAgainstALiveRegistry() {
         let registry = VirtualDisplayRegistry()
-        let other = NSObject(), me = NSObject()
-        registry.register(displayID: 100, identity: VirtualDisplayIdentityPlanner.identity(serial: 50, offset: 0),
+        let other = NSObject(), me = NSObject(), display = NSObject()
+        registry.register(ObjectIdentifier(display), displayID: 100, identity: VirtualDisplayIdentityPlanner.identity(serial: 50, offset: 0),
                           owner: ObjectIdentifier(other))
         let mine = VirtualDisplayIdentityPlanner.offsets(serial: 50, baseOffset: 0) {
             registry.isClaimed($0, byOtherThan: ObjectIdentifier(me))
