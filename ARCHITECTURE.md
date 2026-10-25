@@ -64,6 +64,7 @@ compatibility; the product name is MeowDisplay. `src/`, `public/` and
 | Capture (ScreenCaptureKit) and its lifecycle/recovery | `Mac/MacSender.swift`, `Mac/CaptureLifecycle.swift`, `Mac/CaptureOwnership.swift`, `Mac/MacSenderPipelineState.swift` |
 | Virtual display for Extend (private `CGVirtualDisplay` SPI, isolated here) | `Mac/VirtualDisplay.swift`, `Mac/DisplayArrangement.swift` |
 | Mirror source selection | `Mac/MirrorDisplaySelection.swift` |
+| Per-device Mirror/Extend, live virtual displays ([MULTI_DEVICE.md](MULTI_DEVICE.md)) | `Mac/DisplayModeAssignment.swift` |
 | Video encode (VideoToolbox) | `Mac/MacSenderVideoEncoder.swift` |
 | System audio capture + AAC encode | `Mac/AudioCaptureEncoder.swift` |
 | Input injection and targeting | `Mac/InputInjector.swift`, `Mac/InputRouting.swift`, `Mac/SystemGestureInvoker.swift` |
@@ -142,6 +143,11 @@ framed media over the active route ───────────────
   private `CGVirtualDisplay` SPI is used.
 - Capture lifecycle and transport lifecycle are related but deliberately
   separate: a route change or reconnect should not have to rebuild capture.
+- Mirror/Extend is chosen **per device**: each connected device has its own
+  pipeline, and `DisplayModeCoordinator` decides each one's mode and Mirror
+  source and which single session a change rebuilds. The Mac-wide settings
+  are defaults for devices without their own choice. See
+  [MULTI_DEVICE.md](MULTI_DEVICE.md).
 
 ## Input pipeline
 
@@ -377,3 +383,4 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [SECURITY.md](SECURITY.md) — security model and vulnerability reporting
 - [SUPPORT.md](SUPPORT.md) — where to get help
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
+- [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
