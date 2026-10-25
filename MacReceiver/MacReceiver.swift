@@ -73,6 +73,16 @@ final class ReceiverController: ObservableObject {
     /// checks for already-released MeowDisplay Receiver builds by bundle id). Nil: none to
     /// check.
     var otherReceiverRunning: (() -> Bool)?
+    /// The ownership lock can't be used safely, so the receiver didn't
+    /// start. `statusTitle` says what to fix; it doesn't retry by itself —
+    /// `start()` again (Try Again) once it's fixed.
+    @Published private(set) var lockProblem: ReceiverLockProblem?
+    /// A receiver port is failing to bind (another user's receiver or an
+    /// unrelated app holds it); `statusTitle` says which.
+    @Published private(set) var portsUnavailable = false
+    /// Something is in the way of being a display: show `statusTitle` as an
+    /// explanation, not a plain status.
+    var statusNeedsAttention: Bool { waitingForOtherReceiver || lockProblem != nil || portsUnavailable }
     private let ownership = ReceiverOwnershipLock()
     private var ownershipRetry: Timer?
 
@@ -103,11 +113,25 @@ final class ReceiverController: ObservableObject {
         let decision = ReceiverStartGate.decide(otherReceiverRunning: otherReceiverRunning?() ?? false) {
             ownership.tryAcquire()
         }
-        guard decision == .start else {
+        switch decision {
+        case .start:
+            break
+        case .waitForOtherReceiver:
+            lockProblem = nil
             waitForOtherReceiver()
+            return
+        case .cannotStart(let problem):
+            // Never run without ownership: a second receiver could then
+            // bind next to this one. Not retried by itself.
+            stopWaitingForOtherReceiver()
+            if lockProblem != problem { Log.info("receiver mode not started: ownership lock unusable") }
+            lockProblem = problem
+            statusTitle = problem.message
+            statusColor = .red
             return
         }
         stopWaitingForOtherReceiver()
+        lockProblem = nil
         // 4096x2304 is H.264's practical hardware-decode ceiling: end-to-end
         // playback stops below 5120 wide on every Mac measured, including an
         // M4 Pro — a format limit, not an age one. A 5K/6K panel still gets
@@ -139,10 +163,13 @@ final class ReceiverController: ObservableObject {
             .store(in: &cancellables)
         receiver.$session
             .removeDuplicates()
+            .combineLatest(receiver.$portFailures.removeDuplicates())
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] session in
-                self?.statusTitle = receiver.canonicalPhaseTitle
-                self?.statusColor = Self.statusColor(for: session.phase)
+            .sink { [weak self] session, portFailures in
+                let portMessage = session.phase == .connected ? nil : ReceiverPortMessage.text(for: portFailures)
+                self?.portsUnavailable = portMessage != nil
+                self?.statusTitle = portMessage ?? receiver.canonicalPhaseTitle
+                self?.statusColor = portMessage == nil ? Self.statusColor(for: session.phase) : .orange
             }
             .store(in: &cancellables)
         receiver.$mirrorUnavailable
@@ -243,8 +270,9 @@ final class ReceiverController: ObservableObject {
     /// so the sender ends its session instead of retrying a dead peer.
     func stop(completion: (@Sendable () -> Void)? = nil) {
         startWhenRetired = false
-        if waitingForOtherReceiver {
+        if waitingForOtherReceiver || lockProblem != nil {
             stopWaitingForOtherReceiver()
+            lockProblem = nil
             statusTitle = String(localized: "Waiting for a Mac…")
             statusColor = .secondary
         }
@@ -280,6 +308,7 @@ final class ReceiverController: ObservableObject {
         self.receiver = nil
         connected = false
         streaming = false
+        portsUnavailable = false
         statusTitle = String(localized: "Waiting for a Mac…")
         statusColor = .secondary
         mirrorUnavailableOffer = false

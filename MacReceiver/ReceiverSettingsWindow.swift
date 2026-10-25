@@ -485,9 +485,12 @@ struct WithReceiver<Content: View>: View {
     var body: some View {
         if let receiver = controller.receiver {
             content(receiver)
-        } else if controller.waitingForOtherReceiver {
+        } else if controller.waitingForOtherReceiver || controller.lockProblem != nil {
             ReceiverSettingsForm {
                 ReceiverCaption(verbatim: controller.statusTitle)
+                if controller.lockProblem != nil {
+                    Button("Try Again") { controller.start() }
+                }
             }
         } else {
             ReceiverSettingsForm {

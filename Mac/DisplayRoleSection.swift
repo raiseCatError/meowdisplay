@@ -15,11 +15,16 @@ struct DisplayRoleSection: View {
                 get: { controller.receiverModeEnabled },
                 set: { controller.setReceiverModeEnabled($0) }))
             if controller.receiverModeEnabled {
-                if receiver.waitingForOtherReceiver {
-                    // What to quit; the role starts by itself afterwards.
+                if receiver.statusNeedsAttention {
+                    // What to quit or fix; the role starts by itself
+                    // afterwards, except after a lock problem.
                     Text(receiver.statusTitle)
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(receiver.statusColor)
+                    if receiver.lockProblem != nil {
+                        Button("Try Again") { receiver.start() }
+                            .controlSize(.small)
+                    }
                 } else {
                     LabeledContent("Status", value: receiver.statusTitle)
                 }

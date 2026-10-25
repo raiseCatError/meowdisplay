@@ -98,6 +98,11 @@ final class ReceiverUISink: Sendable {
         target?.applyDiscoveredMacsUpdate(results)
     }
 
+    /// `ReceiverPortHealth`'s observer: which receiver ports fail to bind.
+    func publishPortFailures(_ failures: [ReceiverPortFailure]) {
+        target?.applyPortFailures(failures)
+    }
+
     /// Mirrors `StreamReceiver.notePairingSucceeded()` for the pairing
     /// listener's `newConnectionHandler`/nested `Task` (Receiver
     /// Swift6-Pairing-Listener) — the one boundary crossing that closure

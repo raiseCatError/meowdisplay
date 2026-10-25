@@ -362,6 +362,9 @@ final class TLSListenerState: @unchecked Sendable {
     /// tears down the secure TCP listener reaches QUIC through the same
     /// owner — the two can never follow different lifecycles.
     let quic = QUICReceiverContext()
+    /// The receiver ports whose bind failed, shared by the TLS and pairing
+    /// listeners for the same reason `quic` lives here.
+    let ports = ReceiverPortHealth()
 
     func hasCurrent() -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -423,6 +426,53 @@ final class TLSListenerState: @unchecked Sendable {
         current = nil
         lock.unlock()
         listener?.cancel()
+    }
+}
+
+/// A receiver port whose listener couldn't bind, as the bind reported it.
+struct ReceiverPortFailure: Equatable, Sendable {
+    let port: UInt16
+    /// Something else holds the port (another user's receiver, another app).
+    let addressInUse: Bool
+}
+
+/// Which receiver ports are failing to bind right now — the final word when
+/// something the Mac receiver's ownership lock can't see (a receiver in
+/// another login session, an unrelated app) holds 9001 or 9002. The TLS and
+/// pairing listeners record a failure and clear it once ready; their
+/// existing retries are unchanged and end when the receiver is retired.
+/// Same lock idiom as `TLSListenerState`; `observer` runs outside the lock.
+final class ReceiverPortHealth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: [UInt16: ReceiverPortFailure] = [:]
+    private var observer: (@Sendable ([ReceiverPortFailure]) -> Void)?
+
+    func setObserver(_ observer: @escaping @Sendable ([ReceiverPortFailure]) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        self.observer = observer
+    }
+
+    func record(port: UInt16, error: NWError) {
+        var addressInUse = false
+        if case .posix(let code) = error, code == .EADDRINUSE { addressInUse = true }
+        update(port, ReceiverPortFailure(port: port, addressInUse: addressInUse))
+    }
+
+    func clear(port: UInt16) { update(port, nil) }
+
+    func current() -> [ReceiverPortFailure] {
+        lock.lock(); defer { lock.unlock() }
+        return failures.values.sorted { $0.port < $1.port }
+    }
+
+    private func update(_ port: UInt16, _ failure: ReceiverPortFailure?) {
+        lock.lock()
+        guard failures[port] != failure else { lock.unlock(); return }
+        failures[port] = failure
+        let snapshot = failures.values.sorted { $0.port < $1.port }
+        let observer = self.observer
+        lock.unlock()
+        observer?(snapshot)
     }
 }
 
@@ -1126,6 +1176,9 @@ final class StreamReceiver: ObservableObject {
     private var pairingObservation: AnyCancellable?
     private let pairingSuppressionState = PairingSuppressionState()
     @MainActor @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
+    /// Receiver ports that are failing to bind (`ReceiverPortHealth`), so
+    /// the UI can say a port is taken instead of only "Waiting for a Mac…".
+    @MainActor @Published private(set) var portFailures: [ReceiverPortFailure] = []
     private var macPairingBrowser: NWBrowser?
     /// Bumped only after a pairing (any transport) truly finalized: both
     /// confirmations, commit exchange and the TrustStore pin. Drives the
@@ -1548,6 +1601,10 @@ final class StreamReceiver: ObservableObject {
         selfBox.install(self)
         let helloState = self.helloState
         tlsListenerState.quic.setAvailabilityObserver { helloState.setQUICAvailable($0) }
+        let uiSink = self.uiSink
+        tlsListenerState.ports.setObserver { failures in
+            DispatchQueue.main.async { uiSink.publishPortFailures(failures) }
+        }
         uiSink.target = self
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
         pairingPrompt.trustPinLookup = { TrustStore.receiverRole.pin(peerID: $0) }
@@ -2221,9 +2278,11 @@ final class StreamReceiver: ObservableObject {
                 switch state {
                 case .ready:
                     Log.info("reconnectDebug: listenerReady TLS port=\(WireCrypto.tlsPort)")
+                    tlsListenerState.ports.clear(port: WireCrypto.tlsPort)
                 case .failed(let error):
                     Log.info("secure listener failed: \(error)")
                     guard let listener, tlsListenerState.clearIfCurrent(listener) else { return }
+                    tlsListenerState.ports.record(port: WireCrypto.tlsPort, error: error)
                     // Fixed short backoff: mirrors the plaintext listener's
                     // retry cadence and avoids a busy loop if the port stays
                     // unavailable for a moment (e.g. right after a sleep/wake
@@ -2348,11 +2407,16 @@ final class StreamReceiver: ObservableObject {
                     // busy (another receiver, a sleep/wake rebind) is tried
                     // again, so pairing comes back with the media listener.
                     guard let listener, pairingListenerState.clearIfCurrent(listener) else { return }
+                    tlsListenerState.ports.record(port: WireCrypto.pairingPort, error: error)
                     queue.asyncAfter(deadline: .now() + 1) {
                         selfBox.currentOnQueue()?.startPairingListener()
                     }
+                case .ready:
+                    tlsListenerState.ports.clear(port: WireCrypto.pairingPort)
+                    #if DEBUG
+                    Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
+                    #endif
                 #if DEBUG
-                case .ready: Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
                 case .waiting(let error): Log.info("pairing listener waiting: \(error)")
                 case .cancelled: Log.info("pairing listener cancelled")
                 #endif
@@ -5403,6 +5467,11 @@ final class StreamReceiver: ObservableObject {
     /// publishDiscoveredMacs`, its sole caller. Same single-assignment,
     /// `private(set)`-admitting shape as `applyAuthenticatedPeerIDUpdate`
     /// above.
+    /// `ReceiverUISink.publishPortFailures`, its sole caller.
+    @MainActor func applyPortFailures(_ failures: [ReceiverPortFailure]) {
+        portFailures = failures
+    }
+
     @MainActor func applyDiscoveredMacsUpdate(_ results: [NWBrowser.Result]) {
         discoveredMacs = SameAppPeerFilter.excludingSameApp(results, ownIDs: Self.sameAppSenderIDs) { result in
             if case .bonjour(let txt) = result.metadata { return txt["id"] }
