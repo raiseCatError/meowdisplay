@@ -383,6 +383,34 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(visible.contains(layout.paletteFrame))
     }
 
+    /// Avoid Notch lifts the portrait tray off the home indicator; the
+    /// palette must move with it rather than stay where the tray used to
+    /// be (it covered half the tray on every Face ID iPhone).
+    func testAvoidNotchCarriesPortraitPaletteWithTheTray() {
+        let container = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let layout = ControlTrayGeometry.layout(
+            container: container,
+            safeInsets: ControlSafeInsets(top: 62, leading: 0, bottom: 34, trailing: 0),
+            keyboardVisibleRect: nil, portrait: true, side: .trailing,
+            traySize: CGSize(width: 396, height: 44), paletteSize: CGSize(width: 300, height: 42),
+            avoidNotch: true)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxY, container.maxY - 34)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.trayFrame.minY - layout.paletteFrame.maxY, 10, accuracy: 0.001)
+    }
+
+    func testAvoidNotchCarriesLandscapePaletteWithTheTray() {
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(x: 0, y: 0, width: 874, height: 402),
+            safeInsets: ControlSafeInsets(top: 0, leading: 62, bottom: 21, trailing: 62),
+            keyboardVisibleRect: nil, portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(layout.trayFrame.minX, 62)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.paletteFrame.minX - layout.trayFrame.maxX, 10, accuracy: 0.001)
+    }
+
     func testLandscapeCornerFallsBackInsideKeyboardVisibleBounds() {
         let visible = CGRect(x: 0, y: 0, width: 700, height: 190)
         let layout = ControlTrayGeometry.layout(

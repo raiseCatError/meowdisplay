@@ -388,8 +388,14 @@ enum ControlTrayGeometry {
 
         // Obstacle avoidance is deliberately after normal placement. A
         // non-intersecting frame must remain bit-for-bit unchanged.
-        trayFrame = avoidingUnsafeRegion(trayFrame, in: container, safeInsets: safeInsets, enabled: avoidNotch,
-                                         portrait: portrait, notchSide: notchSide)
+        let unsafeTrayFrame = avoidingUnsafeRegion(trayFrame, in: container, safeInsets: safeInsets,
+                                                   enabled: avoidNotch, portrait: portrait, notchSide: notchSide)
+        // The palette belongs to the tray: when the tray steps off the home
+        // indicator or notch, the palette moves with it instead of staying
+        // where the tray used to be.
+        paletteFrame = paletteFrame.offsetBy(dx: unsafeTrayFrame.minX - trayFrame.minX,
+                                             dy: unsafeTrayFrame.minY - trayFrame.minY)
+        trayFrame = unsafeTrayFrame
         paletteFrame = avoidingUnsafeRegion(paletteFrame, in: container, safeInsets: safeInsets, enabled: avoidNotch,
                                             portrait: portrait, notchSide: notchSide)
         let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
