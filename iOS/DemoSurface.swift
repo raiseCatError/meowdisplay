@@ -273,6 +273,9 @@ struct DemoReceiverScreen: View {
                               onResetView: {
                                   withAnimation(.easeOut(duration: 0.25)) { workspace.interaction.resetViewport() }
                               })
+                // The banner is one fixed-height row over the desktop; past
+                // this size its text overflowed and covered Exit Demo.
+                .dynamicTypeSize(...DynamicTypeSize.xxLarge)
             if let hint {
                 DemoHintChip(hint: hint)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -281,6 +284,8 @@ struct DemoReceiverScreen: View {
                     .transition(.opacity)
             }
         }
+        // Chips over the picture keep scaling, but stop before they cover it.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .frame(width: canvas.width)
         .padding(.top, Self.bandTop(canvas: canvas, insets: insets))
         .offset(x: canvas.minX)
