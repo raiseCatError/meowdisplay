@@ -211,6 +211,7 @@ targets:
       - Mac/AppPresentation.swift
       - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
+      - Mac/DisplayModeAssignment.swift
       - Mac/DisplayHealth.swift
       - Mac/HiDPIEnforcementBackoff.swift
       - Mac/RouteArbitration.swift
