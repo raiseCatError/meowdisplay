@@ -63,9 +63,23 @@ Macs gain nothing over the standalone receiver they already have.
   - Pairing a Mac as this Mac's display never makes it a trusted sender here, and the reverse.
   - The sender's Keychain names are unchanged and pinned by a test.
   - The iPhone/iPad app and the standalone receiver don't declare `MeowDisplayReceiverRoleTrust`, so for them `TrustStore.receiverRole` is `TrustStore.shared` and nothing changes.
-- **Settings:** the only key both roles used, `autoReconnectEnabled`, is `receiver.autoReconnectEnabled` for the receiver role in this app. The receiver's other keys (`receiverName`, `installID`, `audioPreferred`, `avSyncOffsetMs`, `showAnalytics`) don't collide with the sender's.
+- **Approval policy and peer data** (`RolePreferences`): each role keeps its own "Automatically Allow Connections", per-Mac Connection Requests overrides, Remote endpoint hints and Wake metadata. In this app the receiver role's keys are `receiver.`-prefixed (`receiver.incomingSessionAutomaticallyAllow`, `receiver.incomingSessionPeerPolicy.v1`, `receiver.remoteEndpointHints.v1`, `receiver.wakeMetadataHints.v1`, `receiver.inputAutoRequestPeers.v1`, `receiver.autoReconnectEnabled`).
+  - Every call to those stores names its role, so the compiler catches a call site that doesn't.
+  - The receiver role's automatic approval is **off by default**: a Mac connecting to this Mac as a display asks first, until the user turns it on for that role. The sender's stays on by default, as in 1.20.0.
+  - Separate install ids weren't enough on their own: a peer chooses the id it pairs with, so one id can be pinned in both roles.
+  - The sender, the iPhone/iPad app and the standalone receiver keep the original key names, so their saved choices are read exactly as before.
+- **Other settings:** the receiver's remaining keys (`receiverName`, `installID`, `audioPreferred`, `avSyncOffsetMs`, `showAnalytics`, `receiverFullscreen`, `receiverControlPreferences.v1`) are used only by the receiver role. The sender's per-device keys (`extendShape.*`, `receiverMaxFPS.*`, `installIDByUDID`) are used only by the sender. Cat Mode is shared, and is cosmetic.
+- **Settings page:** **This Mac as a Display** in MeowDisplay's Settings (and a link from Overview) holds the role's own settings, apart from the sender's pages:
+  - the switch and status
+  - name
+  - paired sending Macs, with Automatically Allow Connections, each Mac's Connection Requests, Connect and Forget
+  - audio and A/V Sync
+  
+  Its sections are the standalone receiver's own, shared between both apps. With the role off, paired Macs are still listed and can be forgotten, without putting this Mac on the network.
 - **No self-discovery:** the sender ignores this app's receiver in its discovery and pairing browsers, and the receiver ignores this app's sender in its Mac-pairing browser (`SameAppPeerFilter`).
-- **Window and focus:** while the display window is up the app is a regular app (Dock, Command-Tab), so Command-Tab is always a way out. It returns to the user's presentation when the window goes away.
+- **Window and focus:** while the display window is up the app is a regular app (Dock, Command-Tab), so Command-Tab is always a way out. Changing the Dock/menu-bar setting meanwhile doesn't undo that. It returns to the user's presentation when the window goes away.
+- **Mirror unavailable:** when the sending Mac is headless and Mirror was asked for, Settings opens with the standalone receiver's "Use Extend" offer.
+- **Off and straight back on:** the new receiver starts only after the old one has released its listeners and network services.
 - **Quit:** with the display role on, quitting sends the receiver's `closing` first, as the standalone receiver does.
 - **Standalone receiver running:** the role refuses to start (and says why), because both would race for ports 9001/9002 and the same Bonjour services.
 - **Unchanged:** pairing, TLS 1.3, pinning, per-session input authorization and the wire protocol.
@@ -89,39 +103,63 @@ through the existing `appcast.xml` feed.
 - **Release workflow and Fastlane:** they build the same two targets as today. Nothing in `release.yml`, Fastlane or the feeds needs to change for the prototype. Release notes should point macOS 14+ receiver users to the unified app.
 
 **Rollback:**
-- Downgrading to 1.20.0 is safe. 1.20.0 ignores the receiver-role Keychain items and the `receiverModeEnabled`, `receiver.autoReconnectEnabled` and `installID` settings, and its sender data was never modified.
+- Downgrading to 1.20.0 is safe. 1.20.0 ignores the receiver-role Keychain items and the `receiverModeEnabled`, `receiver.*` and `installID` settings, and its sender data was never modified.
 - If the role misbehaves after release, ship a sender update with the switch hidden. The receiver-role data stays in its own namespace.
 
 ## Verified (automated, this branch)
 
-- **macOS suite:** `xcodebuild test -scheme OpenSidecarMac` passes **1960 tests, 0 failures**. That's 1946 on #25's head plus 14 new in `UnifiedMacAppTests`:
-  - role transitions, persistence and rapid toggling
-  - the sender's original Keychain names
-  - receiver-role separation, and receiver-only apps unchanged
-  - the role-scoped settings key
-  - same-app discovery filtering
-  - standalone-receiver conflict
-  - packaging (bundle id, floor, feed, excludes, standalone receiver at 12.0)
-- **Builds:** `OpenSidecarMacReceiver` (macOS 12 target) and `OpenSidecariOS` (generic device) both build. The unified bundle has the sender's id, `LSMinimumSystemVersion` 14.0, `LSUIElement`, `appcast.xml`, `MeowDisplayReceiverRoleTrust = separate`, and the receiver code linked in.
-- **Not covered by automation:** live Keychain isolation (the unsigned test bundle has no Keychain entitlement), TCC, Bonjour on a network, and the window and activation-policy behavior.
+- **macOS suite:** `xcodebuild test -scheme OpenSidecarMac` passes **1977 tests, 0 failures**. That's 1946 on #25's head plus 31 new:
+  - `RolePreferencesIsolationTests` (14): the approval-policy leak in both directions, the receiver role's own default, original key names for existing installs, per-Mac overrides with the same peer id in both roles, role switching and relaunch, both authorization entry points, and per-role endpoint and Wake data. With the keys still shared, 12 of the 14 failed.
+  - `UnifiedMacAppTests` (17):
+    - role transitions, persistence and rapid toggling
+    - the sender's original Keychain names
+    - receiver-role separation, and receiver-only apps unchanged
+    - role-scoped settings keys
+    - same-app discovery filtering
+    - standalone-receiver conflict
+    - packaging (bundle id, floor, feed, excludes, standalone receiver at 12.0)
+    - the Dock/Command-Tab rule
+    - the settings page and its search
+    - a guard that the receiver's settings code never uses the sender's trust store or keys
+- **Builds:** `OpenSidecarMac`, `OpenSidecarMacReceiver` (macOS 12 target) and `OpenSidecariOS` (generic device) all build. The unified bundle has the sender's id, `LSMinimumSystemVersion` 14.0, `LSUIElement`, `MeowDisplayReceiverRoleTrust = separate`, and the receiver code linked in.
+- **Not covered by automation:**
+  - live Keychain isolation (the unsigned test bundle has no Keychain entitlement)
+  - TCC
+  - Bonjour on a network
+  - window and activation-policy behavior
+  - the receiver restart timing
+  - the SwiftUI pages themselves
 
 ## Physical checklist
 
-Needs two signed builds of this branch (Developer ID or team-signed Debug), on
-Mac A (sender) and Mac B (macOS 14+, to be the display).
+Needs two signed builds of this branch (Developer ID or team-signed Debug),
+on Mac A (sender) and Mac B (macOS 14+, to be the display). Test #24's
+per-device Mirror/Extend and #25's input on the same builds.
 
-1. **Upgrade in place.** On a Mac running 1.20.0 with paired iPhones, install this build: devices reconnect without re-pairing, and Screen Recording/Accessibility stay granted.
-2. **Off by default.** Mac B shows nothing on the network until Use This Mac as a Display is on. Mac A's Devices list never shows Mac A itself.
+1. **Upgrade in place.** On a Mac running 1.20.0 with paired iPhones, install this build:
+   - devices reconnect without re-pairing
+   - Screen Recording/Accessibility stay granted
+   - "Automatically Allow Connections" and per-device choices are unchanged
+2. **Off by default.** Mac B shows nothing on the network until Use This Mac as a Display is on. Mac A's Devices list never shows Mac A itself, and Mac B's Nearby Macs never shows Mac B.
 3. **Pair and stream.** On Mac A, pair with Mac B's display role (one code confirmation), connect, Extend, then Mirror. The window goes full screen, Command-Tab works, and #25's control flow works.
-4. **Roles exclusive.** With Mac B's display role on, Mac B's own iPhone doesn't connect to Mac B as a sender. Turning the role off brings the iPhone back without re-pairing.
-5. **Trust separate.** A Mac paired only with Mac B's sender can't stream to Mac B's display role without pairing to it.
-6. **Quit.** Quit Mac B mid-stream: Mac A ends the session rather than redialing.
-7. **Standalone receiver.** With MeowDisplay Receiver running on Mac B, the switch refuses with its message.
-8. **Rollback.** Reinstall 1.20.0 on Mac A: everything works as before.
+4. **Approval is per role.** With Mac B's sender "Automatically Allow Connections" on (the default), Mac A's automatic connection to Mac B's display role is **not** admitted silently: Mac B asks, or declines a background attempt. Turn it on in **This Mac as a Display**: Mac A connects without asking, and Mac B's sender setting is unchanged.
+5. **Per-Mac choices are per role.** Block Mac A on the display page. Mac B's sender settings for its devices don't change. Forget Mac A there with the role off, then turn the role on: Mac A must pair again.
+6. **Settings page.**
+   - Rename the display: Mac A's list updates.
+   - Audio on: sound plays on Mac B, and A/V Sync and Resync work.
+   - Reopen Settings after relaunch: all of it is remembered.
+7. **Roles exclusive.** With Mac B's display role on, Mac B's own iPhone doesn't connect to Mac B as a sender. Turning the role off brings the iPhone back without re-pairing.
+8. **Trust separate.** A Mac paired only with Mac B's sender can't stream to Mac B's display role without pairing to it.
+9. **Rapid switching.** Turn the role off and on three times quickly, then connect from Mac A: it pairs or connects normally, with no "address in use" in the log.
+10. **Mirror unavailable.** Close Mac A's lid (on power, with Mac A's display role off), ask for Mirror from Mac B: Settings opens on Mac B with "Use Extend", and Use Extend works.
+11. **Dock and Command-Tab.** In menu-bar-only mode, stream to Mac B: the Dock icon appears and Command-Tab leaves the window. Switch presentation in Settings meanwhile: Command-Tab still works. End the stream: the Dock icon goes away.
+12. **Quit.** Quit Mac B mid-stream: Mac A ends the session rather than redialing.
+13. **Standalone receiver.** With MeowDisplay Receiver running on Mac B, the switch refuses with its message, at launch and when toggled.
+14. **Rollback.** Reinstall 1.20.0 on Mac A: everything works as before.
 
 ## Remaining work before release
 
-- **Receiver settings:** the display role's own settings (name, paired senders and Forget, audio, A/V sync) aren't in the unified Settings yet. The prototype uses defaults; pairing prompts and session approvals do appear.
-- **Mirror-unavailable offer:** the "Use Extend" alert for a headless sending Mac isn't shown in the unified app yet. That Mirror attempt still fails cleanly when the offer times out.
-- **Localization:** the receiver's strings aren't in MeowDisplay's string catalog yet. They're English-only today anyway.
+- **Hardware QA** of the checklist above, with #24 and #25.
+- **String catalog:** the receiver's strings and the new page's strings aren't in MeowDisplay's catalog yet. Xcode adds them on the next IDE build. The catalogs are English-only, so nothing user-visible changes meanwhile.
+- **Standalone receiver started second:** the unified app refuses to start its display role while the standalone receiver runs, but the standalone receiver doesn't check the other way round. Both would then compete for the same ports. Users pick one; a later standalone update could check too.
 - **Optional migration:** the shared-access-group migration for standalone receiver users, if wanted.
