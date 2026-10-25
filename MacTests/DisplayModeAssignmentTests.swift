@@ -483,6 +483,18 @@ final class DisplayModeAssignmentTests: XCTestCase {
         XCTAssertEqual(coordinator.assignment(sessionID: "a")?.mode, .extend)
     }
 
+    func testSummaryNamesTheModeItsOriginAndTheMirrorSource() {
+        XCTAssertEqual(DeviceDisplayAssignment(mode: .extend, mirrorDisplayUUID: "X", modeIsDeviceChoice: false,
+                                               mirrorSourceIsDeviceChoice: false).summary,
+                       "Extend (Mac default)")
+        XCTAssertEqual(DeviceDisplayAssignment(mode: .mirror, mirrorDisplayUUID: nil, modeIsDeviceChoice: true,
+                                               mirrorSourceIsDeviceChoice: false).summary,
+                       "Mirror (this device's choice) · Automatic display")
+        XCTAssertEqual(DeviceDisplayAssignment(mode: .mirror, mirrorDisplayUUID: "X", modeIsDeviceChoice: false,
+                                               mirrorSourceIsDeviceChoice: true).summary,
+                       "Mirror (Mac default) · Selected display")
+    }
+
     // MARK: - Persistence
 
     func testStoreRoundTripsEveryShape() {

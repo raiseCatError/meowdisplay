@@ -391,9 +391,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
-    /// `SenderController`, which owns the canonical `mirrorDisplayUUID`
-    /// setting (the same one its own Settings picker writes) and the
-    /// existing session-rebuild path that applies it. `nil` requests Auto.
+    /// `SenderController`, which remembers it as THIS device's own source
+    /// (issue #20) and rebuilds this session only. `nil` requests Auto.
     @MainActor var onMirrorDisplayRequest: ((String?) -> Void)?
     /// Fires whenever this peer's Extend shape preference changes — from a
     /// receiver's `extendShapeRequest` or from `requestExtendShape` (the
@@ -5221,8 +5220,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.onStreamingPriorityRequest?(priority)
             }
         case WireMessage.mirrorDisplayRequest:
-            // Like every Mac-wide request, reached only for an admitted
-            // connection (see the gate at the top of `handleControl`).
+            // Like every controller-handled request, reached only for an
+            // admitted connection (see the gate at the top of `handleControl`).
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String

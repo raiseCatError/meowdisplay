@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Only meaningful for Mirror mode — Extend always uses MEOW's own virtual
 /// display, so this view only ever appears when `controller.mode == .mirror`.
+/// It edits the Mac DEFAULT source; a device's own source is picked in its
+/// device settings (`ReceiverDeviceDetailView`, issue #20).
 struct MirrorDisplayPickerView: View {
     @ObservedObject var controller: SenderController
     @State private var candidates: [MirrorDisplayCandidate] = []

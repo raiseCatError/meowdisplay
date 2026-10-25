@@ -109,6 +109,32 @@ struct DeviceDisplayAssignment: Equatable {
     }
 }
 
+extension CaptureMode {
+    var title: String {
+        switch self {
+        case .mirror: return String(localized: "Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
+        case .extend: return String(localized: "Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+        }
+    }
+}
+
+extension DeviceDisplayAssignment {
+    /// One line for a device's settings: its mode, whether that is its own
+    /// choice, and in Mirror whether a specific source is selected.
+    var summary: String {
+        let origin = modeIsDeviceChoice
+            ? String(localized: "this device's choice", comment: "Where a device's display mode comes from.")
+            : String(localized: "Mac default", comment: "Where a device's display mode comes from.")
+        var parts = ["\(mode.title) (\(origin))"]
+        if mode == .mirror {
+            parts.append(mirrorDisplayUUID == nil
+                ? String(localized: "Automatic display", comment: "Mirror source: chosen automatically.")
+                : String(localized: "Selected display", comment: "Mirror source: a display picked by the user."))
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
 enum DeviceDisplayModeResolution {
     static func resolve(preference: DeviceDisplayModePreference, defaults: DisplayModeDefaults,
                         videoEnabled: Bool) -> DeviceDisplayAssignment {
