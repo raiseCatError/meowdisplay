@@ -186,7 +186,9 @@ Settings. **Always Allow Requests** skips the Mac prompt but still requires
 that request each session. See [Allow Input & control requests](README.md#allow-input--control-requests).
 
 Receivers can still view the Mac with input off. The standalone Mac Receiver
-is display-only; its keyboard and trackpad are not forwarded.
+uses the same request: once the sending Mac allows it, the receiving Mac's own
+keyboard and trackpad control it while the video window is in front. See
+[RECEIVER_INPUT.md](RECEIVER_INPUT.md).
 
 ### Connecting and reconnecting
 

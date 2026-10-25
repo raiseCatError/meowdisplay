@@ -51,7 +51,7 @@ later). Both are free.
 | **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
 | **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
 | **Security** | Trusted pairing with a matching code · TLS 1.3 · pinned peer identity |
-| **Receivers** | iPhone and iPad · another Mac with the display-only Mac Receiver |
+| **Receivers** | iPhone and iPad · another Mac with the Mac Receiver, whose keyboard and trackpad can control the sending Mac |
 
 ## Why MeowDisplay?
 
@@ -312,8 +312,9 @@ Either side can start a session, and the Mac sender always streams. When
 connection approval is required, an explicit Connect waits for acceptance;
 background reconnects never prompt.
 
-Receivers include **iPhone**, **iPad**, and the **display-only Mac Receiver**.
-The Mac Receiver does not forward its keyboard or trackpad to the other Mac.
+Receivers include **iPhone**, **iPad**, and the **Mac Receiver**. Once the
+sending Mac allows control, the receiving Mac's own keyboard and trackpad drive
+it while the video window is in front; press ⌃⌥⎋ to pause.
 More on [Devices](https://meowdisplay.app/features.html#devices).
 
 ## Connections

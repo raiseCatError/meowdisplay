@@ -25,7 +25,7 @@ Mac. A second receiver app lets another Mac act as a display too.
        │  video (+ optional audio) + control
        ▼
  ┌──────────────┐
- │ Mac Receiver │   display only: its keyboard/trackpad are NOT forwarded
+ │ Mac Receiver │   its keyboard/trackpad drive the sender once control is granted
  └──────────────┘
 ```
 
@@ -100,8 +100,12 @@ drawing, keeping the Mac awake, and its own settings/pairing UI
 `MacReceiver/ReceiverPairingPanel.swift`). It advertises its own panel size
 like an iPad does.
 
-It is **display-only**: the receiving Mac's keyboard and trackpad are not
-sent back to the sender.
+Once the sending Mac grants the session control, the receiving Mac's own
+keyboard and trackpad drive it while the video window is in front
+(`MacReceiver/ReceiverInputForwarding.swift`, `ReceiverInputController.swift`;
+see [RECEIVER_INPUT.md](RECEIVER_INPUT.md)). Input is never captured globally,
+and it uses the same `pointer`/`scroll`/`keyboard` messages and per-session
+grant as the iPhone and iPad.
 
 ## Shared code (`Shared/`)
 
@@ -384,3 +388,4 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [SUPPORT.md](SUPPORT.md) — where to get help
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
 - [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
+- [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, and its physical test checklist
