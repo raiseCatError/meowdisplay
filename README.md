@@ -15,6 +15,8 @@ right from it.
 [Support](https://meowdisplay.app/support.html) ·
 [Privacy](https://meowdisplay.app/privacy.html)
 
+<a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44"></a>
+
 <br>
 
 <img src="assets/readme/hero.webp" alt="The MeowDisplay Mac app open to Overview, beside the MeowDisplay receiver on iPhone" width="760">
@@ -32,9 +34,11 @@ you control, with devices paired and every session encrypted.
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
 
-<sub>Public release builds are being prepared. There is no public download or
-App Store release yet. The source is available here and can be
-[built from source](#build-from-source).</sub>
+**MeowDisplay for iPhone and iPad is free on the [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864)**
+(iOS/iPadOS 16.4 or later). It works with the MeowDisplay Mac app (macOS 14
+or later), which is currently available only by
+[building it from source](#build-from-source): there is no signed, notarized
+Mac download yet.
 
 ## At a glance
 
@@ -341,8 +345,9 @@ More in [SECURITY.md](SECURITY.md) and the
 
 ## Getting started
 
-1. Run MeowDisplay on your Mac.
-2. Open the MeowDisplay receiver on your iPhone or iPad.
+1. Build and run MeowDisplay on your Mac ([Build from source](#build-from-source)).
+2. Install [MeowDisplay from the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) on your iPhone or iPad
+   and open it.
 3. Connect over USB or Wi-Fi, and pair the devices by confirming the matching
    code.
 4. Choose **Mirror** or **Extend**.
@@ -362,8 +367,11 @@ echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
 ./generate.sh
 ```
 
-Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` (Mac) and
-`OpenSidecariOS` (iPhone/iPad receiver) schemes. Signing, permissions and
+Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` scheme for the Mac
+app. The [`release/app-store-rc`](https://github.com/raiseCatError/meowdisplay/tree/release/app-store-rc) branch matches the App Store
+version (1.20.0). The iPhone/iPad receiver is on the
+[App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864); to build it yourself instead, run the `OpenSidecariOS`
+scheme. Signing, permissions and
 troubleshooting are in [SETUP.md](SETUP.md); release process in
 [RELEASE.md](RELEASE.md).
 
