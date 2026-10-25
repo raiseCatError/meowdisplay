@@ -103,6 +103,7 @@ struct OverviewSettingsView: View {
                     }
                 }
             }
+            DisplayRoleSection(controller: controller)
         }
         .formStyle(.grouped)
     }

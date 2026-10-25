@@ -56,6 +56,9 @@ final class ReceiverController: ObservableObject {
     /// window may be closed (the headless-Mirror offer) — the app delegate
     /// brings it up.
     var onNeedsAttention: (() -> Void)?
+    /// The video window appeared (`true`) or went away. The unified app
+    /// uses it to be a regular, Command-Tab-able app while it's a display.
+    var onVideoWindowVisibilityChanged: ((Bool) -> Void)?
 
     var active: Bool { receiver != nil }
 
@@ -315,6 +318,7 @@ final class ReceiverController: ObservableObject {
             window = w
             observeWindow(w)
             input.attach(to: w)
+            onVideoWindowVisibilityChanged?(true)
             enterFullscreen = windowLifecycle.windowCreated()
         }
         // Resizes keep the stream's shape; re-set on every show because a
@@ -343,8 +347,10 @@ final class ReceiverController: ObservableObject {
         // closing a full screen window reports its exit.
         windowLifecycle.windowClosing()
         stopObservingWindow()
+        let hadWindow = window != nil
         window?.close()
         window = nil
+        if hadWindow { onVideoWindowVisibilityChanged?(false) }
     }
 
     /// Records the user's green-button choice, and forgets the window when
@@ -367,6 +373,7 @@ final class ReceiverController: ObservableObject {
                 $0.windowLifecycle.windowClosing()
                 $0.stopObservingWindow()
                 $0.window = nil
+                $0.onVideoWindowVisibilityChanged?(false)
             },
         ]
     }

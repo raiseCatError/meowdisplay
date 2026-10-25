@@ -64,6 +64,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !StartAtLoginPolicy.wasLaunchedAsLoginItem(), !presentation.showsMenuBarIcon {
             MacSettingsWindow.show()
         }
+        // Use This Mac as a Display comes back only if the user left it on.
+        controller.applyLaunchRole()
+    }
+
+    // Quitting while this Mac is a display: tell the sending Mac we're
+    // closing (it ends the session instead of redialing a dead peer) before
+    // the process goes — the standalone receiver's quit path, unchanged.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ReceiverController.shared.active else { return .terminateNow }
+        ReceiverController.shared.stop {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -400,6 +413,74 @@ final class SenderController: ObservableObject {
     func releaseKeepMacAvailable() {
         keepAvailableAssertion.disable()
         keepMacAvailableActive = false
+    }
+
+    // MARK: - Use This Mac as a Display
+
+    /// Which role has live sessions (see `MacAppRoleState`).
+    private var roleState = MacAppRoleState(defaults: .standard)
+    @Published private(set) var receiverModeEnabled = MacAppRoleState(defaults: .standard).receiverEnabled
+    /// Why the display role couldn't be turned on, until the next attempt.
+    @Published private(set) var receiverModeNotice: String?
+
+    /// "Use This Mac as a Display". Turning it on ends this Mac's sharing
+    /// sessions (their devices reconnect when it's turned off) and starts the
+    /// receiver; turning it off stops the receiver and lets the sender
+    /// reconnect.
+    func setReceiverModeEnabled(_ enabled: Bool) {
+        if enabled, StandaloneReceiverConflict.isRunning(
+            among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)) {
+            receiverModeNotice = String(localized: "Quit MeowDisplay Receiver first — it's already using this Mac as a display.")
+            return
+        }
+        receiverModeNotice = nil
+        let effects = roleState.setReceiverEnabled(enabled, defaults: .standard)
+        receiverModeEnabled = roleState.receiverEnabled
+        applyRoleEffects(effects)
+    }
+
+    func applyLaunchRole() {
+        if roleState.receiverEnabled, StandaloneReceiverConflict.isRunning(
+            among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)) {
+            Log.info("roleDebug: standalone receiver running — display role not started at launch")
+            receiverModeNotice = String(localized: "Quit MeowDisplay Receiver first — it's already using this Mac as a display.")
+            setReceiverModeEnabled(false)
+            return
+        }
+        applyRoleEffects(roleState.launchEffects)
+    }
+
+    private func applyRoleEffects(_ effects: [MacAppRoleState.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .endSenderSessions:
+                Log.info("roleDebug: ending \(sessions.count) sender session(s) — this Mac becomes a display")
+                for session in sessions {
+                    // Not `disconnect(_:)`: that suppresses auto-reconnect,
+                    // and these devices should come back with the role.
+                    session.sender.disconnect { [weak self, weak session] in
+                        guard let self, let session else { return }
+                        self.end(session)
+                    }
+                }
+            case .startReceiver:
+                let receiver = ReceiverController.shared
+                // An accessory (menu-bar-only) app can't be Command-Tabbed
+                // to or away from; while the display window is up the app is
+                // a regular one, so Command-Tab is always the way out.
+                receiver.onVideoWindowVisibilityChanged = { [weak self] visible in
+                    guard let self else { return }
+                    NSApp.setActivationPolicy(visible || self.presentation.showsDockIcon ? .regular : .accessory)
+                }
+                receiver.start()
+                Log.info("roleDebug: receiver started")
+            case .stopReceiver:
+                ReceiverController.shared.stop()
+                Log.info("roleDebug: receiver stopped")
+            case .resumeSender:
+                scheduleAutoConnect()
+            }
+        }
     }
 
     @Published var sessions: [DeviceSession] = []
@@ -969,7 +1050,11 @@ final class SenderController: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.discovered = Array(results)
+                // This Mac's own "Use This Mac as a Display" role is never
+                // a device to list or dial.
+                let ownReceiverIDs = Set([SameAppPeerFilter.receiverRoleInstallID()].compactMap { $0 })
+                self.discovered = SameAppPeerFilter.excludingSameApp(Array(results), ownIDs: ownReceiverIDs,
+                                                                     txtID: self.txtID(of:))
                 self.handleReceiverConnectRequests(in: self.discovered)
                 self.failoverPendingSessions()
                 self.endSessionsWhoseServiceVanished()
@@ -1429,7 +1514,9 @@ final class SenderController: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, changes in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.receiverPairingResults = Array(results)
+                let ownReceiverIDs = Set([SameAppPeerFilter.receiverRoleInstallID()].compactMap { $0 })
+                self.receiverPairingResults = SameAppPeerFilter.excludingSameApp(
+                    Array(results), ownIDs: ownReceiverIDs, txtID: self.txtID(of:))
                 #if DEBUG
                 Log.info("pairing browser changed: results=\(results.count) changes=\(changes.count)")
                 for result in results {
@@ -1968,7 +2055,7 @@ final class SenderController: ObservableObject {
     }
 
     private func autoConnect() {
-        guard autoConnectEnabled else { return }
+        guard autoConnectEnabled, roleState.senderMayConnect else { return }
         dedupeSessions()
         let candidates = autoConnectCandidates
         autoConnectPolicy.updateAvailableIdentifiers(
@@ -2333,6 +2420,13 @@ final class SenderController: ObservableObject {
                               needsSenderApproval: Bool = false,
                               continuation: SessionContinuation? = nil) -> Bool {
         let targetIdentifiers = identifiers(for: target)
+        // Use This Mac as a Display: the sender starts nothing meanwhile —
+        // every path that can start a session funnels through here.
+        guard roleState.senderMayConnect else {
+            Log.info("roleDebug: sender session to \(target.sessionID) refused — this Mac is being used as a display")
+            autoConnectPolicy.finish(attempt)
+            return false
+        }
         guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
             Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
             autoConnectPolicy.finish(attempt)

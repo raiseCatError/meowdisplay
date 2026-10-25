@@ -1,0 +1,64 @@
+import Foundation
+
+/// The unified MeowDisplay app's two roles: Share This Mac (the sender, as
+/// it always was) and Use This Mac as a Display (the Mac Receiver, hosted in
+/// the same bundle). Exactly one has live sessions at a time: while this Mac
+/// is a display, the sender starts no sessions — no auto-connect, Connect,
+/// receiver connect request or Remote knock — and it resumes when the
+/// display role is turned off. That rules out a Mac streaming to itself, two
+/// Macs streaming into each other, and input looping between them, without
+/// tearing down the sender's listeners or pairing.
+struct MacAppRoleState: Equatable {
+    enum Effect: Equatable {
+        /// End every sender session without suppressing auto-reconnect, so
+        /// the devices come back by themselves when the role switches back.
+        case endSenderSessions
+        case startReceiver
+        /// Stop the receiver, sending `closing` to a connected sender.
+        case stopReceiver
+        /// Let the sender reconnect its devices.
+        case resumeSender
+    }
+
+    static let defaultsKey = "receiverModeEnabled"
+
+    private(set) var receiverEnabled: Bool
+
+    init(receiverEnabled: Bool) {
+        self.receiverEnabled = receiverEnabled
+    }
+
+    init(defaults: UserDefaults) {
+        receiverEnabled = defaults.bool(forKey: Self.defaultsKey)
+    }
+
+    /// Whether the sender may start (or keep) a session.
+    var senderMayConnect: Bool { !receiverEnabled }
+
+    /// What launching does: the display role comes back only if the user
+    /// left it on. Off by default — a sender install never advertises a
+    /// receiver it didn't ask for.
+    var launchEffects: [Effect] { receiverEnabled ? [.startReceiver] : [] }
+
+    mutating func setReceiverEnabled(_ enabled: Bool, defaults: UserDefaults) -> [Effect] {
+        guard enabled != receiverEnabled else { return [] }
+        receiverEnabled = enabled
+        defaults.set(enabled, forKey: Self.defaultsKey)
+        return enabled ? [.endSenderSessions, .startReceiver] : [.stopReceiver, .resumeSender]
+    }
+}
+
+/// The standalone MeowDisplay Receiver (still shipped for macOS 12–13, and
+/// installed by existing users) listens on the same ports and advertises the
+/// same services. Two receivers on one Mac would race for them, so the
+/// unified app's display role doesn't start while it runs.
+enum StandaloneReceiverConflict {
+    static let bundleIdentifiers: Set<String> = [
+        "com.raisecaterror.meowdisplay.mac.receiver",
+        "com.raisecaterror.meowdisplay.mac.receiver.debug",
+    ]
+
+    static func isRunning(among runningBundleIdentifiers: [String?]) -> Bool {
+        runningBundleIdentifiers.contains { $0.map(bundleIdentifiers.contains) ?? false }
+    }
+}
