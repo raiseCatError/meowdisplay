@@ -12,8 +12,9 @@ current capabilities.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
 - A free or paid Apple Developer account, to sign the Mac build and, if you
   build it yourself, the iOS build for your device (a free account is enough
-  for local sideloading). The iPhone/iPad receiver is also available from the
-  [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864), which needs no signing.
+  for local sideloading). To just use MeowDisplay, skip building: download the
+  [Mac app](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg) and get the iPhone/iPad receiver from the
+  [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864).
 
 ## Clone
 

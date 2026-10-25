@@ -86,11 +86,14 @@ a higher build number).
 
 ## Required secrets
 
-None are currently configured on this fork. Exact inventory (see the
-release-audit issue for the full table): `DEVELOPMENT_TEAM`,
-`MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`,
-`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`,
-`APP_STORE_CONNECT_KEY_CONTENT`, and optionally `SPARKLE_PRIVATE_KEY`.
+Required: `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`,
+`MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`,
+`APP_STORE_CONNECT_KEY_CONTENT`, and `SPARKLE_PRIVATE_KEY`.
+
+As of 2026-10-25 the fork has `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`,
+`MATCH_DEPLOY_KEY` and `SPARKLE_PRIVATE_KEY`. `MATCH_PASSWORD` and the three
+`APP_STORE_CONNECT_*` secrets are missing, and the match repository holds no
+Developer ID certificate yet, so `build-mac` cannot sign or notarize in CI.
 
 ## Verification
 
@@ -105,6 +108,35 @@ Once a release build exists:
   (Xcode Organizer → Generate Privacy Report lists it); App Store Connect
   does not accept a build that uses a required-reason API no manifest
   declares.
+
+## 1.20.0 Mac release (built locally)
+
+The first MeowDisplay Mac release, `v1.20.0`, was not built by CI (see
+[Required secrets](#required-secrets)). It was produced on a Mac signed in to
+the team's Apple account, from `release/app-store-rc` @ `cbbad7f` (the source
+of App Store 1.20.0), with the same pieces CI uses:
+
+1. `DEVELOPMENT_TEAM=<team> xcodegen generate` from the tracked `project.yml`.
+2. `xcodebuild archive` (Release) for `OpenSidecarMac` and
+   `OpenSidecarMacReceiver`, with `MARKETING_VERSION=1.20.0` and
+   `CURRENT_PROJECT_VERSION=1`.
+3. `xcodebuild -exportArchive` with `method` `developer-id`, `destination`
+   `upload` and automatic signing: Xcode signs with the team's cloud-managed
+   Developer ID Application certificate and submits to Apple's notary
+   service; `xcodebuild -exportNotarizedApp` returns the stapled app.
+4. The DMG step from the Fastfile (`hdiutil`, UDZO, Applications link). The
+   DMG container itself is not code-signed or notarized: the cloud-managed
+   certificate cannot `codesign` arbitrary files and there were no
+   `notarytool` credentials. Gatekeeper accepts the stapled app inside
+   (`spctl`: Notarized Developer ID), and a quarantined copy of the DMG
+   mounts normally.
+5. Appcasts from `generate_appcast`/`sign_update` with the Sparkle key in the
+   login keychain (account `meowdisplay`), uploaded to the release.
+
+To return to the documented CI path, create an App Store Connect API key
+and a Developer ID Application certificate whose private key can be
+exported into match, then add `MATCH_PASSWORD` and the
+`APP_STORE_CONNECT_*` secrets.
 
 ## Rollback / recovery
 

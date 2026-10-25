@@ -1,35 +1,36 @@
 # Launch posts: drafts, not posted
 
-Ready-to-publish copy for the App Store launch of MeowDisplay for iPhone and
-iPad (October 25, 2026). Nothing here has been posted.
-
-Every post must keep the Mac caveat: the iPhone/iPad app is on the App Store,
-but the Mac app currently has to be built from source. Once a signed Mac
-download exists, update the posts (and swap "build it from source" for the
-download link) before reusing them.
+Ready-to-publish copy for the MeowDisplay launch (October 25, 2026): the
+iPhone/iPad app on the App Store and the Mac app as a signed, notarized
+download. Nothing here has been posted.
 
 Verified links:
 
+- Website (download buttons for both apps): https://meowdisplay.app/
+- Mac download: https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg
 - App Store: https://apps.apple.com/us/app/meowdisplay/id6817552864
-- Website: https://meowdisplay.app/
 - Setup: https://meowdisplay.app/docs
 - Source: https://github.com/raiseCatError/meowdisplay
+
+Prefer linking https://meowdisplay.app/ in posts: it has both downloads, and a
+bare DMG link starts a download without context.
 
 ---
 
 ## X / Twitter
 
-> MeowDisplay is on the App Store 🐈
+> MeowDisplay is out 🐈
 >
-> It turns your iPhone or iPad into a second display for your Mac: mirror or extend, then control it with touch, trackpad gestures and a keyboard. USB or Wi-Fi. Free, open source, no account.
+> Turn your iPhone or iPad into a second display for your Mac: mirror or extend, then control it with touch, trackpad gestures and a keyboard. USB or Wi-Fi. Free, open source, no account.
 >
-> https://apps.apple.com/us/app/meowdisplay/id6817552864
+> Mac app + App Store: https://meowdisplay.app
 
 Reply to the first post:
 
-> Heads up: the Mac side isn't a one-click download yet, you build it from source for now (signed build coming). Setup: https://meowdisplay.app/docs
+> iPhone/iPad: https://apps.apple.com/us/app/meowdisplay/id6817552864
+> Code: https://github.com/raiseCatError/meowdisplay
 >
-> Built on the great OpenDisplay project. Code: https://github.com/raiseCatError/meowdisplay
+> Built on the great OpenDisplay project.
 
 ---
 
@@ -39,11 +40,11 @@ Check each subreddit's self-promotion rules first (r/macapps, r/iOSProgramming
 Saturday showcase, r/opensource). Post to one or two communities, not all at
 once, and stay in the thread to answer questions.
 
-**Title:** I made MeowDisplay, a free and open-source app that turns your iPhone or iPad into a display for your Mac. The iPhone/iPad app just landed on the App Store
+**Title:** I made MeowDisplay, a free and open-source app that turns your iPhone or iPad into a display for your Mac
 
 **Body:**
 
-> Hi! MeowDisplay turns an iPhone or iPad into a mirrored or extended display for a Mac, and lets you control the Mac from it.
+> Hi! MeowDisplay turns an iPhone or iPad into a mirrored or extended display for a Mac, and lets you control the Mac from it. The iPhone/iPad app is on the App Store and the Mac app is a signed, notarized download.
 >
 > **What it does**
 >
@@ -55,15 +56,14 @@ once, and stay in the thread to answer questions.
 >
 > **Limitations, honestly**
 >
-> - The iPhone/iPad app is on the App Store, but **the Mac app has no signed download yet**. Right now you build it from source with Xcode (a free Apple account works). A notarized build is next.
 > - Mac-to-iPhone is the most-tested setup; iPad and using another Mac as a receiver need more real-hardware testing.
 > - Controlling the Mac needs Accessibility permission, and every session starts with input off until you allow it.
-> - English only for now.
+> - macOS 14+ for the Mac app, iOS/iPadOS 16.4+ for the receiver. English only for now.
 >
 > **Credit:** MeowDisplay started as a fork of OpenDisplay by Philip Poloczek (https://github.com/peetzweg/opendisplay), which provided the capture/virtual display/encoding foundation. Most of my work since has been on input, gestures, trays, pairing/security, Remote Access and polish. GPL-3.0.
 >
+> - Website and Mac download: https://meowdisplay.app/
 > - App Store (free): https://apps.apple.com/us/app/meowdisplay/id6817552864
-> - Setup: https://meowdisplay.app/docs
 > - Source: https://github.com/raiseCatError/meowdisplay
 >
 > Feedback and bug reports are very welcome, especially from iPad and multi-display setups.
@@ -72,16 +72,16 @@ once, and stay in the thread to answer questions.
 
 ## LinkedIn
 
-> MeowDisplay is now on the App Store.
+> MeowDisplay is out.
 >
 > It's a free, open-source app I've been building that turns an iPhone or iPad into a mirrored or extended display for a Mac, and lets you control the Mac from it with touch, trackpad gestures, a keyboard and Apple Pencil, over USB or Wi-Fi.
 >
 > A few things I cared about along the way: no account, no server in the middle, devices paired with a matching code and every session encrypted. And keeping it open source, building on the excellent OpenDisplay project by Philip Poloczek.
 >
-> The iPhone and iPad app is available today. The Mac companion is built from source for now, with a signed download on the way.
+> The iPhone and iPad app is on the App Store, and the Mac app is a free download.
 >
-> App Store: https://apps.apple.com/us/app/meowdisplay/id6817552864
-> Website and setup: https://meowdisplay.app/ 🐾
+> Website and Mac download: https://meowdisplay.app/
+> App Store: https://apps.apple.com/us/app/meowdisplay/id6817552864 🐾
 
 ---
 
@@ -91,16 +91,16 @@ once, and stay in the thread to answer questions.
 
 > Your Mac. Another screen. Anywhere. 🐈
 >
-> MeowDisplay is now on the App Store: turn your iPhone or iPad into a display for your Mac, and control it with touch, gestures and a keyboard.
+> MeowDisplay is out: turn your iPhone or iPad into a display for your Mac, and control it with touch, gestures and a keyboard.
 >
 > Free and open source. No account.
-> iPhone/iPad app on the App Store; the Mac app is built from source for now. Link in bio → meowdisplay.app
+> Get the Mac app and the iPhone/iPad app: link in bio → meowdisplay.app
 >
 > #MeowDisplay #Mac #iPad #iPhone #OpenSource #IndieDev
 
 **Story text (one frame each):**
 
-1. MeowDisplay is on the App Store 🐾
+1. MeowDisplay is out 🐾
 2. Your iPhone or iPad → a display for your Mac
 3. Free · open source · no account
-4. Link: meowdisplay.app (sticker → https://apps.apple.com/us/app/meowdisplay/id6817552864)
+4. Link: meowdisplay.app (sticker → https://meowdisplay.app/)
