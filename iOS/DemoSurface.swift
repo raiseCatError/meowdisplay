@@ -97,7 +97,8 @@ struct DemoReceiverScreen: View {
                     keyboardActive: $keyboardActive,
                     showSettings: $showSettings,
                     keyboardAvailable: demo.inputAllowed,
-                    keyboardVisibleRect: keyboardRect,
+                    keyboardVisibleRect: DemoDisplayGeometry.keyboardVisibleRect(
+                        keyboardFrame: keyboardRect, canvas: canvas, screenBounds: UIScreen.main.bounds),
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
@@ -144,7 +145,7 @@ struct DemoReceiverScreen: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-            keyboardRect = frame.minY >= UIScreen.main.bounds.maxY - 1 ? nil : frame
+            keyboardRect = frame
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardRect = nil
