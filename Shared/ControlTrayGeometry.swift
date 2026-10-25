@@ -698,3 +698,17 @@ extension ControlTrayGeometry {
         }
     }
 }
+
+extension ControlTrayGeometry {
+    /// The iPhone Main Tray's chip diameter along a screen edge `length`
+    /// points long: the standard size, shrunk just enough that every chip
+    /// and the layout margins fit (nine 40pt chips don't fit a 390pt
+    /// iPhone), never below `minimum`.
+    static func fittedChipDiameter(count: Int, length: CGFloat, preferred: CGFloat = 40,
+                                   gap: CGFloat = 4, slack: CGFloat = 4, margin: CGFloat = 12,
+                                   minimum: CGFloat = 30) -> CGFloat {
+        guard count > 0 else { return preferred }
+        let room = length - margin * 2 - slack - CGFloat(count - 1) * gap
+        return max(minimum, min(preferred, (room / CGFloat(count)).rounded(.down)))
+    }
+}

@@ -507,7 +507,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let portrait = containerSize.height > containerSize.width
         let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown
         let count = max(controls.count, 1)
-        let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count)
+        // Shrinks only when the chips wouldn't fit the screen edge (nine
+        // standard chips are wider than a 390pt iPhone).
+        let trayItem = ControlTrayGeometry.fittedChipDiameter(
+            count: count, length: portrait ? containerSize.width : containerSize.height,
+            preferred: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack)
+        let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count, item: trayItem)
         // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
         // tray content out in place rather than removing it — `collapsed`
         // above is untouched by it, since `store.autoHidden` can only ever
@@ -629,7 +634,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
-                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
                     .opacity(autoHideOpacity)
@@ -753,13 +758,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
     #endif
 
-    private func calculatedTraySize(collapsed: Bool, portrait: Bool, count: Int) -> CGSize {
-        let thickness = Metrics.trayItem + Metrics.touchSlack
+    private func calculatedTraySize(collapsed: Bool, portrait: Bool, count: Int, item: CGFloat) -> CGSize {
+        let thickness = item + Metrics.touchSlack
         guard !collapsed else {
             return CGSize(width: Metrics.collapsed + Metrics.touchSlack,
                           height: Metrics.collapsed + Metrics.touchSlack)
         }
-        let length = CGFloat(count) * Metrics.trayItem
+        let length = CGFloat(count) * item
             + CGFloat(Swift.max(0, count - 1)) * Metrics.trayGap + Metrics.touchSlack
         return portrait
             ? CGSize(width: length, height: thickness)
@@ -805,16 +810,16 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     @ViewBuilder
-    private func controlsRow(axis: Axis) -> some View {
+    private func controlsRow(axis: Axis, item diameter: CGFloat) -> some View {
         let stack = axis == .horizontal
             ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
             : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
         stack {
             ForEach(controls) { item in
                 if let modifier = item.modifier {
-                    modifierButton(modifier)
+                    modifierButton(modifier, diameter: diameter)
                 } else {
-                    actionButton(item)
+                    actionButton(item, diameter: diameter)
                 }
             }
         }
@@ -854,13 +859,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         store.scheduleAutoHide()
     }
 
-    private func modifierButton(_ modifier: ControlModifier) -> some View {
+    private func modifierButton(_ modifier: ControlModifier, diameter: CGFloat) -> some View {
         let selected = interaction.latchedModifiers.contains(modifier)
             || interaction.temporaryModifiers.contains(modifier)
         return Text(modifier.symbol)
-            .font(.system(size: 21, weight: .semibold))
+            .font(.system(size: (21 * diameter / Metrics.trayItem).rounded(), weight: .semibold))
             .foregroundStyle(selected ? Color.black : Color.white)
-            .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+            .frame(width: diameter, height: diameter)
             .background(frameReader("modifier:\(modifier.rawValue)"))
             .background(chip(selected: selected))
             .accessibilityLabel(modifier.title)
@@ -868,17 +873,18 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
     }
 
-    private func actionButton(_ item: ControlTrayItem) -> some View {
-        Group {
+    private func actionButton(_ item: ControlTrayItem, diameter: CGFloat) -> some View {
+        let scale = diameter / Metrics.trayItem
+        return Group {
             if item == .escape || item == .tab {
-                Text(item.displayLabel).font(.system(size: 13, weight: .semibold))
+                Text(item.displayLabel).font(.system(size: (13 * scale).rounded(), weight: .semibold))
             } else {
                 Image(systemName: item.displayLabel)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: (18 * scale).rounded(), weight: .semibold))
             }
         }
         .foregroundStyle(.white)
-        .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+        .frame(width: diameter, height: diameter)
         .background(frameReader("tray:\(item.rawValue)"))
         .background(chip(selected: false))
         .accessibilityLabel(item.title)

@@ -383,6 +383,21 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(visible.contains(layout.paletteFrame))
     }
 
+    /// Nine 40pt chips need 396pt: wider than a 390pt (or 375pt) iPhone in
+    /// portrait, and taller than it in landscape, so the end chips ran off
+    /// the screen and out of the tray's touch area.
+    func testTrayChipsShrinkJustEnoughToFitTheScreen() {
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 9, length: 440), 40)
+        for length: CGFloat in [402, 390, 375] {
+            let chip = ControlTrayGeometry.fittedChipDiameter(count: 9, length: length)
+            XCTAssertLessThan(chip, 40)
+            let tray = 9 * chip + 8 * 4 + 4
+            XCTAssertLessThanOrEqual(tray, length - 24, "\(length)pt screen")
+        }
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 4, length: 390), 40)
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 20, length: 390), 30)
+    }
+
     /// Avoid Notch lifts the portrait tray off the home indicator; the
     /// palette must move with it rather than stay where the tray used to
     /// be (it covered half the tray on every Face ID iPhone).
