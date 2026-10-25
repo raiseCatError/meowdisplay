@@ -33,7 +33,9 @@ final class UnifiedMacAppTests: XCTestCase {
 
     func testTurningTheDisplayRoleOnEndsSharingThenStartsTheReceiver() {
         var state = MacAppRoleState(defaults: defaults)
-        XCTAssertEqual(state.setReceiverEnabled(true, defaults: defaults), [.endSenderSessions, .startReceiver])
+        XCTAssertEqual(state.setReceiverEnabled(true, defaults: defaults),
+                       [.endSenderSessions, .withdrawSenderAdvertisement, .startReceiver],
+                       "other receivers stop listing this Mac as one that will share with them")
         XCTAssertFalse(state.senderMayConnect)
         XCTAssertEqual(state.setReceiverEnabled(true, defaults: defaults), [], "idempotent")
     }
@@ -41,7 +43,8 @@ final class UnifiedMacAppTests: XCTestCase {
     func testTurningItOffStopsTheReceiverThenResumesSharing() {
         var state = MacAppRoleState(defaults: defaults)
         _ = state.setReceiverEnabled(true, defaults: defaults)
-        XCTAssertEqual(state.setReceiverEnabled(false, defaults: defaults), [.stopReceiver, .resumeSender])
+        XCTAssertEqual(state.setReceiverEnabled(false, defaults: defaults),
+                       [.stopReceiver, .advertiseSender, .resumeSender])
         XCTAssertTrue(state.senderMayConnect)
         XCTAssertEqual(state.setReceiverEnabled(false, defaults: defaults), [])
     }
@@ -51,27 +54,31 @@ final class UnifiedMacAppTests: XCTestCase {
         _ = state.setReceiverEnabled(true, defaults: defaults)
         let relaunched = MacAppRoleState(defaults: defaults)
         XCTAssertTrue(relaunched.receiverEnabled)
-        XCTAssertEqual(relaunched.launchEffects, [.startReceiver])
+        XCTAssertEqual(relaunched.launchEffects, [.withdrawSenderAdvertisement, .startReceiver])
         XCTAssertFalse(relaunched.senderMayConnect, "no sender session can start before the receiver is up")
     }
 
     func testRapidTogglingAlwaysEndsInOneConsistentRole() {
         var state = MacAppRoleState(defaults: defaults)
         var receiverRunning = false
+        var senderAdvertised = true
         for index in 0..<50 {
             for effect in state.setReceiverEnabled(index.isMultiple(of: 3), defaults: defaults) {
                 switch effect {
                 case .startReceiver: XCTAssertFalse(receiverRunning); receiverRunning = true
                 case .stopReceiver: XCTAssertTrue(receiverRunning); receiverRunning = false
+                case .withdrawSenderAdvertisement: XCTAssertTrue(senderAdvertised); senderAdvertised = false
+                case .advertiseSender: XCTAssertFalse(senderAdvertised); senderAdvertised = true
                 case .endSenderSessions, .resumeSender: break
                 }
             }
             XCTAssertEqual(receiverRunning, state.receiverEnabled)
             XCTAssertEqual(state.senderMayConnect, !receiverRunning)
+            XCTAssertEqual(senderAdvertised, !receiverRunning, "never advertised as a sender while a display")
         }
     }
 
-    func testTheStandaloneReceiverRunningBlocksTheDisplayRole() {
+    func testTheStandaloneReceiverRunningMakesTheDisplayRoleWait() {
         XCTAssertTrue(StandaloneReceiverConflict.isRunning(
             among: ["com.apple.finder", nil, "com.raisecaterror.meowdisplay.mac.receiver"]))
         XCTAssertTrue(StandaloneReceiverConflict.isRunning(among: ["com.raisecaterror.meowdisplay.mac.receiver.debug"]))

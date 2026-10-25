@@ -420,33 +420,21 @@ final class SenderController: ObservableObject {
     /// Which role has live sessions (see `MacAppRoleState`).
     private var roleState = MacAppRoleState(defaults: .standard)
     @Published private(set) var receiverModeEnabled = MacAppRoleState(defaults: .standard).receiverEnabled
-    /// Why the display role couldn't be turned on, until the next attempt.
-    @Published private(set) var receiverModeNotice: String?
 
     /// "Use This Mac as a Display". Turning it on ends this Mac's sharing
     /// sessions (their devices reconnect when it's turned off) and starts the
     /// receiver; turning it off stops the receiver and lets the sender
     /// reconnect.
+    /// While MeowDisplay Receiver runs, the role stays on but waits
+    /// (`ReceiverController.waitingForOtherReceiver`), saying so, and starts
+    /// by itself once it quits.
     func setReceiverModeEnabled(_ enabled: Bool) {
-        if enabled, StandaloneReceiverConflict.isRunning(
-            among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)) {
-            receiverModeNotice = String(localized: "Quit MeowDisplay Receiver first — it's already using this Mac as a display.")
-            return
-        }
-        receiverModeNotice = nil
         let effects = roleState.setReceiverEnabled(enabled, defaults: .standard)
         receiverModeEnabled = roleState.receiverEnabled
         applyRoleEffects(effects)
     }
 
     func applyLaunchRole() {
-        if roleState.receiverEnabled, StandaloneReceiverConflict.isRunning(
-            among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)) {
-            Log.info("roleDebug: standalone receiver running — display role not started at launch")
-            receiverModeNotice = String(localized: "Quit MeowDisplay Receiver first — it's already using this Mac as a display.")
-            setReceiverModeEnabled(false)
-            return
-        }
         applyRoleEffects(roleState.launchEffects)
     }
 
@@ -489,11 +477,22 @@ final class SenderController: ObservableObject {
                 // alert shows (MirrorUnavailableOfferAlert), as the
                 // standalone receiver does with its own window.
                 receiver.onNeedsAttention = { MacSettingsWindow.show() }
+                receiver.otherReceiverMessage = String(localized: "MeowDisplay Receiver is already using this Mac as a display. Quit it, and this Mac becomes a display here by itself.")
+                receiver.otherReceiverRunning = {
+                    StandaloneReceiverConflict.isRunning(
+                        among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier))
+                }
                 receiver.start()
                 Log.info("roleDebug: receiver started")
             case .stopReceiver:
                 ReceiverController.shared.stop()
                 Log.info("roleDebug: receiver stopped")
+            case .withdrawSenderAdvertisement:
+                pairingListener?.cancel()
+                pairingListener = nil
+                Log.info("roleDebug: sender advertisement withdrawn — this Mac is a display")
+            case .advertiseSender:
+                startPairingListener()
             case .resumeSender:
                 scheduleAutoConnect()
             }
@@ -1103,6 +1102,9 @@ final class SenderController: ObservableObject {
     }
 
     private func startPairingListener() {
+        // Not while this Mac is a display (see `MacAppRoleState.Effect`),
+        // and never twice.
+        guard roleState.senderMayConnect, pairingListener == nil else { return }
         guard let localID = TrustStore.shared.installID() else {
             Log.info("pairing listener not started: local Keychain identity/install ID unavailable")
             pairingMessage = "Pairing listener unavailable"

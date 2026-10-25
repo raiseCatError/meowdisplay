@@ -14,13 +14,15 @@ struct DisplayRoleSection: View {
             Toggle("Use This Mac as a Display", isOn: Binding(
                 get: { controller.receiverModeEnabled },
                 set: { controller.setReceiverModeEnabled($0) }))
-            if let notice = controller.receiverModeNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
             if controller.receiverModeEnabled {
-                LabeledContent("Status", value: receiver.statusTitle)
+                if receiver.waitingForOtherReceiver {
+                    // What to quit; the role starts by itself afterwards.
+                    Text(receiver.statusTitle)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    LabeledContent("Status", value: receiver.statusTitle)
+                }
             }
             if receiver.streaming || onOpenSettings != nil {
                 HStack {

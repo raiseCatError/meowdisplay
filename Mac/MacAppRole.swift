@@ -13,9 +13,15 @@ struct MacAppRoleState: Equatable {
         /// End every sender session without suppressing auto-reconnect, so
         /// the devices come back by themselves when the role switches back.
         case endSenderSessions
+        /// Stop advertising this Mac as a Mac to pair with and connect to
+        /// (`_opendisplay-mac-pair._tcp`): while it's a display, other
+        /// receivers shouldn't list it as a Mac that will share with them.
+        case withdrawSenderAdvertisement
         case startReceiver
         /// Stop the receiver, sending `closing` to a connected sender.
         case stopReceiver
+        /// Advertise the sender again.
+        case advertiseSender
         /// Let the sender reconnect its devices.
         case resumeSender
     }
@@ -38,20 +44,24 @@ struct MacAppRoleState: Equatable {
     /// What launching does: the display role comes back only if the user
     /// left it on. Off by default — a sender install never advertises a
     /// receiver it didn't ask for.
-    var launchEffects: [Effect] { receiverEnabled ? [.startReceiver] : [] }
+    var launchEffects: [Effect] { receiverEnabled ? [.withdrawSenderAdvertisement, .startReceiver] : [] }
 
     mutating func setReceiverEnabled(_ enabled: Bool, defaults: UserDefaults) -> [Effect] {
         guard enabled != receiverEnabled else { return [] }
         receiverEnabled = enabled
         defaults.set(enabled, forKey: Self.defaultsKey)
-        return enabled ? [.endSenderSessions, .startReceiver] : [.stopReceiver, .resumeSender]
+        return enabled
+            ? [.endSenderSessions, .withdrawSenderAdvertisement, .startReceiver]
+            : [.stopReceiver, .advertiseSender, .resumeSender]
     }
 }
 
 /// The standalone MeowDisplay Receiver (still shipped for macOS 12–13, and
 /// installed by existing users) listens on the same ports and advertises the
-/// same services. Two receivers on one Mac would race for them, so the
-/// unified app's display role doesn't start while it runs.
+/// same services. Current versions take `ReceiverOwnershipLock` like the
+/// display role does; already-released builds don't, so while any version
+/// runs the display role waits (`ReceiverController.otherReceiverRunning`)
+/// rather than fail to bind next to it.
 enum StandaloneReceiverConflict {
     static let bundleIdentifiers: Set<String> = [
         "com.raisecaterror.meowdisplay.mac.receiver",
