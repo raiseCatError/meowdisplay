@@ -84,11 +84,19 @@ Macs gain nothing over the standalone receiver they already have.
 - **Mirror unavailable:** when the sending Mac is headless and Mirror was asked for, Settings opens with the standalone receiver's "Use Extend" offer.
 - **Off and straight back on:** the new receiver starts only after the old one has released its listeners and network services. A stopped receiver is retired: a listener retry scheduled before the stop can't reopen a port.
 - **Quit:** with the display role on, quitting sends the receiver's `closing` first, as the standalone receiver does.
-- **Two receivers on one Mac** (`ReceiverOwnershipLock`): the display role and the standalone receiver both take one kernel file lock (`/Users/Shared/.meowdisplay-receiver.lock`) before opening any listener or advertising anything.
-  - Whichever starts second, in either order, binds nothing. It shows what to quit, checks again every 2 seconds, and starts by itself once the other lets go.
-  - The owner releases the lock only after its listeners have closed. The kernel releases it if the owner quits or crashes, so a stale lock can't block anyone.
+- **Two receivers on one Mac** (`ReceiverOwnershipLock`): the display role and the standalone receiver both take one kernel `flock` on `~/Library/Application Support/MeowDisplay/receiver.lock` before opening any listener or advertising anything. Neither app is sandboxed, so both use the same file.
+  - Whichever starts second, in either order, binds nothing. It shows what to quit, checks again every 2 seconds until it starts or is turned off (`stop()` cancels the check), and starts by itself once the other lets go.
+  - The owner releases the lock only after its listeners have closed, and keeps the descriptor open the whole time it owns the ports. The kernel releases it if the owner quits or crashes, so a stale lock can't block anyone. Release never unlinks the file: a waiting receiver must keep locking the same file.
   - Already-released MeowDisplay Receiver builds predate the lock, so the display role also waits while any standalone receiver is running (bundle id).
   - Never needed for safety: a second bind on the same port fails with "address in use" rather than sharing it (measured). The lock makes that failure explicit and recoverable instead of a silent retry loop.
+- **The lock file can't be planted or swapped.** A predictable name in the user's home isn't safe by itself, so:
+  - The path is walked from the home directory (from the account database, not `$HOME`) one component at a time with `openat(O_DIRECTORY | O_NOFOLLOW)`. No component is ever followed through a symlink. Missing folders are created `0700`.
+  - Every folder on the way (`~`, `Library`, `Application Support`, `MeowDisplay`) must be owned by this user and not group- or world-writable (`fstat` on the open descriptor). So nobody else can replace a component between the checks and the open.
+  - The file is opened with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` and created `0600`. A planted FIFO can't hang the open. Then `fstat` requires a regular file owned by this user with one link. An older build's `0644` file is tightened to `0600`.
+  - There's one location and no fallback. A second location would let two receivers lock different files.
+- **Fails closed.** If the lock can't be used safely (symlink, wrong owner, writable by others, not a regular file, hard link, permission denied, any other error), the receiver **does not start**. It never runs as though it owned the ports. The status says what's wrong and where. It isn't retried by itself; **Try Again** (role settings, or the standalone receiver's settings) checks again after the user fixes it. Turning the role off clears it.
+- **Ports taken by something else** (`ReceiverPortHealth`): the lock is per user, so it can't see a receiver in another login session or an unrelated app. There, the actual bind is the final word. When the media (9001) or pairing (9002) listener fails to bind, the status says which port is in use and what that means ("no Mac can connect", or "new Macs can't pair"). The existing 1-second listener retries continue and end when the receiver stops (a retired receiver never reopens a listener). The message clears itself once the listener is ready. QUIC (UDP 9001) failing alone isn't reported: TCP still carries the session.
+- **Cross-user limitation (accepted):** two macOS accounts logged in at once don't coordinate through the lock. Whichever binds second shows the port-in-use status and waits for the port. MeowDisplay doesn't try to see, stop or work around another user's processes, and has no privileged helper for this.
   - The receiver's pairing listener now retries a failed bind like its media listener, so pairing comes back once the port frees.
 - **Unchanged:** pairing, TLS 1.3, pinning, per-session input authorization and the wire protocol.
 
@@ -116,7 +124,7 @@ through the existing `appcast.xml` feed.
 
 ## Verified (automated, this branch)
 
-- **macOS suite:** `xcodebuild test -scheme OpenSidecarMac` passes **1989 tests, 0 failures**. That's 1946 on #25's head plus 43 new:
+- **macOS suite:** `xcodebuild test -scheme OpenSidecarMac` passes **2002 tests, 0 failures**. That's 1946 on #25's head plus 56 new:
   - `RolePreferencesIsolationTests` (14): the approval-policy leak in both directions, the receiver role's own default, original key names for existing installs, per-Mac overrides with the same peer id in both roles, role switching and relaunch, both authorization entry points, and per-role endpoint and Wake data. With the keys still shared, 12 of the 14 failed.
   - `UnifiedMacAppTests` (17):
     - role transitions, persistence and rapid toggling
@@ -130,15 +138,15 @@ through the existing `appcast.xml` feed.
     - the Dock/Command-Tab rule
     - the settings page and its search
     - a guard that the receiver's settings code never uses the sender's trust store or keys
-  - `ReceiverOwnershipTests` (12):
-    - both launch orders
-    - a receiver without the lock
-    - a quit or crashed owner
-    - read-only and unusable lock files
-    - retired listeners never reopening
-    - the pairing listener's retry
-    - a real second bind failing with "address in use"
-- **Two processes:** a command-line build of `ReceiverOwnership.swift` was run as two processes, in both orders and with the owner killed with `kill -9`. The second always waited, then started within one check of the owner going away.
+  - `ReceiverOwnershipTests` (25):
+    - both launch orders, and a receiver without the lock
+    - **a real second process** (`flock(2)` on the same file) in both orders: holding the lock, then exiting normally, being killed with `SIGKILL`, and release and reacquisition (the file is never unlinked)
+    - an existing file reused and tightened to `0600`; a new folder `0700` and file `0600`
+    - refused, without creating anything through it: a symlink at the lock path (dangling or not), a symlinked folder, a hard-linked file, a folder or FIFO at the file's name, a file where a folder belongs, a folder others can write to, an unwritable folder, a folder owned by root, and files and folders of another uid (`fstat` checks)
+    - an unusable lock never lets the receiver start
+    - the status messages for lock problems and taken ports
+    - a port held by another process: the receivers' listener parameters fail with "address in use" and `ReceiverPortHealth` reports it until cleared (an ephemeral port, so a running MeowDisplay isn't disturbed)
+    - retired listeners never reopening, the pairing listener's retry, and a real second bind failing with "address in use"
 - **Builds:** `OpenSidecarMac`, `OpenSidecarMacReceiver` (macOS 12 target) and `OpenSidecariOS` (generic device) all build. The unified bundle has the sender's id, `LSMinimumSystemVersion` 14.0, `LSUIElement`, `MeowDisplayReceiverRoleTrust = separate`, and the receiver code linked in.
 - **Not covered by automation:**
   - live Keychain isolation (the unsigned test bundle has no Keychain entitlement)
@@ -180,6 +188,8 @@ per-device Mirror/Extend and #25's input on the same builds.
     - **Display role first:** with the role on, open the standalone receiver. Its status says MeowDisplay is using this Mac as a display; Mac A keeps streaming to the role. Turn the role off: the standalone receiver starts by itself and is pairable.
     - Repeat the first order with an already-released MeowDisplay Receiver: the role waits the same way.
     - Relaunch MeowDisplay while the standalone receiver runs: the switch stays on and waiting.
+    - **Unsafe lock:** quit both, replace `~/Library/Application Support/MeowDisplay/receiver.lock` with a symlink (`ln -sf /tmp/x …`), turn the role on: it doesn't start, says the file is a symbolic link, and binds nothing. Remove the link, click Try Again: it starts.
+    - **Port taken:** with the standalone receiver running in a second macOS account (fast user switching), turn the role on in the first: the status says port 9001 is in use. Quit the other account's receiver: the role comes up by itself.
 14. **Rollback.** Reinstall 1.20.0 on Mac A: everything works as before.
 
 ## Remaining work before release
@@ -187,5 +197,5 @@ per-device Mirror/Extend and #25's input on the same builds.
 - **Hardware QA** of the checklist above, with #24 and #25.
 - **String catalog:** the receiver's strings and the new page's strings aren't in MeowDisplay's catalog yet. Xcode adds them on the next IDE build. The catalogs are English-only, so nothing user-visible changes meanwhile.
 - **An already-released MeowDisplay Receiver opened second:** it predates the lock and can't be changed. Its own binds fail, so it doesn't disturb the running display role, but it shows no explanation. When the role turns off, its media listener takes the ports, while its pairing listener (unlike this branch's) doesn't retry. Updating the standalone receiver to this branch's version fixes both.
-- **Another app on ports 9001/9002:** a non-MeowDisplay app holding them still just causes the existing silent bind retries.
+- **Another account or app on ports 9001/9002:** shown as "port in use" and retried every second while the receiver is on. The lock doesn't coordinate accounts (by design, see above).
 - **Optional migration:** the shared-access-group migration for standalone receiver users, if wanted.
