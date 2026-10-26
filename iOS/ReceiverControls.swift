@@ -1364,6 +1364,12 @@ extension ReceiverControlOverlay {
             .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
         let occupied = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
             + [gearFrame, paletteFrame].compactMap { $0 }
+        // The touch region, built from typed pieces: as one `+`/`??` chain
+        // inside the ZStack it exceeded Xcode 26's type-checking budget.
+        let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
+            .map { $0.frame.insetBy(dx: -4, dy: -4) }
+        let gearRegion: [CGRect] = gearFrame.map { [$0.insetBy(dx: -4, dy: -4)] } ?? []
+        let paletteRegion: [CGRect] = wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? paletteFrame.map { [$0] } ?? []
 
         ZStack(alignment: .topLeading) {
             ForEach(Array(layout.strips.enumerated()), id: \.offset) { _, strip in
@@ -1425,11 +1431,7 @@ extension ReceiverControlOverlay {
             // outside this region and take their own taps.
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
-                .contentShape(ControlRegionShape(
-                    rects: (autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
-                                .map { $0.frame.insetBy(dx: -4, dy: -4) })
-                        + (gearFrame.map { [$0.insetBy(dx: -4, dy: -4)] } ?? [])
-                        + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? paletteFrame.map { [$0] } ?? [])))
+                .contentShape(ControlRegionShape(rects: mainRegion + gearRegion + paletteRegion))
                 .gesture(controlGesture())
         }
         .onAppear {
