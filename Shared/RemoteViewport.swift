@@ -434,9 +434,15 @@ struct ManualViewportState: Equatable {
     /// Manual zoom can never go below 1x (no such thing as "zoomed out"
     /// of the normal fit) — see `clamped(against:)`.
     static let minScale: CGFloat = 1
-    /// Initial cap on manual magnification (PRODUCT RULE: "approximately
-    /// 3x unless architecture suggests a better bound" — nothing here does).
-    static let maxScale: CGFloat = 3
+    /// Cap on manual magnification. Zoom is a transform on the content layer
+    /// (see `VideoView.applyContentGeometry`): the stream resolution, the
+    /// decoded frame and the Metal drawable are the same at any scale, so
+    /// zooming adds no network, decode or render-pass work. How iOS
+    /// composites a scaled or rotated video layer is up to the system and
+    /// can only be measured on hardware (ux-review/ios-control-surface-
+    /// performance.md). Unrelated to Zoom While Typing's
+    /// `RemoteViewportCalculator.defaultMaxZoom`.
+    static let maxScale: CGFloat = 8
 
     var scale: CGFloat = minScale
     /// Pan offset, in the host view's local points, applied to the scaled
@@ -449,11 +455,16 @@ struct ManualViewportState: Equatable {
 
     var isIdentity: Bool { self == .identity }
 
-    /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` to
-    /// `panLimits(against:)`: translation is independent of zoom (100% can
-    /// pan too), but any edge of the remote display may travel at most to
-    /// the viewport's center, never past it — so the Mac can be brought
-    /// within reach from any direction yet never flung off screen. The
+    /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` so that
+    /// translation is independent of zoom (100% can pan too), but any edge
+    /// of the remote display may travel at most to the viewport's center,
+    /// never past it — so the Mac can be brought within reach from any
+    /// direction yet never flung off screen. The rule holds in the
+    /// picture's own (rotated) frame: the viewport's center always stays on
+    /// the picture. Clamping each screen axis to the rotated bounding box
+    /// instead let a tilted, diagonally panned picture leave the screen
+    /// entirely, and that gap grows with zoom. At 0°, 90° and 180° the two
+    /// are identical. The
     /// viewport's center is `base`'s center: the normal presentation is
     /// centered in the surface, and the keyboard-open one in the area above
     /// the keyboard. The single source of truth for this math — both
@@ -466,18 +477,52 @@ struct ManualViewportState: Equatable {
         var copy = self
         copy.scale = scale.isFinite ? min(max(scale, Self.minScale), Self.maxScale) : Self.minScale
         copy.rotationRadians = rotationRadians.isFinite ? Self.normalizedAngle(rotationRadians) : 0
-        guard let limits = copy.panLimits(against: base) else {
+        guard copy.panLimits(against: base) != nil else {
             copy.panX = 0
             copy.panY = 0
             copy.rotationRadians = 0
             return copy
         }
-        copy.panX = panX.isFinite ? min(max(panX, -limits.x), limits.x) : 0
-        copy.panY = panY.isFinite ? min(max(panY, -limits.y), limits.y) : 0
+        let halfWidth = base.width * copy.scale / 2
+        let halfHeight = base.height * copy.scale / 2
+        let c = cos(copy.rotationRadians)
+        let s = sin(copy.rotationRadians)
+        let x = panX.isFinite ? panX : 0
+        let y = panY.isFinite ? panY : 0
+        // The viewport's center relative to the picture's center, in the
+        // picture's unrotated frame...
+        func local(_ x: CGFloat, _ y: CGFloat) -> (x: CGFloat, y: CGFloat) {
+            (-(x * c + y * s), -(-x * s + y * c))
+        }
+        // ...with a millionth of a point of slack: a pan this clamp itself
+        // put on the edge maps back a rounding error outside it.
+        func isOnPicture(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            let point = local(x, y)
+            return abs(point.x) <= halfWidth + 1e-6 && abs(point.y) <= halfHeight + 1e-6
+        }
+        var resultX = x
+        var resultY = y
+        // Already on the picture: the pan is kept exactly, so re-clamping
+        // (restore, relayout) never nudges it by rounding. Otherwise the
+        // nearest point of the picture, turned back into a screen-space pan.
+        if !isOnPicture(x, y) {
+            let unclamped = local(x, y)
+            let localX = min(max(unclamped.x, -halfWidth), halfWidth)
+            let localY = min(max(unclamped.y, -halfHeight), halfHeight)
+            resultX = -(localX * c - localY * s)
+            resultY = -(localX * s + localY * c)
+        }
         // Floating-point dust from a pinch that ended back at rest must not
-        // leave a technically-non-identity state behind.
-        if abs(copy.panX) < 0.01 { copy.panX = 0 }
-        if abs(copy.panY) < 0.01 { copy.panY = 0 }
+        // leave a technically-non-identity state behind — unless, tilted,
+        // dropping it would step the center off the picture's edge.
+        let snappedX = abs(resultX) < 0.01 ? 0 : resultX
+        let snappedY = abs(resultY) < 0.01 ? 0 : resultY
+        if isOnPicture(snappedX, snappedY) {
+            resultX = snappedX
+            resultY = snappedY
+        }
+        copy.panX = resultX
+        copy.panY = resultY
         return copy
     }
 

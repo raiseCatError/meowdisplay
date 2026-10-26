@@ -37,6 +37,35 @@ final class ReceiverControlsTourTests: XCTestCase {
         app.buttons["Exit Demo"].tap()
     }
 
+    /// Local pinch-zoom to the 8× cap, then a twist, over the sample
+    /// desktop: captured for review, and the controls must stay usable.
+    @MainActor
+    func testHighMagnificationTour() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let desktop = element("Sample Mac desktop")
+        XCTAssertTrue(desktop.waitForExistence(timeout: 3))
+        for _ in 0..<3 {
+            desktop.pinch(withScale: 2.2, velocity: 2)
+            sleep(1)
+        }
+        snapshot("zoom-01-eight-times")
+        desktop.rotate(.pi / 7, withVelocity: 1)
+        sleep(1)
+        snapshot("zoom-02-eight-times-rotated")
+        // One finger pans only under Move View (the iPad radial layout's).
+        let moveView = element("Move View")
+        if moveView.exists, moveView.isHittable {
+            moveView.tap()
+            for _ in 0..<4 { desktop.swipeLeft(velocity: .fast); desktop.swipeUp(velocity: .fast) }
+            sleep(1)
+            snapshot("zoom-03-extreme-pan")
+            moveView.tap()
+        }
+        XCTAssertTrue(element("Settings").exists, "Settings stays reachable while zoomed")
+        app.buttons["Exit Demo"].tap()
+    }
+
     /// Return reaches the (sample) Mac from the Function Tray with the
     /// keyboard closed, and from the keyboard bar with it open.
     @MainActor

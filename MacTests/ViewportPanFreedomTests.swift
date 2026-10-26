@@ -81,10 +81,18 @@ final class ViewportPanFreedomTests: XCTestCase {
         XCTAssertEqual(corners.map(\.x).min() ?? 0, center.x, accuracy: 0.01)
         XCTAssertEqual(corners.map(\.y).min() ?? 0, center.y, accuracy: 0.01)
 
+        // A tilted picture's own right edge stops at the center: the center
+        // stays on the picture (the rotated bounding box let it slide off).
         let tilted = ManualViewportState(scale: 1.5, panX: -10_000, rotationRadians: .pi / 6).clamped(against: base)
-        let tiltedCorners = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1), CGPoint(x: 1, y: 1)]
-            .map(displayed(tilted).viewPoint(forRemote:))
-        XCTAssertEqual(tiltedCorners.map(\.x).max() ?? 0, center.x, accuracy: 0.01)
+        let onPicture = try XCTUnwrap(displayed(tilted).remotePoint(forView: center))
+        XCTAssertEqual(onPicture.x, 1, accuracy: 0.0001)
+        let diagonal = ManualViewportState(scale: 3, panX: 10_000, panY: 10_000, rotationRadians: .pi / 4)
+            .clamped(against: base)
+        let unrotated = displayed(diagonal)
+        let local = CGPoint(x: center.x - unrotated.displayedRect.midX, y: center.y - unrotated.displayedRect.midY)
+        let c = cos(-diagonal.rotationRadians), s = sin(-diagonal.rotationRadians)
+        XCTAssertLessThanOrEqual(abs(local.x * c - local.y * s), unrotated.displayedRect.width / 2 + 0.001)
+        XCTAssertLessThanOrEqual(abs(local.x * s + local.y * c), unrotated.displayedRect.height / 2 + 0.001)
     }
 
     func testInvalidGeometryResetsToIdentity() {
