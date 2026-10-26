@@ -161,7 +161,13 @@ enforces the grant again.
 The Function Tray chips (iPhone and iPad) and the iPad Wheel palette's
 wedges now perform their action for VoiceOver, Voice Control and Switch
 Control, instead of only being labelled. On iPad, the chip's
-`.accessibilityElement(children: .ignore)` had dropped its tap action.
+`.accessibilityElement(children: .ignore)` had dropped its tap action. A
+wedge's action ends the palette through `ControlInteractionState.finish(with:)`,
+the same path a touch selection takes. That's checked in source only. A UI
+test confirms the Function Tray's Return chip is exposed as a button, but no
+automated test covers Wheel wedges, and XCTest can't trigger accessibility
+actions. Activation with real assistive technology is in the hardware
+checklist.
 
 | Function Tray, iPhone 17e (390 pt) | Keyboard bar, iPhone SE (375 pt) | Radial layout, iPad Pro 13 |
 |---|---|---|
@@ -196,12 +202,24 @@ Re-clamping an in-range state (restore, relayout) leaves it exactly as it was.
 - **Fixed-size chip glyphs:** chips over live video ignore Dynamic Type by
   design. Settings, the input prompt and the interruption overlay use system
   text styles.
-- **`DemoModeSmokeTests` on a 375 pt iPhone:** on the iPhone SE (3rd
-  generation) simulator, the landscape run doesn't find the Settings ›
-  Gestures row while scrolling the short list (cause not confirmed). Two
-  test-side scrolling fixes didn't hold on both orientations and were
-  reverted. The test passes on every larger device; Settings itself is
-  unchanged on this branch.
+- **`DemoModeSmokeTests` can't walk Settings on a 375 pt iPhone in
+  landscape. This predates the branch: it's a test scrolling issue, not an
+  app bug.**
+  - **Cause:** on the iPhone SE (3rd generation, iOS 26.5) the landscape
+    Settings sheet shows three rows above its pinned Search field and Demo
+    footer. The Gestures row sits under them, so XCTest reports it as not
+    hittable. The test's single `swipeUp()` then flings the list to the end
+    (Permissions … Developer), the row is recycled, and the lookup fails.
+    The row scrolls into view normally by hand.
+  - **Baseline comparison:** the shipped base (`cbbad7f`) and this branch
+    behave identically with the same test on the same simulator: portrait
+    3/3 pass and landscape 0/3 on each, with the same list state at failure.
+    For that comparison both builds located Explore Demo by its identifier.
+    On the base the unchanged test can't find the Explore Demo button at all
+    (finding 5).
+  - **Test unchanged:** two ad-hoc scrolling changes didn't hold in both
+    orientations and were reverted. A fix needs a scrolling helper verified
+    on every device size. The test passes on all larger devices.
 
 ## Control Surface mode
 
