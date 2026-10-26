@@ -64,6 +64,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !StartAtLoginPolicy.wasLaunchedAsLoginItem(), !presentation.showsMenuBarIcon {
             MacSettingsWindow.show()
         }
+        // Use This Mac as a Display comes back only if the user left it on.
+        controller.applyLaunchRole()
+    }
+
+    // Quitting while this Mac is a display: tell the sending Mac we're
+    // closing (it ends the session instead of redialing a dead peer) before
+    // the process goes — the standalone receiver's quit path, unchanged.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ReceiverController.shared.active else { return .terminateNow }
+        ReceiverController.shared.stop {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -288,6 +301,14 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var videoWidth = 0
     @Published var videoHeight = 0
     @Published var videoFPS = 0
+    /// The Mirror/Extend mode and Mirror source this session's pipeline was
+    /// actually built with (issue #20) — per device, never the Mac default
+    /// unless this device follows it. `SenderController.displayModes` decides
+    /// it; this copy is what the running `sender` really does.
+    @Published var displayAssignment: DeviceDisplayAssignment
+    /// Why this device's last mode request couldn't be honored, until the
+    /// next successful change.
+    @Published var displayModeNotice: String?
 
     var statusWithRoute: String {
         route.map { "\(status) · \($0.rawValue)" } ?? status
@@ -303,8 +324,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     }
 
     init(id: String, logicalID: String, intendedPeerID: String?, attempt: AutoConnectPolicy.Attempt,
-         target: ConnectionTarget, name: String, sender: MacSender) {
+         target: ConnectionTarget, name: String, sender: MacSender, displayAssignment: DeviceDisplayAssignment) {
         self.id = id
+        self.displayAssignment = displayAssignment
         self.logicalID = logicalID
         self.intendedPeerID = intendedPeerID
         self.attempt = attempt
@@ -329,7 +351,7 @@ final class SenderController: ObservableObject {
         didSet {
             guard presentation != oldValue else { return }
             UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
-            NSApp.setActivationPolicy(presentation.showsDockIcon ? .regular : .accessory)
+            applyActivationPolicy()
             // Live switch: create/destroy the single status item right here,
             // rather than only reading the setting at launch — this is the
             // fix for the mode never actually gaining a menu-bar icon.
@@ -393,8 +415,97 @@ final class SenderController: ObservableObject {
         keepMacAvailableActive = false
     }
 
+    // MARK: - Use This Mac as a Display
+
+    /// Which role has live sessions (see `MacAppRoleState`).
+    private var roleState = MacAppRoleState(defaults: .standard)
+    @Published private(set) var receiverModeEnabled = MacAppRoleState(defaults: .standard).receiverEnabled
+
+    /// "Use This Mac as a Display". Turning it on ends this Mac's sharing
+    /// sessions (their devices reconnect when it's turned off) and starts the
+    /// receiver; turning it off stops the receiver and lets the sender
+    /// reconnect.
+    /// While MeowDisplay Receiver runs, the role stays on but waits
+    /// (`ReceiverController.waitingForOtherReceiver`), saying so, and starts
+    /// by itself once it quits.
+    func setReceiverModeEnabled(_ enabled: Bool) {
+        let effects = roleState.setReceiverEnabled(enabled, defaults: .standard)
+        receiverModeEnabled = roleState.receiverEnabled
+        applyRoleEffects(effects)
+    }
+
+    func applyLaunchRole() {
+        applyRoleEffects(roleState.launchEffects)
+    }
+
+    /// Whether the display role's video window is on screen.
+    private var displayWindowVisible = false
+
+    /// Dock and Command-Tab: the user's presentation choice, overridden to a
+    /// regular app while the display window is up so Command-Tab is always a
+    /// way out of it (`MacAppActivationPolicy`).
+    private func applyActivationPolicy() {
+        NSApp.setActivationPolicy(MacAppActivationPolicy.isRegular(
+            showsDockIcon: presentation.showsDockIcon, displayWindowVisible: displayWindowVisible)
+            ? .regular : .accessory)
+    }
+
+    private func applyRoleEffects(_ effects: [MacAppRoleState.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .endSenderSessions:
+                Log.info("roleDebug: ending \(sessions.count) sender session(s) — this Mac becomes a display")
+                for session in sessions {
+                    // Not `disconnect(_:)`: that suppresses auto-reconnect,
+                    // and these devices should come back with the role.
+                    session.sender.disconnect { [weak self, weak session] in
+                        guard let self, let session else { return }
+                        self.end(session)
+                    }
+                }
+            case .startReceiver:
+                let receiver = ReceiverController.shared
+                // An accessory (menu-bar-only) app can't be Command-Tabbed
+                // to or away from; while the display window is up the app is
+                // a regular one, so Command-Tab is always the way out.
+                receiver.onVideoWindowVisibilityChanged = { [weak self] visible in
+                    guard let self else { return }
+                    self.displayWindowVisible = visible
+                    self.applyActivationPolicy()
+                }
+                // The Mirror-unavailable offer: bring Settings up, where its
+                // alert shows (MirrorUnavailableOfferAlert), as the
+                // standalone receiver does with its own window.
+                receiver.onNeedsAttention = { MacSettingsWindow.show() }
+                receiver.otherReceiverMessage = String(localized: "MeowDisplay Receiver is already using this Mac as a display. Quit it, and this Mac becomes a display here by itself.")
+                receiver.otherReceiverRunning = {
+                    StandaloneReceiverConflict.isRunning(
+                        among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier))
+                }
+                receiver.start()
+                Log.info("roleDebug: receiver started")
+            case .stopReceiver:
+                ReceiverController.shared.stop()
+                Log.info("roleDebug: receiver stopped")
+            case .withdrawSenderAdvertisement:
+                pairingListener?.cancel()
+                pairingListener = nil
+                Log.info("roleDebug: sender advertisement withdrawn — this Mac is a display")
+            case .advertiseSender:
+                startPairingListener()
+            case .resumeSender:
+                scheduleAutoConnect()
+            }
+        }
+    }
+
     @Published var sessions: [DeviceSession] = []
     private var suppressModeRestart = false
+    /// Per-device Mirror/Extend authority (issue #20). Starts from the stored
+    /// Mac defaults; every mode-affecting event goes through it.
+    private lazy var displayModes = DisplayModeCoordinator(
+        defaults: DisplayModeDefaults(mode: mode, mirrorDisplayUUID: mirrorDisplayUUID),
+        videoEnabled: videoEnabled)
     @Published var discovered: [NWBrowser.Result] = []
     @Published var usbDevices: [UsbmuxDevice] = []
     let pairingPrompt = PairingPromptModel()
@@ -409,10 +520,11 @@ final class SenderController: ObservableObject {
     let sessionApprovalPrompt = SessionApprovalPromptModel()
     private var pairingObservation: AnyCancellable?
     // `-mode mirror` / `-mode extend` launch argument also works.
-    // Mode/quality apply per-pipeline at construction, so a change rebuilds
-    // every session. Doing that here — rather than in the Settings picker's
-    // onChange — keeps one authoritative transition path shared by the Mac's
-    // own picker and a receiver's `displayModeRequest`.
+    // The Mac-wide DEFAULT mode (issue #20): what a device that hasn't chosen
+    // its own mode uses. Mode applies per-pipeline at construction, so a
+    // change rebuilds exactly the sessions that follow the default and now
+    // capture differently — never a device with its own choice. A device's
+    // own choice goes through `requestMode(_:for:)` instead.
     @Published var mode = VideoModePolicy.normalized(
         mode: CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend,
         videoEnabled: UserDefaults.standard.object(forKey: "videoEnabled") == nil
@@ -420,7 +532,7 @@ final class SenderController: ObservableObject {
         didSet {
             guard mode != oldValue else { return }
             UserDefaults.standard.set(mode.rawValue, forKey: "mode")
-            if !suppressModeRestart { restartAll() }
+            if !suppressModeRestart { rebuild(displayModes.setDefaultMode(mode)) }
         }
     }
     // Mirror's authoritative availability signal — Extend has no such
@@ -523,10 +635,10 @@ final class SenderController: ObservableObject {
     var effectiveQuality: StreamQuality {
         StreamQuality.effective(mode: streamingMode, stored: quality)
     }
-    // Mirror-mode's explicit display choice: a stable UUID (never a raw
-    // CGDirectDisplayID — see MirrorDisplaySelection.swift), or nil for
-    // Automatic. Irrelevant to Extend, which always uses its own virtual
-    // display.
+    // Mirror-mode's DEFAULT display choice (issue #20: a device can choose
+    // its own): a stable UUID (never a raw CGDirectDisplayID — see
+    // MirrorDisplaySelection.swift), or nil for Automatic. Irrelevant to
+    // Extend, which always uses its own virtual display.
     // Default Extend shape for any peer with no per-peer stored preference of
     // its own yet (see `ExtendDisplayShapeStore`). Not itself pushed to
     // active sessions on change — that would make an already-customized
@@ -548,14 +660,15 @@ final class SenderController: ObservableObject {
         didSet {
             guard mirrorDisplayUUID != oldValue else { return }
             UserDefaults.standard.set(mirrorDisplayUUID, forKey: "mirrorDisplayUUID")
-            if mode == .mirror { restartAll() }
+            // Only mirroring devices that follow the default source move.
+            rebuild(displayModes.setDefaultMirrorDisplay(mirrorDisplayUUID))
         }
     }
     /// Incoming session requests from paired receivers connect without a
     /// prompt unless a per-device policy overrides this. Not input
     /// permission, not Auto-Reconnect.
-    @Published var automaticallyAllowConnections = IncomingSessionPolicyStore.automaticallyAllow() {
-        didSet { IncomingSessionPolicyStore.setAutomaticallyAllow(automaticallyAllowConnections) }
+    @Published var automaticallyAllowConnections = IncomingSessionPolicyStore.automaticallyAllow(role: .sender) {
+        didSet { IncomingSessionPolicyStore.setAutomaticallyAllow(automaticallyAllowConnections, role: .sender) }
     }
 
     @Published var allowInput = InputPolicy.allowsInput() {
@@ -627,8 +740,109 @@ final class SenderController: ObservableObject {
         Task { @MainActor in self.mode = requested }
     }
 
+    // MARK: - Per-device display mode (issue #20)
+
+    /// One device's own mode — its device settings on this Mac, its
+    /// receiver's `displayModeRequest`, Connect with Mirror/Extend, or
+    /// session approval. Becomes that device's remembered choice and rebuilds
+    /// only its pipeline; every other device keeps running untouched.
+    func requestMode(_ requested: CaptureMode, for session: DeviceSession) {
+        handleDisplayModeOutcome(
+            displayModes.requestMode(requested, sessionID: session.id,
+                                     hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow()),
+            for: session)
+    }
+
+    /// "Use Mac Default" for one device's mode.
+    func followDefaultMode(for session: DeviceSession) {
+        handleDisplayModeOutcome(displayModes.followDefaultMode(sessionID: session.id), for: session)
+    }
+
+    /// One device's own Mirror source; `nil` follows the Mac default source.
+    func requestMirrorSource(_ source: MirrorSourcePreference?, for session: DeviceSession) {
+        handleDisplayModeOutcome(displayModes.requestMirrorSource(source, sessionID: session.id), for: session)
+    }
+
+    /// The device's remembered choice, for its settings page.
+    func displayModePreference(for session: DeviceSession) -> DeviceDisplayModePreference {
+        displayModes.preference(peerID: displayModes.live[session.id]?.peerID)
+    }
+
+    private func handleDisplayModeOutcome(_ outcome: DisplayModeChangeOutcome, for session: DeviceSession) {
+        switch outcome {
+        case .rejected(.unknownSession):
+            return
+        case .rejected(let rejection):
+            Log.info("routeDebug: rejected \(session.id) mode request — \(rejection)")
+            session.displayModeNotice = switch rejection {
+            case .noPhysicalDisplay: String(localized: "Mirror needs an active physical display. This device keeps its current mode.")
+            case .videoOff: String(localized: "Extend needs video. Turn video back on to extend onto this device.")
+            case .unknownSession: nil
+            }
+            // Tell this receiver its request didn't take — nobody else.
+            session.sender.pushDisplayModeState()
+            if rejection == .noPhysicalDisplay { session.sender.pushMirrorUnavailable() }
+        case .unchanged, .rebuild:
+            session.displayModeNotice = nil
+            // The coordinator is the authority; the session's own copy is
+            // what its pipeline was built with. Rebuild only if they differ.
+            reconcileDisplayMode(session)
+        }
+    }
+
+    /// Rebuilds `session` if its pipeline doesn't capture the way the
+    /// coordinator now says it should; otherwise just refreshes the UI copy
+    /// (who-chose-it flags) and confirms the mode to its receiver.
+    private func reconcileDisplayMode(_ session: DeviceSession) {
+        guard let wanted = displayModes.assignment(sessionID: session.id) else { return }
+        guard wanted.capturesSame(as: session.displayAssignment) else {
+            // Yield first: this can run inside a SwiftUI picker's own update
+            // transaction (see `requestMode(_:)`), and a rebuild publishes.
+            Task { @MainActor in self.rebuild(session) }
+            return
+        }
+        session.displayAssignment = wanted
+        session.sender.pushDisplayModeState()
+    }
+
+    private func rebuild(_ plan: [String: DeviceDisplayAssignment]) {
+        for sessionID in plan.keys.sorted() {
+            guard let session = session(for: sessionID) else { continue }
+            rebuild(session)
+        }
+    }
+
+    /// `restartAll()` for ONE session: the same teardown and the same carried
+    /// invitation, so the receiver recognizes the rebuilt pipeline. The
+    /// coordinator entry survives (same session id), which is what carries
+    /// the new assignment into `startSession`.
+    private func rebuild(_ session: DeviceSession) {
+        guard sessions.contains(where: { $0 === session }),
+              let wanted = displayModes.assignment(sessionID: session.id),
+              !wanted.capturesSame(as: session.displayAssignment) else { return }
+        Log.info("routeDebug: rebuilding \(session.id) for \(wanted.mode.rawValue) "
+            + "mirrorSource=\(wanted.mirrorDisplayUUID ?? "auto") — other sessions untouched")
+        session.invitation.mode = wanted.mode.receiverMode
+        let target = session.target
+        let carried = session.failed ? nil : continuation(of: session)
+        session.sender.stop()
+        sessionObservations.removeValue(forKey: ObjectIdentifier(session))
+        sessions.removeAll { $0 === session }
+        connect(to: target, continuation: carried)
+        displayModes.retain(sessionIDs: Set(sessions.map(\.id)))
+        autoConnect()   // a rebuilt WiFi session may deserve its cable back
+    }
+
     func requestVideoEnabled(_ enabled: Bool) {
         guard enabled != videoEnabled else { return }
+        if enabled {
+            displayModes.enableVideo()
+            videoEnabled = true
+            return
+        }
+        // Video is Mac-wide; the mode hand-off is per device (issue #20).
+        let hasPhysicalDisplay = hasUsablePhysicalDisplayNow()
+        let transitioning = Set(displayModes.disableVideo(hasUsablePhysicalDisplay: hasPhysicalDisplay))
         // Mirror is established through the existing authoritative mode
         // transition before capture is stopped — this reclaims the virtual
         // display's system resources by handing input/capture off to a
@@ -641,9 +855,8 @@ final class SenderController: ObservableObject {
         // video back on never restores Extend implicitly (that comment
         // still applies to the Mirror path below); staying in Extend here
         // means there is nothing to "restore" — it never left.
-        if !enabled, mode == .extend,
-           !MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow()) {
-            let transitioning = sessions
+        if !MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasPhysicalDisplay) {
+            let transitioning = sessions.filter { $0.displayAssignment.mode == .extend }
             guard !transitioning.isEmpty else {
                 videoEnabled = false
                 return
@@ -660,27 +873,29 @@ final class SenderController: ObservableObject {
         }
         // Mirror is established through the existing authoritative mode
         // transition before capture is stopped. Turning video back on never
-        // restores Extend implicitly.
-        if !enabled, mode == .extend {
-            suppressModeRestart = true
-            mode = .mirror
-            suppressModeRestart = false
-            let transitioning = sessions
-            guard !transitioning.isEmpty else {
-                videoEnabled = false
-                return
+        // restores Extend implicitly. The coordinator already moved the
+        // default (and any device that chose Extend) to Mirror.
+        suppressModeRestart = true
+        mode = displayModes.defaultMode
+        suppressModeRestart = false
+        let transitioningSessions = sessions.filter { transitioning.contains($0.id) }
+        for session in sessions {
+            if let assignment = displayModes.assignment(sessionID: session.id) {
+                session.displayAssignment = assignment
             }
-            var remaining = transitioning.count
-            for session in transitioning {
-                session.sender.transitionToMirrorAndDisableVideo { [weak self] in
-                    guard let self else { return }
-                    remaining -= 1
-                    if remaining == 0 { self.videoEnabled = false }
-                }
-            }
+        }
+        guard !transitioningSessions.isEmpty else {
+            videoEnabled = false
             return
         }
-        videoEnabled = enabled
+        var remaining = transitioningSessions.count
+        for session in transitioningSessions {
+            session.sender.transitionToMirrorAndDisableVideo { [weak self] in
+                guard let self else { return }
+                remaining -= 1
+                if remaining == 0 { self.videoEnabled = false }
+            }
+        }
     }
 
     private var browser: NWBrowser?
@@ -851,7 +1066,11 @@ final class SenderController: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.discovered = Array(results)
+                // This Mac's own "Use This Mac as a Display" role is never
+                // a device to list or dial.
+                let ownReceiverIDs = Set([SameAppPeerFilter.receiverRoleInstallID()].compactMap { $0 })
+                self.discovered = SameAppPeerFilter.excludingSameApp(Array(results), ownIDs: ownReceiverIDs,
+                                                                     txtID: self.txtID(of:))
                 self.handleReceiverConnectRequests(in: self.discovered)
                 self.failoverPendingSessions()
                 self.endSessionsWhoseServiceVanished()
@@ -883,6 +1102,9 @@ final class SenderController: ObservableObject {
     }
 
     private func startPairingListener() {
+        // Not while this Mac is a display (see `MacAppRoleState.Effect`),
+        // and never twice.
+        guard roleState.senderMayConnect, pairingListener == nil else { return }
         guard let localID = TrustStore.shared.installID() else {
             Log.info("pairing listener not started: local Keychain identity/install ID unavailable")
             pairingMessage = "Pairing listener unavailable"
@@ -1292,7 +1514,7 @@ final class SenderController: ObservableObject {
         if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
             if dial(.wifi(localResult), via: "local Bonjour") { return }
         }
-        if RemoteEndpointStore.endpoint(forPeerID: peerID) != nil {
+        if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil {
             if dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
         }
         guard let observedHost else {
@@ -1311,7 +1533,9 @@ final class SenderController: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, changes in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.receiverPairingResults = Array(results)
+                let ownReceiverIDs = Set([SameAppPeerFilter.receiverRoleInstallID()].compactMap { $0 })
+                self.receiverPairingResults = SameAppPeerFilter.excludingSameApp(
+                    Array(results), ownIDs: ownReceiverIDs, txtID: self.txtID(of:))
                 #if DEBUG
                 Log.info("pairing browser changed: results=\(results.count) changes=\(changes.count)")
                 for result in results {
@@ -1386,7 +1610,7 @@ final class SenderController: ObservableObject {
             if localStarted { continue }
             // A present-but-blocked/unusable local record must not end
             // route evaluation: fall through to a configured Remote hint.
-            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
             guard endpointFound else { continue }
             connect(to: .remote(peerID: peerID), userInitiated: true, initiator: .receiver,
                     needsSenderApproval: needsApproval)
@@ -1419,7 +1643,7 @@ final class SenderController: ObservableObject {
         if let hostOverride, let portOverride {
             resolvedHost = hostOverride
             resolvedPort = portOverride
-        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) {
+        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) {
             resolvedHost = hint.host
             resolvedPort = hint.port
         } else {
@@ -1571,21 +1795,23 @@ final class SenderController: ObservableObject {
     func forgetPairing(peerID: String) {
         Log.info("trustDebug: forgetPairingCalled peerID=\(peerID)")
         Log.info("trustDebug: trustBefore=\(TrustStore.shared.hasPin(peerID: peerID))")
-        Log.info("trustDebug: remoteEndpointBefore=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
-        Log.info("trustDebug: wakeMetadataBefore=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: remoteEndpointBefore=\(RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil)")
+        Log.info("trustDebug: wakeMetadataBefore=\(WakeMetadataStore.metadata(forPeerID: peerID, role: .sender) != nil)")
         ForgetDeviceAction.perform(
             peerID: peerID,
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
-            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0) },
-            removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0) },
+            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0, role: .sender) },
+            removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0, role: .sender) },
             removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) },
-            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0) },
+            removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender) },
             removeNetworkTransportState: {
                 NetworkTransportPreferenceStore.remove(peerID: $0)
                 PeerQUICCapabilityStore.remove(peerID: $0)
                 QUICCooldownStore.shared.clear(peerID: $0)
                 QUICDiscoveryHintStore.shared.remove(peerID: $0)
             })
+        // Per-device display mode goes with the rest of the device's state.
+        DeviceDisplayModeStore.remove(peerID: peerID)
         sessionApprovalPrompt.cancelAll(peerID: peerID)
         // Forget must take effect immediately for a still-open listener
         // socket, not just for the next connection this process happens to
@@ -1608,8 +1834,8 @@ final class SenderController: ObservableObject {
         Log.info("trustDebug: trustDeleteResult=\(!trustAfter)")
         Log.info("trustDebug: trustAfter=\(trustAfter)")
         Log.info("trustDebug: pinnedPeersContainsAfter=\(TrustStore.shared.pinnedPeers().contains { $0.peerID == peerID })")
-        Log.info("trustDebug: remoteEndpointAfter=\(RemoteEndpointStore.endpoint(forPeerID: peerID) != nil)")
-        Log.info("trustDebug: wakeMetadataAfter=\(WakeMetadataStore.metadata(forPeerID: peerID) != nil)")
+        Log.info("trustDebug: remoteEndpointAfter=\(RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil)")
+        Log.info("trustDebug: wakeMetadataAfter=\(WakeMetadataStore.metadata(forPeerID: peerID, role: .sender) != nil)")
         Log.info("deviceUI: knownPeer removed peerID=\(peerID)")
         pairingMessage = "Device forgotten"
         objectWillChange.send()
@@ -1762,7 +1988,7 @@ final class SenderController: ObservableObject {
         // hint for, and only when no better local candidate for the same
         // logical device exists (the priority sort + de-dupe in autoConnect()
         // handles that).
-        candidates += RemoteEndpointStore.allPeerIDs().compactMap { peerID -> AutoConnectCandidate? in
+        candidates += RemoteEndpointStore.allPeerIDs(role: .sender).compactMap { peerID -> AutoConnectCandidate? in
             guard TrustStore.shared.hasPin(peerID: peerID) else { return nil }
             let target = ConnectionTarget.remote(peerID: peerID)
             let logicalID = logicalID(for: target)
@@ -1848,7 +2074,7 @@ final class SenderController: ObservableObject {
     }
 
     private func autoConnect() {
-        guard autoConnectEnabled else { return }
+        guard autoConnectEnabled, roleState.senderMayConnect else { return }
         dedupeSessions()
         let candidates = autoConnectCandidates
         autoConnectPolicy.updateAvailableIdentifiers(
@@ -2078,13 +2304,30 @@ final class SenderController: ObservableObject {
     }
 
     /// Explicit Connect with a chosen display mode (the Mac-side invitation).
-    /// Mirror/Extend is Mac-wide here, so a different choice switches the
-    /// Mac's mode first — through the same guarded transition as the picker.
+    /// The choice is this device's own (issue #20): remembered for it, and no
+    /// other connected device changes.
     func connect(to target: ConnectionTarget, mode requested: CaptureMode) {
-        if requested != mode, canEnterMode(requested) {
-            mode = requested
+        if let live = session(for: target.sessionID) ?? owningSession(for: target), !live.failed {
+            requestMode(requested, for: live)
+            return
+        }
+        if canEnterMode(requested) {
+            if let peerID = intendedPeerID(for: target, logicalID: logicalID(for: target)) {
+                displayModes.setDeviceMode(requested, peerID: peerID)
+            } else {
+                displayModes.stage(requested, sessionID: target.sessionID)
+            }
         }
         connect(to: target, userInitiated: true)
+        displayModes.retain(sessionIDs: Set(sessions.map(\.id)))
+    }
+
+    /// The receiver's install id when it is known before dialing — the key
+    /// its per-device settings are stored under.
+    private func intendedPeerID(for target: ConnectionTarget, logicalID: String) -> String? {
+        if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
+        if case .wifi(let result) = target { return txtID(of: result) }
+        return nil
     }
 
     private func canEnterMode(_ requested: CaptureMode) -> Bool {
@@ -2196,6 +2439,13 @@ final class SenderController: ObservableObject {
                               needsSenderApproval: Bool = false,
                               continuation: SessionContinuation? = nil) -> Bool {
         let targetIdentifiers = identifiers(for: target)
+        // Use This Mac as a Display: the sender starts nothing meanwhile —
+        // every path that can start a session funnels through here.
+        guard roleState.senderMayConnect else {
+            Log.info("roleDebug: sender session to \(target.sessionID) refused — this Mac is being used as a display")
+            autoConnectPolicy.finish(attempt)
+            return false
+        }
         guard !autoConnectPolicy.isPairing(targetIdentifiers) else {
             Log.info("pairDebug: media auto-connect suppressed reason=pairingInProgress")
             autoConnectPolicy.finish(attempt)
@@ -2275,12 +2525,16 @@ final class SenderController: ObservableObject {
         }
 
         let name = label(for: target)
-        let sender = MacSender(transport: transport, name: name, mode: mode,
+        let intendedPeerID = intendedPeerID(for: target, logicalID: logicalID)
+        // This device's own mode/source, or the Mac default (issue #20). A
+        // rebuild finds the assignment it was planned with.
+        let assignment = displayModes.begin(sessionID: id, peerID: intendedPeerID)
+        let sender = MacSender(transport: transport, name: name, mode: assignment.mode,
                                quality: effectiveQuality, displaySerial: Self.displaySerial(for: id),
                                identityOffset: identityOffset(for: id),
                                awaitingWake: awaitingWake,
                                videoEnabled: videoEnabled,
-                               mirrorDisplayUUID: mirrorDisplayUUID,
+                               mirrorDisplayUUID: assignment.mirrorDisplayUUID,
                                streamingProfile: effectiveStreamingProfile,
                                customFPS: effectiveCustomFPS,
                                extendShapePreference: extendShapeDefault,
@@ -2292,19 +2546,15 @@ final class SenderController: ObservableObject {
         // recognizes it.
         let started = SessionStartPlanning.plan(
             continuation: continuation, initiator: initiator, userInitiated: userInitiated,
-            needsSenderApproval: needsSenderApproval, mode: mode.receiverMode)
+            needsSenderApproval: needsSenderApproval, mode: assignment.mode.receiverMode)
         let invitation = started.invitation
         let needsApproval = started.needsSenderApproval
         sender.sessionInvitation = invitation
         sender.needsSenderApproval = needsApproval
-        let intendedPeerID: String? = {
-            if logicalID.hasPrefix("install:") { return String(logicalID.dropFirst("install:".count)) }
-            if case .wifi(let result) = target { return txtID(of: result) }
-            return nil
-        }()
         let session = DeviceSession(id: id, logicalID: logicalID, intendedPeerID: intendedPeerID,
                                     attempt: attempt,
-                                    target: target, name: name, sender: sender)
+                                    target: target, name: name, sender: sender,
+                                    displayAssignment: assignment)
         if case .wifi(let result) = target {
             session.wifiServiceName = serviceName(of: result)
         }
@@ -2326,7 +2576,8 @@ final class SenderController: ObservableObject {
         }
         sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
             guard let self, let session, self.owns(session) else { return }
-            self.requestMode(CaptureMode(requestedMode))
+            // This receiver's own Mirror/Extend control: this device only.
+            self.requestMode(CaptureMode(requestedMode), for: session)
         }
         sender.onAllowInputRequest = { [weak self, weak session] generation in
             // A request for control, from the connection with this
@@ -2363,10 +2614,9 @@ final class SenderController: ObservableObject {
         }
         sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in
             guard let self, let session, self.owns(session) else { return }
-            // Same authoritative setter the Mac's own MirrorDisplayPickerView
-            // writes — its didSet persists the choice and restarts capture
-            // when Mirror is active, so both surfaces stay one source of truth.
-            self.mirrorDisplayUUID = requestedUUID
+            // This receiver's own Mirror source: remembered for this device
+            // and applied to its pipeline only (issue #20).
+            self.requestMirrorSource(MirrorSourcePreference(displayUUID: requestedUUID), for: session)
         }
         sender.onExtendShapeChanged = { [weak session] preference in
             session?.extendShapePreference = preference
@@ -2396,6 +2646,16 @@ final class SenderController: ObservableObject {
                 self.sessionApprovalPrompt.request(approval)
             }
             session.receiverProtocolVersion = info.protocolVersion
+            // A session that started without an install id (an unresolved
+            // USB device) used the Mac default; now that hello proved who
+            // this is, apply the device's own choice. Deferred while the
+            // Mac's approval is pending — `resolveSessionApproval` reconciles.
+            if let peerID = info.id {
+                let outcome = self.displayModes.identify(sessionID: session.id, peerID: peerID)
+                if case .rebuild = outcome, !session.awaitingLocalApproval {
+                    self.reconcileDisplayMode(session)
+                }
+            }
             self.applyReceiverRequestedMode(info.requestedMode, session: session)
             session.receiverMaxFPS = info.maxFPS
             if let value = info.trayEnabled { session.receiverTrayEnabled = value }
@@ -2634,19 +2894,28 @@ final class SenderController: ObservableObject {
         // Identity comparison prevents a late callback from an old attempt
         // removing its newer replacement, which can have the same route id.
         sessions.removeAll { $0 === session }
+        // Same rule for its display-mode entry: a replacement with this id
+        // owns it now.
+        if !sessions.contains(where: { $0.id == session.id }) {
+            displayModes.end(sessionID: session.id)
+        }
     }
 
     private func owns(_ session: DeviceSession) -> Bool {
         sessions.contains { $0 === session } && autoConnectPolicy.isCurrent(session.attempt)
     }
 
-    /// Mode/quality apply per-pipeline at construction — rebuild every session.
+    /// Streaming settings apply per-pipeline at construction — rebuild every
+    /// session. (Mode no longer goes through here: see `rebuild(_:)`.)
     func restartAll() {
         guard running else { return }
         let rebuilds = sessions.map { ($0.target, $0.failed ? nil : continuation(of: $0)) }
         sessions.forEach { $0.sender.stop() }
         sessions.removeAll()
+        // Each device's display-mode entry survives (same session ids), so
+        // every rebuilt pipeline keeps its own mode.
         rebuilds.forEach { connect(to: $0.0, continuation: $0.1) }
+        displayModes.retain(sessionIDs: Set(sessions.map(\.id)))
         autoConnect()   // a rebuilt WiFi session may deserve its cable back
     }
 
@@ -2770,7 +3039,7 @@ final class SenderController: ObservableObject {
             .map { session in
                 ActiveDisplayEntry(id: session.id, peerID: session.deviceID, name: session.name,
                                    statusText: session.statusWithRoute, route: session.route,
-                                   mode: mode, videoActive: session.videoActive,
+                                   mode: session.displayAssignment.mode, videoActive: session.videoActive,
                                    audioActive: session.audioActive,
                                    allowInput: EffectiveInputAuthorization.allowed(
                                        masterEnabled: allowInput, sessionGranted: session.sender.hasSessionInputGrant),
@@ -2846,7 +3115,7 @@ final class SenderController: ObservableObject {
     /// `ReceiverInputAuthorizationStore.setPolicy`.
     @discardableResult
     func sessionPolicy(peerID: String) -> IncomingSessionPeerPolicy? {
-        IncomingSessionPolicyStore.policy(peerID: peerID)
+        IncomingSessionPolicyStore.policy(peerID: peerID, role: .sender)
     }
 
     /// Same self-authorization guard as `setInputPolicy`: while any device
@@ -2854,7 +3123,7 @@ final class SenderController: ObservableObject {
     @discardableResult
     func setSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) -> Bool {
         guard policy != .alwaysAllow || !anySessionHasEffectiveInput else { return false }
-        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID, role: .sender)
         if policy == .blocked { revokeIncomingSessionAuthority(peerID: peerID) }
         objectWillChange.send()
         return true
@@ -2993,8 +3262,9 @@ final class SenderController: ObservableObject {
     /// A receiver-initiated request named a display mode in its hello. With
     /// manual approval it only becomes the panel's default (Allow & Mirror /
     /// Allow & Extend still decide); when auto-approved it is used if this
-    /// Mac can enter it. Mirror/Extend is Mac-wide, so a different mode
-    /// rebuilds the pipelines, carrying this session's invitation across.
+    /// Mac can enter it. Mirror/Extend is per device (issue #20), so a
+    /// different mode rebuilds this session's pipeline only, carrying its
+    /// invitation across.
     private func applyReceiverRequestedMode(_ raw: String?, session: DeviceSession) {
         guard session.invitation.initiator == .receiver, !session.invitationAdmitted,
               let requested = SessionModePlanning.requestedMode(raw) else { return }
@@ -3002,13 +3272,14 @@ final class SenderController: ObservableObject {
             sessionApprovalPrompt.updateRequestedMode(id: session.invitation.id, mode: requested)
             return
         }
+        let current = session.displayAssignment.mode
         let planned = CaptureMode(SessionModePlanning.mode(
-            senderChoice: nil, receiverRequested: requested, current: mode.receiverMode))
-        guard planned != mode, canEnterMode(planned) else { return }
+            senderChoice: nil, receiverRequested: requested, current: current.receiverMode))
+        guard planned != current, canEnterMode(planned) else { return }
         Log.info("sessionInvite: honoring receiver-requested mode \(planned.rawValue) for \(session.logicalID)")
-        // `restartAll()` carries the updated invitation to the rebuilt pipeline.
+        // `rebuild(_:)` carries the updated invitation to the rebuilt pipeline.
         session.invitation.mode = planned.receiverMode
-        requestMode(planned)
+        requestMode(planned, for: session)
     }
 
     /// Cancel on the Mac's waiting state for an invitation (or its own
@@ -3028,7 +3299,7 @@ final class SenderController: ObservableObject {
         // after it was raised: a late answer neither admits nor persists.
         guard PendingApprovalRevalidation.isStillAuthorized(
             isPinned: TrustStore.shared.hasPin(peerID: approval.peerID),
-            currentPolicy: IncomingSessionPolicyStore.policy(peerID: approval.peerID)) else {
+            currentPolicy: IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .sender)) else {
             Log.info("sessionInvite: late answer for revoked peer \(approval.peerID) ignored id=\(approval.id)")
             session.sender.resolveSenderApproval(accept: false)
             disconnect(session)
@@ -3048,18 +3319,23 @@ final class SenderController: ObservableObject {
         }
         // Allow & Mirror / Allow & Extend override the receiver's request;
         // Allow Permanently keeps the requested (or current) mode.
+        let current = session.displayAssignment.mode
         let requested = CaptureMode(SessionModePlanning.mode(
-            senderChoice: plan.mode, receiverRequested: approval.mode, current: mode.receiverMode))
-        if requested != mode, canEnterMode(requested) {
-            // Mirror/Extend is Mac-wide: switching rebuilds every pipeline.
+            senderChoice: plan.mode, receiverRequested: approval.mode, current: current.receiverMode))
+        session.awaitingLocalApproval = false
+        if requested != current, canEnterMode(requested) {
+            // This device's choice; no other device's pipeline is touched.
+            _ = displayModes.requestMode(requested, sessionID: session.id,
+                                         hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow())
+        }
+        if let wanted = displayModes.assignment(sessionID: session.id),
+           !wanted.capturesSame(as: session.displayAssignment) {
             // Capture has not started for this session, so carry it across
             // the rebuild already approved.
-            session.invitation.mode = requested.receiverMode
-            session.awaitingLocalApproval = false
-            requestMode(requested)
+            session.invitation.mode = wanted.mode.receiverMode
+            Task { @MainActor in self.rebuild(session) }
             return
         }
-        session.awaitingLocalApproval = false
         session.sender.resolveSenderApproval(accept: true)
     }
 

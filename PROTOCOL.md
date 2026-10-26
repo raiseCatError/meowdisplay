@@ -681,6 +681,12 @@ and the stylus would go dead; the fallback keeps it usable.)
   receiver sends MUST be followed by a matching `"up"` (or by disconnect —
   senders MUST release a still-held key on session loss regardless).
   `{"type":"keyboard","action":"down","usage":80,"modifiers":["shift"]}`
+  A `"down"` MAY carry `repeat` (bool, additive, no `pv` bump): `true`
+  marks the receiver's own key repeat for a key it already sent down and
+  has not released. A sender SHOULD post it as an auto-repeat key-down
+  only while that key is held and MUST ignore it otherwise; a sender that
+  doesn't know the field treats it as the duplicate down it already
+  ignores.
 * `"modifierDown"` / `"modifierUp"` (pv 6) — a synthetic modifier's held
   lifecycle: `modifier` is one of `"command"`, `"option"`, `"control"`, or
   `"shift"`. Every down MUST be followed by an up; senders MUST also release
@@ -696,7 +702,13 @@ unrecognized modifier names.
 `usage` values are USB HID Usage Tables keyboard-page (0x07) usage numbers.
 Senders MUST validate `usage` (an integral value in `0...65535`) and MUST
 ignore an out-of-range, non-integral, or unrecognized value rather than
-treat it as fatal. The keys the official apps exchange today:
+treat it as fatal. The official Mac Receiver sends any key of a physical
+keyboard: letters, digits and punctuation (4–56), F1–F12 (58–69) and
+F13–F20 (104–111), Insert/Help (73), Home (74), Page Up (75), End (77),
+Page Down (78), the keypad (83–99, 103, 133), the ISO key (100) and the JIS
+keys (135, 137, 144, 145). The usage names a physical key, so the
+sender's own keyboard layout decides the character. The special keys the
+iPhone and iPad apps send:
 
 | Usage | Key |
 |---|---|
@@ -1471,3 +1483,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-27 | `pv` 22: optional reliable-stream QUIC transport (section 2.4) with authenticated `transports`/`qv` capability |
 | 2026-09-30 | Documented optional HEVC video (section 5.4, `pv` 19) and the `pv` 15/16/18 rows; no wire change. The sender now also falls back to H.264 when an HEVC encoder produces no frames or a new `hello` drops `"hevc"` |
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
+| 2026-10-25 | Additive, no `pv` change: `keyboard` `"down"` may carry `repeat`; the Mac Receiver sends the full physical-keyboard usage range |

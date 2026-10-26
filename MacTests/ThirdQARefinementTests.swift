@@ -39,7 +39,7 @@ final class ThirdQARefinementTests: XCTestCase {
     func testConnectionAlwaysAllowIsNotConsentToRequestInput() throws {
         let (defaults, suite) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
-        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "mac", defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "mac", role: .receiverRole, defaults: defaults)
         XCTAssertFalse(InputAutoRequestStore.isEnabled(peerID: "mac", defaults: defaults))
         XCTAssertFalse(InputAutoRequestPolicy.shouldAutoRequest(
             peerOptedIn: InputAutoRequestStore.isEnabled(peerID: "mac", defaults: defaults)))

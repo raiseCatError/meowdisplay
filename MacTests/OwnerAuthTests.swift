@@ -214,13 +214,14 @@ final class OwnerAuthTests: XCTestCase {
         XCTAssertLessThanOrEqual(OwnerAuthPolicy.reason(peerName: String(repeating: "x", count: 500)).count, 90)
     }
 
-    /// Both apps must actually wire the real authenticator into the prompt.
+    /// Both apps must actually wire the real authenticator into the prompt,
+    /// and each role's prompt must consult that role's own trust store.
     func testAppsInstallTheRealAuthenticator() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        for path in ["Shared/StreamReceiver.swift", "Mac/OpenSidecarMacApp.swift"] {
+        for (path, store) in [("Shared/StreamReceiver.swift", "receiverRole"), ("Mac/OpenSidecarMacApp.swift", "shared")] {
             let source = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
             XCTAssertTrue(source.contains("ownerAuthenticator = LocalOwnerAuthenticator()"), path)
-            XCTAssertTrue(source.contains("trustPinLookup = { TrustStore.shared.pin(peerID: $0) }"), path)
+            XCTAssertTrue(source.contains("trustPinLookup = { TrustStore.\(store).pin(peerID: $0) }"), path)
         }
     }
 

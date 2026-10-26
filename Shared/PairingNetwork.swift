@@ -69,6 +69,7 @@ enum PairingNetwork {
                              allowIdentityChange: Bool = false,
                              isCurrent: @escaping @Sendable () -> Bool = { true },
                              remoteHost: String? = nil, attemptToken: UUID = UUID(),
+                             store: TrustStore = .shared,
                              onHandshakeReached: (@Sendable () -> Void)? = nil) async throws -> PendingPairing {
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
         defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
@@ -76,7 +77,7 @@ enum PairingNetwork {
         defer { timeout.cancel() }
         try await waitUntilReady(connection)
         Log.info("pairDebug: initiator connected")
-        guard let spki = TrustStore.shared.ownSPKI() else { throw PairingError.invalidKey }
+        guard let spki = store.ownSPKI() else { throw PairingError.invalidKey }
         let handshake = PairingHandshake(role: .initiator, deviceID: localID,
                                          displayName: localName, identitySPKI: spki)
         // v13 commit-then-reveal: commit to our real hello first, so the
@@ -89,11 +90,13 @@ enum PairingNetwork {
         if let expectedPeerID, peerHello.deviceID != expectedPeerID { throw PairingError.identityChanged }
         try await PairingFraming.send(.helloReveal(handshake.localHello), on: connection)
         let result = try handshake.result(peerHello: peerHello)
-        var pending = classify(result.pending)
+        var pending = classify(result.pending, store: store)
         try PairingClassifier.check(pending, allowIdentityChange: allowIdentityChange)
         if let remoteHost {
             pending.changesRemoteEndpoint = RemoteHintChange.wouldChange(
-                existing: RemoteEndpointStore.endpoint(forPeerID: pending.peerID), newHost: remoteHost)
+                existing: RemoteEndpointStore.endpoint(forPeerID: pending.peerID,
+                                                       role: RolePreferences(trustNamespace: store.namespace)),
+                newHost: remoteHost)
         }
         onHandshakeReached?()
         // A cancelled/superseded attempt must never surface a SAS prompt.
@@ -110,8 +113,9 @@ enum PairingNetwork {
             },
             onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
             onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
-            store: TrustStore.shared, isCurrent: isCurrent, remoteHost: remoteHost,
-            hints: remoteHost == nil ? nil : RemoteEndpointStoreHints())
+            store: store, isCurrent: isCurrent, remoteHost: remoteHost,
+            hints: remoteHost == nil ? nil
+                : RemoteEndpointStoreHints(role: RolePreferences(trustNamespace: store.namespace)))
         logFinalized(pending)
         return pending
     }
@@ -121,7 +125,8 @@ enum PairingNetwork {
                              allowIdentityChange: Bool = false,
                              isCurrent: @escaping @Sendable () -> Bool = { true },
                              attemptToken: UUID = UUID(),
-                             throttle: PairingCommitThrottleGate = .shared) async throws -> PendingPairing {
+                             throttle: PairingCommitThrottleGate = .shared,
+                             store: TrustStore = .shared) async throws -> PendingPairing {
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
         defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
         let timeout = pairingTimeout(for: connection)
@@ -148,7 +153,7 @@ enum PairingNetwork {
         // this defer already resolved the throttle on success.
         defer { if !throttleResolved { Task { await throttle.revealFailed() } } }
 
-        guard let spki = TrustStore.shared.ownSPKI() else { throw PairingError.invalidKey }
+        guard let spki = store.ownSPKI() else { throw PairingError.invalidKey }
         let handshake = PairingHandshake(role: .responder, deviceID: localID,
                                          displayName: localName, identitySPKI: spki)
         guard isCurrent(), !gate.isCancelled else { throw PairingError.rejected }
@@ -160,7 +165,7 @@ enum PairingNetwork {
             throw PairingError.commitmentMismatch
         }
         let result = try handshake.result(peerHello: peerHello)
-        let pending = classify(result.pending)
+        let pending = classify(result.pending, store: store)
         try PairingClassifier.check(pending, allowIdentityChange: allowIdentityChange)
         guard isCurrent(), !gate.isCancelled else { throw PairingError.rejected }
         // Reveal matched, hello validated, guards passed: this attempt no
@@ -180,7 +185,7 @@ enum PairingNetwork {
             },
             onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
             onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
-            store: TrustStore.shared, isCurrent: isCurrent)
+            store: store, isCurrent: isCurrent)
         // The ceremony reached authenticated trust completion (commit
         // verified and `PairingFinalizer` ran inside `PairingSessionCore.run`)
         // for THIS admitted attempt: only now is prior failure history
@@ -249,8 +254,9 @@ enum PairingNetwork {
     /// gates whether the request is shown, only what the prompt says. An
     /// existing pin for this peer ID is exactly the case the UI must call
     /// out (re-pair, or identity-changed), never silently skip.
-    private static func classify(_ pending: PendingPairing) -> PendingPairing {
-        PairingClassifier.classify(pending, existingPin: TrustStore.shared.pin(peerID: pending.peerID))
+    /// `store` is the role's trust store (see `TrustStore.receiverRole`).
+    private static func classify(_ pending: PendingPairing, store: TrustStore) -> PendingPairing {
+        PairingClassifier.classify(pending, existingPin: store.pin(peerID: pending.peerID))
     }
 
     private static func waitUntilReady(_ connection: NWConnection) async throws {

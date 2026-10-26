@@ -82,8 +82,9 @@ private struct ReceiverSystemPage: View {
 
 /// The advertised-name editor — kept out of any high-frequency observed
 /// object so streaming updates can't rebuild it mid-edit (same reasoning as
-/// the iOS DeviceNameField).
-private struct ReceiverNameField: View {
+/// the iOS DeviceNameField). Also on MeowDisplay's "This Mac as a Display"
+/// page.
+struct ReceiverNameField: View {
     @AppStorage("receiverName") private var name = Host.current().localizedName ?? "Mac"
     let onChange: (String) -> Void
 

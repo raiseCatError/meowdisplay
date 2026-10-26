@@ -44,6 +44,7 @@ struct ReceiverDeviceDetailView: View {
             }
 
             if let session {
+                displayModeSection(session)
                 extendShapeSection(session)
                 maxFPSSection(session)
             }
@@ -155,6 +156,54 @@ struct ReceiverDeviceDetailView: View {
             Text(quicSelectable
                  ? "Auto uses QUIC when this device supports it and uses TCP if QUIC can't reach it. Both use the same pairing and encryption. USB is unaffected."
                  : "QUIC isn't available for this device yet, so Auto uses TCP. It becomes available after a connection with a MeowDisplay version that supports it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// This device's own Mirror/Extend mode and Mirror source (issue #20).
+    /// Mac-authoritative and Mac-local like Extend shape; changing it
+    /// rebuilds this device's stream only — other connected devices keep
+    /// running untouched.
+    @ViewBuilder
+    private func displayModeSection(_ session: DeviceSession) -> some View {
+        let preference = controller.displayModePreference(for: session)
+        Section {
+            Picker("Mode", selection: Binding(
+                get: { DeviceModeChoice(preference.mode) },
+                set: { choice in
+                    if let mode = choice.mode {
+                        controller.requestMode(mode, for: session)
+                    } else {
+                        controller.followDefaultMode(for: session)
+                    }
+                })) {
+                Text("Mac Default (\(controller.mode.title))",
+                     comment: "Per-device display mode option: follow the Mac's default mode, named in parentheses.")
+                    .tag(DeviceModeChoice.macDefault)
+                Text("Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+                    .tag(DeviceModeChoice.extend)
+                    .disabled(!controller.videoEnabled)
+                Text("Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
+                    .tag(DeviceModeChoice.mirror)
+                    .disabled(!controller.hasUsablePhysicalDisplay)
+            }
+            if session.displayAssignment.mode == .mirror {
+                DeviceMirrorSourcePicker(
+                    choice: preference.mirrorSource,
+                    defaultUUID: controller.mirrorDisplayUUID,
+                    onChange: { controller.requestMirrorSource($0, for: session) })
+            }
+            LabeledContent("Currently", value: session.displayAssignment.summary)
+            if let notice = session.displayModeNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Display Mode")
+        } footer: {
+            Text("Only affects this device. Changing it restarts this device's stream; other connected devices keep running.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -441,6 +490,90 @@ struct ReceiverDeviceDetailView: View {
             Text("Tray item layout is configured on the device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The per-device Mode picker's three choices.
+private enum DeviceModeChoice: Hashable {
+    case macDefault
+    case extend
+    case mirror
+
+    init(_ mode: CaptureMode?) {
+        switch mode {
+        case nil: self = .macDefault
+        case .extend: self = .extend
+        case .mirror: self = .mirror
+        }
+    }
+
+    var mode: CaptureMode? {
+        switch self {
+        case .macDefault: return nil
+        case .extend: return .extend
+        case .mirror: return .mirror
+        }
+    }
+}
+
+/// This device's own Mirror source: the Mac's default source, Automatic,
+/// or a specific display — including another device's extended desktop.
+private struct DeviceMirrorSourcePicker: View {
+    let choice: MirrorSourcePreference?
+    let defaultUUID: String?
+    let onChange: (MirrorSourcePreference?) -> Void
+    @State private var candidates: [MirrorDisplayCandidate] = []
+    @State private var loaded = false
+
+    private static let macDefaultTag = "\u{0}default"
+    private static let automaticTag = "\u{0}automatic"
+
+    private var tag: String {
+        switch choice {
+        case nil: return Self.macDefaultTag
+        case .automatic: return Self.automaticTag
+        case .display(let uuid): return uuid
+        }
+    }
+
+    /// The display this device would mirror if it isn't using Automatic.
+    private var explicitUUID: String? { choice.map(\.displayUUID) ?? defaultUUID }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Mirror Display", selection: Binding(
+                // A remembered display that is disconnected has no tag; it
+                // shows as Automatic, which is what capture uses meanwhile.
+                // The stored choice is kept.
+                get: {
+                    PickerSelection.valid(tag, among: [Self.macDefaultTag, Self.automaticTag]
+                        + candidates.compactMap(\.persistentID), fallback: Self.automaticTag)
+                },
+                set: { value in
+                    switch value {
+                    case Self.macDefaultTag: onChange(nil)
+                    case Self.automaticTag: onChange(.automatic)
+                    default: onChange(.display(uuid: value))
+                    }
+                })) {
+                Text("Mac Default").tag(Self.macDefaultTag)
+                Text("Automatic").tag(Self.automaticTag)
+                ForEach(candidates) { candidate in
+                    Text(candidate.label)
+                        .tag(candidate.persistentID ?? "")
+                        .disabled(candidate.persistentID == nil)
+                }
+            }
+            if let explicitUUID, loaded, !candidates.contains(where: { $0.persistentID == explicitUUID }) {
+                Text("Selected display isn't currently available — using Automatic until it reconnects.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .task {
+            candidates = await MirrorDisplayCandidate.listCandidates()
+            loaded = true
         }
     }
 }

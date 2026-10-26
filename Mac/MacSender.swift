@@ -391,9 +391,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
-    /// `SenderController`, which owns the canonical `mirrorDisplayUUID`
-    /// setting (the same one its own Settings picker writes) and the
-    /// existing session-rebuild path that applies it. `nil` requests Auto.
+    /// `SenderController`, which remembers it as THIS device's own source
+    /// (issue #20) and rebuilds this session only. `nil` requests Auto.
     @MainActor var onMirrorDisplayRequest: ((String?) -> Void)?
     /// Fires whenever this peer's Extend shape preference changes — from a
     /// receiver's `extendShapeRequest` or from `requestExtendShape` (the
@@ -1733,9 +1732,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startMirrorCapture(preferredDisplayID: CGDirectDisplayID?,
                                     sessionGeneration: UInt64? = nil) async throws {
         let content = try await SCShareableContent.current
-        let display = preferredDisplayID.flatMap { id in
-            content.displays.first(where: { $0.displayID == id })
-        } ?? content.displays.first
+        // A display that went away (unplugged mid-session) falls back to
+        // Automatic, which never lands on another device's extended desktop.
+        let chosenID = MirrorSourceResolver.recoveryDisplay(
+            preferred: preferredDisplayID, in: Self.mirrorSourceCandidates(content.displays),
+            excluding: VirtualDisplayRegistry.shared.displayIDs)
+        if let preferredDisplayID, chosenID != preferredDisplayID {
+            Log.info("displayDebug: mirrored display \(preferredDisplayID) is gone — "
+                + "recovering onto \(chosenID.map(String.init) ?? "none")")
+        }
+        let display = chosenID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
                           userInfo: [NSLocalizedDescriptionKey:
@@ -1751,20 +1757,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// preference logs the decision and falls back to Automatic.
     private func startMirrorCaptureUsingPreference(sessionGeneration: UInt64? = nil) async throws {
         let content = try await SCShareableContent.current
-        var display = content.displays.first
-        if let uuid = mirrorDisplayUUID {
-            if let resolved = MirrorDisplayIdentity.resolve(persistentID: uuid, in: content.displays) {
-                display = resolved
-            } else {
-                Log.info("displayDebug: mirrorSelection unavailable persistentID=\(uuid) — falling back to Automatic")
-            }
+        let resolution = MirrorSourceResolver.resolve(
+            selectedUUID: mirrorDisplayUUID, in: Self.mirrorSourceCandidates(content.displays),
+            excluding: VirtualDisplayRegistry.shared.displayIDs)
+        if case .selectedUnavailable(let uuid, _) = resolution {
+            Log.info("displayDebug: mirrorSelection unavailable persistentID=\(uuid) — falling back to Automatic")
         }
+        let display = resolution.displayID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
                           userInfo: [NSLocalizedDescriptionKey:
                               "No display available to mirror — connect a display, or use Extend instead."])
         }
         try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
+    }
+
+    /// ScreenCaptureKit's display list in the order it reported, reduced to
+    /// what `MirrorSourceResolver` decides on.
+    private static func mirrorSourceCandidates(_ displays: [SCDisplay]) -> [MirrorSourceCandidate] {
+        displays.map {
+            MirrorSourceCandidate(displayID: $0.displayID,
+                                  persistentID: MirrorDisplayIdentity.uuidString(for: $0.displayID))
+        }
     }
 
     /// Mirror has no usable physical source (headless): instead of failing
@@ -1936,6 +1950,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               productID: productID,
                               refreshRate: refreshRate,
                               restoreOrigin: restoreOrigin,
+                              owner: ObjectIdentifier(self),
                               onOriginChange: { origin, currentSize in
                                   DisplayArrangement.save(origin: origin, size: currentSize,
                                                            device: arrangementKey)
@@ -2044,8 +2059,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // is not a disconnected region (this function keeps using it after
         // the call returns), so the compiler rejects the send outright.
         let selfBox = self.selfBox
-        identities: for probe in 0..<UInt32(3) {
-            let totalOffset = baseIdentityOffset &+ probe
+        // Another connected device's live display may already hold one of
+        // this device's identities (a serial hash collision, or a fallback
+        // identity landing on another device's): skip it up front rather
+        // than retrying into macOS's refusal (issue #20).
+        let owner = ObjectIdentifier(self)
+        let plannedOffsets = VirtualDisplayIdentityPlanner.offsets(serial: serial, baseOffset: baseIdentityOffset) {
+            VirtualDisplayRegistry.shared.isClaimed($0, byOtherThan: owner)
+        }
+        if plannedOffsets.first != baseIdentityOffset {
+            Log.info("extendDebug: display identity +\(baseIdentityOffset) is held by another live session — "
+                + "probing \(plannedOffsets)")
+        }
+        identities: for (probeIndex, totalOffset) in plannedOffsets.enumerated() {
+            let probe = UInt32(probeIndex)
             // A lingering serial belongs to a just-quit twin of the CURRENT
             // identity; fresh fallback identities get a shorter window.
             var createdID: CGDirectDisplayID?
@@ -2077,8 +2104,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         name: displayName,
                         pointsWide: pointsWide, pointsHigh: pointsHigh,
                         sizeInMillimeters: mm,
-                        serialNum: serial &+ totalOffset,
-                        productID: 0x4F53 &+ totalOffset,
+                        serialNum: VirtualDisplayIdentityPlanner.identity(serial: serial, offset: totalOffset).serial,
+                        productID: VirtualDisplayIdentityPlanner.identity(serial: serial, offset: totalOffset).productID,
                         refreshRate: virtualDisplayFPS,
                         arrangementKey: arrangementKey,
                         sizeInPoints: sizeInPoints)
@@ -3938,9 +3965,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
         } else {
-            // Auto mode: preserve existing Automatic behavior.
+            // Auto mode: the first display, skipping other devices'
+            // MeowDisplay virtual displays (issue #20).
             Log.info("wakeCapture: selectedUUID=none(Auto)")
-            resolvedDisplay = content.displays.first
+            let automaticID = MirrorSourceResolver.automatic(
+                in: Self.mirrorSourceCandidates(content.displays),
+                excluding: VirtualDisplayRegistry.shared.displayIDs)
+            resolvedDisplay = automaticID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         }
         guard let display = resolvedDisplay else {
             Log.info("wakeCapture: displayNotFound uuid=none")
@@ -5079,7 +5110,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             case "down":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                      isRepeat: obj["repeat"] as? Bool == true)
                 }
             case "up":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
@@ -5189,8 +5221,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.onStreamingPriorityRequest?(priority)
             }
         case WireMessage.mirrorDisplayRequest:
-            // Like every Mac-wide request, reached only for an admitted
-            // connection (see the gate at the top of `handleControl`).
+            // Like every controller-handled request, reached only for an
+            // admitted connection (see the gate at the top of `handleControl`).
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String

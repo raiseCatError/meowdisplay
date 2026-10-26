@@ -135,7 +135,7 @@ final class WakeConnectCoordinator: ObservableObject {
 
     private func sendWOLBurst() {
         guard let peerID = activePeerID,
-              let metadata = WakeMetadataStore.metadata(forPeerID: peerID),
+              let metadata = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole),
               let broadcast = metadata.broadcastAddress else { return }
         func sendOne() {
             guard attempt.recordWOLSent() else { return }

@@ -29,23 +29,23 @@ final class ForgetDeviceCleanupTests: XCTestCase {
         let forgotten = peerID()
         let kept = peerID()
 
-        RemoteEndpointStore.setEndpoint("100.1.1.1", port: 9001, forPeerID: forgotten)
-        RemoteEndpointStore.setEndpoint("100.2.2.2", port: 9001, forPeerID: kept)
+        RemoteEndpointStore.setEndpoint("100.1.1.1", port: 9001, forPeerID: forgotten, role: .sender)
+        RemoteEndpointStore.setEndpoint("100.2.2.2", port: 9001, forPeerID: kept, role: .sender)
         WakeMetadataStore.setMetadata(
             WakeMetadata(macAddress: "aa:aa:aa:aa:aa:aa", interfaceName: "en0",
-                         updatedAt: Date()), forPeerID: forgotten)
+                         updatedAt: Date()), forPeerID: forgotten, role: .sender)
         WakeMetadataStore.setMetadata(
             WakeMetadata(macAddress: "bb:bb:bb:bb:bb:bb", interfaceName: "en0",
-                         updatedAt: Date()), forPeerID: kept)
+                         updatedAt: Date()), forPeerID: kept, role: .sender)
 
         // Mirrors the cleanup forgetPairing(peerID:) performs.
-        RemoteEndpointStore.removeEndpoint(forPeerID: forgotten)
-        WakeMetadataStore.removeMetadata(forPeerID: forgotten)
+        RemoteEndpointStore.removeEndpoint(forPeerID: forgotten, role: .sender)
+        WakeMetadataStore.removeMetadata(forPeerID: forgotten, role: .sender)
 
-        XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: forgotten))
-        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: forgotten))
-        XCTAssertEqual(RemoteEndpointStore.endpoint(forPeerID: kept)?.host, "100.2.2.2")
-        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: kept)?.macAddress, "bb:bb:bb:bb:bb:bb")
+        XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: forgotten, role: .sender))
+        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: forgotten, role: .sender))
+        XCTAssertEqual(RemoteEndpointStore.endpoint(forPeerID: kept, role: .sender)?.host, "100.2.2.2")
+        XCTAssertEqual(WakeMetadataStore.metadata(forPeerID: kept, role: .sender)?.macAddress, "bb:bb:bb:bb:bb:bb")
     }
 
     func testForgetActionUsesTheExactStablePeerIDForEveryCleanup() {

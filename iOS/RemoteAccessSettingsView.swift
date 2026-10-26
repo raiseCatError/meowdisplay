@@ -45,7 +45,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
-        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) != nil
     }
 
     var body: some View {
@@ -96,7 +96,7 @@ struct RemoteEndpointEditorView: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) else {
             host = ""
             port = String(WireCrypto.remoteRequestPort)
             return
@@ -108,8 +108,8 @@ struct RemoteEndpointEditorView: View {
     private func save() {
         switch RemoteEndpointValidation.validate(host: host, port: port) {
         case .success(let value):
-            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
-            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
+            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .receiverRole)
+            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole),
                   readBack.host == value.host, readBack.port == value.port else {
                 errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
@@ -132,7 +132,7 @@ struct RemoteEndpointEditorView: View {
     /// the Mac remains paired and reachable locally exactly as before (see
     /// `ForgetDeviceAction` on the Mac side for the same distinction).
     private func remove() {
-        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
         host = ""
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil

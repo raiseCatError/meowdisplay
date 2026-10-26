@@ -19,7 +19,7 @@ final class SessionInvitationTests: XCTestCase {
     // MARK: - Incoming policy
 
     func testAutomaticallyAllowDefaultsOn() {
-        XCTAssertTrue(IncomingSessionPolicyStore.automaticallyAllow(defaults: defaults))
+        XCTAssertTrue(IncomingSessionPolicyStore.automaticallyAllow(role: .sender, defaults: defaults))
     }
 
     func testPolicyMatrix() {
@@ -38,54 +38,54 @@ final class SessionInvitationTests: XCTestCase {
     }
 
     func testStoreDecisionsFollowPersistedPolicy() {
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, defaults: defaults), .accept)
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false, defaults: defaults)
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, defaults: defaults), .askUser)
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .automatic, defaults: defaults), .decline)
-        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", defaults: defaults)
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .automatic, defaults: defaults), .accept)
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true, defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "a", defaults: defaults)
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, defaults: defaults), .block)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, role: .sender, defaults: defaults), .accept)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .sender, defaults: defaults)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, role: .sender, defaults: defaults), .askUser)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .automatic, role: .sender, defaults: defaults), .decline)
+        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", role: .sender, defaults: defaults)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .automatic, role: .sender, defaults: defaults), .accept)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .sender, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "a", role: .sender, defaults: defaults)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: "a", intent: .manual, role: .sender, defaults: defaults), .block)
     }
 
     func testReturningToDefaultAndForgetRemoveOverride() {
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "a", defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(nil, peerID: "a", defaults: defaults)
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", defaults: defaults))
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "a", role: .sender, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(nil, peerID: "a", role: .sender, defaults: defaults)
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", role: .sender, defaults: defaults))
 
-        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", role: .sender, defaults: defaults)
         var removed: [String] = []
         ForgetDeviceAction.perform(
             peerID: "a", forgetTrust: { _ in }, removeRemoteEndpoint: { _ in }, removeWakeMetadata: { _ in },
             removeSessionPolicy: {
                 removed.append($0)
-                IncomingSessionPolicyStore.removePolicy(peerID: $0, defaults: self.defaults)
+                IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender, defaults: self.defaults)
             })
         XCTAssertEqual(removed, ["a"])
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", defaults: defaults))
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", role: .sender, defaults: defaults))
     }
 
     func testPoliciesPersistAcrossStoreReads() {
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false, defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "b", defaults: defaults)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .sender, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "a", role: .sender, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "b", role: .sender, defaults: defaults)
         let reopened = UserDefaults(suiteName: suiteName)!
-        XCTAssertFalse(IncomingSessionPolicyStore.automaticallyAllow(defaults: reopened))
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "a", defaults: reopened), .alwaysAllow)
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "b", defaults: reopened), .blocked)
+        XCTAssertFalse(IncomingSessionPolicyStore.automaticallyAllow(role: .sender, defaults: reopened))
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "a", role: .sender, defaults: reopened), .alwaysAllow)
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "b", role: .sender, defaults: reopened), .blocked)
     }
 
     func testPolicyIsKeyedByStablePeerIDOnly() {
         // Names and addresses never enter the store; only the pinned install ID.
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "install-1", defaults: defaults)
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "Jai's iPad", defaults: defaults))
-        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "install-1", defaults: defaults), .blocked)
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "install-1", role: .sender, defaults: defaults)
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "Jai's iPad", role: .sender, defaults: defaults))
+        XCTAssertEqual(IncomingSessionPolicyStore.policy(peerID: "install-1", role: .sender, defaults: defaults), .blocked)
     }
 
     func testUnauthenticatedPeerNeverPrompts() {
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false, defaults: defaults)
-        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: nil, intent: .manual, defaults: defaults), .decline)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .sender, defaults: defaults)
+        XCTAssertEqual(IncomingSessionPolicyStore.decision(peerID: nil, intent: .manual, role: .sender, defaults: defaults), .decline)
     }
 
     // MARK: - Roles
@@ -144,8 +144,8 @@ final class SessionInvitationTests: XCTestCase {
 
     func testRejectForSessionPersistsNothing() {
         let plan = SessionApprovalPlan.plan(for: SenderApprovalDecision.rejectForSession)
-        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", defaults: defaults) }
-        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", defaults: defaults))
+        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", role: .sender, defaults: defaults) }
+        XCTAssertNil(IncomingSessionPolicyStore.policy(peerID: "a", role: .sender, defaults: defaults))
     }
 
     // MARK: - Pending lifecycle
@@ -260,12 +260,12 @@ final class SessionInvitationTests: XCTestCase {
 
     func testLegacySenderAdmittedOnlyWhenBackgroundAttemptWouldBe() {
         XCTAssertTrue(ReceiverSessionAdmission.admitsLegacySender(peerID: "mac", defaults: defaults))
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false, defaults: defaults)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .sender, defaults: defaults)
         XCTAssertFalse(ReceiverSessionAdmission.admitsLegacySender(peerID: "mac", defaults: defaults))
-        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "mac", defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.alwaysAllow, peerID: "mac", role: .sender, defaults: defaults)
         XCTAssertTrue(ReceiverSessionAdmission.admitsLegacySender(peerID: "mac", defaults: defaults))
-        IncomingSessionPolicyStore.setAutomaticallyAllow(true, defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "mac", defaults: defaults)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(true, role: .sender, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(.blocked, peerID: "mac", role: .sender, defaults: defaults)
         XCTAssertFalse(ReceiverSessionAdmission.admitsLegacySender(peerID: "mac", defaults: defaults))
     }
 
@@ -283,7 +283,7 @@ final class SessionInvitationTests: XCTestCase {
 
     func testAllowPermanentlyDoesNotTouchInputPolicy() {
         let plan = SessionApprovalPlan.plan(for: SenderApprovalDecision.allowPermanently)
-        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", defaults: defaults) }
+        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", role: .sender, defaults: defaults) }
         XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: "a", defaults: defaults), .ask)
     }
 
@@ -327,7 +327,7 @@ final class SessionInvitationTests: XCTestCase {
 
     func testAllowPermanentlyDoesNotPersistMode() {
         let plan = SessionApprovalPlan.plan(for: SenderApprovalDecision.allowPermanently)
-        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", defaults: defaults) }
+        if let policy = plan.persistPolicy { IncomingSessionPolicyStore.setPolicy(policy, peerID: "a", role: .sender, defaults: defaults) }
         let domain = defaults.persistentDomain(forName: suiteName) ?? [:]
         XCTAssertEqual(domain.count, 1, "only the connection policy is stored")
         XCTAssertEqual(domain.values.first as? [String: String], ["a": "alwaysAllow"])

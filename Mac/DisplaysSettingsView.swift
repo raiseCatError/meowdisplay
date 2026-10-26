@@ -21,22 +21,40 @@ struct DisplaysSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             } header: {
-                Text("Display Mode")
+                Text("Default Display Mode")
             } footer: {
-                // Disabling the segment alone still lets a stale keyboard/
-                // accessibility selection reach it — `requestMode` is the
-                // actual authority and rejects Mirror regardless; this is
-                // just telling the user why.
-                if !controller.hasUsablePhysicalDisplay {
-                    Text("Mirror requires an active physical display.")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Applies to devices that haven't chosen their own mode. Each device can Mirror or Extend on its own — set it in that device's settings, or from the device itself.")
+                    // Disabling the segment alone still lets a stale keyboard/
+                    // accessibility selection reach it — `requestMode` is the
+                    // actual authority and rejects Mirror regardless; this is
+                    // just telling the user why.
+                    if !controller.hasUsablePhysicalDisplay {
+                        Text("Mirror requires an active physical display.")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if controller.mode == .mirror {
+                Section {
+                    MirrorDisplayPickerView(controller: controller)
+                } header: {
+                    Text("Default Mirror Display")
+                } footer: {
+                    Text("Used by mirroring devices that haven't chosen their own display.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if controller.mode == .mirror {
-                Section("Mirror") {
-                    MirrorDisplayPickerView(controller: controller)
+            let connected = controller.activeDisplayEntries
+            if connected.count > 1 {
+                Section("Connected Devices") {
+                    ForEach(connected) { entry in
+                        LabeledContent(entry.name, value: entry.mode.title)
+                    }
                 }
             }
 

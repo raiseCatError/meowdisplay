@@ -1342,7 +1342,7 @@ struct IdleView: View {
     /// Paired Macs that have a saved Remote endpoint, with display names.
     private var remoteMacs: [(peerID: String, displayName: String)] {
         _ = remoteRefresh
-        let configured = Set(RemoteEndpointStore.allPeerIDs())
+        let configured = Set(RemoteEndpointStore.allPeerIDs(role: .receiverRole))
         return TrustStore.shared.pinnedPeers().filter { configured.contains($0.peerID) }
     }
 
@@ -1415,7 +1415,7 @@ struct IdleView: View {
             Menu {
                 Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
                 Button("Remove Remote Details", role: .destructive) {
-                    RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+                    RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
                     remoteRefresh += 1
                 }
             } label: {
@@ -1481,7 +1481,7 @@ struct IdleView: View {
                         .font(.caption)
                         .buttonStyle(.borderless)
                 }
-            } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
+            } else if WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole)?.broadcastAddress != nil {
                 Button {
                     wakeConnect.begin(peerID: peerID)
                 } label: {

@@ -60,6 +60,18 @@ targets:
     sources:
       - Mac
       - Shared
+      # The unified app's "Use This Mac as a Display" role: the Mac
+      # Receiver's code, minus its own app entry point and bundle resources
+      # (MeowDisplay keeps one icon, string catalog and Info.plist). The
+      # standalone receiver target below still builds all of it for macOS
+      # 12-13.
+      - path: MacReceiver
+        excludes:
+          - OpenSidecarMacReceiverApp.swift
+          - Info.plist
+          - "*.entitlements"
+          - "*.xcstrings"
+          - Assets.xcassets
     dependencies:
       - package: Sparkle
       - package: SwiftCertificates
@@ -77,6 +89,9 @@ targets:
         NSLocalNetworkUsageDescription: MeowDisplay connects to your iPad or iPhone over the local network in WiFi mode.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
+        # The receiver role keeps its own identity and pins (see
+        # ReceiverRoleConfiguration / TrustStore.receiverRole).
+        MeowDisplayReceiverRoleTrust: separate
         # --- Sparkle auto-update (see RELEASE.md) ---
         # MeowDisplay's own feed and EdDSA public key — never upstream
         # OpenDisplay's. Both Mac apps trust the same key; each has its own
@@ -179,6 +194,10 @@ targets:
       - Mac/SmartTouchTargetClassifier.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
+      - MacReceiver/ReceiverInputForwarding.swift
+      - MacReceiver/ReceiverOwnership.swift
+      - Shared/ReceiverRoleConfiguration.swift
+      - Mac/MacAppRole.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
@@ -211,6 +230,7 @@ targets:
       - Mac/AppPresentation.swift
       - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
+      - Mac/DisplayModeAssignment.swift
       - Mac/DisplayHealth.swift
       - Mac/HiDPIEnforcementBackoff.swift
       - Mac/RouteArbitration.swift

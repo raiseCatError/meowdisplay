@@ -25,7 +25,7 @@ Mac. A second receiver app lets another Mac act as a display too.
        │  video (+ optional audio) + control
        ▼
  ┌──────────────┐
- │ Mac Receiver │   display only: its keyboard/trackpad are NOT forwarded
+ │ Mac Receiver │   its keyboard/trackpad drive the sender once control is granted
  └──────────────┘
 ```
 
@@ -43,9 +43,9 @@ tracked — edit `project.yml`, never the generated project.
 
 | Target | Sources | Role |
 | --- | --- | --- |
-| `OpenSidecarMac` | `Mac/`, `Shared/` | Mac Sender app |
+| `OpenSidecarMac` | `Mac/`, `Shared/`, `MacReceiver/` (minus its entry point and resources) | MeowDisplay: the sender, plus Use This Mac as a Display ([UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md)) |
 | `OpenSidecariOS` | `iOS/`, `Shared/` (bundles `iOS/PrivacyInfo.xcprivacy`) | iPhone/iPad Receiver app |
-| `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Mac Receiver app |
+| `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Standalone Mac Receiver app, for macOS 12–13 and existing users |
 | `OpenSidecarMacTests` | `MacTests/` plus selected pure-logic files | Hostless unit tests (run by `.github/workflows/tests.yml`) |
 
 The `OpenSidecar*` names are inherited from OpenDisplay and are kept for
@@ -64,6 +64,7 @@ compatibility; the product name is MeowDisplay. `src/`, `public/` and
 | Capture (ScreenCaptureKit) and its lifecycle/recovery | `Mac/MacSender.swift`, `Mac/CaptureLifecycle.swift`, `Mac/CaptureOwnership.swift`, `Mac/MacSenderPipelineState.swift` |
 | Virtual display for Extend (private `CGVirtualDisplay` SPI, isolated here) | `Mac/VirtualDisplay.swift`, `Mac/DisplayArrangement.swift` |
 | Mirror source selection | `Mac/MirrorDisplaySelection.swift` |
+| Per-device Mirror/Extend, live virtual displays ([MULTI_DEVICE.md](MULTI_DEVICE.md)) | `Mac/DisplayModeAssignment.swift` |
 | Video encode (VideoToolbox) | `Mac/MacSenderVideoEncoder.swift` |
 | System audio capture + AAC encode | `Mac/AudioCaptureEncoder.swift` |
 | Input injection and targeting | `Mac/InputInjector.swift`, `Mac/InputRouting.swift`, `Mac/SystemGestureInvoker.swift` |
@@ -99,8 +100,12 @@ drawing, keeping the Mac awake, and its own settings/pairing UI
 `MacReceiver/ReceiverPairingPanel.swift`). It advertises its own panel size
 like an iPad does.
 
-It is **display-only**: the receiving Mac's keyboard and trackpad are not
-sent back to the sender.
+Once the sending Mac grants the session control, the receiving Mac's own
+keyboard and trackpad drive it while the video window is in front
+(`MacReceiver/ReceiverInputForwarding.swift`, `ReceiverInputController.swift`;
+see [RECEIVER_INPUT.md](RECEIVER_INPUT.md)). Input is never captured globally,
+and it uses the same `pointer`/`scroll`/`keyboard` messages and per-session
+grant as the iPhone and iPad.
 
 ## Shared code (`Shared/`)
 
@@ -142,6 +147,11 @@ framed media over the active route ───────────────
   private `CGVirtualDisplay` SPI is used.
 - Capture lifecycle and transport lifecycle are related but deliberately
   separate: a route change or reconnect should not have to rebuild capture.
+- Mirror/Extend is chosen **per device**: each connected device has its own
+  pipeline, and `DisplayModeCoordinator` decides each one's mode and Mirror
+  source and which single session a change rebuilds. The Mac-wide settings
+  are defaults for devices without their own choice. See
+  [MULTI_DEVICE.md](MULTI_DEVICE.md).
 
 ## Input pipeline
 
@@ -377,3 +387,6 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [SECURITY.md](SECURITY.md) — security model and vulnerability reporting
 - [SUPPORT.md](SUPPORT.md) — where to get help
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
+- [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
+- [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, and its physical test checklist
+- [UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md) — one Mac app for both roles: design, migration and its physical test checklist

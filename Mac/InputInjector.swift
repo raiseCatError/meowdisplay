@@ -78,6 +78,7 @@ final class InputInjector {
     // Hardware keys currently held down (M4) — released on cancellation so a
     // dropped session can never leave a modifier or arrow key stuck.
     private var heldKeys = HeldKeyTracker()
+    private var scrollRemainder = ScrollRemainder()
     private var heldModifiers = HeldModifierTracker()
 
     init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox) {
@@ -96,6 +97,7 @@ final class InputInjector {
     /// Caller must already hold inputLock.
     private func cancelActiveInputLocked() {
         let point = currentCursor()
+        scrollRemainder.reset()
 
         if isDown {
             if let event = CGEvent(
@@ -220,10 +222,12 @@ final class InputInjector {
         guard inputIsAllowed() else { return }
         let bounds = CGDisplayBounds(displayID)
         let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+        let whole = scrollRemainder.take(dxPoints: dx / scale, dyPoints: dy / scale)
+        guard whole.dx != 0 || whole.dy != 0 else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
                                   wheelCount: 2,
-                                  wheel1: Int32((dy / scale).rounded()),
-                                  wheel2: Int32((dx / scale).rounded()),
+                                  wheel1: whole.dy,
+                                  wheel2: whole.dx,
                                   wheel3: 0) else { return }
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         event.post(tap: .cghidEventTap)
@@ -380,13 +384,21 @@ final class InputInjector {
     }
 
     /// A hardware key going down. A duplicate down for an already-held key
-    /// is ignored rather than re-posted.
-    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String]) {
+    /// is ignored rather than re-posted — unless it is marked `repeat` (a
+    /// receiving Mac's own key repeat), which posts an auto-repeat key-down
+    /// for the held key.
+    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), heldKeys.down(usage) else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: true,
-                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
+        guard inputIsAllowed() else { return }
+        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        if isRepeat {
+            guard heldKeys.allowsRepeat(usage) else { return }
+            postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags, autorepeat: true)
+            return
+        }
+        guard heldKeys.down(usage) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
     }
 
     /// The matching release. A spurious up for a key that isn't held (e.g.
@@ -399,9 +411,10 @@ final class InputInjector {
                      flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
     }
 
-    private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {
+    private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags, autorepeat: Bool = false) {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown) else { return }
         event.flags = flags
+        if autorepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
         event.post(tap: .cghidEventTap)
     }
 

@@ -164,43 +164,63 @@ enum IncomingSessionPolicy {
 
 /// Persistent incoming-invitation policy, keyed only by the stable peer
 /// install ID `TrustStore` pins (never a name, address, or unauthenticated
-/// claim). Stores exactly two things: the global "Automatically Allow
-/// Connections" preference and per-peer overrides. Pending requests, one-off
-/// rejections, chosen display modes and input permission are deliberately
-/// never stored here. Forget/unpair must call `removePolicy(peerID:)`.
+/// claim). Stores exactly two things per role: the global "Automatically
+/// Allow Connections" preference and per-peer overrides. Pending requests,
+/// one-off rejections, chosen display modes and input permission are
+/// deliberately never stored here. Forget/unpair must call
+/// `removePolicy(peerID:role:)`.
+///
+/// Every call names its role (`RolePreferences`). In the unified Mac app the
+/// sender's preference governs receivers asking this Mac to share, and the
+/// receiver role's governs Macs asking to use this Mac as a display: one must
+/// never approve for the other.
 enum IncomingSessionPolicyStore {
-    static let automaticallyAllowKey = "incomingSessionAutomaticallyAllow"
-    private static let policiesKey = "incomingSessionPeerPolicy.v1"
-
-    /// Defaults to ON.
-    static func automaticallyAllow(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: automaticallyAllowKey) as? Bool ?? true
+    static func automaticallyAllowKey(_ role: RolePreferences) -> String {
+        role.key("incomingSessionAutomaticallyAllow")
     }
 
-    static func setAutomaticallyAllow(_ value: Bool, defaults: UserDefaults = .standard) {
-        defaults.set(value, forKey: automaticallyAllowKey)
+    private static func policiesKey(_ role: RolePreferences) -> String {
+        role.key("incomingSessionPeerPolicy.v1")
     }
 
-    static func policy(peerID: String, defaults: UserDefaults = .standard) -> IncomingSessionPeerPolicy? {
-        (defaults.dictionary(forKey: policiesKey)?[peerID] as? String).flatMap(IncomingSessionPeerPolicy.init(rawValue:))
+    /// ON for the sender and the receiver-only apps, as it always was. OFF
+    /// for the unified Mac app's receiver role: a Mac connecting to this Mac
+    /// as a display asks until the user turns it on for that role.
+    static func automaticallyAllowDefault(_ role: RolePreferences) -> Bool {
+        !role.isSeparateReceiverRole
+    }
+
+    static func automaticallyAllow(role: RolePreferences, defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: automaticallyAllowKey(role)) as? Bool ?? automaticallyAllowDefault(role)
+    }
+
+    static func setAutomaticallyAllow(_ value: Bool, role: RolePreferences, defaults: UserDefaults = .standard) {
+        defaults.set(value, forKey: automaticallyAllowKey(role))
+    }
+
+    static func policy(peerID: String, role: RolePreferences,
+                       defaults: UserDefaults = .standard) -> IncomingSessionPeerPolicy? {
+        (defaults.dictionary(forKey: policiesKey(role))?[peerID] as? String)
+            .flatMap(IncomingSessionPeerPolicy.init(rawValue:))
     }
 
     /// `nil` returns the peer to Default.
-    static func setPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String, defaults: UserDefaults = .standard) {
-        var policies = defaults.dictionary(forKey: policiesKey) as? [String: String] ?? [:]
+    static func setPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String, role: RolePreferences,
+                          defaults: UserDefaults = .standard) {
+        var policies = defaults.dictionary(forKey: policiesKey(role)) as? [String: String] ?? [:]
         policies[peerID] = policy?.rawValue
-        defaults.set(policies, forKey: policiesKey)
+        defaults.set(policies, forKey: policiesKey(role))
     }
 
-    static func removePolicy(peerID: String, defaults: UserDefaults = .standard) {
-        setPolicy(nil, peerID: peerID, defaults: defaults)
+    static func removePolicy(peerID: String, role: RolePreferences, defaults: UserDefaults = .standard) {
+        setPolicy(nil, peerID: peerID, role: role, defaults: defaults)
     }
 
-    static func decision(peerID: String?, intent: SessionInvitationIntent,
+    static func decision(peerID: String?, intent: SessionInvitationIntent, role: RolePreferences,
                          defaults: UserDefaults = .standard) -> IncomingSessionDecision {
         let decision = IncomingSessionPolicy.resolve(
-            peerPolicy: peerID.flatMap { policy(peerID: $0, defaults: defaults) },
-            automaticallyAllow: automaticallyAllow(defaults: defaults), intent: intent)
+            peerPolicy: peerID.flatMap { policy(peerID: $0, role: role, defaults: defaults) },
+            automaticallyAllow: automaticallyAllow(role: role, defaults: defaults), intent: intent)
         // Without an authenticated identity there is nobody to name in a
         // prompt and no per-device policy to apply: never ask.
         if peerID == nil, decision == .askUser { return .decline }
@@ -334,7 +354,9 @@ enum ReceiverRequestAdmission {
     /// started or dropped, never turned into a prompt.
     static func decide(peerID: String, intent: SessionInvitationIntent, existing: ExistingSession?,
                        defaults: UserDefaults = .standard) -> Action {
-        decide(policy: IncomingSessionPolicyStore.decision(peerID: peerID, intent: intent, defaults: defaults),
+        // The Mac Sender's own policy: this is a receiver asking it to share.
+        decide(policy: IncomingSessionPolicyStore.decision(peerID: peerID, intent: intent, role: .sender,
+                                                           defaults: defaults),
                existing: existing)
     }
 
@@ -595,7 +617,9 @@ struct ReceiverSessionAdmission: Equatable, Sendable {
     /// admitted only if this receiver would accept a background attempt from
     /// it anyway. Anything stricter fails closed — an older peer must never
     /// silently bypass the user's approval preference.
-    static func admitsLegacySender(peerID: String?, defaults: UserDefaults = .standard) -> Bool {
-        IncomingSessionPolicyStore.decision(peerID: peerID, intent: .automatic, defaults: defaults) == .accept
+    static func admitsLegacySender(peerID: String?, role: RolePreferences = .receiverRole,
+                                   defaults: UserDefaults = .standard) -> Bool {
+        IncomingSessionPolicyStore.decision(peerID: peerID, intent: .automatic, role: role,
+                                            defaults: defaults) == .accept
     }
 }

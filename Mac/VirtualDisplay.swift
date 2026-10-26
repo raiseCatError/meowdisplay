@@ -41,6 +41,7 @@ final class VirtualDisplay {
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
           refreshRate: Int = 60,
           restoreOrigin: CGPoint? = nil,
+          owner: ObjectIdentifier? = nil,
           onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
@@ -80,6 +81,12 @@ final class VirtualDisplay {
             return nil
         }
         Log.info("virtual display created: id=\(display.displayID) \(pointsWide)x\(pointsHigh)pt @2x")
+        // Registered for exactly this object's lifetime (see `deinit`), so
+        // every teardown path — disconnect, mode switch, rotation rebuild,
+        // a failed probe — releases the record with the display itself.
+        VirtualDisplayRegistry.shared.register(
+            ObjectIdentifier(self), displayID: display.displayID,
+            identity: VirtualDisplayIdentity(serial: serialNum, productID: productID), owner: owner)
 
         // macOS defaults the new display to its 1x mode AND can restore a
         // stale saved mode for this serial asynchronously, seconds after the
@@ -102,6 +109,10 @@ final class VirtualDisplay {
                 try? await Task.sleep(for: .milliseconds(settled ? 2000 : 200))
             }
         }
+    }
+
+    deinit {
+        VirtualDisplayRegistry.shared.unregister(ObjectIdentifier(self))
     }
 
     /// Change orientation without changing the virtual monitor's identity.

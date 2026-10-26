@@ -18,7 +18,6 @@ struct ReceiverStreamingSettingsView: View {
 private struct ReceiverStreamingPage: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var controller: ReceiverController
-    @AppStorage(ReceiverController.audioPreferredKey) private var audioPreferred = false
 
     var body: some View {
         ReceiverSettingsForm {
@@ -70,7 +69,7 @@ private struct ReceiverStreamingPage: View {
                 }
             }
 
-            audioSection
+            ReceiverAudioSection(receiver: receiver, controller: controller)
 
             if receiver.connected, receiver.videoSize != .zero {
                 Section("Current Stream") {
@@ -123,12 +122,18 @@ private struct ReceiverStreamingPage: View {
                              ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
         }
     }
+}
 
-    /// The receiver's own audio opt-in, plus the receiver-local A/V Sync
-    /// offset and Resync — the same controls, range and step
-    /// (`AVSyncOffset`) as the iPhone app.
-    @ViewBuilder
-    private var audioSection: some View {
+/// The receiver's own audio opt-in, plus the receiver-local A/V Sync offset
+/// and Resync — the same controls, range and step (`AVSyncOffset`) as the
+/// iPhone app. Shared by the standalone receiver's Streaming page and
+/// MeowDisplay's "This Mac as a Display" page.
+struct ReceiverAudioSection: View {
+    @ObservedObject var receiver: StreamReceiver
+    @ObservedObject var controller: ReceiverController
+    @AppStorage(ReceiverController.audioPreferredKey) private var audioPreferred = false
+
+    var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Audio", isOn: Binding(

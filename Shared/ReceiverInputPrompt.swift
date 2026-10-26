@@ -133,7 +133,8 @@ enum InputAutoRequestPolicy {
 /// peer ID like `IncomingSessionPolicyStore`. Off unless the user turns it
 /// on; forgetting the Mac removes it.
 enum InputAutoRequestStore {
-    static let defaultsKey = "inputAutoRequestPeers.v1"
+    // Receiver-only; scoped like every receiver-role key in the unified app.
+    static let defaultsKey = ReceiverRoleConfiguration.defaultsKey("inputAutoRequestPeers.v1")
 
     static func isEnabled(peerID: String?, defaults: UserDefaults = .standard) -> Bool {
         guard let peerID else { return false }

@@ -10,8 +10,11 @@ current capabilities.
   `macos-26` runner). The Mac sender target's deployment target is macOS 14;
   the Mac Receiver target is macOS 12; the iOS target is iOS/iPadOS 16.4.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
-- A free or paid Apple Developer account, to sign the iOS build for your
-  device (a free account is enough for local sideloading).
+- A free or paid Apple Developer account, to sign the Mac build and, if you
+  build it yourself, the iOS build for your device (a free account is enough
+  for local sideloading). To just use MeowDisplay, skip building: download the
+  [Mac app](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg) and get the iPhone/iPad receiver from the
+  [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864).
 
 ## Clone
 
@@ -183,7 +186,9 @@ Settings. **Always Allow Requests** skips the Mac prompt but still requires
 that request each session. See [Allow Input & control requests](README.md#allow-input--control-requests).
 
 Receivers can still view the Mac with input off. The standalone Mac Receiver
-is display-only; its keyboard and trackpad are not forwarded.
+uses the same request: once the sending Mac allows it, the receiving Mac's own
+keyboard and trackpad control it while the video window is in front. See
+[RECEIVER_INPUT.md](RECEIVER_INPUT.md).
 
 ### Connecting and reconnecting
 

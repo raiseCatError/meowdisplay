@@ -67,7 +67,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
-        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
     }
 
     private var statusText: String? {
@@ -134,7 +134,7 @@ struct RemoteEndpointEditorView: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) else {
             host = ""
             port = String(WireCrypto.remoteRequestPort)
             return
@@ -146,11 +146,11 @@ struct RemoteEndpointEditorView: View {
     private func save() {
         switch RemoteEndpointValidation.validate(host: host, port: port) {
         case .success(let value):
-            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
+            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .sender)
             // Read back from the canonical store rather than trusting the
             // local write — if persistence actually failed, show that
             // instead of claiming success.
-            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
+            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender),
                   readBack.host == value.host, readBack.port == value.port else {
                 errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
@@ -170,7 +170,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private func remove() {
-        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .sender)
         host = ""
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil

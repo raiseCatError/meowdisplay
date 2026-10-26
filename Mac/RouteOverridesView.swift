@@ -45,12 +45,12 @@ struct RemoteEndpointDebugView: View {
         HStack {
             Button("Save") {
                 guard !peerID.isEmpty, let portNum = UInt16(port), !host.isEmpty else { return }
-                RemoteEndpointStore.setEndpoint(host, port: portNum, forPeerID: peerID)
+                RemoteEndpointStore.setEndpoint(host, port: portNum, forPeerID: peerID, role: .sender)
             }
             .disabled(peerID.isEmpty || host.isEmpty || UInt16(port) == nil)
             Button("Forget") {
                 guard !peerID.isEmpty else { return }
-                RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+                RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .sender)
                 host = ""
                 port = "9001"
             }
@@ -62,7 +62,7 @@ struct RemoteEndpointDebugView: View {
         // this view previously left the fields blank/stale here, which is
         // what made a successful Save look like it hadn't persisted.
         .onChange(of: peerID) { _, newValue in
-            guard let hint = RemoteEndpointStore.endpoint(forPeerID: newValue) else {
+            guard let hint = RemoteEndpointStore.endpoint(forPeerID: newValue, role: .sender) else {
                 host = ""
                 port = "9001"
                 return

@@ -65,9 +65,29 @@ final class QUICReceiverContext: @unchecked Sendable {
         return current
     }
 
-    func install(_ listener: NWListener) {
+    /// Set once by `StreamReceiver.stop()`: this receiver is finished, so
+    /// a retry scheduled before the stop (after a failed bind, for example)
+    /// must never open a listener again.
+    private var retired = false
+
+    func retire() {
         lock.lock(); defer { lock.unlock() }
+        retired = true
+    }
+
+    func isRetired() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    /// Installs `listener` as current, or refuses (and returns `false`) once
+    /// retired; the caller then drops the listener without starting it.
+    @discardableResult
+    func install(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return false }
         current = listener
+        return true
     }
 
     func isCurrent(_ listener: NWListener) -> Bool {
@@ -497,13 +517,13 @@ enum QUICReceiverListener {
         guard QUICRuntimeAvailability.isAvailable, !context.hasCurrent(),
               let quic = TLSConfigurator.pinnedQUICOptions(
                 identity: identity,
-                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                pinnedSPKIs: { TrustStore.receiverRole.allPinnedPeerSPKIs() },
                 isListener: true, queue: queue) else { return }
         configureStreamLimits(quic)
         do {
             let params = listenerParameters(quic: quic)
             let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: QUICTransport.udpPort)!)
-            context.install(listener)
+            guard context.install(listener) else { return }
             listener.service = quicService(advertisementState: advertisementState, installID: installID,
                                            protocolVersion: advertisedProtocolVersion)
             let groups = context.groups
@@ -541,7 +561,7 @@ enum QUICReceiverListener {
                     Log.info("QUIC listener failed: \(error)")
                     guard let listener, context.clearIfCurrent(listener) else { return }
                     queue.asyncAfter(deadline: .now() + 1) {
-                        guard let identity = TrustStore.shared.ownIdentity() else { return }
+                        guard let identity = TrustStore.receiverRole.ownIdentity() else { return }
                         startIfNeeded(
                             context: context, identity: identity, queue: queue,
                             pairingSuppressionState: pairingSuppressionState,

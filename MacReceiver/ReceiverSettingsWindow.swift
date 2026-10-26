@@ -386,10 +386,20 @@ struct ReceiverSettingsDetailView: View {
         }
         .frame(minWidth: 500, minHeight: 450)
         .background(ReceiverNavigationKeyboardShortcuts(navigationModel: navigationModel))
-        // The sender is headless, so Mirror has nothing to capture. "Use
-        // Extend" sends the existing displayModeRequest; the sender decides.
-        .alert("Mirror isn’t available",
-               isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
+        .modifier(MirrorUnavailableOfferAlert(controller: controller))
+    }
+}
+
+/// The sender is headless, so Mirror has nothing to capture. "Use Extend"
+/// sends the existing displayModeRequest; the sender decides. Withdrawn by
+/// the sender (or its timeout), the alert goes away by itself. On the
+/// standalone receiver's Settings window and on MeowDisplay's Settings.
+struct MirrorUnavailableOfferAlert: ViewModifier {
+    @ObservedObject var controller: ReceiverController
+
+    func body(content: Content) -> some View {
+        content.alert("Mirror isn’t available",
+                      isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
             Button("Cancel", role: .cancel) { controller.declineMirrorUnavailableOffer() }
             Button("Use Extend") { controller.acceptMirrorUnavailableOffer() }
         } message: {
@@ -475,6 +485,13 @@ struct WithReceiver<Content: View>: View {
     var body: some View {
         if let receiver = controller.receiver {
             content(receiver)
+        } else if controller.waitingForOtherReceiver || controller.lockProblem != nil {
+            ReceiverSettingsForm {
+                ReceiverCaption(verbatim: controller.statusTitle)
+                if controller.lockProblem != nil {
+                    Button("Try Again") { controller.start() }
+                }
+            }
         } else {
             ReceiverSettingsForm {
                 ReceiverCaption("The receiver is not running.")

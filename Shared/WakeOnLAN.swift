@@ -25,35 +25,36 @@ struct WakeMetadata: Codable, Equatable {
 /// `RemoteEndpointStore`'s pattern exactly: keyed by stable peer install ID,
 /// never by the network address itself, and discarding anything from an
 /// incompatible schema rather than guessing at its shape.
+/// Per role (`RolePreferences`), like `RemoteEndpointStore`.
 enum WakeMetadataStore {
-    private static let defaultsKey = "wakeMetadataHints.v1"
+    private static func defaultsKey(_ role: RolePreferences) -> String { role.key("wakeMetadataHints.v1") }
 
-    private static func load() -> [String: WakeMetadata] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+    private static func load(_ role: RolePreferences) -> [String: WakeMetadata] {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey(role)),
               let decoded = try? JSONDecoder().decode([String: WakeMetadata].self, from: data)
         else { return [:] }
         return decoded.filter { $0.value.version == WakeMetadata.schemaVersion }
     }
 
-    private static func save(_ hints: [String: WakeMetadata]) {
+    private static func save(_ hints: [String: WakeMetadata], _ role: RolePreferences) {
         guard let data = try? JSONEncoder().encode(hints) else { return }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        UserDefaults.standard.set(data, forKey: defaultsKey(role))
     }
 
-    static func metadata(forPeerID peerID: String) -> WakeMetadata? {
-        load()[peerID]
+    static func metadata(forPeerID peerID: String, role: RolePreferences) -> WakeMetadata? {
+        load(role)[peerID]
     }
 
-    static func setMetadata(_ metadata: WakeMetadata, forPeerID peerID: String) {
-        var hints = load()
+    static func setMetadata(_ metadata: WakeMetadata, forPeerID peerID: String, role: RolePreferences) {
+        var hints = load(role)
         hints[peerID] = metadata
-        save(hints)
+        save(hints, role)
     }
 
-    static func removeMetadata(forPeerID peerID: String) {
-        var hints = load()
+    static func removeMetadata(forPeerID peerID: String, role: RolePreferences) {
+        var hints = load(role)
         hints.removeValue(forKey: peerID)
-        save(hints)
+        save(hints, role)
     }
 }
 
