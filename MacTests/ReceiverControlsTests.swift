@@ -383,6 +383,49 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(visible.contains(layout.paletteFrame))
     }
 
+    /// Nine 40pt chips need 396pt: wider than a 390pt (or 375pt) iPhone in
+    /// portrait, and taller than it in landscape, so the end chips ran off
+    /// the screen and out of the tray's touch area.
+    func testTrayChipsShrinkJustEnoughToFitTheScreen() {
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 9, length: 440), 40)
+        for length: CGFloat in [402, 390, 375] {
+            let chip = ControlTrayGeometry.fittedChipDiameter(count: 9, length: length)
+            XCTAssertLessThan(chip, 40)
+            let tray = 9 * chip + 8 * 4 + 4
+            XCTAssertLessThanOrEqual(tray, length - 24, "\(length)pt screen")
+        }
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 4, length: 390), 40)
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 20, length: 390), 30)
+    }
+
+    /// Avoid Notch lifts the portrait tray off the home indicator; the
+    /// palette must move with it rather than stay where the tray used to
+    /// be (it covered half the tray on every Face ID iPhone).
+    func testAvoidNotchCarriesPortraitPaletteWithTheTray() {
+        let container = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let layout = ControlTrayGeometry.layout(
+            container: container,
+            safeInsets: ControlSafeInsets(top: 62, leading: 0, bottom: 34, trailing: 0),
+            keyboardVisibleRect: nil, portrait: true, side: .trailing,
+            traySize: CGSize(width: 396, height: 44), paletteSize: CGSize(width: 300, height: 42),
+            avoidNotch: true)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxY, container.maxY - 34)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.trayFrame.minY - layout.paletteFrame.maxY, 10, accuracy: 0.001)
+    }
+
+    func testAvoidNotchCarriesLandscapePaletteWithTheTray() {
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(x: 0, y: 0, width: 874, height: 402),
+            safeInsets: ControlSafeInsets(top: 0, leading: 62, bottom: 21, trailing: 62),
+            keyboardVisibleRect: nil, portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(layout.trayFrame.minX, 62)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.paletteFrame.minX - layout.trayFrame.maxX, 10, accuracy: 0.001)
+    }
+
     func testLandscapeCornerFallsBackInsideKeyboardVisibleBounds() {
         let visible = CGRect(x: 0, y: 0, width: 700, height: 190)
         let layout = ControlTrayGeometry.layout(
@@ -415,18 +458,80 @@ final class ReceiverControlsTests: XCTestCase {
 
     // MARK: - Function Tray
 
-    func testDefaultFunctionTrayContainsZoomAndEditActionsInOrder() {
+    func testDefaultFunctionTrayContainsZoomEditAndReturnActionsInOrder() {
         let profile = FunctionTrayProfile.canonical()
-        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo"])
-        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo"])
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo", "return"])
+        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo", "Return"])
     }
 
-    func testDefaultFunctionTrayRendersAsTwoDistinctGroups() {
-        let profile = FunctionTrayProfile.canonical()
-        let groups = profile.visibleGroups
-        XCTAssertEqual(groups.count, 2)
-        XCTAssertEqual(groups[0].map(\.id), ["zoom-in", "zoom-out"])
-        XCTAssertEqual(groups[1].map(\.id), ["undo", "redo"])
+    /// Return gets its own cluster right after Undo/Redo: near the editing
+    /// actions, but with a gap so a reach for Redo doesn't submit.
+    func testDefaultFunctionTrayRendersReturnAsItsOwnGroupAfterEditing() {
+        let groups = FunctionTrayProfile.canonical().visibleGroups
+        XCTAssertEqual(groups.map { $0.map(\.id) }, [["zoom-in", "zoom-out"], ["undo", "redo"], ["return"]])
+    }
+
+    /// One activation is one ordinary Return press: usage 40, no modifiers
+    /// of its own, so a latched ⌘ or ⇧ (held on the Mac) still applies.
+    func testReturnIsOnePlainReturnPress() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "return" })
+        XCTAssertEqual(ControlActionPlan.operations(for: item.action), [.press(usage: 40, modifiers: [])])
+        XCTAssertTrue(item.action.isValid)
+        XCTAssertTrue(FunctionTrayProfile.isBuiltIn("return"))
+    }
+
+    /// On the Mac, usage 40 is the Return key, and a modifier latched on the
+    /// receiver (held via modifierDown) joins the press the way
+    /// `InputInjector.handleKeyboardPress` combines them: ⌘↵, ⇧↵.
+    func testReturnPressPicksUpLatchedModifiersOnTheMac() throws {
+        let usage = try XCTUnwrap(HIDKeyUsage.parse(40))
+        XCTAssertEqual(usage, .returnOrEnter)
+        XCTAssertEqual(usage.keyCode, 36)
+        var held = HeldModifierTracker()
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), [])
+        _ = held.down(.command)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskCommand)
+        _ = held.up(.command)
+        _ = held.down(.shift)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskShift)
+    }
+
+    /// A profile saved before Return existed keeps its tray exactly as it
+    /// was; Return arrives hidden, ready to switch on in the editor.
+    func testSavedProfileGainsReturnHiddenWithoutChangingItsLayout() {
+        var saved = FunctionTrayProfile.canonical()
+        saved.items.removeAll { $0.id == "return" }
+        saved.moveItems(from: IndexSet(integer: 3), to: 0)
+        saved.items[1].isVisible = false
+        let refreshed = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(Array(refreshed.items.prefix(saved.items.count)), saved.items)
+        let added = refreshed.items.filter { !saved.items.map(\.id).contains($0.id) }
+        XCTAssertEqual(added.map(\.id), ["return"])
+        XCTAssertEqual(added.first?.isVisible, false)
+        XCTAssertEqual(refreshed.visibleItems.map(\.id), saved.visibleItems.map(\.id))
+    }
+
+    /// While typing, Return sits in the keyboard bar beside Escape and Tab.
+    func testKeyboardBarOffersReturnBeforeHideKeyboard() {
+        let items = KeyboardBarItem.defaultItems
+        XCTAssertEqual(Array(items.suffix(4)), [.escape, .tab, .returnKey, .dismissKeyboard])
+        XCTAssertEqual(items.filter { $0 == .returnKey }.count, 1)
+    }
+
+    /// The eight-key bar (same metrics as `keyboardBarBody`) fits a 375pt
+    /// and 390pt iPhone inside the layout margins, shrinking only as far as
+    /// it must and never below the 30pt floor.
+    func testEightKeyKeyboardBarFitsCompactIPhones() {
+        let count = KeyboardBarItem.defaultItems.count
+        XCTAssertEqual(count, 8)
+        let gap: CGFloat = 8, padding: CGFloat = 6
+        for (width, expected) in [(CGFloat(375), CGFloat(35)), (390, 37), (402, 38), (440, 38)] {
+            let item = ControlTrayGeometry.fittedChipDiameter(count: count, length: width, preferred: 38,
+                                                              gap: gap, slack: padding * 2)
+            XCTAssertEqual(item, expected, "\(width)pt")
+            let barWidth = CGFloat(count) * item + CGFloat(count - 1) * gap + padding * 2
+            XCTAssertLessThanOrEqual(barWidth, width - 24, "\(width)pt")
+        }
     }
 
     func testZoomInResolvesToCommandPlus() throws {

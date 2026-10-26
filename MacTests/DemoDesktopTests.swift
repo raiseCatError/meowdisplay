@@ -364,3 +364,36 @@ final class DemoDesktopTests: XCTestCase {
         XCTAssertEqual(second.extendShape, .standard)
     }
 }
+
+/// The demo hands the control overlay the same keyboard geometry as a live
+/// session: the area above a docked keyboard, not the keyboard itself, or
+/// the keyboard bar is laid out behind the keyboard.
+final class DemoKeyboardGeometryTests: XCTestCase {
+    private let screen = CGRect(x: 0, y: 0, width: 402, height: 874)
+
+    func testDockedKeyboardYieldsTheAreaAboveIt() {
+        let keyboard = CGRect(x: 0, y: 538, width: 402, height: 336)
+        let visible = DemoDisplayGeometry.keyboardVisibleRect(keyboardFrame: keyboard, canvas: screen,
+                                                              screenBounds: screen)
+        XCTAssertEqual(visible, CGRect(x: 0, y: 0, width: 402, height: 538))
+    }
+
+    func testVisibleRectIsInTheCanvasOwnCoordinates() {
+        let canvas = CGRect(x: 0, y: 0, width: 1180, height: 760)
+        let screen = CGRect(x: 0, y: 0, width: 1180, height: 820)
+        let keyboard = CGRect(x: 0, y: 500, width: 1180, height: 320)
+        let visible = DemoDisplayGeometry.keyboardVisibleRect(keyboardFrame: keyboard, canvas: canvas,
+                                                              screenBounds: screen)
+        XCTAssertEqual(visible, CGRect(x: 0, y: 0, width: 1180, height: 500))
+    }
+
+    func testHiddenOrFloatingKeyboardYieldsNothing() {
+        XCTAssertNil(DemoDisplayGeometry.keyboardVisibleRect(keyboardFrame: nil, canvas: screen, screenBounds: screen))
+        let offscreen = CGRect(x: 0, y: 874, width: 402, height: 336)
+        XCTAssertNil(DemoDisplayGeometry.keyboardVisibleRect(keyboardFrame: offscreen, canvas: screen,
+                                                             screenBounds: screen))
+        let floating = CGRect(x: 60, y: 300, width: 320, height: 250)
+        XCTAssertNil(DemoDisplayGeometry.keyboardVisibleRect(keyboardFrame: floating, canvas: screen,
+                                                             screenBounds: screen))
+    }
+}

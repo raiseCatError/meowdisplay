@@ -171,9 +171,11 @@ enum KeyboardBarItem: Hashable {
     case modifier(ControlModifier)
     case escape
     case tab
+    /// One Return press, beside Escape and Tab for ⌘↵ and ⇧↵.
+    case returnKey
     /// Dismisses the software keyboard.
     case dismissKeyboard
 
     static let defaultItems: [KeyboardBarItem] = ControlModifier.allCases.map(KeyboardBarItem.modifier)
-        + [.escape, .tab, .dismissKeyboard]
+        + [.escape, .tab, .returnKey, .dismissKeyboard]
 }

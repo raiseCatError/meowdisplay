@@ -97,7 +97,8 @@ struct DemoReceiverScreen: View {
                     keyboardActive: $keyboardActive,
                     showSettings: $showSettings,
                     keyboardAvailable: demo.inputAllowed,
-                    keyboardVisibleRect: keyboardRect,
+                    keyboardVisibleRect: DemoDisplayGeometry.keyboardVisibleRect(
+                        keyboardFrame: keyboardRect, canvas: canvas, screenBounds: UIScreen.main.bounds),
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
@@ -144,7 +145,7 @@ struct DemoReceiverScreen: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-            keyboardRect = frame.minY >= UIScreen.main.bounds.maxY - 1 ? nil : frame
+            keyboardRect = frame
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardRect = nil
@@ -272,6 +273,9 @@ struct DemoReceiverScreen: View {
                               onResetView: {
                                   withAnimation(.easeOut(duration: 0.25)) { workspace.interaction.resetViewport() }
                               })
+                // The banner is one fixed-height row over the desktop; past
+                // this size its text overflowed and covered Exit Demo.
+                .dynamicTypeSize(...DynamicTypeSize.xxLarge)
             if let hint {
                 DemoHintChip(hint: hint)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -280,6 +284,8 @@ struct DemoReceiverScreen: View {
                     .transition(.opacity)
             }
         }
+        // Chips over the picture keep scaling, but stop before they cover it.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .frame(width: canvas.width)
         .padding(.top, Self.bandTop(canvas: canvas, insets: insets))
         .offset(x: canvas.minX)

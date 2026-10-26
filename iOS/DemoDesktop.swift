@@ -478,6 +478,17 @@ enum DemoDisplayGeometry {
         }
     }
 
+    /// The part of the receiver surface above a docked software keyboard,
+    /// in the surface's own coordinates: what a live session hands the
+    /// control overlay (see `VideoView`'s `keyboardWillChangeFrame`). `nil`
+    /// while the keyboard is hidden or floating.
+    static func keyboardVisibleRect(keyboardFrame: CGRect?, canvas: CGRect, screenBounds: CGRect) -> CGRect? {
+        guard let keyboardFrame, keyboardFrame.minY < screenBounds.maxY - 1,
+              keyboardFrame.maxY >= screenBounds.maxY - 1 else { return nil }
+        return CGRect(x: 0, y: 0, width: canvas.width,
+                      height: min(canvas.height, max(0, keyboardFrame.minY - canvas.minY)))
+    }
+
     /// The point size a real Mac would build this Extend display at, from
     /// the same `ExtendDisplaySizing` the Mac uses.
     static func extendPointSize(shape: ExtendDisplayShapePreference, receiverPixels: CGSize) -> (wide: Int, high: Int) {

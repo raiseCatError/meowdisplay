@@ -57,7 +57,7 @@ final class ReceiverControlStore: ObservableObject {
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
         self.isPad = isPad
-        preferences = repository.load()
+        preferences = repository.load(initial: .initial(isPad: isPad))
     }
 
     /// The iPad layout mode actually in effect: Custom needs a layout to
@@ -323,6 +323,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
+    @State private var initiatingReturn = false
     /// The Wheel palette on screen, for hit-testing its wedges.
     @State private var wheelHit: WheelHitTarget?
     /// The modifier whose placement a Custom-layout palette blooms around.
@@ -507,7 +508,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let portrait = containerSize.height > containerSize.width
         let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown
         let count = max(controls.count, 1)
-        let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count)
+        // Shrinks only when the chips wouldn't fit the screen edge (nine
+        // standard chips are wider than a 390pt iPhone).
+        let trayItem = ControlTrayGeometry.fittedChipDiameter(
+            count: count, length: portrait ? containerSize.width : containerSize.height,
+            preferred: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack)
+        let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count, item: trayItem)
         // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
         // tray content out in place rather than removing it — `collapsed`
         // above is untouched by it, since `store.autoHidden` can only ever
@@ -626,9 +632,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .background(frameReader("tray:more"))
                     .background(chip(selected: false))
                     .accessibilityLabel(ControlTrayItem.settings.title)
+                    .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
-                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
                     .opacity(autoHideOpacity)
@@ -752,13 +759,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
     #endif
 
-    private func calculatedTraySize(collapsed: Bool, portrait: Bool, count: Int) -> CGSize {
-        let thickness = Metrics.trayItem + Metrics.touchSlack
+    private func calculatedTraySize(collapsed: Bool, portrait: Bool, count: Int, item: CGFloat) -> CGSize {
+        let thickness = item + Metrics.touchSlack
         guard !collapsed else {
             return CGSize(width: Metrics.collapsed + Metrics.touchSlack,
                           height: Metrics.collapsed + Metrics.touchSlack)
         }
-        let length = CGFloat(count) * Metrics.trayItem
+        let length = CGFloat(count) * item
             + CGFloat(Swift.max(0, count - 1)) * Metrics.trayGap + Metrics.touchSlack
         return portrait
             ? CGSize(width: length, height: thickness)
@@ -804,16 +811,16 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     @ViewBuilder
-    private func controlsRow(axis: Axis) -> some View {
+    private func controlsRow(axis: Axis, item diameter: CGFloat) -> some View {
         let stack = axis == .horizontal
             ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
             : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
         stack {
             ForEach(controls) { item in
                 if let modifier = item.modifier {
-                    modifierButton(modifier)
+                    modifierButton(modifier, diameter: diameter)
                 } else {
-                    actionButton(item)
+                    actionButton(item, diameter: diameter)
                 }
             }
         }
@@ -844,6 +851,17 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .contentShape(Circle())
         .onTapGesture { performFunctionAction(item) }
         .accessibilityLabel(item.title)
+        .trayButtonAccessibility { performFunctionAction(item) }
+    }
+
+    /// One plain Return press through the normal keyboard path. Modifiers
+    /// latched on the tray are held on the Mac, so they still apply. Gated
+    /// like the Function Tray's one-tap actions; the Mac enforces the grant
+    /// again on its side.
+    fileprivate func sendReturn() {
+        guard store.preferences.allowInput else { return }
+        receiver.sendKeyboardPress(usage: 40)
+        haptics.play(.confirmation)
     }
 
     private func performFunctionAction(_ item: ShortcutItem) {
@@ -852,33 +870,36 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         store.scheduleAutoHide()
     }
 
-    private func modifierButton(_ modifier: ControlModifier) -> some View {
+    private func modifierButton(_ modifier: ControlModifier, diameter: CGFloat) -> some View {
         let selected = interaction.latchedModifiers.contains(modifier)
             || interaction.temporaryModifiers.contains(modifier)
         return Text(modifier.symbol)
-            .font(.system(size: 21, weight: .semibold))
+            .font(.system(size: (21 * diameter / Metrics.trayItem).rounded(), weight: .semibold))
             .foregroundStyle(selected ? Color.black : Color.white)
-            .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+            .frame(width: diameter, height: diameter)
             .background(frameReader("modifier:\(modifier.rawValue)"))
             .background(chip(selected: selected))
             .accessibilityLabel(modifier.title)
             .accessibilityValue(selected ? "On" : "Off")
+            .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
     }
 
-    private func actionButton(_ item: ControlTrayItem) -> some View {
-        Group {
+    private func actionButton(_ item: ControlTrayItem, diameter: CGFloat) -> some View {
+        let scale = diameter / Metrics.trayItem
+        return Group {
             if item == .escape || item == .tab {
-                Text(item.displayLabel).font(.system(size: 13, weight: .semibold))
+                Text(item.displayLabel).font(.system(size: (13 * scale).rounded(), weight: .semibold))
             } else {
                 Image(systemName: item.displayLabel)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: (18 * scale).rounded(), weight: .semibold))
             }
         }
         .foregroundStyle(.white)
-        .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+        .frame(width: diameter, height: diameter)
         .background(frameReader("tray:\(item.rawValue)"))
         .background(chip(selected: false))
         .accessibilityLabel(item.title)
+        .trayButtonAccessibility { activateForAccessibility(item) }
     }
 
     private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool,
@@ -925,6 +946,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .scaleEffect(selected ? 1.12 : 1)
         .animation(.snappy(duration: 0.14), value: selected)
         .accessibilityLabel(action.title)
+        .trayButtonAccessibility { apply(interaction.finish(with: action)) }
     }
 
     /// Shows the combination the finger is currently on — the live chord,
@@ -959,6 +981,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     initiatingItem = trayItem(at: value.startLocation)
                     initiatingMoveView = initiatingItem == nil
                         && frames["control:moveView"]?.contains(value.startLocation) == true
+                    initiatingReturn = initiatingItem == nil
+                        && frames["control:return"]?.contains(value.startLocation) == true
                     if let modifier = initiatingItem?.modifier {
                         initiatingModifier = modifier
                         paletteAnchor = modifier
@@ -1008,6 +1032,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 } else if let item = initiatingItem,
                           frames["tray:\(item.rawValue)"]?.contains(value.location) == true {
                     perform(item)
+                } else if initiatingReturn,
+                          frames["control:return"]?.contains(value.location) == true {
+                    // A latched chord stays latched: ⌘ then ↵ is ⌘↵.
+                    sendReturn()
                 } else if initiatingMoveView,
                           frames["control:moveView"]?.contains(value.location) == true {
                     store.setMoveViewActive(!store.moveViewActive)
@@ -1018,6 +1046,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 initiatingModifier = nil
                 initiatingItem = nil
                 initiatingMoveView = false
+                initiatingReturn = false
                 lastHoveredModifier = nil
                 gestureActive = false
                 // The touch lifted: safe to (re)start counting down again,
@@ -1084,6 +1113,20 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         }
     }
 
+    /// What a tap on a Main control does, for VoiceOver, Voice Control and
+    /// Switch Control. The chips are only drawn; taps reach them through
+    /// `controlGesture`'s hit-testing, which those technologies don't use.
+    /// A modifier latches, exactly like a quick tap.
+    fileprivate func activateForAccessibility(_ item: ControlTrayItem) {
+        store.beginAutoHideActivity()
+        if let modifier = item.modifier {
+            apply(interaction.tap(modifier))
+        } else {
+            perform(item)
+        }
+        store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+    }
+
     private func apply(_ effects: [ControlInteractionEffect]) {
         for effect in effects {
             switch effect {
@@ -1110,11 +1153,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 extension ReceiverControlOverlay {
     /// The tray items the bar's gesture can start on — see `KeyboardBarItem`.
     fileprivate var keyboardBarTrayItems: [ControlTrayItem] {
-        keyboardBarItems.map { item in
+        keyboardBarItems.compactMap { item in
             switch item {
             case .modifier(let modifier): return ControlTrayItem.item(for: modifier)
             case .escape: return .escape
             case .tab: return .tab
+            // Not a tray item; `controlGesture` tracks it by its frame.
+            case .returnKey: return nil
             case .dismissKeyboard: return .keyboard
             }
         }
@@ -1137,9 +1182,12 @@ extension ReceiverControlOverlay {
     var keyboardBarBody: some View {
         let keyboardTop = (keyboardVisibleRect?.maxY ?? containerSize.height) + surfaceOrigin.y
         let items = keyboardBarItems
-        let item: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
         let gap: CGFloat = 8
         let padding: CGFloat = 6
+        let preferredItem: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
+        // Eight keys need a little more than a 375pt iPhone offers at 38pt.
+        let item = ControlTrayGeometry.fittedChipDiameter(count: items.count, length: containerSize.width,
+                                                          preferred: preferredItem, gap: gap, slack: padding * 2)
         let barWidth = CGFloat(items.count) * item + CGFloat(items.count - 1) * gap + padding * 2
         let bar = CGRect(x: containerSize.width / 2 - barWidth / 2, y: keyboardTop - 8 - item - padding * 2,
                          width: barWidth, height: item + padding * 2)
@@ -1217,6 +1265,7 @@ extension ReceiverControlOverlay {
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(modifier.title)
                 .accessibilityValue(selected ? "On" : "Off")
+                .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
         case .escape, .tab:
             let item: ControlTrayItem = entry == .escape ? .escape : .tab
             Text(item.displayLabel)
@@ -1227,6 +1276,7 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: false, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(item.title)
+                .trayButtonAccessibility { activateForAccessibility(item) }
         case .dismissKeyboard:
             Image(systemName: "keyboard.chevron.compact.down")
                 .font(.system(size: frame.width * 0.38, weight: .semibold))
@@ -1236,6 +1286,17 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: false, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(Text("Hide Keyboard"))
+                .trayButtonAccessibility { activateForAccessibility(.keyboard) }
+        case .returnKey:
+            Image(systemName: "return")
+                .font(.system(size: frame.width * 0.38, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: frame.width, height: frame.height)
+                .background(frameReader("control:return"))
+                .background(PadChip(selected: false, onRail: true))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityLabel(Text("Return"))
+                .trayButtonAccessibility { sendReturn() }
         }
     }
 }
@@ -1408,7 +1469,8 @@ extension ReceiverControlOverlay {
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
-                                 centerLabel: paletteChord.symbols)
+                                 centerLabel: paletteChord.symbols,
+                                 onActivate: { apply(interaction.finish(with: $0)) })
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
             } else if let paletteChord, let paletteFrame {
                 if !actions.isEmpty {
@@ -1565,7 +1627,8 @@ extension ReceiverControlOverlay {
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
-                                 centerLabel: paletteChord.symbols)
+                                 centerLabel: paletteChord.symbols,
+                                 onActivate: { apply(interaction.finish(with: $0)) })
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
             } else if let paletteChord {
                 if paletteKeys.isEmpty, let anchorControl {
@@ -1755,6 +1818,17 @@ extension ReceiverControlOverlay {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(padAccessibilityLabel(kind))
         .accessibilityValue(kind.modifier != nil || kind == .moveView ? (selected ? "On" : "Off") : "")
+        .trayButtonAccessibility {
+            switch kind {
+            case .tray(let item):
+                activateForAccessibility(item)
+            case .moveView:
+                store.setMoveViewActive(!store.moveViewActive)
+                haptics.play(.selection)
+            case .function, .shortcut:
+                break
+            }
+        }
     }
 
     private func padAccessibilityLabel(_ kind: CustomControlKind) -> String {
@@ -1789,7 +1863,9 @@ extension ReceiverControlOverlay {
         .position(x: frame.midX, y: frame.minY + (diameter + (hint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.title)
-        .accessibilityAddTraits(.isButton)
+        // `.ignore` drops the face's tap gesture from the element, so the
+        // action has to be given to it directly.
+        .trayButtonAccessibility { performFunctionAction(item) }
     }
 
     @ViewBuilder
@@ -1837,6 +1913,7 @@ extension ReceiverControlOverlay {
         .scaleEffect(selected ? 1.05 : 1)
         .animation(.snappy(duration: 0.14), value: selected)
         .accessibilityLabel(action.title)
+        .trayButtonAccessibility { apply(interaction.finish(with: action)) }
     }
 
     private func emptyPaletteLabel(_ chord: ModifierChord) -> some View {
@@ -1932,6 +2009,9 @@ struct WheelPaletteView: View {
     let actions: [ShortcutItem]
     let selectedID: String?
     let centerLabel: String
+    /// Fires a wedge for VoiceOver, Voice Control and Switch Control; touch
+    /// selection goes through the overlay's gesture. `nil` in the editor.
+    var onActivate: ((ShortcutItem) -> Void)?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -1951,6 +2031,8 @@ struct WheelPaletteView: View {
                     .scaleEffect(selected ? 1.12 : 1)
                     .position(segment.labelPoint)
                     .accessibilityLabel(action.title)
+                    .accessibilityAddTraits(onActivate == nil ? [] : .isButton)
+                    .accessibilityAction { onActivate?(action) }
             }
             Circle()
                 .fill(Color(white: 0.12).opacity(0.92))
@@ -2351,4 +2433,13 @@ struct ShortcutButtonFaceView: View {
 /// The real control source: the live session's state and wire.
 extension StreamReceiver: ReceiverControlSource {
     var controlSessionPhase: ReceiverSessionPhase { session.phase }
+}
+
+private extension View {
+    /// Marks a drawn control as a button and gives assistive technologies
+    /// its tap action directly — see `activateForAccessibility`.
+    func trayButtonAccessibility(_ action: @escaping () -> Void) -> some View {
+        accessibilityAddTraits(.isButton)
+            .accessibilityAction { action() }
+    }
 }

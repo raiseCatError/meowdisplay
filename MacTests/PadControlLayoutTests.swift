@@ -700,7 +700,7 @@ final class PadControlLayoutTests: XCTestCase {
     func testTemplateEnablesTwoHandAssistWithIdleFunctionActions() {
         let layout = CustomControlLayout.radialTemplate(name: "Test", corner: .bottomLeading)
         XCTAssertTrue(layout.twoHandAssist)
-        XCTAssertEqual(layout.assistActionIDs, ["undo", "redo", "zoom-in", "zoom-out"])
+        XCTAssertEqual(layout.assistActionIDs, ["undo", "redo", "zoom-in", "zoom-out", "return"])
         let canonicalIDs = Set(FunctionTrayProfile.canonical().items.map(\.id))
         XCTAssertTrue(Set(layout.assistActionIDs).isSubset(of: canonicalIDs),
                       "idle actions reuse existing Function Tray items")
@@ -774,5 +774,66 @@ final class PadControlLayoutTests: XCTestCase {
         let suite = "PadControlLayoutTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         return (ReceiverControlPreferencesRepository(defaults: defaults), defaults, suite)
+    }
+}
+
+/// A fresh iPad starts on the radial Custom layout around a bottom-right
+/// Settings anchor; Strip and Overlay stay one setting away. Nothing a
+/// user already saved changes, and the iPhone is unaffected.
+final class PadDefaultLayoutTests: XCTestCase {
+    private func emptyDefaults() -> UserDefaults {
+        let suite = "PadDefaultLayoutTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    func testFreshPadStartsOnTheRadialCustomLayout() {
+        let preferences = ReceiverControlPreferences.initial(isPad: true)
+        XCTAssertEqual(preferences.padControlLayout, .custom)
+        let layout = try? XCTUnwrap(preferences.activeCustomLayout)
+        XCTAssertEqual(layout?.landscape, .radialTemplate(corner: .bottomTrailing, portrait: false))
+        XCTAssertEqual(layout?.portrait, .radialTemplate(corner: .bottomTrailing, portrait: true))
+        XCTAssertEqual(preferences.customLayouts.count, 1)
+    }
+
+    func testFreshPhoneKeepsTheStandardDefaults() {
+        XCTAssertEqual(ReceiverControlPreferences.initial(isPad: false), ReceiverControlPreferences())
+    }
+
+    func testRepositoryUsesTheInitialPreferencesOnlyWhenNothingIsSaved() {
+        let defaults = emptyDefaults()
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        XCTAssertEqual(repository.load(initial: .initial(isPad: true)).padControlLayout, .custom)
+
+        var saved = ReceiverControlPreferences()
+        saved.padControlLayout = .strip
+        repository.save(saved)
+        XCTAssertEqual(repository.load(initial: .initial(isPad: true)).padControlLayout, .strip)
+        XCTAssertTrue(repository.load(initial: .initial(isPad: true)).customLayouts.isEmpty)
+    }
+}
+
+/// The radial layout's idle Two-Hand Assist arc offers Return beside Undo,
+/// Redo and Zoom, without crowding the arc.
+final class RadialReturnTests: XCTestCase {
+    func testRadialTemplateOffersReturnInTwoHandAssist() {
+        XCTAssertEqual(CustomControlLayout.defaultAssistActionIDs, ["undo", "redo", "zoom-in", "zoom-out", "return"])
+        let layout = CustomControlLayout.radialTemplate(name: "Test")
+        XCTAssertTrue(layout.assistActionIDs.contains("return"))
+    }
+
+    func testFiveAssistActionsDoNotOverlap() {
+        let area = CGRect(x: 0, y: 0, width: 1180, height: 820)
+        let diameter: CGFloat = 52
+        let points = TwoHandAssist.helperPoints(count: 5, clusterCentroid: CGPoint(x: 0.9, y: 0.9), area: area,
+                                                itemDiameter: diameter, spacing: 8)
+        XCTAssertEqual(points.count, 5)
+        for (i, a) in points.enumerated() {
+            XCTAssertTrue(area.insetBy(dx: diameter / 2 - 0.5, dy: diameter / 2 - 0.5).contains(a))
+            for b in points[(i + 1)...] {
+                XCTAssertGreaterThanOrEqual(hypot(a.x - b.x, a.y - b.y), diameter - 0.5)
+            }
+        }
     }
 }

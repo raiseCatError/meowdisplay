@@ -715,6 +715,9 @@ extension FunctionTrayProfile {
         let zoomGroup = 0
         let editGroup = 1
         let systemGroup = 2
+        // Return sits right after the edit cluster (select, paste, then
+        // submit) but in its own cluster, so a reach for Redo can't submit.
+        let returnGroup = 3
         let items: [(ShortcutItem, Int)] = [
             (ShortcutItem(id: "zoom-in", title: "Zoom In", displayKey: "+", usage: 46, modifiers: command,
                          systemImage: "plus.magnifyingglass"), zoomGroup),
@@ -724,6 +727,10 @@ extension FunctionTrayProfile {
                          systemImage: "arrow.uturn.backward"), editGroup),
             (ShortcutItem(id: "redo", title: "Redo", displayKey: "Z", usage: 29, modifiers: commandShift,
                          systemImage: "arrow.uturn.forward"), editGroup),
+            // HID Return (40) with no modifiers of its own: a latched ⌘ or ⇧
+            // held on the Mac still applies (⌘↵, ⇧↵).
+            (ShortcutItem(id: "return", title: "Return", displayKey: "↵", usage: 40, modifiers: ModifierChord(),
+                         systemImage: "return"), returnGroup),
         ]
         // Opt-in (hidden by default): the only routes to Launchpad and Show
         // Desktop besides the 4/5-finger pinch/spread, which can collide
@@ -1080,11 +1087,13 @@ struct ReceiverControlPreferencesRepository {
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
-    func load() -> ReceiverControlPreferences {
+    /// `initial` is what a device starts with while nothing usable is saved
+    /// (see `ReceiverControlPreferences.initial(isPad:)`).
+    func load(initial: ReceiverControlPreferences = ReceiverControlPreferences()) -> ReceiverControlPreferences {
         guard let data = defaults.data(forKey: Self.defaultsKey),
               var value = try? JSONDecoder().decode(ReceiverControlPreferences.self, from: data),
               value.version <= ReceiverControlPreferences.schemaVersion else {
-            return ReceiverControlPreferences()
+            return initial
         }
         if value.version < 2 {
             for index in value.profiles.indices
