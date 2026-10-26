@@ -511,6 +511,188 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(refreshed.visibleItems.map(\.id), saved.visibleItems.map(\.id))
     }
 
+    // MARK: Return upgrade from v1.20.0
+
+    /// One Function Tray profile's items as v1.20.0 (schema 18) stored them:
+    /// every slot started with this tray, and saving any receiver setting
+    /// wrote it out even when the tray itself was never touched.
+    private static let v1_20FunctionTrayItems = """
+        [
+          {"item": {"id": "zoom-in", "title": "Zoom In", "displayKey": "+", "systemImage": "plus.magnifyingglass",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 46, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 0},
+          {"item": {"id": "zoom-out", "title": "Zoom Out", "displayKey": "−", "systemImage": "minus.magnifyingglass",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 45, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 0},
+          {"item": {"id": "undo", "title": "Undo", "displayKey": "Z", "systemImage": "arrow.uturn.backward",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 29, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 1},
+          {"item": {"id": "redo", "title": "Redo", "displayKey": "Z", "systemImage": "arrow.uturn.forward",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 29,
+                                                           "modifiers": {"modifiers": ["shift", "command"]}}}}},
+           "isVisible": true, "group": 1},
+          {"item": {"id": "menu-bar", "title": "Menu Bar", "displayKey": "Menu Bar", "systemImage": "menubar.rectangle",
+                    "action": {"receiverGesture": {"_0": "menuBar"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "launchpad", "title": "Launchpad", "displayKey": "Launchpad", "systemImage": "square.grid.3x3",
+                    "action": {"receiverGesture": {"_0": "launchpad"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "show-desktop", "title": "Show Desktop", "displayKey": "Show Desktop",
+                    "systemImage": "rectangle.dashed", "action": {"receiverGesture": {"_0": "showDesktop"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "control-center", "title": "Control Center", "displayKey": "Control Center",
+                    "systemImage": "switch.2", "action": {"receiverGesture": {"_0": "controlCenter"}}},
+           "isVisible": false, "group": 2}
+        ]
+        """
+
+    private func v1_20FunctionTrayProfile(_ slot: ControlProfileSlot) throws -> FunctionTrayProfile {
+        let json = #"{"slot": "\#(slot.rawValue)", "items": \#(Self.v1_20FunctionTrayItems)}"#
+        return try JSONDecoder().decode(FunctionTrayProfile.self, from: Data(json.utf8))
+    }
+
+    /// A schema-18 save holding `trays` (v1.20.0's tray in every slot when
+    /// nil) with some unrelated receiver settings changed.
+    private func saveV1_20Preferences(_ defaults: UserDefaults, trays: [FunctionTrayProfile]? = nil) throws {
+        var old = ReceiverControlPreferences()
+        old.version = 18
+        old.hapticsEnabled = false
+        old.inputMode = .trackpad
+        old.activeFunctionTrayProfile = .profile1
+        old.functionTrayPosition = .sameSide
+        old.functionTrayProfiles = try trays ?? ControlProfileSlot.allCases.map { try v1_20FunctionTrayProfile($0) }
+        defaults.set(try JSONEncoder().encode(old), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+    }
+
+    private func migrationDefaults() throws -> (UserDefaults, ReceiverControlPreferencesRepository) {
+        let suite = "ReceiverControlsReturnMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        return (defaults, ReceiverControlPreferencesRepository(defaults: defaults))
+    }
+
+    /// The fixture is v1.20.0's starting tray: Zoom and Undo/Redo showing,
+    /// the four system actions hidden, and no Return.
+    func testV1_20FixtureIsThatReleasesDefaultTray() throws {
+        let profile = try v1_20FunctionTrayProfile(.default)
+        XCTAssertEqual(profile.items.map(\.id), ["zoom-in", "zoom-out", "undo", "redo",
+                                                 "menu-bar", "launchpad", "show-desktop", "control-center"])
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo"])
+        XCTAssertEqual(profile.items.map(\.group), [0, 0, 1, 1, 2, 2, 2, 2])
+        var today = FunctionTrayProfile.canonical()
+        today.items.removeAll { $0.id == "return" }
+        XCTAssertEqual(profile, today)
+    }
+
+    func testFreshInstallShowsReturnInEverySlot() throws {
+        let (_, repository) = try migrationDefaults()
+        for initial in [ReceiverControlPreferences.initial(isPad: false), .initial(isPad: true)] {
+            let loaded = repository.load(initial: initial)
+            for slot in ControlProfileSlot.allCases {
+                let profile = loaded.functionTrayProfile(for: slot)
+                XCTAssertEqual(profile, .canonical(slot: slot), "\(slot)")
+                XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo", "return"])
+            }
+        }
+    }
+
+    /// An untouched v1.20.0 tray, saved only because other settings
+    /// changed, upgrades to today's default in all three slots, and those
+    /// other settings stay as they were.
+    func testUntouchedV1_20TraysUpgradeToShowReturnInEverySlot() throws {
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults)
+
+        let loaded = repository.load()
+        for slot in ControlProfileSlot.allCases {
+            XCTAssertEqual(loaded.functionTrayProfiles.first { $0.slot == slot }, .canonical(slot: slot), "\(slot)")
+            XCTAssertEqual(loaded.functionTrayProfile(for: slot).visibleGroups.map { $0.map(\.id) },
+                           [["zoom-in", "zoom-out"], ["undo", "redo"], ["return"]], "\(slot)")
+        }
+        XCTAssertFalse(loaded.hapticsEnabled)
+        XCTAssertEqual(loaded.inputMode, .trackpad)
+        XCTAssertEqual(loaded.activeFunctionTrayProfile, .profile1)
+        XCTAssertEqual(loaded.functionTrayPosition, .sameSide)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    /// Each kind of customization keeps the user's tray exactly and only
+    /// adds Return hidden, ready in the editor. Untouched slots beside it
+    /// still upgrade on their own.
+    func testCustomizedV1_20TraysKeepTheirLayoutAndGainReturnHidden() throws {
+        let custom = ShortcutItem(id: "custom-save", title: "Save", displayKey: "S", usage: 22,
+                                  modifiers: ModifierChord([.command]))
+        let customizations: [(String, (inout FunctionTrayProfile) -> Void)] = [
+            ("order", { $0.moveItems(from: IndexSet(integer: 3), to: 0) }),
+            ("hidden", { $0.removeItem(id: "zoom-out") }),
+            ("shown", { $0.items[4].isVisible = true }),
+            ("group", { $0.items[1].group = 1 }),
+            ("custom action", { XCTAssertTrue($0.addCustomItem(custom)) }),
+            ("name", { $0.rename(id: "undo", to: "Back") }),
+            ("display", { $0.setDisplay(id: "redo", .emoji("🔁")) }),
+        ]
+        for (name, customize) in customizations {
+            let (defaults, repository) = try migrationDefaults()
+            var tray = try v1_20FunctionTrayProfile(.profile2)
+            customize(&tray)
+            try saveV1_20Preferences(defaults, trays: [try v1_20FunctionTrayProfile(.default),
+                                                       try v1_20FunctionTrayProfile(.profile1), tray])
+
+            let loaded = repository.load()
+            let migrated = loaded.functionTrayProfile(for: .profile2)
+            XCTAssertEqual(Array(migrated.items.dropLast()), tray.items, name)
+            XCTAssertEqual(migrated.items.last?.id, "return", name)
+            XCTAssertEqual(migrated.items.last?.isVisible, false, name)
+            XCTAssertEqual(migrated.visibleItems, tray.visibleItems, name)
+            XCTAssertEqual(loaded.functionTrayProfile(for: .default), .canonical(slot: .default), name)
+            XCTAssertEqual(loaded.functionTrayProfile(for: .profile1), .canonical(slot: .profile1), name)
+        }
+    }
+
+    /// A tray that already has Return keeps the user's choice for it.
+    func testSavedReturnChoiceIsKept() throws {
+        var hidden = FunctionTrayProfile.canonical(slot: .default)
+        hidden.removeItem(id: "return")
+        var moved = FunctionTrayProfile.canonical(slot: .profile1)
+        moved.moveItems(from: IndexSet(integer: 4), to: 0)
+        // A pre-release build appended it hidden to a v1.20.0 tray.
+        var appended = try v1_20FunctionTrayProfile(.profile2)
+        let returnItem = try XCTUnwrap(FunctionTrayProfile.canonical().items.first { $0.id == "return" })
+        appended.items.append(FunctionTrayItemConfiguration(item: returnItem.item, isVisible: false,
+                                                            group: returnItem.group))
+        for profile in [hidden, moved, appended] {
+            XCTAssertEqual(profile.resolvingCanonicalMetadata(), profile, "\(profile.slot)")
+        }
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults, trays: [hidden, moved, appended])
+        let loaded = repository.load()
+        XCTAssertEqual(loaded.functionTrayProfiles, [hidden, moved, appended])
+    }
+
+    /// Upgraded once, a tray is the user's: hiding Return sticks across
+    /// later loads, and loading again without a save upgrades the same way.
+    func testReturnUpgradeIsIdempotentAndRespectsALaterHide() throws {
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults)
+        let first = repository.load()
+        XCTAssertEqual(repository.load(), first)
+        repository.save(first)
+        XCTAssertEqual(repository.load(), first)
+
+        var preferences = first
+        var tray = preferences.functionTrayProfile(for: .profile1)
+        tray.removeItem(id: "return")
+        preferences.updateFunctionTrayProfile(tray)
+        repository.save(preferences)
+        for _ in 0..<2 {
+            let reloaded = repository.load()
+            XCTAssertEqual(reloaded.functionTrayProfile(for: .profile1), tray)
+            XCTAssertFalse(reloaded.functionTrayProfile(for: .profile1).visibleItems.contains { $0.id == "return" })
+            XCTAssertTrue(reloaded.functionTrayProfile(for: .default).visibleItems.contains { $0.id == "return" })
+            repository.save(reloaded)
+        }
+    }
+
     /// While typing, Return sits in the keyboard bar beside Escape and Tab.
     func testKeyboardBarOffersReturnBeforeHideKeyboard() {
         let items = KeyboardBarItem.defaultItems

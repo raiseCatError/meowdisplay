@@ -257,6 +257,8 @@ is a product decision, so it isn't in this branch.
       on a Function Tray chip and an iPad Wheel wedge fire the action.
 - [ ] Upgrade over v1.20.0 with a customized Function Tray: the tray is
       unchanged and Return is listed, hidden, in the editor.
+- [ ] Upgrade over v1.20.0 with other settings changed but the Function
+      Tray untouched: Return shows after Undo/Redo in every profile.
 - [ ] Pinch to 8× and back on a live Mac: smooth, anchored under the
       fingers, and taps land on the magnified control. Rotate, pan hard in
       every direction, rotate the device and open the keyboard while zoomed.

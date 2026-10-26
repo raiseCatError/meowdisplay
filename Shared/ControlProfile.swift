@@ -630,7 +630,12 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     /// Visibility, ordering, and grouping remain entirely user-owned. A
     /// canonical item a saved profile predates is appended HIDDEN, so the
     /// editor can offer it without changing the tray the user already has.
+    ///
+    /// A tray still exactly as an earlier release started it was never
+    /// customized — saving any other receiver setting writes the trays too —
+    /// so it takes today's default instead, new visible actions included.
     func resolvingCanonicalMetadata() -> FunctionTrayProfile {
+        if isEarlierReleaseDefault { return Self.canonical(slot: slot) }
         let canonical = Self.canonical(slot: slot).items
         let canonicalByID = Dictionary(uniqueKeysWithValues: canonical.map { ($0.id, $0.item) })
         let savedIDs = Set(items.map(\.id))
@@ -646,6 +651,38 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
             FunctionTrayItemConfiguration(item: $0.item, isVisible: false, group: $0.group)
         }
         return FunctionTrayProfile(slot: slot, items: resolved + added)
+    }
+
+    /// Every slot's starting tray in an earlier release, by the user-owned
+    /// fields only: action ID, visibility and group, in order. Spelled out
+    /// rather than derived from `canonical`, which keeps moving.
+    private static let earlierReleaseDefaults: [[EarlierDefaultEntry]] = [
+        // v1.20.0, before Return.
+        [EarlierDefaultEntry("zoom-in", true, 0), EarlierDefaultEntry("zoom-out", true, 0),
+         EarlierDefaultEntry("undo", true, 1), EarlierDefaultEntry("redo", true, 1),
+         EarlierDefaultEntry("menu-bar", false, 2), EarlierDefaultEntry("launchpad", false, 2),
+         EarlierDefaultEntry("show-desktop", false, 2), EarlierDefaultEntry("control-center", false, 2)],
+    ]
+
+    private struct EarlierDefaultEntry: Equatable {
+        let id: String
+        let isVisible: Bool
+        let group: Int
+
+        init(_ id: String, _ isVisible: Bool, _ group: Int) {
+            self.id = id
+            self.isVisible = isVisible
+            self.group = group
+        }
+    }
+
+    /// Unchanged since an earlier release created it: same actions, order,
+    /// visibility and groups, and no built-in renamed or restyled. A custom
+    /// action has its own ID, so a tray with one never matches.
+    private var isEarlierReleaseDefault: Bool {
+        let entries = items.map { EarlierDefaultEntry($0.id, $0.isVisible, $0.group) }
+        return Self.earlierReleaseDefaults.contains(entries)
+            && items.allSatisfy { $0.customTitle == nil && $0.customDisplay == nil }
     }
 }
 
@@ -1223,7 +1260,8 @@ struct ReceiverControlPreferencesRepository {
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
-        // user's visibility, order, or group choices.
+        // user's visibility, order, or group choices; a tray still at an
+        // earlier release's default takes today's (v1.20.0 → Return shown).
         value.functionTrayProfiles = value.functionTrayProfiles.map {
             $0.resolvingCanonicalMetadata()
         }
