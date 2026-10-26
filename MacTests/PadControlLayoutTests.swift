@@ -700,7 +700,7 @@ final class PadControlLayoutTests: XCTestCase {
     func testTemplateEnablesTwoHandAssistWithIdleFunctionActions() {
         let layout = CustomControlLayout.radialTemplate(name: "Test", corner: .bottomLeading)
         XCTAssertTrue(layout.twoHandAssist)
-        XCTAssertEqual(layout.assistActionIDs, ["undo", "redo", "zoom-in", "zoom-out"])
+        XCTAssertEqual(layout.assistActionIDs, ["undo", "redo", "zoom-in", "zoom-out", "return"])
         let canonicalIDs = Set(FunctionTrayProfile.canonical().items.map(\.id))
         XCTAssertTrue(Set(layout.assistActionIDs).isSubset(of: canonicalIDs),
                       "idle actions reuse existing Function Tray items")
@@ -811,5 +811,29 @@ final class PadDefaultLayoutTests: XCTestCase {
         repository.save(saved)
         XCTAssertEqual(repository.load(initial: .initial(isPad: true)).padControlLayout, .strip)
         XCTAssertTrue(repository.load(initial: .initial(isPad: true)).customLayouts.isEmpty)
+    }
+}
+
+/// The radial layout's idle Two-Hand Assist arc offers Return beside Undo,
+/// Redo and Zoom, without crowding the arc.
+final class RadialReturnTests: XCTestCase {
+    func testRadialTemplateOffersReturnInTwoHandAssist() {
+        XCTAssertEqual(CustomControlLayout.defaultAssistActionIDs, ["undo", "redo", "zoom-in", "zoom-out", "return"])
+        let layout = CustomControlLayout.radialTemplate(name: "Test")
+        XCTAssertTrue(layout.assistActionIDs.contains("return"))
+    }
+
+    func testFiveAssistActionsDoNotOverlap() {
+        let area = CGRect(x: 0, y: 0, width: 1180, height: 820)
+        let diameter: CGFloat = 52
+        let points = TwoHandAssist.helperPoints(count: 5, clusterCentroid: CGPoint(x: 0.9, y: 0.9), area: area,
+                                                itemDiameter: diameter, spacing: 8)
+        XCTAssertEqual(points.count, 5)
+        for (i, a) in points.enumerated() {
+            XCTAssertTrue(area.insetBy(dx: diameter / 2 - 0.5, dy: diameter / 2 - 0.5).contains(a))
+            for b in points[(i + 1)...] {
+                XCTAssertGreaterThanOrEqual(hypot(a.x - b.x, a.y - b.y), diameter - 0.5)
+            }
+        }
     }
 }

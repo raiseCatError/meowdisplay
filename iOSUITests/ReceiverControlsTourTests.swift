@@ -31,8 +31,42 @@ final class ReceiverControlsTourTests: XCTestCase {
     func testTrayControlsAreAccessibilityButtons() {
         XCUIDevice.shared.orientation = .portrait
         enterDemo()
-        for label in ["Command", "Option", "Control", "Shift", "Escape", "Tab", "Toggle Dock", "Settings"] {
+        for label in ["Command", "Option", "Control", "Shift", "Escape", "Tab", "Toggle Dock", "Settings", "Return"] {
             XCTAssertTrue(app.buttons[label].firstMatch.exists, "\(label) is not exposed as a button")
+        }
+        app.buttons["Exit Demo"].tap()
+    }
+
+    /// Return reaches the (sample) Mac from the Function Tray with the
+    /// keyboard closed, and from the keyboard bar with it open.
+    @MainActor
+    func testReturnSendsAPressWithKeyboardClosedAndOpen() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let sent = NSPredicate(format: "label BEGINSWITH 'Return' OR label == 'New line'")
+        let trayReturn = app.buttons["Return"].firstMatch
+        XCTAssertTrue(trayReturn.waitForExistence(timeout: 3))
+        revealControls(trayReturn)
+        trayReturn.tap()
+        XCTAssertTrue(app.staticTexts.matching(sent).firstMatch.waitForExistence(timeout: 3),
+                      "Function Tray Return sent nothing")
+
+        let keyboard = element("Keyboard")
+        if keyboard.exists {
+            revealControls(keyboard)
+            keyboard.tap()
+            sleep(2)
+            if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); sleep(1) }
+            // Not the software keyboard's own return key.
+            let keys = app.keyboards.firstMatch.frame
+            let barReturn = app.buttons.matching(identifier: "Return").allElementsBoundByIndex
+                .first { !keys.intersects($0.frame) }
+            XCTAssertNotNil(barReturn, "keyboard bar has no Return")
+            barReturn?.tap()
+            XCTAssertTrue(app.staticTexts["New line"].firstMatch.waitForExistence(timeout: 3),
+                          "keyboard bar Return sent nothing")
+            let hide = element("Hide Keyboard")
+            if hide.waitForExistence(timeout: 3) { hide.tap() }
         }
         app.buttons["Exit Demo"].tap()
     }

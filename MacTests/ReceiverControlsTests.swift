@@ -458,18 +458,80 @@ final class ReceiverControlsTests: XCTestCase {
 
     // MARK: - Function Tray
 
-    func testDefaultFunctionTrayContainsZoomAndEditActionsInOrder() {
+    func testDefaultFunctionTrayContainsZoomEditAndReturnActionsInOrder() {
         let profile = FunctionTrayProfile.canonical()
-        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo"])
-        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo"])
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo", "return"])
+        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo", "Return"])
     }
 
-    func testDefaultFunctionTrayRendersAsTwoDistinctGroups() {
-        let profile = FunctionTrayProfile.canonical()
-        let groups = profile.visibleGroups
-        XCTAssertEqual(groups.count, 2)
-        XCTAssertEqual(groups[0].map(\.id), ["zoom-in", "zoom-out"])
-        XCTAssertEqual(groups[1].map(\.id), ["undo", "redo"])
+    /// Return gets its own cluster right after Undo/Redo: near the editing
+    /// actions, but with a gap so a reach for Redo doesn't submit.
+    func testDefaultFunctionTrayRendersReturnAsItsOwnGroupAfterEditing() {
+        let groups = FunctionTrayProfile.canonical().visibleGroups
+        XCTAssertEqual(groups.map { $0.map(\.id) }, [["zoom-in", "zoom-out"], ["undo", "redo"], ["return"]])
+    }
+
+    /// One activation is one ordinary Return press: usage 40, no modifiers
+    /// of its own, so a latched ⌘ or ⇧ (held on the Mac) still applies.
+    func testReturnIsOnePlainReturnPress() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "return" })
+        XCTAssertEqual(ControlActionPlan.operations(for: item.action), [.press(usage: 40, modifiers: [])])
+        XCTAssertTrue(item.action.isValid)
+        XCTAssertTrue(FunctionTrayProfile.isBuiltIn("return"))
+    }
+
+    /// On the Mac, usage 40 is the Return key, and a modifier latched on the
+    /// receiver (held via modifierDown) joins the press the way
+    /// `InputInjector.handleKeyboardPress` combines them: ⌘↵, ⇧↵.
+    func testReturnPressPicksUpLatchedModifiersOnTheMac() throws {
+        let usage = try XCTUnwrap(HIDKeyUsage.parse(40))
+        XCTAssertEqual(usage, .returnOrEnter)
+        XCTAssertEqual(usage.keyCode, 36)
+        var held = HeldModifierTracker()
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), [])
+        _ = held.down(.command)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskCommand)
+        _ = held.up(.command)
+        _ = held.down(.shift)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskShift)
+    }
+
+    /// A profile saved before Return existed keeps its tray exactly as it
+    /// was; Return arrives hidden, ready to switch on in the editor.
+    func testSavedProfileGainsReturnHiddenWithoutChangingItsLayout() {
+        var saved = FunctionTrayProfile.canonical()
+        saved.items.removeAll { $0.id == "return" }
+        saved.moveItems(from: IndexSet(integer: 3), to: 0)
+        saved.items[1].isVisible = false
+        let refreshed = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(Array(refreshed.items.prefix(saved.items.count)), saved.items)
+        let added = refreshed.items.filter { !saved.items.map(\.id).contains($0.id) }
+        XCTAssertEqual(added.map(\.id), ["return"])
+        XCTAssertEqual(added.first?.isVisible, false)
+        XCTAssertEqual(refreshed.visibleItems.map(\.id), saved.visibleItems.map(\.id))
+    }
+
+    /// While typing, Return sits in the keyboard bar beside Escape and Tab.
+    func testKeyboardBarOffersReturnBeforeHideKeyboard() {
+        let items = KeyboardBarItem.defaultItems
+        XCTAssertEqual(Array(items.suffix(4)), [.escape, .tab, .returnKey, .dismissKeyboard])
+        XCTAssertEqual(items.filter { $0 == .returnKey }.count, 1)
+    }
+
+    /// The eight-key bar (same metrics as `keyboardBarBody`) fits a 375pt
+    /// and 390pt iPhone inside the layout margins, shrinking only as far as
+    /// it must and never below the 30pt floor.
+    func testEightKeyKeyboardBarFitsCompactIPhones() {
+        let count = KeyboardBarItem.defaultItems.count
+        XCTAssertEqual(count, 8)
+        let gap: CGFloat = 8, padding: CGFloat = 6
+        for (width, expected) in [(CGFloat(375), CGFloat(35)), (390, 37), (402, 38), (440, 38)] {
+            let item = ControlTrayGeometry.fittedChipDiameter(count: count, length: width, preferred: 38,
+                                                              gap: gap, slack: padding * 2)
+            XCTAssertEqual(item, expected, "\(width)pt")
+            let barWidth = CGFloat(count) * item + CGFloat(count - 1) * gap + padding * 2
+            XCTAssertLessThanOrEqual(barWidth, width - 24, "\(width)pt")
+        }
     }
 
     func testZoomInResolvesToCommandPlus() throws {

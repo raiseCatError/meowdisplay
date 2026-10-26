@@ -323,6 +323,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
+    @State private var initiatingReturn = false
     /// The Wheel palette on screen, for hit-testing its wedges.
     @State private var wheelHit: WheelHitTarget?
     /// The modifier whose placement a Custom-layout palette blooms around.
@@ -850,7 +851,17 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .contentShape(Circle())
         .onTapGesture { performFunctionAction(item) }
         .accessibilityLabel(item.title)
-        .accessibilityAddTraits(.isButton)
+        .trayButtonAccessibility { performFunctionAction(item) }
+    }
+
+    /// One plain Return press through the normal keyboard path. Modifiers
+    /// latched on the tray are held on the Mac, so they still apply. Gated
+    /// like the Function Tray's one-tap actions; the Mac enforces the grant
+    /// again on its side.
+    fileprivate func sendReturn() {
+        guard store.preferences.allowInput else { return }
+        receiver.sendKeyboardPress(usage: 40)
+        haptics.play(.confirmation)
     }
 
     private func performFunctionAction(_ item: ShortcutItem) {
@@ -970,6 +981,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     initiatingItem = trayItem(at: value.startLocation)
                     initiatingMoveView = initiatingItem == nil
                         && frames["control:moveView"]?.contains(value.startLocation) == true
+                    initiatingReturn = initiatingItem == nil
+                        && frames["control:return"]?.contains(value.startLocation) == true
                     if let modifier = initiatingItem?.modifier {
                         initiatingModifier = modifier
                         paletteAnchor = modifier
@@ -1019,6 +1032,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 } else if let item = initiatingItem,
                           frames["tray:\(item.rawValue)"]?.contains(value.location) == true {
                     perform(item)
+                } else if initiatingReturn,
+                          frames["control:return"]?.contains(value.location) == true {
+                    // A latched chord stays latched: ⌘ then ↵ is ⌘↵.
+                    sendReturn()
                 } else if initiatingMoveView,
                           frames["control:moveView"]?.contains(value.location) == true {
                     store.setMoveViewActive(!store.moveViewActive)
@@ -1029,6 +1046,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 initiatingModifier = nil
                 initiatingItem = nil
                 initiatingMoveView = false
+                initiatingReturn = false
                 lastHoveredModifier = nil
                 gestureActive = false
                 // The touch lifted: safe to (re)start counting down again,
@@ -1135,11 +1153,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 extension ReceiverControlOverlay {
     /// The tray items the bar's gesture can start on — see `KeyboardBarItem`.
     fileprivate var keyboardBarTrayItems: [ControlTrayItem] {
-        keyboardBarItems.map { item in
+        keyboardBarItems.compactMap { item in
             switch item {
             case .modifier(let modifier): return ControlTrayItem.item(for: modifier)
             case .escape: return .escape
             case .tab: return .tab
+            // Not a tray item; `controlGesture` tracks it by its frame.
+            case .returnKey: return nil
             case .dismissKeyboard: return .keyboard
             }
         }
@@ -1162,9 +1182,12 @@ extension ReceiverControlOverlay {
     var keyboardBarBody: some View {
         let keyboardTop = (keyboardVisibleRect?.maxY ?? containerSize.height) + surfaceOrigin.y
         let items = keyboardBarItems
-        let item: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
         let gap: CGFloat = 8
         let padding: CGFloat = 6
+        let preferredItem: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
+        // Eight keys need a little more than a 375pt iPhone offers at 38pt.
+        let item = ControlTrayGeometry.fittedChipDiameter(count: items.count, length: containerSize.width,
+                                                          preferred: preferredItem, gap: gap, slack: padding * 2)
         let barWidth = CGFloat(items.count) * item + CGFloat(items.count - 1) * gap + padding * 2
         let bar = CGRect(x: containerSize.width / 2 - barWidth / 2, y: keyboardTop - 8 - item - padding * 2,
                          width: barWidth, height: item + padding * 2)
@@ -1264,6 +1287,16 @@ extension ReceiverControlOverlay {
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(Text("Hide Keyboard"))
                 .trayButtonAccessibility { activateForAccessibility(.keyboard) }
+        case .returnKey:
+            Image(systemName: "return")
+                .font(.system(size: frame.width * 0.38, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: frame.width, height: frame.height)
+                .background(frameReader("control:return"))
+                .background(PadChip(selected: false, onRail: true))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityLabel(Text("Return"))
+                .trayButtonAccessibility { sendReturn() }
         }
     }
 }
@@ -1430,7 +1463,8 @@ extension ReceiverControlOverlay {
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
-                                 centerLabel: paletteChord.symbols)
+                                 centerLabel: paletteChord.symbols,
+                                 onActivate: { apply(interaction.finish(with: $0)) })
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
             } else if let paletteChord, let paletteFrame {
                 if !actions.isEmpty {
@@ -1591,7 +1625,8 @@ extension ReceiverControlOverlay {
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
-                                 centerLabel: paletteChord.symbols)
+                                 centerLabel: paletteChord.symbols,
+                                 onActivate: { apply(interaction.finish(with: $0)) })
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
             } else if let paletteChord {
                 if paletteKeys.isEmpty, let anchorControl {
@@ -1826,7 +1861,9 @@ extension ReceiverControlOverlay {
         .position(x: frame.midX, y: frame.minY + (diameter + (hint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.title)
-        .accessibilityAddTraits(.isButton)
+        // `.ignore` drops the face's tap gesture from the element, so the
+        // action has to be given to it directly.
+        .trayButtonAccessibility { performFunctionAction(item) }
     }
 
     @ViewBuilder
@@ -1970,6 +2007,9 @@ struct WheelPaletteView: View {
     let actions: [ShortcutItem]
     let selectedID: String?
     let centerLabel: String
+    /// Fires a wedge for VoiceOver, Voice Control and Switch Control; touch
+    /// selection goes through the overlay's gesture. `nil` in the editor.
+    var onActivate: ((ShortcutItem) -> Void)?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -1989,6 +2029,8 @@ struct WheelPaletteView: View {
                     .scaleEffect(selected ? 1.12 : 1)
                     .position(segment.labelPoint)
                     .accessibilityLabel(action.title)
+                    .accessibilityAddTraits(onActivate == nil ? [] : .isButton)
+                    .accessibilityAction { onActivate?(action) }
             }
             Circle()
                 .fill(Color(white: 0.12).opacity(0.92))

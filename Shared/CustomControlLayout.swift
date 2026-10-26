@@ -234,7 +234,7 @@ struct CustomControlArrangement: Codable, Equatable {
 
 struct CustomControlLayout: Codable, Equatable, Identifiable {
     static let maximumCount = 5
-    static let defaultAssistActionIDs = ["undo", "redo", "zoom-in", "zoom-out"]
+    static let defaultAssistActionIDs = ["undo", "redo", "zoom-in", "zoom-out", "return"]
 
     var id: String
     var name: String
