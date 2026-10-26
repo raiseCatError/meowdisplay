@@ -175,6 +175,7 @@ targets:
     sources:
       - MacTests
       - Mac/DisplayArrangement.swift
+      - Mac/OriginRestore.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
