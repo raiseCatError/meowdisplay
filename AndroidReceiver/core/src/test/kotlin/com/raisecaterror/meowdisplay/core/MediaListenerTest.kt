@@ -211,6 +211,28 @@ class MediaListenerTest {
     }
 
     @Test
+    fun sendsNeverBlockTheCallerAndKeepTheirOrder() {
+        Mac(macA).use { mac ->
+            mac.admit()
+            // The Mac reads nothing while 500 messages are sent: the caller must not wait on the socket.
+            val started = System.nanoTime()
+            repeat(500) { session.sendStats(mapOf("n" to it)) }
+            assertTrue("sending blocked the caller", System.nanoTime() - started < 1_000_000_000L)
+            repeat(500) { assertEquals(it, mac.expect("stats")["n"]!!.jsonPrimitive.content.toInt()) }
+        }
+    }
+
+    @Test
+    fun aDisconnectStillDeliversClosingBeforeTheSocketCloses() {
+        Mac(macA).use { mac ->
+            mac.admit()
+            session.disconnect()
+            mac.expect("closing")
+            assertTrue(mac.closedByReceiver())
+        }
+    }
+
+    @Test
     fun aNewConnectionReplacesTheOldOne() {
         Mac(macA).use { first ->
             first.admit()

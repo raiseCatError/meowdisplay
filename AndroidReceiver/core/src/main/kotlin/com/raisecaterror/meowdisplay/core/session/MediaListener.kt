@@ -7,12 +7,14 @@ import java.io.Closeable
 import java.io.FilterInputStream
 import java.io.IOException
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
@@ -41,6 +43,7 @@ class MediaListener(
     private val handshakeTimeoutMs: Long = 8_000,
     private val maxPendingHandshakes: Int = 4,
     private val tickIntervalMs: Long = 250,
+    private val log: (String) -> Unit = {},
 ) : Closeable {
     private val workers: ExecutorService = Executors.newCachedThreadPool(daemon("meow-media"))
     private val timers: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(daemon("meow-media-timer"))
@@ -133,7 +136,7 @@ class MediaListener(
             // From here the session's watchdog judges liveness.
             socket.soTimeout = 0
             done.set(true)
-            TlsLink(socket, peerID, workers)
+            TlsLink(socket, peerID, workers, log)
         } catch (_: Exception) {
             closeQuietly(socket)
             null
@@ -143,29 +146,66 @@ class MediaListener(
         }
     }
 
-    private class TlsLink(private val socket: SSLSocket, override val peerID: String, private val closer: ExecutorService) : MediaLink {
+    /**
+     * One authenticated connection. Every write happens on the link's own
+     * ordered writer thread, never the caller's: the UI thread may not touch
+     * a socket on Android, and a peer that stops reading must not stall the
+     * session. The backlog is bounded; a peer that lets it overflow is closed.
+     */
+    private class TlsLink(
+        private val socket: SSLSocket,
+        override val peerID: String,
+        private val closer: ExecutorService,
+        private val log: (String) -> Unit,
+    ) : MediaLink {
         private val output = socket.outputStream
         private val closed = AtomicBoolean()
+        private val queuedBytes = AtomicLong()
+        private val writer = Executors.newSingleThreadExecutor(daemon("meow-media-writer"))
 
         override fun send(payload: ByteArray): Boolean {
             if (closed.get()) return false
+            val frame = try {
+                WireFraming.frame(payload)
+            } catch (e: IllegalArgumentException) {
+                log("refused outgoing frame: ${e.message}")
+                return false
+            }
+            if (queuedBytes.addAndGet(frame.size.toLong()) > MAX_QUEUED_BYTES) {
+                log("peer stopped reading: closing")
+                close()
+                return false
+            }
             return try {
-                val frame = WireFraming.frame(payload)
-                synchronized(this) {
-                    output.write(frame)
-                    output.flush()
+                writer.execute {
+                    try {
+                        output.write(frame)
+                        output.flush()
+                    } catch (e: Exception) {
+                        log("write failed: $e")
+                        close()
+                    } finally {
+                        queuedBytes.addAndGet(-frame.size.toLong())
+                    }
                 }
                 true
-            } catch (_: Exception) {
-                close()
+            } catch (_: RejectedExecutionException) {
                 false
             }
         }
 
-        /** Never blocks the caller: TLS close_notify can wait on a peer that stopped reading. */
+        /**
+         * Never blocks the caller. Frames already queued (a final `closing` or
+         * `sleeping`) still go out first; a peer that stopped reading gets a
+         * second before the socket is closed underneath the writer.
+         */
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
-            runCatching { closer.execute { closeQuietly(socket) } }.onFailure { closeQuietly(socket) }
+            runCatching { writer.execute { closeQuietly(socket) } }
+            writer.shutdown()
+            runCatching {
+                closer.execute { if (!writer.awaitTermination(CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)) closeQuietly(socket) }
+            }.onFailure { closeQuietly(socket) }
         }
     }
 
@@ -173,6 +213,9 @@ class MediaListener(
         fun closeQuietly(socket: SSLSocket) {
             runCatching { socket.close() }
         }
+
+        const val MAX_QUEUED_BYTES = 8L shl 20
+        const val CLOSE_GRACE_MS = 1_000L
 
         fun daemon(name: String) = ThreadFactory { runnable -> Thread(runnable, name).apply { isDaemon = true } }
     }
