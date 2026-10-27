@@ -1,10 +1,12 @@
 name: Release dry run
 
-# Checks that CI could produce a correct Mac release, without building,
-# signing, tagging or uploading anything:
-#  - which release secrets are missing;
-#  - the SPARKLE_PRIVATE_KEY secret matches the SUPublicEDKey the apps ship
-#    (a wrong key publishes feeds every installed copy rejects);
+# Checks that release.yml could produce a correct Mac release, without
+# building, signing, notarizing, tagging or uploading anything:
+#  - the release environments exist and are protected (release-build limited
+#    to release/app-store-rc; release-publish also requires a reviewer);
+#  - which release secrets and variables are missing;
+#  - Sparkle-key continuity: the SPARKLE_PRIVATE_KEY secret, project.yml and
+#    the PUBLISHED v1.20.0 apps all use one key;
 #  - the build number to release is above the live feeds' builds;
 #  - the match repository holds the Developer ID certificate (read-only).
 # Manual only. GitHub can dispatch it once this file is on the default branch.
@@ -16,17 +18,39 @@ on:
         required: true
         default: "2.0.0"
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   dry-run:
     runs-on: macos-26
+    # The signing secrets live in this environment only.
+    environment: release-build
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Only from release/app-store-rc
+        if: github.ref != 'refs/heads/release/app-store-rc'
+        run: |
+          echo "::error::Run this from release/app-store-rc (got $GITHUB_REF)"
+          exit 1
 
-      - name: Report missing release secrets
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Release environments are protected
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=0
+          scripts/release/check-environment.sh release-build || status=1
+          scripts/release/check-environment.sh release-publish --require-reviewers || status=1
+          exit $status
+
+      - name: Report missing release secrets and variables
         id: secrets
+        if: ${{ !cancelled() }}
         env:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
@@ -36,19 +60,23 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
         run: |
           missing=""
           for name in DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD \
                       APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID \
-                      APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY; do
+                      APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY \
+                      RELEASE_APP_PRIVATE_KEY RELEASE_APP_CLIENT_ID; do
             if [ -z "${!name}" ]; then
-              echo "::warning::Secret $name is not set"
+              echo "::warning::$name is not set"
               missing="$missing $name"
             fi
           done
           echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
 
-      - name: Sparkle key matches SUPublicEDKey
+      - name: Sparkle key continuity (secret == project.yml == published apps)
+        if: ${{ !cancelled() }}
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           # Same tools and checksum as release.yml.
@@ -56,6 +84,7 @@ jobs:
           SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
         run: |
           set -euo pipefail
+          scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
           if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
             echo "::error::SPARKLE_PRIVATE_KEY is not set"
             exit 1
@@ -64,7 +93,7 @@ jobs:
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
           echo "${SPARKLE_TOOLS_SHA256}  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
-          printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin" "$RUNNER_TEMP/baseline"
 
       - name: Build number is above the live feeds
         if: ${{ !cancelled() }}
@@ -72,10 +101,11 @@ jobs:
           BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           set -euo pipefail
-          scripts/release/check-build-number.sh "$BUILD_NUMBER" https://meowdisplay.app/appcast.xml
-          scripts/release/check-build-number.sh "$BUILD_NUMBER" https://meowdisplay.app/appcast-receiver.xml
+          . scripts/release/baseline.env
+          scripts/release/check-build-number.sh "$BUILD_NUMBER" "$LIVE_FEED_BASE/$SENDER_FEED"
+          scripts/release/check-build-number.sh "$BUILD_NUMBER" "$LIVE_FEED_BASE/$RECEIVER_FEED"
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         with:
           ruby-version: '3.3'
@@ -83,7 +113,7 @@ jobs:
 
       - name: Set up SSH for match certs repo
         if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
-        uses: webfactory/ssh-agent@v0.10.0
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
 
@@ -98,10 +128,10 @@ jobs:
             app_identifier:com.raisecaterror.meowdisplay.mac,com.raisecaterror.meowdisplay.mac.receiver \
             team_id:"$DEVELOPMENT_TEAM" platform:macos
 
-      - name: Fail if any release secret is missing
+      - name: Fail if any release secret or variable is missing
         if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
         env:
           MISSING: ${{ steps.secrets.outputs.missing }}
         run: |
-          echo "::error::Missing secrets: $MISSING"
+          echo "::error::Missing: $MISSING"
           exit 1

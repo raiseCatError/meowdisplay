@@ -12,10 +12,11 @@ release-preparation GitHub issues) — not aspirational process.
   from [`release-please`](https://github.com/googleapis/release-please-action),
   which derives the next version from
   [Conventional Commits](https://www.conventionalcommits.org/) merged to
-  `release/app-store-rc`. The **Release** workflow (`release.yml`) runs
-  only when started by hand from that branch: the first run opens or
-  updates the release PR, and a run after that PR is merged creates the
-  `vX.Y.Z` tag and builds the Mac apps.
+  `release/app-store-rc`. Two manual workflows, both run only from that
+  branch: **Release PR** (`release-pr.yml`) opens or updates the release
+  PR and never tags or releases; **Release** (`release.yml`), run after
+  that PR is merged, builds, verifies and publishes (see
+  [Release workflow](#release-workflow-fail-closed)).
 - **Build number** (`CFBundleVersion`):
   - **Mac:** the marketing version itself (`1.20.0`). Sparkle decides
     whether an update is newer by comparing `CFBundleVersion`, so it must
@@ -51,8 +52,11 @@ release-preparation GitHub issues) — not aspirational process.
 
 | Lane | Purpose |
 |---|---|
-| `mac build_release` | Developer ID-signed, notarized Mac sender DMG |
+| `mac build_release` | Developer ID-signed, notarized Mac sender DMG (runs the three stages below) |
 | `mac build_receiver_release` | Same, for the standalone Mac Receiver |
+| `mac sign_app app:<sender\|receiver>` | Stage 1: build and Developer ID-sign the .app |
+| `mac notarize_app app:<sender\|receiver>` | Stage 2: notarize and staple that .app |
+| `mac package_dmg app:<sender\|receiver>` | Stage 3: signed, notarized, stapled DMG |
 | `ios release` | App Store release candidate: builds and uploads the binary to App Store Connect. Skips metadata and screenshots, does **not** submit for review, does **not** release |
 | `ios beta` | **Optional** TestFlight upload for beta testing. Not required for a release |
 
@@ -68,14 +72,14 @@ the two can go live together.
 1. Merge normal Conventional Commit PRs to `release/app-store-rc` (`feat:`,
    `fix:`, etc.).
 2. Run **Release dry run** (`release-dry-run.yml`) with the coming build
-   number. It must pass: secrets present, Sparkle key matches
-   `SUPublicEDKey`, build number above the live feeds, Developer ID
-   certificate in match.
-3. Run **Release** from `release/app-store-rc`. `release-please` opens or
-   updates a release PR with the generated `CHANGELOG.md` entry. Its title
-   gives the next version. GitHub starts no workflows for a PR opened with
-   the workflow's own token, so the required `mac` and `conventional`
-   checks don't run on it: close and reopen the release PR to start them.
+   number. It must pass: both release environments protected, secrets
+   present, Sparkle-key continuity with the published v1.20.0 apps, build
+   number above the live feeds, Developer ID certificate in match.
+3. Run **Release PR** from `release/app-store-rc`. `release-please` opens or
+   updates the release PR with the generated `CHANGELOG.md` entry; its title
+   gives the next version. It runs with the release GitHub App's token, so
+   the required `mac` and `conventional` checks run on that PR like on any
+   other.
 4. Run **iOS App Store candidate** (`app-store-candidate.yml`) from the
    Actions tab: select the release PR's branch, enter that version (e.g.
    `1.20.0`), destination `app-store`. This runs `fastlane ios release`.
@@ -85,23 +89,73 @@ the two can go live together.
    this version**, and submit for review by hand.
 6. When Apple approves, the version waits in **Pending Developer Release**.
 7. Merge the release PR, then run **Release** from `release/app-store-rc`
-   again. This creates the `vX.Y.Z` tag and runs `build-mac` (guarded on
-   `release_created == 'true'`). Its preflight stops before building if the
-   Sparkle key doesn't match `SUPublicEDKey` or the build number isn't above
-   the live feeds' (`scripts/release/`). Then both Mac apps are built,
-   signed, notarized, packaged as DMGs, and uploaded to the GitHub Release
-   (`MeowDisplay.dmg`, `MeowDisplayReceiver.dmg`).
-8. The same job signs `appcast.xml` / `appcast-receiver.xml` for the new
-   DMGs with `SPARKLE_PRIVATE_KEY`, verifies them with Sparkle's
-   `sign_update`, and uploads them to the same GitHub Release. The feeds
-   are live as soon as that release is GitHub's latest release (see
-   [Sparkle auto-update](#sparkle-auto-update)).
-9. Verify the Mac release (see [Verification](#verification)), then release
+   with that version. It builds, signs, notarizes, packages and verifies
+   both Mac apps and signs and verifies both feeds without touching any
+   release. Then its `publish` job waits for **your approval**
+   (`release-publish` environment), creates a draft, verifies it, and makes
+   it Latest. See [Release workflow](#release-workflow-fail-closed).
+8. Verify the Mac release (see [Verification](#verification)), then release
    the iOS version manually in App Store Connect.
 
 If App Review rejects the build, fix it on `release/app-store-rc`, run
-**Release** again so release-please updates the PR, and upload a new candidate with the same version (a new run gives it
-a higher build number).
+**Release PR** again so release-please updates the PR, and upload a new
+candidate with the same version (a new run gives it a higher build number).
+
+## Release workflow (fail-closed)
+
+The apps' feed URLs (`https://meowdisplay.app/appcast.xml` and
+`/appcast-receiver.xml`) are Cloudflare redirects to
+`releases/latest/download/<feed>`. **Whatever GitHub Release is Latest is
+the live update feed**, and a Latest release without its feeds breaks
+updates for every installed copy. `release.yml` therefore runs one job per
+stage and touches no release, tag or asset until the last one:
+
+| Job | Does | Secrets |
+| --- | --- | --- |
+| `plan` | Refuses any branch but `release/app-store-rc`. Checks the version input against `version.txt`, the manifest and `CHANGELOG.md`, and that tag and release `v<version>` don't exist. Checks build-number ordering: the Mac build number (= the version) must be above every build the live feeds offer. Records the current Latest. | none |
+| `key-continuity` | Downloads the **published v1.20.0 DMGs** (sha256 pinned in `scripts/release/baseline.env`) and reads the key the installed apps ship. Requires that `project.yml` ships the same key and that the secret signs for it (`check-sparkle-key.sh`). | release-build |
+| `sign` → `notarize` → `package` | Fastlane stages `sign_app`, `notarize_app`, `package_dmg` per app, each a separate job with only the credentials it needs. | release-build |
+| `verify-artifacts` | Each DMG checked against the published baseline (`verify-mac-artifact.sh`): signed, notarized and stapled DMG and app; Developer ID on every Mach-O; planned version and build; the published app's designated requirement and exact entitlements (TCC, Keychain and Sparkle continuity); published key; live feed URL. | none |
+| `sign-feeds` | generate_appcast for the verified DMGs; key on stdin. | release-build |
+| `verify-feeds` | Both feeds and DMGs verified against the **published** key, the way Sparkle 2.10.0 does (`verify-feed.sh`): exact enclosure URL, version, build, length, one item. | none |
+| `publish` | After **approval**: re-checks that the downloaded files are byte-identical to the verified ones and that nothing was published meanwhile. Creates a **draft** with both DMGs, both feeds and `SHA256SUMS.txt`, downloads the draft's assets back and compares them byte for byte, then publishes as **Latest**. Then confirms both live feed URLs serve the new feeds. If they don't within 5 minutes, it makes the previous release Latest again and returns the new one to draft. Relabels the release PR `autorelease: tagged`. | none |
+
+A failure anywhere before `publish` leaves the previous release live and
+nothing behind except workflow artifacts (kept 3 days).
+`scripts/release/check-release-workflows.rb` (run by **Tests**) fails if any
+of these rules is broken.
+
+**One-time setup** (all repository-admin actions; nothing here is applied by
+the workflows):
+
+- **GitHub App for release PRs.** This repository doesn't let Actions create
+  pull requests, and PRs opened with `GITHUB_TOKEN` start no workflows, so
+  the required checks would never report. Create a GitHub App owned by the
+  repository owner with Contents, Pull requests and Issues set to
+  read & write, and install it on this repository only. Store its client ID
+  as the variable `RELEASE_APP_CLIENT_ID` and a private key as the secret
+  `RELEASE_APP_PRIVATE_KEY`.
+- **Environments**, each with a custom deployment-branch policy allowing only
+  `release/app-store-rc`. Jobs check this at run time and stop if it's
+  missing, because a job that names a missing environment gets a new,
+  unprotected one:
+  - `release-build`: holds `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`,
+    `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, the three
+    `APP_STORE_CONNECT_*` and `SPARKLE_PRIVATE_KEY`. Then delete the
+    repository-level copies, so no other workflow or branch can read them.
+  - `release-publish`: no secrets; **required reviewers** (you). This is
+    the explicit approval in front of every production release action.
+- **Default branch.** GitHub dispatches a workflow only if its file exists on
+  the default branch (`dev/opendisplay-next`), and shows the "Run workflow"
+  button only if that copy has `workflow_dispatch`. Land identical copies of
+  `release-pr.yml`, `release.yml` and `release-dry-run.yml` there by PR. Their
+  branch guard makes a run from the default branch fail immediately. Then
+  dispatch with `gh workflow run <file> --ref release/app-store-rc`.
+- **`main`** still carries upstream's push-triggered `release.yml` and
+  `pages.yml`; replace them with these files or no-op stubs by PR.
+
+Never mark a release Latest by hand before both DMGs and both signed feeds
+are attached and verified. The manual path below follows the same order.
 
 ## First release without CI secrets (manual path)
 
@@ -136,7 +190,16 @@ locally instead of by the workflows:
     --link https://meowdisplay.app/ -o <dir>/appcast.xml <dir>
   ```
 
-  Upload both DMGs and both feeds to the GitHub Release, just as CI does.
+  Then publish in the same fail-closed order as CI:
+  1. Verify each DMG with `scripts/release/verify-mac-artifact.sh` against
+     `scripts/release/published-baseline.sh` output, and each feed with
+     `scripts/release/verify-feed.sh` against the published key.
+  2. `gh release create v<version> --draft` with both DMGs, both feeds and
+     `SHA256SUMS.txt`.
+  3. Download the draft's assets back and compare them byte for byte.
+  4. `gh release edit v<version> --draft=false --latest`.
+  5. Check that both `https://meowdisplay.app/` feed URLs serve the new
+     feeds; if they don't, make the previous release Latest again.
 
 Values still to fill in before or at release:
 
@@ -173,7 +236,9 @@ Also missing before CI can release:
 - **Proof that `SPARKLE_PRIVATE_KEY` is the shipped key.** Run **Release
   dry run** once (it must be on the default branch before GitHub can
   dispatch it). It signs a random probe with the secret and verifies it
-  against `SUPublicEDKey`, printing pass or fail only.
+  against the key in the published v1.20.0 apps, printing pass or fail only.
+- **The release App and environments** described under
+  [Release workflow](#release-workflow-fail-closed).
 - **Branch protection.** `.github/rulesets/release-app-store-rc.json`
   protects `release/app-store-rc` (no deletion or force-push, PR required,
   Tests `mac` and PR title `conventional` must pass).
@@ -187,11 +252,10 @@ Once a release build exists:
 
 - `codesign --verify --deep --strict MeowDisplay.app`
 - `spctl -a -vv MeowDisplay.dmg` (Gatekeeper assessment — should say "accepted")
-- `sign_update --account meowdisplay --verify appcast.xml` (and
-  `appcast-receiver.xml`): the feed's embedded signature is valid.
-  `sign_update --account meowdisplay --verify MeowDisplay.dmg <edSignature>`
-  with the enclosure's `sparkle:edSignature`: the DMG is the one the feed
-  signed.
+- `scripts/release/verify-feed.sh <feed> <dmg> <published key> <version>
+  <build> <enclosure URL>` for each feed. It checks both signatures against
+  the key the installed apps ship. (`sign_update --verify` checks against the
+  key it is given, so a wrong key still "verifies".)
 - Once the release is published: `https://meowdisplay.app/appcast.xml` and
   `/appcast-receiver.xml` serve those same files, and **Check for
   Updates…** in the previous version finds the new one.

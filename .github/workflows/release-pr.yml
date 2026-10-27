@@ -1,0 +1,58 @@
+name: Release PR
+
+# Opens or updates the release PR into release/app-store-rc (CHANGELOG,
+# version.txt, manifest). It never creates a tag or a GitHub Release
+# (skip-github-release): publishing is the last, approval-gated job of
+# release.yml. Manual only, from release/app-store-rc.
+#
+# Token: a GitHub App installation token, not GITHUB_TOKEN. This repository
+# doesn't let Actions create pull requests, and a PR opened with GITHUB_TOKEN
+# starts no workflows, so the required `mac` and `conventional` checks would
+# never report and the PR could never merge. A PR opened by the App runs them
+# like any other. Setup: RELEASE.md § "Release workflow".
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Only from release/app-store-rc
+        if: github.ref != 'refs/heads/release/app-store-rc'
+        run: |
+          echo "::error::Run this from release/app-store-rc (got $GITHUB_REF)"
+          exit 1
+
+      - name: Release App credentials are configured
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != true ]; then
+            echo "::error::Set the RELEASE_APP_CLIENT_ID variable and RELEASE_APP_PRIVATE_KEY secret (RELEASE.md)"
+            exit 1
+          fi
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          target-branch: release/app-store-rc
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
