@@ -60,10 +60,17 @@ class MediaListener(
         timers.scheduleWithFixedDelay({ runCatching { session.tick() } }, tickIntervalMs, tickIntervalMs, TimeUnit.MILLISECONDS)
     }
 
-    override fun close() {
+    override fun close() = close(sleeping = false)
+
+    /**
+     * Stops listening and ends the live connection with `sleeping` (this
+     * device went to the background and expects the Mac back) or `closing`
+     * (the session is over).
+     */
+    fun close(sleeping: Boolean) {
         if (!closed.compareAndSet(false, true)) return
         runCatching { server?.close() }
-        session.disconnect()
+        session.disconnect(sleeping)
         timers.shutdownNow()
         workers.shutdownNow()
     }
@@ -90,7 +97,8 @@ class MediaListener(
         } finally {
             pending.decrementAndGet()
         } ?: return
-        session.adopt(link)
+        // A Mac this device blocked is closed without touching the live session.
+        if (!session.adopt(link)) return
         try {
             val counted = object : FilterInputStream(socket.inputStream) {
                 override fun read(b: ByteArray, off: Int, len: Int): Int =

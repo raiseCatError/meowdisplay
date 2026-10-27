@@ -140,14 +140,52 @@ class ReceiverSessionTest {
 
     @Test
     fun theMacsIdentityComesFromItsCertificateNotFromWhatItSays() {
-        policies.setPolicy(MAC_B, PeerSessionPolicy.Blocked)
+        policies.automaticallyAllow = false
+        policies.setPolicy(MAC_A, PeerSessionPolicy.AlwaysAllow)
         val b = connect(MAC_B)
         // In-band claims of another identity change nothing.
         session.say(b, "{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"id\":\"$MAC_A\",\"peer\":\"$MAC_A\"}")
         session.say(b, invite("s1"))
         assertEquals(MAC_B, session.peerID)
-        assertEquals(listOf("s1" to "blocked"), b.responses())
+        assertEquals(listOf("s1" to "declined"), b.responses())
         assertFalse(session.isAdmitted)
+    }
+
+    @Test
+    fun aBlockedMacCannotDisturbTheLiveSession() {
+        val a = connect(MAC_A)
+        session.say(a, invite("s1"))
+        policies.setPolicy(MAC_B, PeerSessionPolicy.Blocked)
+        val b = FakeLink(MAC_B)
+        assertFalse(session.adopt(b))
+        assertTrue(b.closed)
+        assertTrue("never even greeted", b.sent.isEmpty())
+        assertFalse(a.closed)
+        assertEquals(MAC_A, session.peerID)
+        assertTrue(session.isAdmitted)
+    }
+
+    @Test
+    fun anUnadmittedMacDrivesNoUiButItsStateArrivesAtAdmission() {
+        policies.automaticallyAllow = false
+        val a = connect(MAC_A)
+        session.say(a, invite("s1", intent = "manual"))
+        events.clear()
+        session.say(a, "{\"type\":\"streamCodecState\",\"codec\":\"hevc\",\"reason\":\"x\"}")
+        session.say(a, "{\"type\":\"videoState\",\"enabled\":true,\"width\":99999,\"height\":1080}")
+        session.say(a, "{\"type\":\"cursor\",\"x\":0.5,\"y\":0.5,\"v\":1}")
+        session.say(a, "{\"type\":\"cursorImg\",\"png\":\"\",\"nw\":0.1,\"nh\":0.1}")
+        session.say(a, "{\"type\":\"inputReset\"}")
+        session.say(a, "{\"type\":\"allowInputState\",\"allowed\":true,\"state\":\"allowed\"}")
+        assertEquals(emptyList<SessionEvent>(), events)
+        session.answerInvitation("s1", ReceiverApprovalDecision.Allow)
+        val admitted = events.indexOfFirst { it is SessionEvent.Admitted }
+        val codec = events.indexOf(SessionEvent.CodecChanged(com.raisecaterror.meowdisplay.core.session.StreamCodec.Hevc))
+        assertTrue("held state follows admission: $events", admitted >= 0 && codec > admitted)
+        assertTrue("an absurd width is dropped", events.contains(SessionEvent.VideoState(true, null, 1080)))
+        assertTrue(events.any { it is SessionEvent.Control && it.type == "cursorImg" })
+        assertFalse(events.any { it is SessionEvent.Cursor || it is SessionEvent.InputReset })
+        assertFalse("no grant from before admission", session.inputAllowed)
     }
 
     @Test
@@ -273,6 +311,7 @@ class ReceiverSessionTest {
     @Test
     fun pongsFeedTheClockAndCursorSequencesNeverGoBackwards() {
         val a = connect(MAC_A)
+        session.say(a, invite("s1"))
         session.say(a, "{\"type\":\"pong\",\"t\":${clock - 40},\"mt\":${clock + 10_000}}")
         assertEquals(40.0, session.rttMs!!, 0.0)
         assertEquals(10_020.0, session.clockOffsetMs!!, 0.0)

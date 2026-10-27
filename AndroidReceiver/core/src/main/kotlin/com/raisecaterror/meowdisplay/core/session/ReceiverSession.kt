@@ -81,6 +81,13 @@ class ReceiverSession(
     private var reconnectDeadlineMs: Long? = null
     private var reportedPhase = lifecycle.phase
 
+    /**
+     * App-facing state the Mac sent before this connection was admitted:
+     * the latest per kind, delivered at admission. An unadmitted Mac never
+     * drives the receiver's UI.
+     */
+    private val heldState = LinkedHashMap<String, SessionEvent>()
+
     /** This receiver's own audio preference, reasserted on every `welcome`. */
     @Volatile var audioPreferred = false
 
@@ -98,9 +105,17 @@ class ReceiverSession(
 
     // MARK: - Connections
 
-    /** A new connection that completed pinned TLS and resolved to exactly one peer. */
+    /**
+     * A new connection that completed pinned TLS and resolved to exactly one
+     * peer. It replaces the current one (PROTOCOL.md 1), except that a Mac
+     * this device blocked is closed before it can disturb anything.
+     */
     @Synchronized
-    fun adopt(newLink: MediaLink) {
+    fun adopt(newLink: MediaLink): Boolean {
+        if (policies.policy(newLink.peerID) == PeerSessionPolicy.Blocked) {
+            newLink.close()
+            return false
+        }
         val previous = link
         link = newLink
         if (previous != null) {
@@ -117,6 +132,7 @@ class ReceiverSession(
         lastCursorSequence = 0
         lastKeyframeRequestMs = null
         reconnectDeadlineMs = null
+        heldState.clear()
         val t = now()
         lastReceivedMs = t
         lastPingMs = t
@@ -126,6 +142,7 @@ class ReceiverSession(
         emit(SessionEvent.Connected(newLink.peerID))
         emit(SessionEvent.InputState(InputWireState.Off, false))
         send(ReceiverMessages.hello(helloFields()))
+        return true
     }
 
     /** Any bytes from the Mac keep the connection alive (PROTOCOL.md 8.2), not only whole frames. */
@@ -292,8 +309,9 @@ class ReceiverSession(
                 if (message.pv >= WireProtocol.AUDIO) send(ReceiverMessages.audioRequest(audioPreferred)) else emit(SessionEvent.AudioState(false))
             }
             is SenderMessage.UpdateRequired -> {
+                // Accepted unadmitted: an incompatible receiver can never be admitted. Text only, bounded.
                 incompatible = true
-                emit(SessionEvent.UpdateRequired(message.message, message.store?.takeIf(::isSafeUpdateLink)))
+                emit(SessionEvent.UpdateRequired(message.message?.take(MAX_NOTICE_LENGTH), message.store?.takeIf(::isSafeUpdateLink)))
             }
             is SenderMessage.Pong -> clock.record(message.t, message.mt, now().toDouble())
             SenderMessage.Ping -> Unit
@@ -309,26 +327,30 @@ class ReceiverSession(
             }
             is SenderMessage.AllowInputState -> {
                 // A grant applies only to this connection, and only while it is admitted.
-                inputGranted = message.allowed && message.state == InputWireState.Allowed && admission.admitted
+                if (!admission.admitted) return
+                inputGranted = message.allowed && message.state == InputWireState.Allowed
                 emit(SessionEvent.InputState(message.state, inputGranted))
             }
             is SenderMessage.VideoState -> {
                 if (!message.enabled) video.reset()
-                emit(SessionEvent.VideoState(message.enabled, message.width, message.height))
+                deliver("videoState", SessionEvent.VideoState(message.enabled, message.width?.takeIf(::isSaneDimension), message.height?.takeIf(::isSaneDimension)))
             }
-            is SenderMessage.AudioState -> emit(SessionEvent.AudioState(message.enabled))
+            is SenderMessage.AudioState -> deliver("audioState", SessionEvent.AudioState(message.enabled))
             is SenderMessage.CodecState -> if (message.codec != video.codec) {
+                // The decoder follows at once (it orders with the frames); the app hears at admission.
                 video.reset(message.codec)
-                emit(SessionEvent.CodecChanged(message.codec))
+                deliver("codec", SessionEvent.CodecChanged(message.codec))
             }
             is SenderMessage.DisplayPaused -> {
                 paused = message.paused
                 val changed = if (message.paused) lifecycle.displayPaused() else lifecycle.displayResumed()
                 if (changed) reportPhase()
-                emit(SessionEvent.DisplayPaused(message.paused))
+                deliver("displayState", SessionEvent.DisplayPaused(message.paused))
             }
-            is SenderMessage.DisplayModeState -> emit(SessionEvent.DisplayModeConfirmed(message.mode))
+            is SenderMessage.DisplayModeState -> deliver("displayMode", SessionEvent.DisplayModeConfirmed(message.mode))
             is SenderMessage.Cursor -> {
+                // No cursor before admission (6.9): it is not state worth holding.
+                if (!admission.admitted) return
                 val sequence = message.sequence
                 if (sequence != null) {
                     if (sequence <= lastCursorSequence) return
@@ -336,9 +358,9 @@ class ReceiverSession(
                 }
                 emit(SessionEvent.Cursor(message.x, message.y, message.visible))
             }
-            SenderMessage.InputReset -> emit(SessionEvent.InputReset)
+            SenderMessage.InputReset -> if (admission.admitted) emit(SessionEvent.InputReset)
             SenderMessage.Closing -> closeCurrent(SessionLossReason.PeerClosed)
-            is SenderMessage.Other -> emit(SessionEvent.Control(message.type, message.body))
+            is SenderMessage.Other -> deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
         }
     }
 
@@ -389,11 +411,22 @@ class ReceiverSession(
         admission.admit(invitationID, peerID)
         if (wasAdmitted) return
         emit(SessionEvent.Admitted(peerID))
+        heldState.values.forEach(::emit)
+        heldState.clear()
         // Frames before admission were dropped: ask for a keyframe so a static screen appears at once.
         requestKeyframe()
     }
 
     private fun mediaAdmitted() = link != null && admission.admitted && !incompatible
+
+    private fun deliver(kind: String, event: SessionEvent) {
+        if (admission.admitted) {
+            emit(event)
+        } else if (kind in heldState || heldState.size < MAX_HELD_STATES) {
+            heldState.remove(kind)
+            heldState[kind] = event
+        }
+    }
 
     private fun handleVideo(payload: ByteArray) {
         if (!mediaAdmitted()) return
@@ -418,6 +451,7 @@ class ReceiverSession(
         admission.beginConnection()
         inputGranted = false
         paused = false
+        heldState.clear()
         dismissApprovals(answer = null)
         val effective = if (incompatible && reason.automaticallyRecoverable) SessionLossReason.ProtocolIncompatible else reason
         lifecycle.connectionLost(effective)
@@ -448,6 +482,11 @@ class ReceiverSession(
         const val PING_INTERVAL_MS = 2_000L
         const val LIVENESS_TIMEOUT_MS = 5_000L
         const val KEYFRAME_REQUEST_INTERVAL_MS = 1_000L
+        const val MAX_HELD_STATES = 32
+        const val MAX_NOTICE_LENGTH = 300
+        const val MAX_DIMENSION = 16_384
+
+        fun isSaneDimension(value: Int) = value in 1..MAX_DIMENSION
 
         /** Only an https link is ever opened from `updateRequired.store`. */
         fun isSafeUpdateLink(link: String): Boolean =

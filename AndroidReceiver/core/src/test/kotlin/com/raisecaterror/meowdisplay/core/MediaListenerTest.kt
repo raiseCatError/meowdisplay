@@ -197,6 +197,20 @@ class MediaListenerTest {
     }
 
     @Test
+    fun aBlockedMacIsClosedWithoutDisturbingTheLiveSession() {
+        Mac(macA).use { a ->
+            a.admit()
+            policies.setPolicy(MAC_B, com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy.Blocked)
+            Mac(macB).use { b -> assertTrue(b.closedByReceiver()) }
+            assertEquals(MAC_A, session.peerID)
+            assertTrue(session.isAdmitted)
+            a.send("{\"type\":\"ping\"}")
+            a.send("{\"type\":\"pong\",\"t\":${System.currentTimeMillis()},\"mt\":1}")
+            eventually("still served") { session.rttMs != null }
+        }
+    }
+
+    @Test
     fun aNewConnectionReplacesTheOldOne() {
         Mac(macA).use { first ->
             first.admit()
