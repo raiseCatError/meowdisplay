@@ -1385,8 +1385,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sessionInputGrant.set(false)
             if wasGranted {
                 // Held-input cleanup: an ON -> OFF transition must never
-                // leave a stuck key/button/touch behind.
+                // leave a stuck key/button/touch behind, nor a magnify/rotate
+                // still "began" that would swallow the next grant's gesture.
                 self.inputInjector?.cancelActiveInput()
+                self.nativeAppGestureState.cancelAll()
                 self.sendJSONObject(["type": WireMessage.inputReset])
             }
             self.sendAllowInputState(state: state)
