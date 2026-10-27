@@ -111,7 +111,19 @@ An unpaired pv 11 receiver also advertises `_opendisplay-pair._tcp` on TCP
 port 9002. It conveys discovery, not trust, and carries no secret.
 The Mac sender advertises `_opendisplay-mac-pair._tcp` while running so the
 receiver can present the product's primary "nearby Mac → Pair" flow. Both
-pairing advertisements carry only `id` and `pv` discovery metadata.
+pairing advertisements carry `id` and `pv` discovery metadata (and the
+`pp` pairing-version hint), never a secret.
+
+When several people are logged in to one Mac, each person's sender may opt
+in to four more `_opendisplay-mac-pair._tcp` TXT keys so receivers can list
+one Mac with its login sessions (additive, no `pv` change; see
+[SAME_MAC_SESSIONS.md](SAME_MAC_SESSIONS.md)): `hg` (16 lowercase hex
+digits, the same on every session of one Mac), `hn` (the Mac's name), `sl`
+(the session's chosen label, at most 32 characters) and `ss` (`a` while
+that login session is on the console, `i` while it is switched out). Like
+everything in TXT they are unauthenticated: receivers use them only to
+arrange and label rows, MUST NOT let them affect pairing, pins, admission
+or input, and MUST ignore all four when any is malformed or `id` is absent.
 
 ### 2.2 USB (Apple devices)
 
@@ -1506,3 +1518,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
 | 2026-10-25 | Additive, no `pv` change: `keyboard` `"down"` may carry `repeat`; the Mac Receiver sends the full physical-keyboard usage range |
 | 2026-10-27 | No wire change: Android receivers (section 2.2a); `hello.device` `"Android"` and `updateRequired.target` `"android"`. Cross-platform test vectors in `fixtures/receiver-protocol/` |
+| 2026-10-27 | Additive, no `pv` change: opt-in same-Mac login-session TXT keys `hg`/`hn`/`sl`/`ss` on `_opendisplay-mac-pair._tcp` (section 2.1) |
