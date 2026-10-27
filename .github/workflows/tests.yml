@@ -2,10 +2,15 @@ name: Tests
 
 # Nothing checked pull requests before this, so a branch that did not compile
 # (or a test target that could not build) only surfaced on someone's laptop.
+# Required checks (.github/rulesets): `mac`, `conventional` (pr-title.yml)
+# and `release-tooling`; `android` once the Android app is on the branch.
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, dev, 'release/**']
+
+permissions:
+  contents: read
 
 # A superseded run tells us nothing, so drop in-flight runs for the same ref.
 concurrency:
@@ -13,15 +18,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast and first: the release and repository workflows stay fail-closed,
+  # and the release library behaves (scripts/release/test).
+  release-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Workflows stay fail-closed
+        run: ruby scripts/release/check-release-workflows.rb
+      - name: Release library, CLI, state branch and reference sync
+        run: ruby -Iscripts/release/lib -e 'Dir["scripts/release/test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
+      - name: Shell scripts
+        run: |
+          set -euo pipefail
+          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' | xargs -0 -n1 bash -n
+          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' | xargs -0 shellcheck -S warning
+
+  # Runs on every branch; does real work only where the Android app exists.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        if: hashFiles('AndroidReceiver/settings.gradle.kts') != ''
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Tests, lint and an unsigned release bundle
+        if: hashFiles('AndroidReceiver/settings.gradle.kts') != ''
+        working-directory: AndroidReceiver
+        run: ./gradlew --no-daemon :core:test :app:testDebugUnitTest :app:lintRelease :app:bundleRelease
+
   mac:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
-
-      # First and cheap: the release workflows must stay fail-closed (no
-      # release becomes Latest before its DMGs and signed feeds are verified).
-      - name: Release workflows stay fail-closed
-        run: ruby scripts/release/check-release-workflows.rb
 
       - name: Install XcodeGen
         run: brew install xcodegen
