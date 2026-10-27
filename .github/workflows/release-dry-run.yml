@@ -1,0 +1,107 @@
+name: Release dry run
+
+# Checks that CI could produce a correct Mac release, without building,
+# signing, tagging or uploading anything:
+#  - which release secrets are missing;
+#  - the SPARKLE_PRIVATE_KEY secret matches the SUPublicEDKey the apps ship
+#    (a wrong key publishes feeds every installed copy rejects);
+#  - the build number to release is above the live feeds' builds;
+#  - the match repository holds the Developer ID certificate (read-only).
+# Manual only. GitHub can dispatch it once this file is on the default branch.
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Mac CFBundleVersion the release will use (the marketing version, e.g. 2.0.0)
+        required: true
+        default: "2.0.0"
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Report missing release secrets
+        id: secrets
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_DEPLOY_KEY: ${{ secrets.MATCH_DEPLOY_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          missing=""
+          for name in DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD \
+                      APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID \
+                      APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::warning::Secret $name is not set"
+              missing="$missing $name"
+            fi
+          done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
+
+      - name: Sparkle key matches SUPublicEDKey
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          # Same tools and checksum as release.yml.
+          SPARKLE_TOOLS_VERSION: "2.10.0"
+          SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY is not set"
+            exit 1
+          fi
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          echo "${SPARKLE_TOOLS_SHA256}  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin"
+
+      - name: Build number is above the live feeds
+        if: ${{ !cancelled() }}
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          scripts/release/check-build-number.sh "$BUILD_NUMBER" https://meowdisplay.app/appcast.xml
+          scripts/release/check-build-number.sh "$BUILD_NUMBER" https://meowdisplay.app/appcast-receiver.xml
+
+      - uses: ruby/setup-ruby@v1
+        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Set up SSH for match certs repo
+        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
+
+      - name: Developer ID certificate in match (read-only)
+        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        env:
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          bundle exec fastlane run match type:developer_id readonly:true \
+            app_identifier:com.raisecaterror.meowdisplay.mac,com.raisecaterror.meowdisplay.mac.receiver \
+            team_id:"$DEVELOPMENT_TEAM" platform:macos
+
+      - name: Fail if any release secret is missing
+        if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
+        env:
+          MISSING: ${{ steps.secrets.outputs.missing }}
+        run: |
+          echo "::error::Missing secrets: $MISSING"
+          exit 1

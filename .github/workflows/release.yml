@@ -1,8 +1,11 @@
 name: Release
 
+# Manual only: run it from the release branch (release/app-store-rc). The
+# first run opens or updates the release PR; running it again after that PR
+# is merged tags the release and builds the Mac apps. It used to run on every
+# push to `main`, which on this fork is an untouched upstream snapshot.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -24,7 +27,9 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: rp
         with:
-          release-type: simple
+          target-branch: ${{ github.ref_name }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   # The iOS app is not built here: App Store candidates are uploaded ahead of
   # the public release by the manually dispatched app-store-candidate.yml
@@ -36,6 +41,33 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
+
+      # Fail before building or uploading anything if the feeds could not
+      # reach installed apps: the Sparkle secret must be the key whose public
+      # half the apps ship, and the build number must be above the live feeds'.
+      - name: Preflight (Sparkle key, build number)
+        env:
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          # Sparkle release that ships the generate_appcast / sign_update
+          # tools, and the SHA-256 GitHub publishes for its tarball.
+          SPARKLE_TOOLS_VERSION: "2.10.0"
+          SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY is not set; cannot sign the appcasts"
+            exit 1
+          fi
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
+          echo "${SPARKLE_TOOLS_SHA256}  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+          echo "SPARKLE_BIN=$RUNNER_TEMP/sparkle/bin" >> "$GITHUB_ENV"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin"
+          # The Mac build number is the marketing version (Fastfile below).
+          scripts/release/check-build-number.sh "${TAG_NAME#v}" https://meowdisplay.app/appcast.xml
+          scripts/release/check-build-number.sh "${TAG_NAME#v}" https://meowdisplay.app/appcast-receiver.xml
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -103,25 +135,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          # Only this step sees the signing key.
+          # Only this step and the preflight see the signing key. The
+          # preflight already checked it against SUPublicEDKey and set
+          # SPARKLE_BIN to the verified Sparkle tools.
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          # Sparkle release that ships the generate_appcast / sign_update
-          # tools, and the SHA-256 GitHub publishes for its tarball.
-          SPARKLE_TOOLS_VERSION: "2.10.0"
-          SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
         run: |
           set -euo pipefail
-
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "::error::SPARKLE_PRIVATE_KEY is not set; cannot sign the appcasts"
-            exit 1
-          fi
-
-          curl -fsSL -o /tmp/sparkle.tar.xz \
-            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
-          echo "${SPARKLE_TOOLS_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c -
-          mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
-          SPARKLE_BIN=/tmp/sparkle/bin
 
           # generate_appcast wants a directory of update archives per feed.
           # Download links point at this release's immutable per-tag assets.

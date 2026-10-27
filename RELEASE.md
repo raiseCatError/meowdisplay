@@ -12,8 +12,10 @@ release-preparation GitHub issues) — not aspirational process.
   from [`release-please`](https://github.com/googleapis/release-please-action),
   which derives the next version from
   [Conventional Commits](https://www.conventionalcommits.org/) merged to
-  `main` and opens a release PR. Merging that PR creates the `vX.Y.Z` tag
-  that triggers the Mac build jobs.
+  `release/app-store-rc`. The **Release** workflow (`release.yml`) runs
+  only when started by hand from that branch: the first run opens or
+  updates the release PR, and a run after that PR is merged creates the
+  `vX.Y.Z` tag and builds the Mac apps.
 - **Build number** (`CFBundleVersion`):
   - **Mac:** the marketing version itself (`1.20.0`). Sparkle decides
     whether an update is newer by comparing `CFBundleVersion`, so it must
@@ -31,12 +33,14 @@ release-preparation GitHub issues) — not aspirational process.
   numbers differ from the Mac ones.
 - This repository is a fork of [OpenDisplay](https://github.com/peetzweg/opendisplay)
   and inherited its tag history (`v1.12.0`–`v1.19.0`) and `release-please`
-  setup. There is no `release-please-config.json`/manifest file in this repo,
-  so `release-please-action` runs on its defaults (`release-type: simple`)
-  and infers the next version from the existing tag sequence. **Recommendation:**
-  continue that sequence rather than resetting to `v1.0.0` — it's what the
-  tooling already does with zero configuration, and a reset would make old
-  and new tags ambiguous in a fork that shares commit ancestry with upstream.
+  setup. `release-please-config.json` (`release-type: simple`) and
+  `.release-please-manifest.json` pin the last release, `1.20.0`, so
+  release-please no longer infers it from upstream's tags. The config's
+  `release-as: 2.0.0` makes the next release PR propose 2.0.0 rather than
+  1.21.0; **delete `release-as` in the release PR's follow-up**, or every
+  later release PR proposes 2.0.0 again. The tag sequence continues from
+  upstream's (no reset to `v1.0.0`), because a reset would make old and
+  new tags ambiguous in a fork that shares commit ancestry with upstream.
 - There is currently no separate beta/stable tag convention (no `-beta`
   pre-release suffixes). Until MeowDisplay has its own beta channel, "beta"
   refers to the *distribution* stage (optional TestFlight testing, or an
@@ -61,31 +65,42 @@ Connect; the stored copy and checklist live in
 The iOS build goes to App Review **before** the public Mac/GitHub release, so
 the two can go live together.
 
-1. Merge normal Conventional Commit PRs to `main` (`feat:`, `fix:`, etc.).
-2. `release-please` opens/updates a release PR with the generated
-   `CHANGELOG.md` entry. Its title gives the next version.
-3. Run **iOS App Store candidate** (`app-store-candidate.yml`) from the
+1. Merge normal Conventional Commit PRs to `release/app-store-rc` (`feat:`,
+   `fix:`, etc.).
+2. Run **Release dry run** (`release-dry-run.yml`) with the coming build
+   number. It must pass: secrets present, Sparkle key matches
+   `SUPublicEDKey`, build number above the live feeds, Developer ID
+   certificate in match.
+3. Run **Release** from `release/app-store-rc`. `release-please` opens or
+   updates a release PR with the generated `CHANGELOG.md` entry. Its title
+   gives the next version. GitHub starts no workflows for a PR opened with
+   the workflow's own token, so the required `mac` and `conventional`
+   checks don't run on it: close and reopen the release PR to start them.
+4. Run **iOS App Store candidate** (`app-store-candidate.yml`) from the
    Actions tab: select the release PR's branch, enter that version (e.g.
    `1.20.0`), destination `app-store`. This runs `fastlane ios release`.
    (Destination `testflight` runs the optional `ios beta` lane instead.)
-4. In App Store Connect: wait for the build to process, inspect it, complete
+5. In App Store Connect: wait for the build to process, inspect it, complete
    the fields in `APP_STORE_LISTING.md`'s checklist, choose **Manually release
    this version**, and submit for review by hand.
-5. When Apple approves, the version waits in **Pending Developer Release**.
-6. Merge the release PR. This creates the `vX.Y.Z` tag and runs
-   `release.yml`'s `build-mac` job (guarded on `release_created == 'true'`):
-   both Mac apps are built, signed, notarized, packaged as DMGs, and uploaded
-   to the GitHub Release (`MeowDisplay.dmg`, `MeowDisplayReceiver.dmg`).
-7. The same job signs `appcast.xml` / `appcast-receiver.xml` for the new
+6. When Apple approves, the version waits in **Pending Developer Release**.
+7. Merge the release PR, then run **Release** from `release/app-store-rc`
+   again. This creates the `vX.Y.Z` tag and runs `build-mac` (guarded on
+   `release_created == 'true'`). Its preflight stops before building if the
+   Sparkle key doesn't match `SUPublicEDKey` or the build number isn't above
+   the live feeds' (`scripts/release/`). Then both Mac apps are built,
+   signed, notarized, packaged as DMGs, and uploaded to the GitHub Release
+   (`MeowDisplay.dmg`, `MeowDisplayReceiver.dmg`).
+8. The same job signs `appcast.xml` / `appcast-receiver.xml` for the new
    DMGs with `SPARKLE_PRIVATE_KEY`, verifies them with Sparkle's
    `sign_update`, and uploads them to the same GitHub Release. The feeds
    are live as soon as that release is GitHub's latest release (see
    [Sparkle auto-update](#sparkle-auto-update)).
-8. Verify the Mac release (see [Verification](#verification)), then release
+9. Verify the Mac release (see [Verification](#verification)), then release
    the iOS version manually in App Store Connect.
 
-If App Review rejects the build, fix it on `main`, let release-please update
-the PR, and upload a new candidate with the same version (a new run gives it
+If App Review rejects the build, fix it on `release/app-store-rc`, run
+**Release** again so release-please updates the PR, and upload a new candidate with the same version (a new run gives it
 a higher build number).
 
 ## First release without CI secrets (manual path)
@@ -104,7 +119,11 @@ locally instead of by the workflows:
   build number above the run numbers that workflow will reach for the same
   version (or re-upload under a new version).
 - **Mac.** Archive `OpenSidecarMac` and `OpenSidecarMacReceiver` in Release
-  with `CURRENT_PROJECT_VERSION` set to the marketing version (`1.20.0`),
+  with `CURRENT_PROJECT_VERSION` set to the marketing version (`1.20.0`;
+  1.20.0 itself actually shipped with build `1`, so every later release
+  must use its marketing version, e.g. `2.0.0`, or Sparkle offers it to
+  nobody; `scripts/release/check-build-number.sh <build>
+  https://meowdisplay.app/appcast.xml` checks this before you publish),
   export each with Developer ID, notarize (`xcrun notarytool submit …
   --wait`), staple, and package as `MeowDisplay.dmg` /
   `MeowDisplayReceiver.dmg` as `fastlane mac build_release` would. Then
@@ -140,6 +159,27 @@ Configured on this fork: `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`,
 `MATCH_DEPLOY_KEY`, `SPARKLE_PRIVATE_KEY`. Still missing: `MATCH_PASSWORD`
 and the three `APP_STORE_CONNECT_*` secrets, so CI cannot yet build a
 release by itself.
+
+Also missing before CI can release:
+
+- **A Developer ID Application certificate in match.** The team's current
+  Developer ID certificate is cloud-managed (it signed 1.20.0 through
+  Xcode) and can't be exported. The Account Holder creates an exportable
+  one with `fastlane match developer_id`. TCC permissions and Sparkle
+  accept a new certificate from the same team, as long as the Sparkle key
+  doesn't change in the same release. The cloud-managed certificate
+  expires **2027-02-01**; after that, Xcode's manual path needs a new one
+  too.
+- **Proof that `SPARKLE_PRIVATE_KEY` is the shipped key.** Run **Release
+  dry run** once (it must be on the default branch before GitHub can
+  dispatch it). It signs a random probe with the secret and verifies it
+  against `SUPublicEDKey`, printing pass or fail only.
+- **Branch protection.** `.github/rulesets/release-app-store-rc.json`
+  protects `release/app-store-rc` (no deletion or force-push, PR required,
+  Tests `mac` and PR title `conventional` must pass).
+  `scripts/release/apply-rulesets.sh` shows what it would create and which
+  existing rulesets' empty required-checks lists it would fill; it changes
+  nothing until it's run with `--apply` by a repository admin.
 
 ## Verification
 
