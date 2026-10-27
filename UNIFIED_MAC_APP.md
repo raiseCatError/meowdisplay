@@ -115,7 +115,7 @@ through the existing `appcast.xml` feed.
 - If both are installed on one Mac, only one is a display at a time. The other waits and says what to quit.
 
 **Release:**
-- **Versions:** the unified app continues the sender's version line (1.21.0 onward); the standalone receiver continues its own.
+- **Versions:** one release tag versions both Mac apps, as `release.yml` builds them: the unified app and the standalone receiver ship together as 2.0.0. Each keeps its own bundle id and Sparkle feed (`appcast.xml`, `appcast-receiver.xml`). `CFBundleVersion` must sort above the shipped 1.20.0's `1` (for example `2.0.0`), or Sparkle offers no update.
 - **Release workflow and Fastlane:** they build the same two targets as today. Nothing in `release.yml`, Fastlane or the feeds needs to change for the prototype. Release notes should point macOS 14+ receiver users to the unified app.
 
 **Rollback:**
@@ -196,6 +196,6 @@ per-device Mirror/Extend and #25's input on the same builds.
 
 - **Hardware QA** of the checklist above, with #24 and #25.
 - **String catalog:** the receiver's strings and the new page's strings aren't in MeowDisplay's catalog yet. Xcode adds them on the next IDE build. The catalogs are English-only, so nothing user-visible changes meanwhile.
-- **An already-released MeowDisplay Receiver opened second:** it predates the lock and can't be changed. Its own binds fail, so it doesn't disturb the running display role, but it shows no explanation. When the role turns off, its media listener takes the ports, while its pairing listener (unlike this branch's) doesn't retry. Updating the standalone receiver to this branch's version fixes both.
+- **An already-released MeowDisplay Receiver opened second:** it predates the lock and can't be changed. Its own binds fail, so it doesn't disturb the running display role, and it shows no explanation itself. MeowDisplay notices it opening while the role owns the ports and says so under the role's status ("MeowDisplay Receiver was opened, but this Mac is already a display here…", `StandaloneReceiverConflict.noticeWhileDisplay`), until it quits or the role is turned off. When the role turns off, its media listener takes the ports, while its pairing listener (unlike this branch's) doesn't retry. Updating the standalone receiver to this branch's version fixes both.
 - **Another account or app on ports 9001/9002:** shown as "port in use" and retried every second while the receiver is on. The lock doesn't coordinate accounts (by design, see above).
 - **Optional migration:** the shared-access-group migration for standalone receiver users, if wanted.
