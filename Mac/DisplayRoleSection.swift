@@ -28,6 +28,11 @@ struct DisplayRoleSection: View {
                 } else {
                     LabeledContent("Status", value: receiver.statusTitle)
                 }
+                if let notice = receiver.coexistenceNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             if receiver.streaming || onOpenSettings != nil {
                 HStack {

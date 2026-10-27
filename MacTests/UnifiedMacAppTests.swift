@@ -86,6 +86,22 @@ final class UnifiedMacAppTests: XCTestCase {
             among: ["com.raisecaterror.meowdisplay.mac", "com.raisecaterror.meowdisplay.ios", nil]))
     }
 
+    /// The other order: an already-released standalone receiver opened while
+    /// the display role holds the ports binds nothing and can't say why, so
+    /// MeowDisplay says it — only while the role really owns the ports, and
+    /// only while such a receiver runs.
+    func testAStandaloneReceiverOpenedWhileThisMacIsADisplayGetsANotice() {
+        let standalone: [String?] = ["com.apple.finder", "com.raisecaterror.meowdisplay.mac.receiver"]
+        XCTAssertNotNil(StandaloneReceiverConflict.noticeWhileDisplay(
+            displayRoleOwnsPorts: true, runningBundleIdentifiers: standalone))
+        XCTAssertNil(StandaloneReceiverConflict.noticeWhileDisplay(
+            displayRoleOwnsPorts: false, runningBundleIdentifiers: standalone),
+            "a role that is itself waiting already explains the conflict")
+        XCTAssertNil(StandaloneReceiverConflict.noticeWhileDisplay(
+            displayRoleOwnsPorts: true, runningBundleIdentifiers: ["com.raisecaterror.meowdisplay.mac", nil]),
+            "cleared once the standalone receiver quits")
+    }
+
     // MARK: - Trust stays per role
 
     func testTheSendersKeychainNamesAreExactlyTheOriginalOnes() {

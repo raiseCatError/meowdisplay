@@ -83,6 +83,13 @@ final class ReceiverController: ObservableObject {
     /// Something is in the way of being a display: show `statusTitle` as an
     /// explanation, not a plain status.
     var statusNeedsAttention: Bool { waitingForOtherReceiver || lockProblem != nil || portsUnavailable }
+    /// This receiver is running and holds the receiver ports (not waiting for
+    /// another receiver, not stopped by a lock problem).
+    var ownsReceiverPorts: Bool { receiver != nil && !waitingForOtherReceiver && lockProblem == nil }
+    /// Set by the host app when another receiver it knows about was opened
+    /// while this one owns the ports (`StandaloneReceiverConflict`); shown
+    /// next to the status. The standalone receiver never sets it.
+    @Published var coexistenceNotice: String?
     private let ownership = ReceiverOwnershipLock()
     private var ownershipRetry: Timer?
 

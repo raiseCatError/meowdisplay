@@ -450,6 +450,41 @@ final class SenderController: ObservableObject {
             ? .regular : .accessory)
     }
 
+    private var standaloneReceiverObservers: [NSObjectProtocol] = []
+
+    /// While this Mac is a display, a standalone MeowDisplay Receiver that
+    /// gets opened (or quits) updates the display role's notice: an
+    /// already-released one can't explain itself (`StandaloneReceiverConflict`).
+    private func observeStandaloneReceiverLaunches() {
+        guard standaloneReceiverObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        standaloneReceiverObservers = [NSWorkspace.didLaunchApplicationNotification,
+                                       NSWorkspace.didTerminateApplicationNotification].map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshStandaloneReceiverNotice() }
+            }
+        }
+        refreshStandaloneReceiverNotice()
+    }
+
+    private func stopObservingStandaloneReceiverLaunches() {
+        let center = NSWorkspace.shared.notificationCenter
+        standaloneReceiverObservers.forEach { center.removeObserver($0) }
+        standaloneReceiverObservers = []
+        ReceiverController.shared.coexistenceNotice = nil
+    }
+
+    private func refreshStandaloneReceiverNotice() {
+        let receiver = ReceiverController.shared
+        let notice = StandaloneReceiverConflict.noticeWhileDisplay(
+            displayRoleOwnsPorts: receiver.ownsReceiverPorts,
+            runningBundleIdentifiers: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier))
+        if notice != nil, receiver.coexistenceNotice == nil {
+            Log.info("roleDebug: standalone receiver opened while this Mac is a display")
+        }
+        receiver.coexistenceNotice = notice
+    }
+
     private func applyRoleEffects(_ effects: [MacAppRoleState.Effect]) {
         for effect in effects {
             switch effect {
@@ -483,8 +518,10 @@ final class SenderController: ObservableObject {
                         among: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier))
                 }
                 receiver.start()
+                observeStandaloneReceiverLaunches()
                 Log.info("roleDebug: receiver started")
             case .stopReceiver:
+                stopObservingStandaloneReceiverLaunches()
                 ReceiverController.shared.stop()
                 Log.info("roleDebug: receiver stopped")
             case .withdrawSenderAdvertisement:

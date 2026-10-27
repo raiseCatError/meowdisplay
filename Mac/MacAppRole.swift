@@ -71,6 +71,17 @@ enum StandaloneReceiverConflict {
     static func isRunning(among runningBundleIdentifiers: [String?]) -> Bool {
         runningBundleIdentifiers.contains { $0.map(bundleIdentifiers.contains) ?? false }
     }
+
+    /// The other order: a standalone receiver opened while the display role
+    /// already owns the receiver ports. An updated one waits and says why;
+    /// an already-released one (no ownership lock) binds nothing and
+    /// explains nothing, so MeowDisplay says it instead, for as long as one
+    /// is running.
+    static func noticeWhileDisplay(displayRoleOwnsPorts: Bool,
+                                   runningBundleIdentifiers: [String?]) -> String? {
+        guard displayRoleOwnsPorts, isRunning(among: runningBundleIdentifiers) else { return nil }
+        return String(localized: "MeowDisplay Receiver was opened, but this Mac is already a display here. It can't receive while this is on: quit MeowDisplay Receiver, or turn this off to use it instead.")
+    }
 }
 
 /// The unified app is a menu-bar (accessory) app unless the user chose a
