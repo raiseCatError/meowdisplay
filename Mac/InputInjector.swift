@@ -454,9 +454,12 @@ final class InputInjector {
 
     /// The control-message gate is duplicated here under the input lock so an
     /// OFF transition cannot race an event that already passed its outer gate.
+    /// A login session that is switched out (Fast User Switching) never
+    /// injects: someone else is using the Mac (`LoginSessionConsole`).
     private func inputIsAllowed() -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                   sessionGranted: sessionInputGrant.get()) else {
+                                                   sessionGranted: sessionInputGrant.get()),
+              LoginSessionConsole.shared.isOnConsole else {
             cancelActiveInputLocked()
             return false
         }

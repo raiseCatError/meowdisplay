@@ -1308,33 +1308,56 @@ struct IdleView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
-                    let isPaired = receiver.pairingMacIsPaired(result)
-                    HStack {
-                        Text(receiver.pairingMacName(result)).lineLimit(1)
-                        Spacer()
-                        if isPaired {
-                            if receiver.connected {
-                                Text("Connected").foregroundStyle(.secondary)
-                            } else {
-                                // Trust and connectivity are different: a
-                                // paired-but-not-currently-connected Mac
-                                // that is visible right now must offer a
-                                // way back in rather than a dead-end
-                                // "Paired" label. A disconnected Mac is
-                                // never dialing out on its own, so this
-                                // can't just rearm our own listener
-                                // (reconnectNow) — it asks the Mac,
-                                // which is always the dialer, to
-                                // actually start a session for us.
-                                connectControl(for: result)
-                            }
-                        } else {
-                            Button("Pair") { receiver.pairWithMac(result) }
-                                .buttonStyle(.borderedProminent)
+                // Several people's sessions on one Mac (opt-in) are listed
+                // under that Mac; every other Mac is one row, as before.
+                ForEach(receiver.nearbyMacGroups) { group in
+                    if group.isMultiSession {
+                        Text(verbatim: group.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    ForEach(group.sessions) { session in
+                        if let result = receiver.discoveredMac(session) {
+                            nearbyMacRow(result, title: group.isMultiSession ? session.rowTitle : group.title,
+                                         availability: session.availability)
+                                .padding(.leading, group.isMultiSession ? 12 : 0)
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private func nearbyMacRow(_ result: NWBrowser.Result, title: String,
+                              availability: MacLoginSessionAvailability) -> some View {
+        let isPaired = receiver.pairingMacIsPaired(result)
+        return HStack {
+            Text(verbatim: title).lineLimit(1)
+            Spacer()
+            if availability == .switchedOut {
+                // Logged in but not in front: it can't share, and a pairing
+                // code would appear on a screen nobody is looking at.
+                Text("Switched Out").foregroundStyle(.secondary)
+            } else if isPaired {
+                if receiver.connected {
+                    Text("Connected").foregroundStyle(.secondary)
+                } else {
+                    // Trust and connectivity are different: a
+                    // paired-but-not-currently-connected Mac
+                    // that is visible right now must offer a
+                    // way back in rather than a dead-end
+                    // "Paired" label. A disconnected Mac is
+                    // never dialing out on its own, so this
+                    // can't just rearm our own listener
+                    // (reconnectNow) — it asks the Mac,
+                    // which is always the dialer, to
+                    // actually start a session for us.
+                    connectControl(for: result)
+                }
+            } else {
+                Button("Pair") { receiver.pairWithMac(result) }
+                    .buttonStyle(.borderedProminent)
             }
         }
     }

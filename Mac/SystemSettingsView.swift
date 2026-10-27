@@ -136,6 +136,8 @@ struct SystemSettingsView: View {
                 Text("Availability")
             }
 
+            SessionDiscoverySection(controller: controller)
+
             Section("Updates") {
                 if let updater {
                     CheckForUpdatesView(updater: updater)
@@ -218,5 +220,30 @@ struct SystemSettingsView: View {
                 .controlSize(.small)
             }
         }
+    }
+}
+
+/// Fast User Switching (`SessionDiscoveryPreferences`): this user's opt-in to
+/// being listed as one of several login sessions on this Mac. Only the name
+/// typed here is shown to receivers, never the account name; each session
+/// keeps its own pairings.
+private struct SessionDiscoverySection: View {
+    @ObservedObject var controller: SenderController
+    @AppStorage(SessionDiscoveryPreferences.enabledKey) private var enabled = false
+    @AppStorage(SessionDiscoveryPreferences.labelKey) private var label = ""
+
+    var body: some View {
+        Section {
+            TextField("Your Session's Name", text: $label, prompt: Text("For example, Alex"))
+                .onSubmit { controller.refreshSenderAdvertisement() }
+            Toggle("List My Session Separately", isOn: $enabled)
+                .disabled(SenderSessionAdvertisement.normalizedLabel(label) == nil)
+        } header: {
+            Text("Other People on This Mac")
+        } footer: {
+            Text("When several people are logged in to this Mac at once, devices list this Mac once, with each person's session under it. Each session pairs on its own, and a session that's switched out shows as unavailable.")
+        }
+        .onChange(of: enabled) { _, _ in controller.refreshSenderAdvertisement() }
+        .onDisappear { controller.refreshSenderAdvertisement() }
     }
 }

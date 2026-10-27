@@ -199,6 +199,7 @@ targets:
       - MacReceiver/ReceiverOwnership.swift
       - Shared/ReceiverRoleConfiguration.swift
       - Mac/MacAppRole.swift
+      - Mac/LoginSession.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
@@ -241,6 +242,7 @@ targets:
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift
       - Shared/SessionInvitation.swift
+      - Shared/MacSessionDiscovery.swift
       - Shared/PickerSelection.swift
       - Shared/SessionStabilizationPolicy.swift
       - Shared/WakeOnLAN.swift

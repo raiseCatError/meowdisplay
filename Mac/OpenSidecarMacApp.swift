@@ -4,6 +4,7 @@ import Combine
 import Sparkle
 import Security
 import CryptoKit
+import SystemConfiguration
 
 // `AppPresentation` lives in its own file (Mac/AppPresentation.swift) — a
 // pure, dependency-free policy type, same shape as `ReconnectPolicy`/
@@ -1043,6 +1044,7 @@ final class SenderController: ObservableObject {
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
         if keepMacAvailableRequested { keepMacAvailableActive = keepAssertionEnable() }
         startObservingPhysicalDisplayAvailability()
+        observeLoginSessionSwitching()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1138,6 +1140,70 @@ final class SenderController: ObservableObject {
         quicHintBrowser = browser
     }
 
+    /// The name this Mac pairs and advertises under: the Mac's own name, or
+    /// "Mac — label" when this user opted in to being listed as one of
+    /// several login sessions on this Mac (`SessionDiscoveryPreferences`).
+    var senderDisplayName: String {
+        sessionAdvertisement()?.displayName ?? (Host.current().localizedName ?? "Mac")
+    }
+
+    private func sessionAdvertisement() -> SenderSessionAdvertisement? {
+        SessionDiscoveryPreferences.advertisement(
+            hostName: Host.current().localizedName ?? "Mac",
+            localHostName: SCDynamicStoreCopyLocalHostName(nil) as String?,
+            onConsole: LoginSessionConsole.shared.isOnConsole)
+    }
+
+    private func senderPairingService(localID: String) -> NWListener.Service {
+        var txt = NWTXTRecord()
+        txt["id"] = localID
+        txt["pv"] = String(WireProtocol.version)
+        // `pp`: unauthenticated pairing-protocol-version hint, additive
+        // and separate from `pv` (the media wire version above). It
+        // exists only for early "update required" UX before a connection
+        // is even attempted — never a security decision. The in-band
+        // v13 helloCommit/hello/helloReveal ceremony is the only thing
+        // that actually validates pairing compatibility.
+        txt["pp"] = String(WireProtocol.pairingVersion)
+        // Same-Mac session hints (opt-in): grouping and labels only.
+        let advertisement = sessionAdvertisement()
+        for (key, value) in advertisement?.txtFields ?? [:] { txt[key] = value }
+        return NWListener.Service(name: advertisement?.displayName ?? (Host.current().localizedName ?? "Mac"),
+                                  type: "_opendisplay-mac-pair._tcp", txtRecord: txt)
+    }
+
+    /// Re-publishes the pairing advertisement after the session opt-in, its
+    /// label, or this login session's console state changed.
+    func refreshSenderAdvertisement() {
+        guard let pairingListener, let localID = TrustStore.shared.installID() else { return }
+        pairingListener.service = senderPairingService(localID: localID)
+    }
+
+    private var loginSessionObservers: [NSObjectProtocol] = []
+
+    /// Fast User Switching: when this login session is switched out, the
+    /// injector stops taking input (`LoginSessionConsole`) and every held key
+    /// and button is released now, not on the next event; an opted-in
+    /// advertisement says the session is switched out.
+    private func observeLoginSessionSwitching() {
+        let center = NSWorkspace.shared.notificationCenter
+        loginSessionObservers = [(NSWorkspace.sessionDidBecomeActiveNotification, true),
+                                 (NSWorkspace.sessionDidResignActiveNotification, false)].map { name, onConsole in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.loginSessionConsoleChanged(onConsole: onConsole) }
+            }
+        }
+    }
+
+    private func loginSessionConsoleChanged(onConsole: Bool) {
+        guard LoginSessionConsole.shared.set(onConsole: onConsole) else { return }
+        Log.info("sessionDebug: this login session is \(onConsole ? "on the console" : "switched out")")
+        if !onConsole {
+            for session in sessions { session.sender.cancelActiveInput() }
+        }
+        refreshSenderAdvertisement()
+    }
+
     private func startPairingListener() {
         // Not while this Mac is a display (see `MacAppRoleState.Effect`),
         // and never twice.
@@ -1151,22 +1217,10 @@ final class SenderController: ObservableObject {
             let parameters = NWParameters.tcp
             parameters.includePeerToPeer = true
             let listener = try NWListener(using: parameters)
-            var txt = NWTXTRecord()
-            txt["id"] = localID
-            txt["pv"] = String(WireProtocol.version)
-            // `pp`: unauthenticated pairing-protocol-version hint, additive
-            // and separate from `pv` (the media wire version above). It
-            // exists only for early "update required" UX before a connection
-            // is even attempted — never a security decision. The in-band
-            // v13 helloCommit/hello/helloReveal ceremony is the only thing
-            // that actually validates pairing compatibility.
-            txt["pp"] = String(WireProtocol.pairingVersion)
-            listener.service = NWListener.Service(
-                name: Host.current().localizedName ?? "Mac",
-                type: "_opendisplay-mac-pair._tcp", txtRecord: txt)
+            listener.service = senderPairingService(localID: localID)
             pairingListener = listener
             #if DEBUG
-            Log.info("pairing listener starting: type=_opendisplay-mac-pair._tcp id=\(txt["id"] ?? "missing") peerToPeer=true")
+            Log.info("pairing listener starting: type=_opendisplay-mac-pair._tcp id=\(localID) peerToPeer=true")
             #endif
             listener.newConnectionHandler = { [weak self, weak listener] connection in
                 Task { @MainActor [weak self, weak listener] in
@@ -1178,7 +1232,7 @@ final class SenderController: ObservableObject {
                     do {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: localID,
-                            localName: Host.current().localizedName ?? "Mac",
+                            localName: self.senderDisplayName,
                             prompt: self.pairingPrompt, allowIdentityChange: false)
                         self.finishExplicitPairing(peerID: paired.peerID, success: true)
                         self.pairingMessage = "Paired with \(paired.peerName)"
@@ -1306,7 +1360,7 @@ final class SenderController: ObservableObject {
         do {
             let paired = try await PairingNetwork.runResponder(
                 connection: connection, localID: localID,
-                localName: Host.current().localizedName ?? "Mac",
+                localName: self.senderDisplayName,
                 prompt: pairingPrompt, allowIdentityChange: false,
                 isCurrent: { validity.isValid }, attemptToken: token)
             success = true
@@ -1744,7 +1798,7 @@ final class SenderController: ObservableObject {
             do {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: localID,
-                    localName: Host.current().localizedName ?? "Mac",
+                    localName: self.senderDisplayName,
                     prompt: pairingPrompt, expectedPeerID: expected, allowIdentityChange: false)
                 finishExplicitPairing(peerID: paired.peerID, success: true)
                 pairingMessage = "Paired with \(paired.peerName)"
@@ -1810,7 +1864,7 @@ final class SenderController: ObservableObject {
                     }
                     let paired = try await PairingNetwork.runInitiator(
                         connection: connection, localID: localID,
-                        localName: Host.current().localizedName ?? "Mac",
+                        localName: self.senderDisplayName,
                         prompt: self.pairingPrompt, expectedPeerID: knownPeerID,
                         allowIdentityChange: USBPairingPolicy.allowIdentityChange)
                     self.installIDByUDID[udid] = paired.peerID
@@ -2749,7 +2803,7 @@ final class SenderController: ObservableObject {
                         }
                         let paired = try await PairingNetwork.runInitiator(
                             connection: connection, localID: localID,
-                            localName: Host.current().localizedName ?? "Mac",
+                            localName: self.senderDisplayName,
                             prompt: self.pairingPrompt, expectedPeerID: peerID,
                             allowIdentityChange: USBPairingPolicy.allowIdentityChange)
                         guard self.owns(session) else { return }

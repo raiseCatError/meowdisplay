@@ -342,16 +342,21 @@ struct ReceiverNearbyMacRow: View {
     let result: NWBrowser.Result
 
     var body: some View {
+        // An opted-in login session on a shared Mac reads "Mac — Alex"; a
+        // switched-out one can't pair (its code would show on a screen
+        // nobody is looking at).
+        let summary = receiver.nearbyMacSummary(result)
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(receiver.pairingMacName(result)).lineLimit(1)
-                Text("Nearby")
+                Text(verbatim: summary.title).lineLimit(1)
+                Text(summary.availability == .switchedOut ? "Switched out" : "Nearby")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Button("Pair") { receiver.pairWithMac(result) }
                 .controlSize(.small)
+                .disabled(summary.availability == .switchedOut)
         }
     }
 }

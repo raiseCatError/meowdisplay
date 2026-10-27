@@ -1910,6 +1910,32 @@ final class StreamReceiver: ObservableObject {
         return "Mac"
     }
 
+    /// The Nearby list arranged by Mac: several login sessions of one Mac
+    /// that opted in are grouped under it (`NearbyMacDirectory`). Grouping
+    /// and labels come from unauthenticated TXT hints and never affect
+    /// trust; every row still pairs and connects as its own sender.
+    @MainActor var nearbyMacGroups: [NearbyMacGroup] {
+        NearbyMacDirectory.groups(from: discoveredMacs.compactMap { result in
+            guard case .service(let name, _, _, _) = result.endpoint else { return nil }
+            guard case .bonjour(let txt) = result.metadata else { return .init(serviceName: name, txt: [:]) }
+            return .init(serviceName: name, txt: txt.dictionary)
+        })
+    }
+
+    /// The discovery result a `NearbyMacSession` row stands for.
+    @MainActor func discoveredMac(_ session: NearbyMacSession) -> NWBrowser.Result? {
+        discoveredMacs.first { pairingMacName($0) == session.serviceName }
+    }
+
+    /// One result's row title ("Mac — Alex" for an opted-in session) and
+    /// whether that login session is switched out, for flat lists.
+    @MainActor func nearbyMacSummary(_ result: NWBrowser.Result) -> (title: String, availability: MacLoginSessionAvailability) {
+        let txt: [String: String]
+        if case .bonjour(let record) = result.metadata { txt = record.dictionary } else { txt = [:] }
+        let group = NearbyMacDirectory.groups(from: [.init(serviceName: pairingMacName(result), txt: txt)]).first
+        return (group?.title ?? pairingMacName(result), group?.sessions.first?.availability ?? .available)
+    }
+
     func pairingMacIsPaired(_ result: NWBrowser.Result) -> Bool {
         guard case .bonjour(let txt) = result.metadata, let id = txt["id"] else { return false }
         return TrustStore.receiverRole.hasPin(peerID: id)

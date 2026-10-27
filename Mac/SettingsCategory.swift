@@ -100,7 +100,7 @@ struct SettingsSearchIndex {
                 keywords = ["use this mac as a display", "receiver", "display role", "paired macs", "forget",
                             "receiver name", "audio", "a/v sync", "automatically allow"]
             case .system:
-                keywords = ["system", "preferences", "settings", "meowdisplay", "app", "permissions", "available"]
+                keywords = ["system", "preferences", "settings", "meowdisplay", "app", "permissions", "available", "users", "user switching", "sessions", "other people"]
             #if DEBUG
             case .developer:
                 keywords = ["developer", "debug", "diagnostics", "route overrides", "routes", "wake"]
