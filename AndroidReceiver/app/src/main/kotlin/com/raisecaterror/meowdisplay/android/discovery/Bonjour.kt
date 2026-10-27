@@ -22,6 +22,9 @@ object ServiceTypes {
     const val MEDIA_PORT = 9001
     const val PAIRING_PORT = 9002
 
+    /** The media advertisement (2.1): `id` must equal hello's `id`. Never carries trust. */
+    fun mediaTxt(installID: String, protocolVersion: Int) = mapOf("id" to installID, "pv" to protocolVersion.toString())
+
     /** The pairing advertisement: discovery metadata only, never a secret. */
     fun pairingTxt(installID: String, protocolVersion: Int, pairingVersion: Int) =
         mapOf("id" to installID, "pv" to protocolVersion.toString(), "pp" to pairingVersion.toString())

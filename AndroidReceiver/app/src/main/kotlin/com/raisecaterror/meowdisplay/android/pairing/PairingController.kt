@@ -13,6 +13,7 @@ import com.raisecaterror.meowdisplay.core.pairing.PairingException
 import com.raisecaterror.meowdisplay.core.pairing.PairingProtocol
 import com.raisecaterror.meowdisplay.core.pairing.PendingPairing
 import com.raisecaterror.meowdisplay.core.pairing.SocketPairingTransport
+import com.raisecaterror.meowdisplay.core.session.WireProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -60,8 +61,8 @@ class PairingController(
     private val bonjour: Bonjour,
     private val localName: () -> String,
 ) {
-    /** Must match the media protocol version this receiver speaks once media lands. */
-    private val advertisedProtocolVersion = 22
+    /** The media protocol version this receiver speaks. */
+    private val advertisedProtocolVersion = WireProtocol.VERSION
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val throttle = PairingCommitThrottle()

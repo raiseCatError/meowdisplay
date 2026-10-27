@@ -33,14 +33,21 @@ import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.pairing.PairingController
 import com.raisecaterror.meowdisplay.android.trust.PinStore
+import com.raisecaterror.meowdisplay.android.session.MediaController
+import com.raisecaterror.meowdisplay.android.session.MediaUiState
 import com.raisecaterror.meowdisplay.core.pairing.PairingClassification
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.core.session.ReceiverApprovalDecision
+import com.raisecaterror.meowdisplay.core.session.SessionPhase
 
 /** The receiver's home: this device, Macs nearby to pair with, and paired Macs. */
 @Composable
-fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pairing: PairingController) {
+fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pairing: PairingController, media: MediaController) {
     val ui by pairing.ui.collectAsState()
+    val mediaUi by media.ui.collectAsState()
     val nearby by bonjour.nearbyMacs.collectAsState()
     val paired by pins.paired.collectAsState()
+    val macName = { peerID: String? -> paired.firstOrNull { it.peerID == peerID }?.name ?: "Your Mac" }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -57,6 +64,10 @@ fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pai
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+            item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID))) }
+            mediaUi.updateMessage?.let { message ->
+                item { Hint(listOfNotNull(message, mediaUi.updateLink).joinToString("\n")) }
             }
             ui.message?.let { message ->
                 item { Notice(message, onDismiss = pairing::dismissMessage) }
@@ -75,7 +86,7 @@ fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pai
                 item { Hint("No paired Macs yet.") }
             }
             items(paired, key = { "paired-" + it.peerID }) { mac ->
-                ActionRow(mac.name, "Forget", enabled = true) { pins.forget(mac.peerID) }
+                ActionRow(mac.name, "Forget", enabled = true) { media.forget(mac.peerID) }
             }
             item {
                 Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(vertical = 24.dp)) {
@@ -84,6 +95,16 @@ fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pai
                 }
             }
         }
+    }
+
+    mediaUi.approval?.let { approval ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Allow ${macName(approval.peerID)} to use this display?") },
+            text = { Text("It asked to ${if (approval.mode == DisplayMode.Mirror) "mirror" else "extend"} its screen here. This doesn't allow it to control anything.") },
+            confirmButton = { TextButton(onClick = { media.answer(approval.id, ReceiverApprovalDecision.Allow) }) { Text("Allow") } },
+            dismissButton = { TextButton(onClick = { media.answer(approval.id, ReceiverApprovalDecision.RejectForSession) }) { Text("Not Now") } },
+        )
     }
 
     ui.prompt?.let { prompt ->
@@ -115,6 +136,17 @@ fun ReceiverHome(identity: DeviceIdentity, pins: PinStore, bonjour: Bonjour, pai
             dismissButton = { TextButton(onClick = { pairing.cancel() }) { Text("Cancel") } },
         )
     }
+}
+
+private fun sessionStatus(ui: MediaUiState, mac: String): String = when (ui.phase) {
+    SessionPhase.Connected -> if (ui.admitted) "Showing $mac's display." else "Connecting to $mac…"
+    SessionPhase.Connecting -> "Connecting to $mac…"
+    SessionPhase.Paused -> "$mac paused the display."
+    SessionPhase.Reconnecting -> "Reconnecting to $mac…"
+    SessionPhase.ReconnectFailed -> "Connection to $mac lost."
+    SessionPhase.Unrecoverable -> "$mac and this device can't work together yet."
+    SessionPhase.PeerDisconnected -> "$mac ended the session."
+    SessionPhase.Disconnected -> ui.listenerError ?: if (ui.listening) "Ready: open MeowDisplay on your Mac and choose this device." else "Not available while in the background."
 }
 
 @Composable

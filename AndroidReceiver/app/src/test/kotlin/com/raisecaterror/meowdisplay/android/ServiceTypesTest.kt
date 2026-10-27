@@ -22,4 +22,10 @@ class ServiceTypesTest {
             ServiceTypes.pairingTxt("1A2B3C4D-5E6F-4071-8293-A4B5C6D7E8F9", 22, 13),
         )
     }
+
+    @Test
+    fun theMediaAdvertisementCarriesOnlyIdAndProtocolVersion() {
+        assertEquals(mapOf("id" to "ID", "pv" to "22"), ServiceTypes.mediaTxt("ID", 22))
+        assertEquals(9001, ServiceTypes.MEDIA_PORT)
+    }
 }

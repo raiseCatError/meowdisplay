@@ -14,20 +14,23 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MeowTheme {
-                ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing)
+                ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media)
             }
         }
     }
 
-    // Pairing is offered only while the app is in front, like the Apple
-    // receivers' pairing screen: nothing listens in the background.
+    // Pairing and media are offered only while the app is in front, like the
+    // Apple receivers' pairing screen: nothing listens in the background.
     override fun onStart() {
         super.onStart()
         app.pairing.start()
+        app.media.start()
     }
 
     override fun onStop() {
         app.pairing.stop()
+        // Backgrounded, not quit: the Mac is told to expect this device back.
+        app.media.stop(sleeping = !isFinishing)
         super.onStop()
     }
 }
