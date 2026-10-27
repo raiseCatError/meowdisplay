@@ -135,6 +135,21 @@ is held to exactly the same identity rule as any other route (section 6.9,
 "Admission is per connection"): its `id` must be the peer the sender dialed
 and its certificate must present that peer's current pin.
 
+### 2.2a Android receivers
+
+The official Android receiver uses binding 2.1 unchanged: the same Bonjour
+service types and TXT keys (published through the platform's DNS-SD), the
+same pinned mutual-TLS 1.3 media listener on TCP 9001 and pairing listener
+on TCP 9002, and the same `_opendisplay-mac-pair._tcp` browse for its
+"nearby Mac → Pair" flow. Its persistent identity is a P-256 key in the
+Android Keystore; its pin is that key's SubjectPublicKeyInfo DER, compared
+byte-for-byte exactly like every other pin. It sends `hello.device`
+`"Android"`. It has no USB binding yet (section 2.2 is usbmuxd, which only
+reaches Apple devices) and does not list `"quic"` in `transports` until it
+has a QUIC listener, so senders reach it over TCP on the local network. A
+future USB binding would tunnel the same pinned-mTLS port (for example
+`adb reverse`) and change nothing above it.
+
 ### 2.3 First pairing (pv 11)
 
 Each side generates a fresh P-256 ECDH key and 32-byte nonce. Pairing hello
@@ -565,8 +580,11 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
 * `scale` (number): the device's UI scale factor (2 or 3 on Apple
   hardware). The sender uses it to pick a sensible point-size for the
   virtual display.
-* `device` (string, optional): device kind for UI text, `"iPhone"` or
-  `"iPad"` from the official receiver. Free-form.
+* `device` (string, optional): device kind for UI text: `"iPhone"` or
+  `"iPad"` from the iOS receiver, `"Mac"` from the Mac receiver,
+  `"Android"` from the Android receiver. Free-form; a sender MUST NOT gate
+  security on it. The official sender uses it only for naming, for
+  `updateRequired.target`, and to recognize a Mac receiver (section 6.4).
 * `id` (string, optional): stable per-install UUID. MUST match the Bonjour
   TXT `id`. Senders use it to recognize the same physical device across
   transports and renames.
@@ -950,12 +968,15 @@ to a pre-pv-2 sender and MUST assume sender `pv` 1.
 
 **`updateRequired`**: the sender declares the pairing unsupported until the
 receiver updates. `target` names the end that must act (`"ios"` for the
-iPhone/iPad app, `"mac"` for the Mac receiver), `store` is a
+iPhone/iPad app, `"mac"` for the Mac receiver, `"android"` for the Android
+receiver, chosen from `hello.device`), `store` is a
 platform-appropriate update URL, `message` is user-facing prose. The sender
 always includes `store`, because older receivers fall back to a built-in
 App Store link without it: for `"ios"` it is MeowDisplay's own App Store
 listing once one is configured (`AppStore.iOSAppID`), otherwise the project
-page; for `"mac"` it is the project page. A receiver opens `store` only if
+page; for `"android"` it is the Google Play listing once one is configured
+(`AppStore.androidPlayPackage`), otherwise the project page; for `"mac"` it
+is the project page. A receiver opens `store` only if
 it is an `https` link or its own configured listing, and otherwise
 substitutes its own update link (`AppStore.resolveReceiverUpdateURL`), so
 another app's listing is never opened. Receivers SHOULD surface it prominently and stop expecting video —
@@ -1484,3 +1505,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-30 | Documented optional HEVC video (section 5.4, `pv` 19) and the `pv` 15/16/18 rows; no wire change. The sender now also falls back to H.264 when an HEVC encoder produces no frames or a new `hello` drops `"hevc"` |
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
 | 2026-10-25 | Additive, no `pv` change: `keyboard` `"down"` may carry `repeat`; the Mac Receiver sends the full physical-keyboard usage range |
+| 2026-10-27 | No wire change: Android receivers (section 2.2a); `hello.device` `"Android"` and `updateRequired.target` `"android"`. Cross-platform test vectors in `fixtures/receiver-protocol/` |
