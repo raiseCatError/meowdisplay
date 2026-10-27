@@ -1,0 +1,143 @@
+{
+  "_comment" : "Generated from the Swift implementation by MacTests/CrossPlatformFixtureTests.swift. Do not edit by hand.",
+  "audioFrames" : [
+    {
+      "bytes" : "AQEAALuAAgACEZA=",
+      "channelCount" : 2,
+      "cookie" : "EZA=",
+      "kind" : "config",
+      "sampleRate" : 48000
+    },
+    {
+      "bytes" : "AQIAAAAHAAABoXcgynsAAAAVAAAABSEblAD/",
+      "capturedAtMs" : 1793000000123,
+      "durationMs" : 21,
+      "kind" : "packet",
+      "payload" : "IRuUAP8=",
+      "sequence" : 7
+    },
+    {
+      "bytes" : "AQMAALuAAg==",
+      "channelCount" : 2,
+      "kind" : "pcmConfig",
+      "sampleRate" : 48000
+    },
+    {
+      "bytes" : "AQQAAAAB//////////sAAAACAAAACAAAgD8AAIC/",
+      "capturedAtMs" : -5,
+      "frameCount" : 2,
+      "kind" : "pcmPacket",
+      "payload" : "AACAPwAAgL8=",
+      "sequence" : 1
+    }
+  ],
+  "fingerprints" : [
+    {
+      "fingerprint" : "2017 0575 9209 6612 7539",
+      "spki" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VoHtImZYbYBX6hywSBt1U1wKDUizrMhzQRuVrHIi/4SkKKiO9f5Q5q49fYqbM8hism6Ur/Ih+3O3rOiOlUl8A=="
+    },
+    {
+      "fingerprint" : "5656 1694 3891 5526 7385",
+      "spki" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW+y0g1HTeZkzejBKTo1uvGPdbj9aZATwI7BUGkdRlh38Ddj7exoKuYk/Ndg9NSolfvO3hl3nYvpI41rD8Bi4Tg=="
+    },
+    {
+      "fingerprint" : "8507 1222 3283 9203 8482",
+      "spki" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZo3R4qBYIM86lZNRw3y6bBRX90XpRwMwY1LKiFnluPqkW/sjuQdf8MQFXras2pvL7RJzIdlveURiUyzZRmxdpA=="
+    },
+    {
+      "fingerprint" : "0241 8617 0647 2209 8565",
+      "spki" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQFFiZ9xUA/V6/502+0PpIcHzj9fskUzNZmBub5Fjxd6I5J5m2XJ48PnTVypzjyMLI/hpjyRKkdEqGNk6r8zasA=="
+    }
+  ],
+  "pairing" : [
+    {
+      "envelopes" : {
+        "commit" : "{\"kind\":\"commit\",\"authenticator\":\"K2zGoPkVIAgau9xq29\\/tfGy570VRujbTj1nDK7gNfkE=\"}",
+        "confirmation" : "{\"kind\":\"confirmation\",\"confirmation\":{\"accepted\":true,\"authenticator\":\"3txzyzyFW42QJuAVsxGk3RI7c4tHfm83u4S7v6C87vw=\"}}",
+        "hello" : "{\"kind\":\"hello\",\"hello\":{\"version\":13,\"ephemeralPublicKey\":\"BDttQrBA6E2dADGyS4kVxbADx38HoM+m9PPybz\\/uUjLAWKSNqHhgb\\/gtwQmH7SI8SpvdBjBrlrRFoLIv\\/juWZsk=\",\"nonce\":\"DWgr5L7aWyvJH8Lov8fKaTIpPqs5giC0DBxpTWIx1Wo=\",\"deviceID\":\"1A2B3C4D-5E6F-4071-8293-A4B5C6D7E8F9\",\"displayName\":\"Pixel 9 Pro Fold\",\"identitySPKI\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW+y0g1HTeZkzejBKTo1uvGPdbj9aZATwI7BUGkdRlh38Ddj7exoKuYk\\/Ndg9NSolfvO3hl3nYvpI41rD8Bi4Tg==\"}}",
+        "helloCommit" : "{\"helloCommitment\":\"zO1nTJ14JS\\/BzvdNxEfGfIrJsV6fkAeJnr5J1fusyAU=\",\"kind\":\"helloCommit\"}",
+        "helloReveal" : "{\"kind\":\"helloReveal\",\"hello\":{\"version\":13,\"ephemeralPublicKey\":\"BOUk\\/dfCKp8iFYDaRYyjUUa8GGMH8gtxhDQSXLAVp6tADM5JO1LZ8iCEwGXNK97Z4RMEuLt2csljESuIucRWucI=\",\"nonce\":\"0wAO+SCW1qwkZllTPUicBSzZVyYg98lCgEuWZKEdR44=\",\"deviceID\":\"0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0\",\"displayName\":\"MacBook Air\",\"identitySPKI\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VoHtImZYbYBX6hywSBt1U1wKDUizrMhzQRuVrHIi\\/4SkKKiO9f5Q5q49fYqbM8hism6Ur\\/Ih+3O3rOiOlUl8A==\"}}"
+      },
+      "helloCommitment" : "zO1nTJ14JS/BzvdNxEfGfIrJsV6fkAeJnr5J1fusyAU=",
+      "initiator" : {
+        "deviceID" : "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "displayName" : "MacBook Air",
+        "ephemeralPrivateKey" : "acaf34a66137b1db052634dc75813d23a90b7320bcebb45546d381786585fa01",
+        "ephemeralPublicKey" : "BOUk/dfCKp8iFYDaRYyjUUa8GGMH8gtxhDQSXLAVp6tADM5JO1LZ8iCEwGXNK97Z4RMEuLt2csljESuIucRWucI=",
+        "identityPrivateKey" : "eea3bf5e9fb72fd81ea06cae9945a5afba773e4e4dc9bfffe9c0a58d9e4b3719",
+        "identitySPKI" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7VoHtImZYbYBX6hywSBt1U1wKDUizrMhzQRuVrHIi/4SkKKiO9f5Q5q49fYqbM8hism6Ur/Ih+3O3rOiOlUl8A==",
+        "nonce" : "0wAO+SCW1qwkZllTPUicBSzZVyYg98lCgEuWZKEdR44="
+      },
+      "initiatorConfirmationAccepted" : "SvO1T1roEBUupJr677riOvLl+GsBLqSvRriGUDQeuZs=",
+      "initiatorConfirmationRejected" : "s75eUV7WTEm4k5Nns719/1dDUBHvJI+wsQo+a+wEcW4=",
+      "initiatorSteps" : {
+        "abort" : "Tv5HI0HYAuAd1c/tCctKuKUQgvdXA2Sn/VX8bW4I0qA=",
+        "commit" : "K2zGoPkVIAgau9xq29/tfGy570VRujbTj1nDK7gNfkE=",
+        "commitAck" : "SoxUpr7FIpWpyIkRlS/V0qy7e/rdrdjKPBmN27lGBZo="
+      },
+      "name" : "mac-initiates-android-responds",
+      "responder" : {
+        "deviceID" : "1A2B3C4D-5E6F-4071-8293-A4B5C6D7E8F9",
+        "displayName" : "Pixel 9 Pro Fold",
+        "ephemeralPrivateKey" : "bb788ee73edff3a0bdcb9fcd79f15c9ebb272e0c8c91a781cdab7cfbb16d5680",
+        "ephemeralPublicKey" : "BDttQrBA6E2dADGyS4kVxbADx38HoM+m9PPybz/uUjLAWKSNqHhgb/gtwQmH7SI8SpvdBjBrlrRFoLIv/juWZsk=",
+        "identityPrivateKey" : "167194c877aa313da4070f99f388559d18095b8f0944a678e5a8737e81924e3a",
+        "identitySPKI" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW+y0g1HTeZkzejBKTo1uvGPdbj9aZATwI7BUGkdRlh38Ddj7exoKuYk/Ndg9NSolfvO3hl3nYvpI41rD8Bi4Tg==",
+        "nonce" : "DWgr5L7aWyvJH8Lov8fKaTIpPqs5giC0DBxpTWIx1Wo="
+      },
+      "responderConfirmationAccepted" : "3txzyzyFW42QJuAVsxGk3RI7c4tHfm83u4S7v6C87vw=",
+      "responderConfirmationRejected" : "LoowBSknmpRwTwBIK+u/vmJi/kaShQbI3A/tUO7qF5g=",
+      "responderSteps" : {
+        "abort" : "3Rggr9rk17Sn5HVrn5Y3GugsXpOJ10goMDWzKVLwyGo=",
+        "commit" : "SiNrenrDtZBCvZ4rcqapDdddc4WHNMcfnm8xV4IpyZc=",
+        "commitAck" : "ZQcI4lWaYs/GrVWLMM0ej8xW3IHGF2tOO170+sPERFY="
+      },
+      "sas" : "582 420"
+    },
+    {
+      "envelopes" : {
+        "commit" : "{\"kind\":\"commit\",\"authenticator\":\"DCqX+lywSHvmu\\/fUGodS26cdfZrMKhkK4VampHPjXf4=\"}",
+        "confirmation" : "{\"kind\":\"confirmation\",\"confirmation\":{\"accepted\":true,\"authenticator\":\"wPycHReFitYmmskgwCkig6AHhos0xamthmT6fz5qYs8=\"}}",
+        "hello" : "{\"kind\":\"hello\",\"hello\":{\"version\":13,\"ephemeralPublicKey\":\"BCkZM3zmkuRsoSwpFAZtGREC0cUWoCdYjs9\\/6flVeMBg+qet15kzQbUVhjVK8R\\/FyI4+C0wWGmcPXLZJGfp\\/6rc=\",\"nonce\":\"Pa7\\/FjQgA0g8iFf35E\\/FP6NxHOgLunliPtszWGq57bo=\",\"deviceID\":\"3C4D5E6F-7081-4293-A4B5-C6D7E8F90112\",\"displayName\":\"Family MacBook\",\"identitySPKI\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQFFiZ9xUA\\/V6\\/502+0PpIcHzj9fskUzNZmBub5Fjxd6I5J5m2XJ48PnTVypzjyMLI\\/hpjyRKkdEqGNk6r8zasA==\"}}",
+        "helloCommit" : "{\"helloCommitment\":\"tLyMpRuvMRae\\/lAypLEN08C\\/OAdVNHCUY3\\/OsJ5cw3E=\",\"kind\":\"helloCommit\"}",
+        "helloReveal" : "{\"kind\":\"helloReveal\",\"hello\":{\"version\":13,\"ephemeralPublicKey\":\"BK5ZWyVH+EpFFwDLmtcZyJfFHTUEAC8xJzAv3VTXyb3RmNjRFUQ94QCd1iWkx5ZEsdzFsMvj9Fhu7xFEkCw4GuM=\",\"nonce\":\"pHtGyMIRzJ0m7lLGp3UP0oe550TlhAdPCm4t8Dlbgvc=\",\"deviceID\":\"2B3C4D5E-6F70-4182-93A4-B5C6D7E8F901\",\"displayName\":\"Äidin tabletti 🐱\",\"identitySPKI\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZo3R4qBYIM86lZNRw3y6bBRX90XpRwMwY1LKiFnluPqkW\\/sjuQdf8MQFXras2pvL7RJzIdlveURiUyzZRmxdpA==\"}}"
+      },
+      "helloCommitment" : "tLyMpRuvMRae/lAypLEN08C/OAdVNHCUY3/OsJ5cw3E=",
+      "initiator" : {
+        "deviceID" : "2B3C4D5E-6F70-4182-93A4-B5C6D7E8F901",
+        "displayName" : "Äidin tabletti 🐱",
+        "ephemeralPrivateKey" : "f81afcb23853418f263f360d370883e52224a67ea1d3131c63de7e0fdeda722a",
+        "ephemeralPublicKey" : "BK5ZWyVH+EpFFwDLmtcZyJfFHTUEAC8xJzAv3VTXyb3RmNjRFUQ94QCd1iWkx5ZEsdzFsMvj9Fhu7xFEkCw4GuM=",
+        "identityPrivateKey" : "d1e11804fea3ca88533c14a3184549e2c096315d83440e20e034206acb585272",
+        "identitySPKI" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZo3R4qBYIM86lZNRw3y6bBRX90XpRwMwY1LKiFnluPqkW/sjuQdf8MQFXras2pvL7RJzIdlveURiUyzZRmxdpA==",
+        "nonce" : "pHtGyMIRzJ0m7lLGp3UP0oe550TlhAdPCm4t8Dlbgvc="
+      },
+      "initiatorConfirmationAccepted" : "FDTRE0XBCcvstDeVo6y2n9xP33j7+0Ihlmqn0Qm0w3U=",
+      "initiatorConfirmationRejected" : "xLZwzuZu+l4qvaRA3HlFeUQwiecf9UCPiFY5g5r4xus=",
+      "initiatorSteps" : {
+        "abort" : "QFRfSSmX8Bie1KZ99wkmrWdj+zscZuDqUmBFCiKiyz0=",
+        "commit" : "DCqX+lywSHvmu/fUGodS26cdfZrMKhkK4VampHPjXf4=",
+        "commitAck" : "8DC8sjdIY8aOdFt1uAEXBd8unTmw3InmjJYNZpnvSGs="
+      },
+      "name" : "android-initiates-mac-responds-unicode-name",
+      "responder" : {
+        "deviceID" : "3C4D5E6F-7081-4293-A4B5-C6D7E8F90112",
+        "displayName" : "Family MacBook",
+        "ephemeralPrivateKey" : "9c313ef64bb4a264fe2f521ce084d075065fc3004d544ef6b9321e0b4de1d905",
+        "ephemeralPublicKey" : "BCkZM3zmkuRsoSwpFAZtGREC0cUWoCdYjs9/6flVeMBg+qet15kzQbUVhjVK8R/FyI4+C0wWGmcPXLZJGfp/6rc=",
+        "identityPrivateKey" : "40372917fdac29fe490150d589730444f861fa57173821c4cee9d483b4e3f594",
+        "identitySPKI" : "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQFFiZ9xUA/V6/502+0PpIcHzj9fskUzNZmBub5Fjxd6I5J5m2XJ48PnTVypzjyMLI/hpjyRKkdEqGNk6r8zasA==",
+        "nonce" : "Pa7/FjQgA0g8iFf35E/FP6NxHOgLunliPtszWGq57bo="
+      },
+      "responderConfirmationAccepted" : "wPycHReFitYmmskgwCkig6AHhos0xamthmT6fz5qYs8=",
+      "responderConfirmationRejected" : "svI45UZBWmiuPUGPanjBMChrT1kj6cWLodDz6s5kSYE=",
+      "responderSteps" : {
+        "abort" : "63Dj+d0TawNOOvM4Rx7dfvcSPngavXhZlHorjVGG7Dw=",
+        "commit" : "LbGwa92uOujcHm6R8ESbFgs9xAS5b7Cwc/1ipgGeWf0=",
+        "commitAck" : "/VLQmAiNSNIO7KWvXngP58YdLFo14wo+MT84I3uOF9k="
+      },
+      "sas" : "721 475"
+    }
+  ],
+  "pairingVersion" : 13
+}
