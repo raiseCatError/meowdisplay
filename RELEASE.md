@@ -1,182 +1,245 @@
 # Release process
 
-This documents how a MeowDisplay release actually gets built and published,
-as implemented in `.github/workflows/release.yml`,
-`.github/workflows/app-store-candidate.yml`, and `fastlane/Fastfile`.
-It reflects what was verified while auditing the pipeline (see the
-release-preparation GitHub issues) — not aspirational process.
+How MeowDisplay releases are built, reviewed and published, as implemented
+in `.github/workflows/release-*.yml`, `scripts/release/` and
+`fastlane/Fastfile`. Branches and the repository migration are in
+[BRANCHING.md](BRANCHING.md); the OpenDisplay reference in
+[REFERENCE.md](REFERENCE.md).
 
-## Versioning
+## One release branch, four products
 
-- **Marketing version** (`CFBundleShortVersionString`, e.g. `1.20.0`) comes
-  from [`release-please`](https://github.com/googleapis/release-please-action),
-  which derives the next version from
-  [Conventional Commits](https://www.conventionalcommits.org/) merged to
-  `release/app-store-rc`. Two manual workflows, both run only from that
-  branch: **Release PR** (`release-pr.yml`) opens or updates the release
-  PR and never tags or releases; **Release** (`release.yml`), run after
-  that PR is merged, builds, verifies and publishes (see
-  [Release workflow](#release-workflow-fail-closed)).
-- **Build number** (`CFBundleVersion`):
-  - **Mac:** the marketing version itself (`1.20.0`). Sparkle decides
-    whether an update is newer by comparing `CFBundleVersion`, so it must
-    grow with every release. `release.yml`'s run number can't guarantee
-    that, because it restarts at 1 on this fork and 1.20.0 was built by hand.
-  - **iOS:** the run number (`github.run_number`) of
-    `app-store-candidate.yml`, the only workflow that builds iOS, so App
-    Store Connect builds stay distinct across re-runs.
-- Both numbers are injected into `xcodebuild` via `xcargs` in
-  `fastlane/Fastfile`'s `version_xcargs` helper; `project.yml` only defines
-  placeholder defaults (`0.0.0` / `1`) for local, non-release builds.
-- The Mac sender and Mac Receiver build from the **same tag and the same
-  run**. The iOS app is built separately with the same marketing version
-  (passed as the workflow input), so versions stay in lockstep; iOS build
-  numbers differ from the Mac ones.
-- This repository is a fork of [OpenDisplay](https://github.com/peetzweg/opendisplay)
-  and inherited its tag history (`v1.12.0`–`v1.19.0`) and `release-please`
-  setup. `release-please-config.json` (`release-type: simple`) and
-  `.release-please-manifest.json` pin the last release, `1.20.0`, so
-  release-please no longer infers it from upstream's tags. The config's
-  `release-as: 2.0.0` makes the next release PR propose 2.0.0 rather than
-  1.21.0; **delete `release-as` in the release PR's follow-up**, or every
-  later release PR proposes 2.0.0 again. The tag sequence continues from
-  upstream's (no reset to `v1.0.0`), because a reset would make old and
-  new tags ambiguous in a fork that shares commit ancestry with upstream.
-- There is currently no separate beta/stable tag convention (no `-beta`
-  pre-release suffixes). Until MeowDisplay has its own beta channel, "beta"
-  refers to the *distribution* stage (optional TestFlight testing, or an
-  unlisted GitHub Release) of an ordinary `vX.Y.Z` build, not a distinct
-  version format.
+`release/<version>` (for example `release/2.0.0`) is the single source of
+every platform's release candidate:
+
+| Product | Built by | Distributed through |
+| --- | --- | --- |
+| MeowDisplay for Mac (Sender and Receiver) | `release-mac.yml` | GitHub Release (DMG) + Sparkle `appcast.xml` |
+| MeowDisplay Receiver for Mac (macOS 12+) | `release-mac.yml` | GitHub Release (DMG) + Sparkle `appcast-receiver.xml` |
+| MeowDisplay for iPhone and iPad | `release-ios.yml` | App Store Connect → App Store |
+| MeowDisplay for Android | `release-android.yml` | Google Play |
+
+```
+push to release/2.0.0 ──► release-candidate.yml ── candidate = that commit
+                              ├─ release-mac.yml      build · sign · notarize · DMG · verify · signed feeds   (staged)
+                              ├─ release-ios.yml      build · sign · upload to App Store Connect            (uploaded)
+                              └─ release-android.yml  test · sign · upload to internal testing              (uploaded)
+release-monitor.yml (every 30 min) ── submit processed builds · follow App Review and Play review
+                                       └─ gate open? ── manual mode: waits for your approval
+                                                        auto mode:   starts release-publish.yml
+release-publish.yml ── [your approval] gate · Mac release (draft→verify→Latest→live, auto-revert)
+                       ── stores: release iOS · Android (Play Console Publish click under managed publishing)
+                       ── website: release.json on meowdisplay.app (only what is live)
+                       ── PR of the released source into main
+```
+
+**Versions.** One marketing version for every product (`version.txt`, set
+by the release PR). Build identifiers stay independent and only grow:
+
+- **Mac:** `CFBundleVersion` = the marketing version (`2.0.0`). Sparkle compares it; 1.20.0 shipped as `1`, and the candidate refuses a build number not above every live feed's.
+- **iOS:** one above every build App Store Connect has for this version (`fastlane ios upload_candidate`), so re-runs never collide.
+- **Android:** `versionCode` = major×1,000,000 + minor×10,000 + patch×100 + build (1–99), above everything Google Play has (`meow-release next-build android`).
+
+**Release state.** Every release has one record, `releases/<version>.json`
+on the `release-state` branch, keyed by the candidate commit
+(`scripts/release/lib/meow_release/state.rb`). Each platform moves through
+**Built and tested → Signed → Uploaded → Submitted → Under review →
+Approved / ready → Published**, or aside to **Blocked**, **Rejected** or
+**Failed**. Only **Published** means users can install it. A newer push to
+the release branch supersedes the candidate: everything recorded for the
+older commit stops counting, and a publication can never use it. Every
+release workflow ends with the readiness report (Actions job summary):
+each platform's stage, build, source commit, checksums, store status,
+blockers and what is waiting on a person.
+
+## What is automatic and what needs you
+
+| Step | Automatic | Needs a person |
+| --- | --- | --- |
+| Release PR (version.txt, CHANGELOG) | `release-pr.yml` opens/updates it | Merge it (that push builds the candidate) |
+| Build, sign, notarize, package, verify all four products | ✔ on every push | — |
+| Upload to App Store Connect / Google Play internal testing | ✔ | — |
+| Submit iOS for review | ✔ once the build is processed and App Store Connect accepts the submission (`ios.submitForReview`) | Missing metadata or screenshots: App Store Connect's own message becomes a blocker |
+| Send Android to review | ✔ to the review track (`android.reviewTrack`) | — |
+| Follow review | ✔ App Store Connect `appStoreState`; Play `tracks.releases.list` lifecycle | Reply to App Review / Play policy questions |
+| Rejection | Recorded with the store's reason; the gate stays closed | Fix, merge to the release branch (a new candidate) |
+| Start publication | Auto mode only (both switches) | **Manual mode (default): approve `release-publish`** |
+| Mac release, live feed check, revert | ✔ | — |
+| Release iOS (manual release control) | ✔ | — |
+| Publish Android under managed publishing | — | **Press Publish in Play Console** (no API exists); the monitor records it |
+| Website (`release.json`) | ✔ through the website's own PR and deploy | — |
+| Record the release in `main` | ✔ opens the PR (auto-merge if `RELEASE_AUTO_PROMOTE`) | Merge it otherwise |
+
+**Publish modes** (`publishMode` in `.github/release-config.json`):
+- `manual-final-approval` (default): the monitor reports "Ready to publish"; publication starts when you approve the `release-publish` environment's deployment.
+- `auto-publish-after-approval` (future opt-in): needs **both** that config value on the release branch **and** the repository variable `RELEASE_PUBLISH_MODE=auto-publish-after-approval`; then the monitor starts publication once every required platform is approved for the branch head. Either switch alone keeps the approval.
+
+**What the release requires** (`requiredPlatforms`, `crossPlatformReady`):
+Mac and iOS always; Android once `crossPlatformReady` is `true`. Until then
+an Android candidate is built, uploaded and reported, but doesn't hold the
+release.
+
+## The publication gate
+
+`release-publish.yml` starts only when every required platform is
+**Approved** for the exact commit the release branch points at. Then, in
+the order that keeps every failure recoverable
+(`scripts/release/lib/meow_release/publisher.rb`):
+
+1. **Mac.** The verified DMGs and feeds of the candidate run (checksums re-checked) become a **draft** release with `SHA256SUMS.txt`; the draft's assets are downloaded back and compared byte for byte; then it becomes **Latest**; then both live feed URLs must serve the new feeds within 5 minutes, or Latest is reverted to the previous release automatically. Whatever release is Latest IS the live Sparkle feed (`meowdisplay.app/appcast*.xml` redirect to `releases/latest/download/…`), so no incomplete release is ever Latest. Nothing irreversible has happened before this step ends.
+2. **Stores.** The approved iOS version is released (it waits in Pending Developer Release). Android: Play holds an approved release (`APPROVED_NOT_PUBLISHED`) until Publish is pressed in Play Console; the monitor sees `PUBLISHED`.
+3. **Website.** `release.json` lists only platforms that are live, and is published through the website repository's own pull request and Cloudflare Pages deploy; the step waits until meowdisplay.app serves it.
+4. **main.** A PR of `release/<version>` into `main` (merge commit, so main's tree equals the tag's).
+
+A run that stops part way is resumed (`resume`, by the monitor) without
+repeating finished steps; resuming never starts a publication.
+
+**The release state is not evidence.** Any GitHub Actions workflow can
+write the `release-state` branch, so publication re-derives every fact
+that matters from its source before anything becomes public:
+`verify-stores` observes App Store Connect and Google Play live (a recorded
+approval a store doesn't confirm fails, since a platform can't move
+backwards); the Mac artifacts must come from the `release-candidate.yml`
+run for exactly this commit on this branch, whose Mac verification
+succeeded, and are verified again (signatures, notarization, identity,
+feeds against the published key) before the draft is created.
+
+## Stores
+
+**App Store Connect.** The build uploads with `fastlane ios upload_candidate`
+(no submission). The monitor attaches it to the App Store version (created
+with manual release control if missing) and submits it through
+`reviewSubmissions` once processing is `VALID`; processing finished is
+never treated as approval. Approval = `PENDING_DEVELOPER_RELEASE`
+(`appStoreState`/`appVersionState`); release = an
+`appStoreVersionReleaseRequests` call from the publish workflow. A newer
+candidate's build replaces an older one still in review (the older
+submission is cancelled first). Metadata and screenshots stay maintained in
+App Store Connect ([`fastlane/APP_STORE_LISTING.md`](fastlane/APP_STORE_LISTING.md)).
+
+**Google Play.** The bundle uploads to the internal track as its own
+committed edit. The monitor puts the build on the review track (production)
+and commits with `changesInReviewBehavior=ERROR_IF_IN_REVIEW`, so nothing in
+review is ever cancelled by accident; replacing a superseded candidate's
+release uses `CANCEL_IN_REVIEW_AND_SUBMIT` deliberately. Review is followed
+through `GET applications/{package}/tracks/{track}/releases`
+(`ReleaseSummary.releaseLifecycleState`):
+
+| Play state | Release stage |
+| --- | --- |
+| `DRAFT`, `NOT_SENT_FOR_REVIEW` | Blocked (not sent for review) |
+| `IN_REVIEW` | Under review |
+| `APPROVED_NOT_PUBLISHED` | Approved / ready |
+| `NOT_APPROVED` | Rejected |
+| `PUBLISHED` | Published |
+
+The list omits obsolete releases and returns at most 20 per track.
+**Turn on managed publishing in Play Console**: without it, Play publishes
+the moment review approves, which can't be coordinated with the Mac and App
+Store releases. Publishing a held release has no API: it is Play Console's
+**Publish changes** button, which the monitor then records.
+
+## Website
+
+The release workflow never changes how meowdisplay.app is built. It writes
+`release.json` (version, source commit, the stable `releases/latest/download`
+URLs of both DMGs, store links of live platforms only) into the website
+repository by pull request with auto-merge; the site's own checks and
+Cloudflare Pages deploy run as always, and the step waits until
+`https://meowdisplay.app/release.json` serves the new version.
+
+**One-time website change (not made yet):** the website repository's
+`scripts/package.py` must copy `release.json` into `dist/`, and its pages
+should read version text and store links from it (the DMG links already
+use the stable `latest/download` URLs, which switch with the GitHub
+Release). Until that change lands, `update-website.sh` refuses and the
+website step reports a blocker; nothing else is affected.
+
+## Credentials
+
+Every secret lives in one protected environment; jobs check the
+environment's protection (`check-environment.sh`) before using a secret,
+because a job naming a missing environment silently gets an unprotected one.
+`Release dry run` reports what is missing, by name only.
+
+| Environment (branches) | Secrets | Variables | Who creates them |
+| --- | --- | --- | --- |
+| `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization), `SPARKLE_PRIVATE_KEY` | — | Owner; a Developer ID certificate in match via `fastlane match developer_id` (Account Holder) |
+| `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect API key, App Manager role) |
+| `android-upload` (`release/*`) | `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | `ANDROID_UPLOAD_CERT_SHA256` (the upload certificate registered with Play App Signing) | Owner (Play Console service account with release permissions; the upload key) |
+| `release-stores` (default branch, `release/*`) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON` | — | Owner |
+| `release-publish` (`release/*`) | none | — | Owner adds themselves as **required reviewer** |
+| `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App (Contents, Pull requests, Issues: read & write) installed on this repository only |
+| `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
+
+Repository variables that switch automation on, each off until set:
+`RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
+(auto publication, with the config), `RELEASE_AUTO_PROMOTE=enabled` (merge
+the main promotion PR automatically), `REFERENCE_SYNC=enabled`,
+`REPOSITORY_GUARD=enabled`, `EXPECTED_DEFAULT_BRANCH`.
+
+After moving the signing secrets into environments, delete the
+repository-level copies (`DEVELOPMENT_TEAM`, `MATCH_DEPLOY_KEY`,
+`MATCH_GIT_URL`, `SPARKLE_PRIVATE_KEY` exist there today), so no other
+workflow or branch can read them. The Developer ID certificate that
+signed 1.20.0 is cloud-managed and expires **2027-02-01**.
+
+## Recovery: a partially completed launch
+
+The release state shows exactly where a launch stopped. Re-running
+`release-publish.yml` for the same candidate resumes; it never repeats a
+finished step.
+
+| Where it stopped | What users see | What to do |
+| --- | --- | --- |
+| Before or during the Mac step (draft not verified, feeds not live) | 1.x as before; Latest was reverted automatically | Read the job log, fix (assets, CDN), re-run publish. A leftover draft/tag `v<version>` must be removed by hand first (the gate refuses an existing tag). |
+| After the Mac step, before stores | Mac users get the new version; phones keep the previous store version (compatible by protocol) | Re-run publish (resume): stores, website and promotion continue. |
+| iOS release request failed | App Store still shows the previous version | Re-run publish, or press Release in App Store Connect; the monitor records it either way. |
+| Android approved but not published | Play shows the previous version | Press **Publish changes** in Play Console; the monitor records it and resumes publication. |
+| Website step failed | Site shows the previous version text; the stable DMG link already serves the new DMG | Fix the website PR or its checks; resume. |
+| A store rejected the candidate | Nothing new is public (the gate never opened) | Fix on the release branch: the push is a new candidate; the old submission is replaced. |
+| A bad version is live | — | Mac: make the previous release Latest (its feeds come back), then ship a fixed, higher version (Sparkle never downgrades). iOS: ship a fixed version (a release can't be pulled back; remove from sale if needed). Android: halt the rollout in Play Console, then ship a fixed versionCode. |
+
+Never hand-edit a published feed: it is signed, and the apps reject an
+edited copy.
+
+## Release PR and versions
+
+`release-pr.yml` (manual, from `release/<version>`) runs release-please
+with the release App's token and `skip-github-release`: it opens or updates
+the release PR (CHANGELOG, `version.txt`, `.release-please-manifest.json`)
+and never tags or releases. `release-please-config.json`'s `release-as:
+2.0.0` makes the next PR propose 2.0.0; delete it in the follow-up, or every
+later PR proposes 2.0.0 again. The repository inherited the OpenDisplay
+reference's old tags (`v0.1.0`–`v1.19.0`); MeowDisplay's own releases start
+at `v1.20.0`, the candidate refuses a version whose tag exists, and the
+reference sync never imports tags.
 
 ## Fastlane lanes
 
 | Lane | Purpose |
 |---|---|
-| `mac build_release` | Developer ID-signed, notarized Mac sender DMG (runs the three stages below) |
-| `mac build_receiver_release` | Same, for the standalone Mac Receiver |
 | `mac sign_app app:<sender\|receiver>` | Stage 1: build and Developer ID-sign the .app |
 | `mac notarize_app app:<sender\|receiver>` | Stage 2: notarize and staple that .app |
 | `mac package_dmg app:<sender\|receiver>` | Stage 3: signed, notarized, stapled DMG |
-| `ios release` | App Store release candidate: builds and uploads the binary to App Store Connect. Skips metadata and screenshots, does **not** submit for review, does **not** release |
-| `ios beta` | **Optional** TestFlight upload for beta testing. Not required for a release |
+| `mac build_release` / `build_receiver_release` | The three stages for one app, locally |
+| `ios upload_candidate` | Release candidate: build number above every existing one for the version, App Store build uploaded, nothing submitted |
+| `ios release` | Manual: upload a binary to App Store Connect without submitting |
+| `ios beta` | Optional TestFlight upload for testers |
 
-App Store metadata and screenshots are maintained by hand in App Store
-Connect; the stored copy and checklist live in
-[`fastlane/APP_STORE_LISTING.md`](fastlane/APP_STORE_LISTING.md).
+## Manual path (without CI credentials)
 
-## Release checklist
+Until the environments above exist, a release can be built locally, in the
+same fail-closed order. 1.20.0 was released this way.
 
-The iOS build goes to App Review **before** the public Mac/GitHub release, so
-the two can go live together.
-
-1. Merge normal Conventional Commit PRs to `release/app-store-rc` (`feat:`,
-   `fix:`, etc.).
-2. Run **Release dry run** (`release-dry-run.yml`) with the coming build
-   number. It must pass: both release environments protected, secrets
-   present, Sparkle-key continuity with the published v1.20.0 apps, build
-   number above the live feeds, Developer ID certificate in match.
-3. Run **Release PR** from `release/app-store-rc`. `release-please` opens or
-   updates the release PR with the generated `CHANGELOG.md` entry; its title
-   gives the next version. It runs with the release GitHub App's token, so
-   the required `mac` and `conventional` checks run on that PR like on any
-   other.
-4. Run **iOS App Store candidate** (`app-store-candidate.yml`) from the
-   Actions tab: select the release PR's branch, enter that version (e.g.
-   `1.20.0`), destination `app-store`. This runs `fastlane ios release`.
-   (Destination `testflight` runs the optional `ios beta` lane instead.)
-5. In App Store Connect: wait for the build to process, inspect it, complete
-   the fields in `APP_STORE_LISTING.md`'s checklist, choose **Manually release
-   this version**, and submit for review by hand.
-6. When Apple approves, the version waits in **Pending Developer Release**.
-7. Merge the release PR, then run **Release** from `release/app-store-rc`
-   with that version. It builds, signs, notarizes, packages and verifies
-   both Mac apps and signs and verifies both feeds without touching any
-   release. Then its `publish` job waits for **your approval**
-   (`release-publish` environment), creates a draft, verifies it, and makes
-   it Latest. See [Release workflow](#release-workflow-fail-closed).
-8. Verify the Mac release (see [Verification](#verification)), then release
-   the iOS version manually in App Store Connect.
-
-If App Review rejects the build, fix it on `release/app-store-rc`, run
-**Release PR** again so release-please updates the PR, and upload a new
-candidate with the same version (a new run gives it a higher build number).
-
-## Release workflow (fail-closed)
-
-The apps' feed URLs (`https://meowdisplay.app/appcast.xml` and
-`/appcast-receiver.xml`) are Cloudflare redirects to
-`releases/latest/download/<feed>`. **Whatever GitHub Release is Latest is
-the live update feed**, and a Latest release without its feeds breaks
-updates for every installed copy. `release.yml` therefore runs one job per
-stage and touches no release, tag or asset until the last one:
-
-| Job | Does | Secrets |
-| --- | --- | --- |
-| `plan` | Refuses any branch but `release/app-store-rc`. Checks the version input against `version.txt`, the manifest and `CHANGELOG.md`, and that tag and release `v<version>` don't exist. Checks build-number ordering: the Mac build number (= the version) must be above every build the live feeds offer. Records the current Latest. | none |
-| `key-continuity` | Downloads the **published v1.20.0 DMGs** (sha256 pinned in `scripts/release/baseline.env`) and reads the key the installed apps ship. Requires that `project.yml` ships the same key and that the secret signs for it (`check-sparkle-key.sh`). | release-build |
-| `sign` → `notarize` → `package` | Fastlane stages `sign_app`, `notarize_app`, `package_dmg` per app, each a separate job with only the credentials it needs. | release-build |
-| `verify-artifacts` | Each DMG checked against the published baseline (`verify-mac-artifact.sh`): signed, notarized and stapled DMG and app; Developer ID on every Mach-O; planned version and build; the published app's designated requirement and exact entitlements (TCC, Keychain and Sparkle continuity); published key; live feed URL. | none |
-| `sign-feeds` | generate_appcast for the verified DMGs; key on stdin. | release-build |
-| `verify-feeds` | Both feeds and DMGs verified against the **published** key, the way Sparkle 2.10.0 does (`verify-feed.sh`): exact enclosure URL, version, build, length, one item. | none |
-| `publish` | After **approval**: re-checks that the downloaded files are byte-identical to the verified ones and that nothing was published meanwhile. Creates a **draft** with both DMGs, both feeds and `SHA256SUMS.txt`, downloads the draft's assets back and compares them byte for byte, then publishes as **Latest**. Then confirms both live feed URLs serve the new feeds. If they don't within 5 minutes, it makes the previous release Latest again and returns the new one to draft. Relabels the release PR `autorelease: tagged`. | none |
-
-A failure anywhere before `publish` leaves the previous release live and
-nothing behind except workflow artifacts (kept 3 days).
-`scripts/release/check-release-workflows.rb` (run by **Tests**) fails if any
-of these rules is broken.
-
-**One-time setup** (all repository-admin actions; nothing here is applied by
-the workflows):
-
-- **GitHub App for release PRs.** This repository doesn't let Actions create
-  pull requests, and PRs opened with `GITHUB_TOKEN` start no workflows, so
-  the required checks would never report. Create a GitHub App owned by the
-  repository owner with Contents, Pull requests and Issues set to
-  read & write, and install it on this repository only. Store its client ID
-  as the variable `RELEASE_APP_CLIENT_ID` and a private key as the secret
-  `RELEASE_APP_PRIVATE_KEY`.
-- **Environments**, each with a custom deployment-branch policy allowing only
-  `release/app-store-rc`. Jobs check this at run time and stop if it's
-  missing, because a job that names a missing environment gets a new,
-  unprotected one:
-  - `release-build`: holds `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`,
-    `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, the three
-    `APP_STORE_CONNECT_*` and `SPARKLE_PRIVATE_KEY`. Then delete the
-    repository-level copies, so no other workflow or branch can read them.
-  - `release-publish`: no secrets; **required reviewers** (you). This is
-    the explicit approval in front of every production release action.
-- **Default branch.** GitHub dispatches a workflow only if its file exists on
-  the default branch (`dev/opendisplay-next`), and shows the "Run workflow"
-  button only if that copy has `workflow_dispatch`. Land identical copies of
-  `release-pr.yml`, `release.yml` and `release-dry-run.yml` there by PR. Their
-  branch guard makes a run from the default branch fail immediately. Then
-  dispatch with `gh workflow run <file> --ref release/app-store-rc`.
-- **`main`** still carries upstream's push-triggered `release.yml` and
-  `pages.yml`; replace them with these files or no-op stubs by PR.
-
-Never mark a release Latest by hand before both DMGs and both signed feeds
-are attached and verified. The manual path below follows the same order.
-
-## First release without CI secrets (manual path)
-
-Not all of the secrets below exist yet, so the first release can be built
-locally instead of by the workflows:
-
-- **Version.** The inherited tag sequence ends at `v1.19.0` and the open
-  release-please PR proposes **1.20.0**, so the first release is 1.20.0.
-  Build it with `MARKETING_VERSION=1.20.0` and a `CURRENT_PROJECT_VERSION`
-  higher than any build already uploaded for that version.
 - **iOS.** Generate the project with `DEVELOPMENT_TEAM` set, archive the
   `OpenSidecariOS` scheme in Release, then upload from Xcode Organizer →
-  Distribute App → App Store Connect. A later `app-store-candidate.yml` run
-  numbers its builds from its own run counter, so give a manual upload a
-  build number above the run numbers that workflow will reach for the same
-  version (or re-upload under a new version).
+  Distribute App → App Store Connect, with a build number above every build
+  already uploaded for that version.
 - **Mac.** Archive `OpenSidecarMac` and `OpenSidecarMacReceiver` in Release
-  with `CURRENT_PROJECT_VERSION` set to the marketing version (`1.20.0`;
-  1.20.0 itself actually shipped with build `1`, so every later release
-  must use its marketing version, e.g. `2.0.0`, or Sparkle offers it to
-  nobody; `scripts/release/check-build-number.sh <build>
+  with `CURRENT_PROJECT_VERSION` set to the marketing version (1.20.0
+  shipped with build `1`, so every later release must use its marketing
+  version, e.g. `2.0.0`, or Sparkle offers it to nobody;
+  `scripts/release/check-build-number.sh <build>
   https://meowdisplay.app/appcast.xml` checks this before you publish),
   export each with Developer ID, notarize (`xcrun notarytool submit …
   --wait`), staple, and package as `MeowDisplay.dmg` /
@@ -186,7 +249,7 @@ locally instead of by the workflows:
 
   ```sh
   generate_appcast --account meowdisplay \
-    --download-url-prefix https://github.com/raiseCatError/meowdisplay/releases/download/v1.20.0/ \
+    --download-url-prefix https://github.com/raiseCatError/meowdisplay/releases/download/v<version>/ \
     --link https://meowdisplay.app/ -o <dir>/appcast.xml <dir>
   ```
 
@@ -203,48 +266,11 @@ locally instead of by the workflows:
 
 Values still to fill in before or at release:
 
-- [x] `AppStore.iOSAppID` in `Shared/AppStore.swift` — `6817552864`, the
-      app's Apple ID from App Store Connect.
+- [x] `AppStore.iOSAppID` in `Shared/AppStore.swift` — `6817552864`.
+- [ ] `AppStore.androidPlayPackage` — the Android application ID, once its
+      Play listing is public.
 - [ ] `ProjectLinks.koFiPage` in `Shared/ProjectLinks.swift` — the Ko-fi page
-      URL, once it exists (deferred past 1.20.0). Until then no app shows a support link. Add the
-      same URL to the README's Contributing section and `SUPPORT.md` then.
-
-## Required secrets
-
-Exact inventory (see the release-audit issue for the full table):
-`DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`,
-`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`,
-`APP_STORE_CONNECT_KEY_CONTENT`, and `SPARKLE_PRIVATE_KEY`. The Mac
-release job fails without `SPARKLE_PRIVATE_KEY`, because unsigned feeds
-would leave installed apps without the update.
-
-Configured on this fork: `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`,
-`MATCH_DEPLOY_KEY`, `SPARKLE_PRIVATE_KEY`. Still missing: `MATCH_PASSWORD`
-and the three `APP_STORE_CONNECT_*` secrets, so CI cannot yet build a
-release by itself.
-
-Also missing before CI can release:
-
-- **A Developer ID Application certificate in match.** The team's current
-  Developer ID certificate is cloud-managed (it signed 1.20.0 through
-  Xcode) and can't be exported. The Account Holder creates an exportable
-  one with `fastlane match developer_id`. TCC permissions and Sparkle
-  accept a new certificate from the same team, as long as the Sparkle key
-  doesn't change in the same release. The cloud-managed certificate
-  expires **2027-02-01**; after that, Xcode's manual path needs a new one
-  too.
-- **Proof that `SPARKLE_PRIVATE_KEY` is the shipped key.** Run **Release
-  dry run** once (it must be on the default branch before GitHub can
-  dispatch it). It signs a random probe with the secret and verifies it
-  against the key in the published v1.20.0 apps, printing pass or fail only.
-- **The release App and environments** described under
-  [Release workflow](#release-workflow-fail-closed).
-- **Branch protection.** `.github/rulesets/release-app-store-rc.json`
-  protects `release/app-store-rc` (no deletion or force-push, PR required,
-  Tests `mac` and PR title `conventional` must pass).
-  `scripts/release/apply-rulesets.sh` shows what it would create and which
-  existing rulesets' empty required-checks lists it would fill; it changes
-  nothing until it's run with `--apply` by a repository admin.
+      URL, once it exists. Until then no app shows a support link.
 
 ## Verification
 
@@ -261,28 +287,11 @@ Once a release build exists:
   Updates…** in the previous version finds the new one.
 - Mount the DMG and launch the app on a non-development Mac account.
 - For iOS, confirm the build processes in App Store Connect and shows the
-  expected version and build number before submitting it for review. The
-  archive must contain `PrivacyInfo.xcprivacy` at the app bundle's root
-  (Xcode Organizer → Generate Privacy Report lists it); App Store Connect
-  does not accept a build that uses a required-reason API no manifest
-  declares.
-
-## Rollback / recovery
-
-- A GitHub Release is just tagged, uploaded artifacts — a bad release can be
-  marked as a pre-release/draft or deleted from the Releases page without
-  affecting `main` or the tag history.
-- A bad Mac release reaches existing installs through Sparkle. To stop it
-  spreading, delete that release's `appcast.xml` / `appcast-receiver.xml`
-  assets, or mark the release as a draft or pre-release so that
-  `releases/latest` moves back to the previous release and its feeds.
-  Sparkle never downgrades, so anyone already updated needs a fixed, higher
-  version. Never hand-edit a published feed: it is signed, and the apps
-  reject an edited copy. Regenerate it with `generate_appcast` instead.
-- An iOS version still in review can be withdrawn from App Store Connect.
-  A released App Store version cannot be pulled back to an earlier build;
-  ship a fixed version instead, or remove the app from sale if needed.
-- A bad TestFlight build can be expired in App Store Connect.
+  expected version and build number. The archive must contain
+  `PrivacyInfo.xcprivacy` at the app bundle's root.
+- For Android, `bundletool validate`, the upload certificate's fingerprint
+  (`keytool -printcert -jarfile app-release.aab`), and the pre-launch report
+  in Play Console.
 
 ## Sparkle auto-update
 
@@ -306,25 +315,26 @@ pins the configuration below.
   (`SUAutomaticallyUpdate`) stays off unless the user turns it on in that
   prompt. **Check for Updates…** (Settings → System → Updates, and the
   Receiver's app menu) always works.
-- Never point either app at upstream OpenDisplay's feeds or key.
+- Never point either app at the OpenDisplay reference project's feeds or key.
 
 **Signing key.** An Ed25519 key made with Sparkle 2.10.0's `generate_keys`
-for MeowDisplay only. It is not upstream OpenDisplay's key.
+for MeowDisplay only.
 
 - The private key lives in the maintainer's login Keychain under
   `generate_keys`' `--account meowdisplay` (the Keychain item is "Private
   key for signing Sparkle updates"). The same key is stored in the
-  `SPARKLE_PRIVATE_KEY` Actions secret. The private key is never committed
-  or printed.
+  `SPARKLE_PRIVATE_KEY` secret. The private key is never committed or
+  printed.
 - GitHub secrets can't be read back, so keep an offline backup:
   `generate_keys --account meowdisplay -x <file>`, stored in a password
   manager, with the file deleted afterwards. On another Mac,
   `generate_keys --account meowdisplay -f <file>` imports it.
 - To confirm which public key the Keychain holds:
-  `generate_keys --account meowdisplay -p`.
+  `generate_keys --account meowdisplay -p`. Every release checks the secret
+  against the key the PUBLISHED v1.20.0 apps ship (`check-sparkle-key.sh`).
 
-**Feed hosting.** CI uploads each release's signed feeds as assets of the
-GitHub Release. Their enclosures point at that tag's immutable
+**Feed hosting.** Each release's signed feeds are assets of its GitHub
+Release, with enclosures at that tag's immutable
 `releases/download/vX.Y.Z/*.dmg` URLs. On Cloudflare, meowdisplay.app
 redirects (302) each feed to the latest release's copy:
 
@@ -332,10 +342,9 @@ redirects (302) each feed to the latest release's copy:
 - `/appcast-receiver.xml` → `https://github.com/raiseCatError/meowdisplay/releases/latest/download/appcast-receiver.xml`
 
 So a feed goes live together with its release, and no website deploy is
-involved. Sparkle follows HTTPS redirects, and the feed's own signature
-protects it, not the hosting. A release without feed assets (drafts and
-pre-releases are never "latest") makes the feeds 404 until the next full
-release. Installed apps then find no update and do not break.
+involved. A Latest release without feed assets would make the feeds 404,
+which is why publication only ever makes a verified, complete release
+Latest.
 
 **Key rotation.** Change only when necessary, such as a lost or leaked key.
 Because updates are Developer ID-signed DMGs, Sparkle accepts an update that

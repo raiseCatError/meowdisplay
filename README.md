@@ -461,7 +461,9 @@ the session lifecycle, clamshell and headless use, audio, Picture in Picture,
 and a lot of polish.
 
 If you only need the core second-display experience, or compatibility that
-the upstream project serves better, OpenDisplay is well worth a look.
+the OpenDisplay project serves better, OpenDisplay is well worth a look.
+MeowDisplay is developed and released independently of it
+([BRANCHING.md](BRANCHING.md), [REFERENCE.md](REFERENCE.md)).
 
 ## Responsible use
 
