@@ -58,6 +58,27 @@ struct InputControlRequestPlan: Equatable {
     }
 }
 
+/// How a receiver's control request is answered before any prompt.
+enum InputControlRequestRoute: Equatable {
+    case deny(SessionInputWireState)
+    case grant
+    case ask
+
+    /// A login session that is switched out (Fast User Switching) refuses
+    /// every request, Always Allow included: nobody who could approve it is
+    /// at the Mac, and a grant made now would wait, live, for the session to
+    /// come back. The receiver asks again once it has.
+    static func route(masterEnabled: Bool, onConsole: Bool,
+                      policy: PeerInputRequestPolicy) -> InputControlRequestRoute {
+        guard masterEnabled, onConsole else { return .deny(.notAllowed) }
+        switch policy {
+        case .neverAllow: return .deny(.requestsDisabled)
+        case .alwaysAllow: return .grant
+        case .ask: return .ask
+        }
+    }
+}
+
 /// Pure per-session request lifecycle: at most one pending request, a
 /// cooldown after "Not Now"/timeout so a receiver can't spam the Mac owner
 /// with prompts, and a generation counter so a stale async decision or

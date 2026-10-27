@@ -1354,6 +1354,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
+            // A decision that raced a Fast User Switch out of this login
+            // session grants nothing (`InputControlRequestRoute`).
+            guard LoginSessionConsole.shared.isOnConsole else {
+                Log.info("inputConsent: ignored grant while this login session is switched out")
+                self.sendAllowInputState(state: .notAllowed)
+                return
+            }
             guard self.sessionAuthorization.grantInput(generation: generation) else {
                 Log.info("inputConsent: ignored grant for superseded connection generation=\(generation)")
                 return

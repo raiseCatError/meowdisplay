@@ -1199,7 +1199,17 @@ final class SenderController: ObservableObject {
         guard LoginSessionConsole.shared.set(onConsole: onConsole) else { return }
         Log.info("sessionDebug: this login session is \(onConsole ? "on the console" : "switched out")")
         if !onConsole {
-            for session in sessions { session.sender.cancelActiveInput() }
+            // Switching out ends control, not just input: held keys and
+            // buttons are released now, every grant is revoked (the
+            // receiver is told Control is off) and a request still waiting
+            // on the owner is retired without a Not Now cooldown, so control
+            // is asked for again after switching back.
+            for session in sessions {
+                session.sender.cancelActiveInput()
+                session.sender.revokeSessionInput()
+                session.inputControlRequest.invalidatePending()
+                inputControlPrompt.cancelForEndedSession(id: session.id)
+            }
         }
         refreshSenderAdvertisement()
     }
@@ -3441,16 +3451,15 @@ final class SenderController: ObservableObject {
     /// `MacSender.grantSessionInput(generation:)`).
     func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64) {
         guard let peerID = session.deviceID else { return }
-        guard allowInput else {
-            // Mac-wide master is off — the owner already said no globally;
-            // never surface a prompt for a request that can't succeed.
-            session.sender.denySessionInput(state: .notAllowed)
-            return
-        }
-        switch ReceiverInputAuthorizationStore.policy(peerID: peerID) {
-        case .neverAllow:
-            session.sender.denySessionInput(state: .requestsDisabled)
-        case .alwaysAllow:
+        // Mac-wide master off (the owner already said no globally) or this
+        // login session switched out: never surface a prompt for a request
+        // that can't succeed (`InputControlRequestRoute`).
+        switch InputControlRequestRoute.route(masterEnabled: allowInput,
+                                              onConsole: LoginSessionConsole.shared.isOnConsole,
+                                              policy: ReceiverInputAuthorizationStore.policy(peerID: peerID)) {
+        case .deny(let state):
+            session.sender.denySessionInput(state: state)
+        case .grant:
             session.sender.grantSessionInput(generation: connectionGeneration)
         case .ask:
             presentInputControlPrompt(session: session, peerID: peerID, connectionGeneration: connectionGeneration)

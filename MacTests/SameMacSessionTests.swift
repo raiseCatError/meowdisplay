@@ -224,4 +224,30 @@ final class SameMacSessionTests: XCTestCase {
         // before; the default reading must never be "switched out" here.
         XCTAssertTrue(LoginSessionConsole.windowServerReportsOnConsole())
     }
+
+    // MARK: - Switching out ends control
+
+    func testASwitchedOutSessionRefusesEveryControlRequest() {
+        for policy in [PeerInputRequestPolicy.ask, .alwaysAllow, .neverAllow] {
+            XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: false, policy: policy),
+                           .deny(.notAllowed), "\(policy)")
+        }
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, policy: .alwaysAllow), .grant)
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, policy: .ask), .ask)
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, policy: .neverAllow),
+                       .deny(.requestsDisabled))
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: false, onConsole: true, policy: .alwaysAllow),
+                       .deny(.notAllowed))
+    }
+
+    /// A prompt still up when the session was switched out can't grant
+    /// anything afterwards, and asking again after switching back isn't held
+    /// up by a Not Now cooldown.
+    func testSwitchingOutRetiresAPendingRequestWithoutACooldown() throws {
+        var lifecycle = InputControlRequestLifecycle()
+        let pending = try XCTUnwrap(lifecycle.beginRequest())
+        lifecycle.invalidatePending()
+        XCTAssertFalse(lifecycle.resolve(generation: pending, decision: .allowSession))
+        XCTAssertNotNil(lifecycle.beginRequest())
+    }
 }
