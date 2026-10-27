@@ -9,7 +9,6 @@ import org.junit.Test
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.security.cert.X509Certificate
-import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
@@ -25,24 +24,31 @@ class PinnedTlsTest {
     /** What the listener saw: the admitted peer's SPKI (re-checked against current pins), or the failure. */
     private class Outcome(val admittedSPKI: ByteArray?, val error: Throwable?, val echoed: Int?)
 
+    /**
+     * Accepts [connections] connections one after another, so outcome i is
+     * the i-th dial (concurrent accepts would hand them out in any order).
+     */
     private fun serve(context: SSLContext, currentPins: () -> Collection<ByteArray>, connections: Int = 1): Pair<Int, List<java.util.concurrent.Future<Outcome>>> {
         val server = PinnedTls.serverSocket(context, 0)
-        val futures = (0 until connections).map {
-            pool.submit(Callable {
-                try {
-                    (server.accept() as SSLSocket).use { socket ->
-                        socket.soTimeout = 5_000
-                        socket.startHandshake()
-                        val admitted = PinnedTls.verifiedPeerSPKI(socket, currentPins())
-                        val echoed = if (admitted != null) socket.inputStream.read().also { socket.outputStream.write(it); socket.outputStream.flush() } else null
-                        Outcome(admitted, null, echoed)
-                    }
-                } catch (e: Exception) {
-                    Outcome(null, e, null)
-                } finally {
-                    if (it == connections - 1) server.close()
+        val futures = List(connections) { java.util.concurrent.CompletableFuture<Outcome>() }
+        pool.submit {
+            server.use {
+                for (future in futures) {
+                    future.complete(
+                        try {
+                            (server.accept() as SSLSocket).use { socket ->
+                                socket.soTimeout = 5_000
+                                socket.startHandshake()
+                                val admitted = PinnedTls.verifiedPeerSPKI(socket, currentPins())
+                                val echoed = if (admitted != null) socket.inputStream.read().also { socket.outputStream.write(it); socket.outputStream.flush() } else null
+                                Outcome(admitted, null, echoed)
+                            }
+                        } catch (e: Exception) {
+                            Outcome(null, e, null)
+                        },
+                    )
                 }
-            })
+            }
         }
         return server.localPort to futures
     }
