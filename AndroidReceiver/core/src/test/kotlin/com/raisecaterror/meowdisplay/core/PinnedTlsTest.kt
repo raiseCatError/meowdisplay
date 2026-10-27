@@ -1,64 +1,25 @@
 package com.raisecaterror.meowdisplay.core
 
 import com.raisecaterror.meowdisplay.core.tls.PinnedTls
-import org.bouncycastle.asn1.x500.X500Name
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.math.BigInteger
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.security.KeyPairGenerator
-import java.security.KeyStore
 import java.security.cert.X509Certificate
-import java.security.spec.ECGenParameterSpec
-import java.util.Date
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509KeyManager
 
 /** Pinned mutual TLS 1.3 over loopback, both roles, with persistent self-signed P-256 identities. */
 class PinnedTlsTest {
-    private class Identity(name: String, keyAlgorithm: String = "EC") {
-        val keyManager: X509KeyManager
-        val certificate: X509Certificate
-
-        init {
-            val pair = KeyPairGenerator.getInstance(keyAlgorithm).run {
-                if (keyAlgorithm == "EC") initialize(ECGenParameterSpec("secp256r1")) else initialize(2048)
-                generateKeyPair()
-            }
-            val subject = X500Name("CN=$name")
-            val now = System.currentTimeMillis()
-            val signer = JcaContentSignerBuilder(if (keyAlgorithm == "EC") "SHA256withECDSA" else "SHA256withRSA").build(pair.private)
-            certificate = JcaX509CertificateConverter().getCertificate(
-                JcaX509v3CertificateBuilder(subject, BigInteger.valueOf(now), Date(now - 60_000), Date(now + 86_400_000), subject, pair.public)
-                    .build(signer),
-            )
-            val store = KeyStore.getInstance("PKCS12").apply {
-                load(null, null)
-                setKeyEntry("identity", pair.private, CharArray(0), arrayOf(certificate))
-            }
-            keyManager = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).run {
-                init(store, CharArray(0))
-                keyManagers.single() as X509KeyManager
-            }
-        }
-
-        val spki: ByteArray get() = certificate.publicKey.encoded
-    }
-
-    private val receiver = Identity("receiver")
-    private val mac = Identity("mac")
+    private val receiver = TestIdentity("receiver")
+    private val mac = TestIdentity("mac")
     private val pool = Executors.newCachedThreadPool()
 
     /** What the listener saw: the admitted peer's SPKI (re-checked against current pins), or the failure. */
@@ -107,7 +68,7 @@ class PinnedTlsTest {
 
     @Test
     fun anUnpinnedSenderIsRefusedByTheReceiver() {
-        val stranger = Identity("stranger")
+        val stranger = TestIdentity("stranger")
         val (port, outcomes) = serve(PinnedTls.context(receiver.keyManager) { listOf(mac.spki) }, { listOf(mac.spki) })
         assertTrue(dial(PinnedTls.context(stranger.keyManager) { listOf(receiver.spki) }, port).isFailure)
         val outcome = outcomes.single().get(10, TimeUnit.SECONDS)
@@ -117,7 +78,7 @@ class PinnedTlsTest {
 
     @Test
     fun aSenderRefusesAReceiverItHasNotPinned() {
-        val impostor = Identity("impostor")
+        val impostor = TestIdentity("impostor")
         val (port, outcomes) = serve(PinnedTls.context(impostor.keyManager) { listOf(mac.spki) }, { listOf(mac.spki) })
         assertTrue(dial(PinnedTls.context(mac.keyManager) { listOf(receiver.spki) }, port).isFailure)
         assertNull(outcomes.single().get(10, TimeUnit.SECONDS).admittedSPKI)
@@ -150,7 +111,7 @@ class PinnedTlsTest {
 
     @Test
     fun aNonP256IdentityIsNeverPinnable() {
-        val rsa = Identity("rsa", keyAlgorithm = "RSA")
+        val rsa = TestIdentity("rsa", keyAlgorithm = "RSA")
         assertNull(PinnedTls.spki(rsa.certificate))
         val (port, outcomes) = serve(PinnedTls.context(receiver.keyManager) { listOf(rsa.spki) }, { listOf(rsa.spki) })
         assertTrue(dial(PinnedTls.context(rsa.keyManager) { listOf(receiver.spki) }, port).isFailure)

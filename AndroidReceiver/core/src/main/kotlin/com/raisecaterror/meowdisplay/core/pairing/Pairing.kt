@@ -40,6 +40,16 @@ private val uuidPattern = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 
 fun isUuidString(value: String): Boolean = uuidPattern.matches(value)
 
+/**
+ * Only an identity a TLS handshake could ever present may become a pin: a
+ * P-256 SPKI in the exact DER the handshake re-encodes (PinnedTls.spki).
+ * Every real peer sends its TLS certificate's key, so this refuses nothing a
+ * genuine peer sends; it stops a pairing from storing a pin that can never
+ * authenticate yet still occupies that peer ID.
+ */
+fun isPinnableIdentity(spki: ByteArray): Boolean =
+    P256.publicKeyFromSpki(spki)?.encoded?.contentEquals(spki) == true
+
 /** First-pairing hello. Never accepted on the media port. */
 class PairingHello(
     val version: Int,
@@ -55,6 +65,7 @@ class PairingHello(
             displayName.isNotBlank() &&
             displayName.utf8.size <= 128 &&
             identitySPKI.size <= 512 &&
+            isPinnableIdentity(identitySPKI) &&
             ephemeralPublicKey.size == 65 &&
             nonce.size == 32 &&
             P256.publicKey(ephemeralPublicKey) != null

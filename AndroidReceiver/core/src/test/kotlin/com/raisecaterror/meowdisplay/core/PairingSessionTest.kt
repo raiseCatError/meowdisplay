@@ -239,6 +239,22 @@ class PairingSessionTest {
         }
     }
 
+    @Test
+    fun aKeyAnotherPairedMacHoldsIsNeverPinnedASecondTime() = runBlocking {
+        val (macEnd, androidEnd) = pipe()
+        // Pairing proves no possession of the identity key, so a peer could
+        // claim the key of a Mac this device already trusts.
+        val holder = "CCCCCCCC-0000-0000-0000-000000000003"
+        val androidStore = InMemoryPeerTrustStore().apply { pins[holder] = mac.b64("identitySPKI") }
+        val responder = async {
+            androidEnd.session { attempt(androidEnd, android, androidStore).runResponder(PairingCommitThrottle(), decide = { true }) }
+        }
+        macEnd.session { attempt(macEnd, mac, InMemoryPeerTrustStore()).runInitiator(decide = { true }) }
+        assertEquals(PairingError.IdentityChanged, responder.await().pairingError)
+        assertNull(androidStore.pin(mac.str("deviceID")))
+        assertEquals(setOf(holder), androidStore.pins.keys)
+    }
+
     /** The same ceremony over a real loopback TCP connection with the production socket transport. */
     @Test
     fun aFullCeremonyOverALoopbackSocket() = runBlocking {

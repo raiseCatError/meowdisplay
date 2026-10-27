@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import com.raisecaterror.meowdisplay.core.crypto.base64
 import com.raisecaterror.meowdisplay.core.crypto.base64Bytes
+import com.raisecaterror.meowdisplay.core.pairing.PeerDirectory
 import com.raisecaterror.meowdisplay.core.pairing.PeerTrustStore
 import com.raisecaterror.meowdisplay.core.pairing.TrustPinPolicy
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,11 +34,14 @@ class PinStore(context: Context) : PeerTrustStore {
 
     override fun pin(peerID: String): ByteArray? = state.value.firstOrNull { it.peerID == peerID }?.spki
 
+    override fun pinnedPeers(): Map<String, ByteArray> = state.value.associate { it.peerID to it.spki }
+
     // commit(), not apply(): a pin must be on disk before pairing reports
     // success, and a failed write must fail the pairing.
     @SuppressLint("ApplySharedPref", "UseKtx")
     @Synchronized
     override fun setPin(peerID: String, spki: ByteArray, displayName: String, allowIdentityChange: Boolean): Boolean {
+        if (PeerDirectory.isHeldByAnotherPeer(pinnedPeers(), peerID, spki)) return false
         val decision = TrustPinPolicy.decision(pin(peerID), spki)
         if (decision == TrustPinPolicy.Decision.IdentityChanged && !allowIdentityChange) return false
         val entry = PairedMac(peerID, displayName, spki)
