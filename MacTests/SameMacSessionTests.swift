@@ -167,6 +167,28 @@ final class SameMacSessionTests: XCTestCase {
         XCTAssertEqual(NearbyMacDirectory.groups(from: [.init(serviceName: "No ID", txt: noID)]).first?.title, "No ID")
     }
 
+    /// TXT is unauthenticated: an advertisement copying a Mac's digest under
+    /// another name can neither rename that Mac's heading nor join it.
+    func testACopiedDigestUnderAnotherNameIsItsOwnRow() throws {
+        let spoof = try XCTUnwrap(SenderSessionAdvertisement(hostName: "Evil", localHostName: familyMac,
+                                                             sessionLabel: "Dad", availability: .available))
+        let groups = NearbyMacDirectory.groups(from: [
+            entry(alex, name: "Family MacBook — Alex", advertisement("Alex")),
+            entry(mom, name: "Family MacBook — Mom", advertisement("Mom")),
+            entry(dad, name: "Evil — Dad", spoof),
+        ])
+        let family = try XCTUnwrap(groups.first { $0.title == "Family MacBook" })
+        XCTAssertEqual(family.sessions.map(\.installID), [alex, mom])
+        XCTAssertEqual(groups.first { $0.sessions.contains { $0.installID == dad } }?.title, "Evil — Dad")
+        // Whichever arrives first, the heading is the same.
+        let reversed = NearbyMacDirectory.groups(from: [
+            entry(dad, name: "Evil — Dad", spoof),
+            entry(mom, name: "Family MacBook — Mom", advertisement("Mom")),
+            entry(alex, name: "Family MacBook — Alex", advertisement("Alex")),
+        ])
+        XCTAssertEqual(Set(reversed.map(\.title)), Set(groups.map(\.title)))
+    }
+
     func testAnUnknownSessionStateIsShownAsAvailable() {
         var txt = advertisement("Alex")!.txtFields
         txt["ss"] = "z"

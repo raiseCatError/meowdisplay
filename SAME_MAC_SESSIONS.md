@@ -38,6 +38,15 @@ that says "Alex" is a sender that *claims* the label "Alex"; pairing still
 shows the code on that session's screen, and only that session's user can
 confirm it.
 
+A spoofed advertisement on the same network is the residual risk, as it
+already is for any nearby Mac name. Receivers group by the digest **and**
+the Mac's name together, so copying a Mac's digest under another name only
+creates a separate row; it can't rename the heading or join the group. A
+perfect copy of both lands under the heading as an **unpaired** row (Pair,
+not Connect), and can only become trusted through its own code comparison.
+Paired rows are recognized by pinned install id, never by their place in a
+group (`SameMacSessionTests.testACopiedDigestUnderAnotherNameIsItsOwnRow`).
+
 ## What was implemented
 
 - **Sender, always on:** the input gate requires this login session to be on

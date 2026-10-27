@@ -153,7 +153,13 @@ enum NearbyMacDirectory {
                 installID: installID, serviceName: entry.serviceName, sessionLabel: hint?.label,
                 availability: hint?.availability ?? .available,
                 rowTitle: hint?.label ?? entry.serviceName)
-            let key = hint.map { "hg:\($0.group)" } ?? session.id
+            // The group is the digest AND the name together: an
+            // advertisement (it is unauthenticated) that copies a Mac's
+            // digest under another name forms its own row instead of
+            // renaming that Mac's heading or slipping under it. One that
+            // copies both still only adds an unpaired row there, which pairs
+            // only through its own code like any nearby Mac.
+            let key = hint.map { "hg:\($0.group)|\($0.hostName.lowercased())" } ?? session.id
             if grouped[key] == nil {
                 grouped[key] = (hint?.hostName ?? entry.serviceName, [])
                 order.append(key)
