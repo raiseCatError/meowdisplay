@@ -116,6 +116,63 @@ final class AppStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Android receivers (updateRequired)
+
+    func testAndroidHasNoPlayLinkUntilItsListingExists() {
+        XCTAssertNil(AppStore.androidPlayPackage, "set only once the Google Play listing is public")
+        XCTAssertEqual(AppStore.androidReceiverUpdateURL, AppStore.projectURL)
+        XCTAssertNil(AppStore.androidListingURL(package: nil))
+    }
+
+    func testAndroidListingIsLinkedOnceConfigured() {
+        let package = "com.raisecaterror.meowdisplay.android"
+        XCTAssertEqual(AppStore.androidListingURL(package: package)?.absoluteString,
+                       "https://play.google.com/store/apps/details?id=\(package)")
+        XCTAssertEqual(AppStore.androidUpdateDestination(package: package),
+                       AppStore.androidListingURL(package: package))
+    }
+
+    func testOnlyAWellFormedPackageBecomesAListingLink() {
+        for package in ["", "meowdisplay", "com..meowdisplay", ".com.meowdisplay", "com.meowdisplay.",
+                        "com.1meowdisplay", "com.meow display", "com.meowdisplay&hl=en", "com.meowdisplay/x",
+                        "com.méowdisplay"] {
+            XCTAssertNil(AppStore.androidListingURL(package: package), package)
+            XCTAssertEqual(AppStore.androidUpdateDestination(package: package), AppStore.projectURL, package)
+        }
+    }
+
+    func testUpdateRequiredNamesTheReceiversOwnPlatform() {
+        XCTAssertEqual(ReceiverUpdatePlatform(receiverKind: "Mac"), .mac)
+        XCTAssertEqual(ReceiverUpdatePlatform(receiverKind: "Android"), .android)
+        XCTAssertEqual(ReceiverUpdatePlatform(receiverKind: "Android tablet"), .android)
+        for kind in ["iPhone", "iPad", "", "Vision"] {
+            XCTAssertEqual(ReceiverUpdatePlatform(receiverKind: kind), .ios, kind)
+        }
+
+        let android = ReceiverUpdatePlatform.updateRequiredMessage(receiverKind: "Android")
+        XCTAssertEqual(android["type"] as? String, WireMessage.updateRequired)
+        XCTAssertEqual(android["target"] as? String, "android")
+        XCTAssertEqual(android["store"] as? String, AppStore.androidReceiverUpdateURL.absoluteString)
+        XCTAssertFalse(AppStore.isAppStoreLink(AppStore.androidReceiverUpdateURL),
+                       "an Android receiver is never sent to the App Store")
+
+        let iPhone = ReceiverUpdatePlatform.updateRequiredMessage(receiverKind: "iPhone")
+        XCTAssertEqual(iPhone["target"] as? String, "ios")
+        XCTAssertEqual(iPhone["store"] as? String, AppStore.receiverUpdateURL.absoluteString)
+
+        let mac = ReceiverUpdatePlatform.updateRequiredMessage(receiverKind: "Mac")
+        XCTAssertEqual(mac["target"] as? String, "mac")
+        XCTAssertEqual(mac["store"] as? String, AppStore.projectURL.absoluteString)
+
+        // Every one stays a valid control frame (PROTOCOL.md section 4).
+        for message in [android, iPhone, mac] {
+            let data = try? JSONSerialization.data(withJSONObject: message)
+            XCTAssertNotNil(data)
+            XCTAssertLessThan(data?.count ?? .max, 32_768)
+            XCTAssertEqual(data?.first, UInt8(ascii: "{"))
+        }
+    }
+
     // MARK: - Source
 
     /// The upstream listing ID must not survive anywhere it could be emitted

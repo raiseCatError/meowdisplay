@@ -6298,20 +6298,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Ask the receiver to update (built via JSONSerialization because the
     /// message text is user-facing prose). Dormant while minSupportedPeer is
     /// 1, but the copy must fit the platform the day a floor is raised: a
-    /// Mac receiver updates via Sparkle (once MeowDisplay hosts its own
-    /// appcast) or the GitHub repo, not the App Store.
+    /// Mac receiver updates via Sparkle or the GitHub repo and an Android
+    /// receiver from Google Play, neither from the App Store
+    /// (`ReceiverUpdatePlatform`).
     private func sendUpdateRequired(kind: String) {
-        let isMac = kind == "Mac"
-        let dict: [String: Any] = [
-            "type": WireMessage.updateRequired,
-            "target": isMac ? "mac" : "ios",
-            // Always present: an older receiver without it falls back to the
-            // App Store link it was built with (upstream's listing).
-            "store": (isMac ? AppStore.projectURL : AppStore.receiverUpdateURL).absoluteString,
-            "message": isMac
-                ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Update it from the MeowDisplay GitHub page to reconnect."
-                : "This \(kind) app is too old for this Mac. Update MeowDisplay on it to reconnect.",
-        ]
+        let dict = ReceiverUpdatePlatform.updateRequiredMessage(receiverKind: kind)
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let json = String(data: data, encoding: .utf8) {
             sendJSONFrame(json)
