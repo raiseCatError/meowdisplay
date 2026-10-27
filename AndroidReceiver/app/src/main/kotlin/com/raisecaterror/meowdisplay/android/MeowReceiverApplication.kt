@@ -4,6 +4,7 @@ import android.app.Application
 import android.view.WindowManager
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
+import com.raisecaterror.meowdisplay.android.media.MediaPipeline
 import com.raisecaterror.meowdisplay.android.pairing.PairingController
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.android.session.SessionPolicyPrefs
@@ -22,6 +23,8 @@ class MeowReceiverApplication : Application() {
     val media: MediaController by lazy {
         MediaController(identity, pins, SessionPolicyPrefs(this), bonjour, localName = { DeviceIdentity.displayName(this) }, panel = ::panel)
     }
+
+    val pipeline: MediaPipeline by lazy { MediaPipeline(media) }
 
     /** The panel in its current orientation; the receiver surface refines this once it is on screen. */
     private fun panel(): HelloFields {

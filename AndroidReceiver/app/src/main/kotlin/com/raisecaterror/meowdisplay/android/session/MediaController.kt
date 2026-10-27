@@ -2,6 +2,7 @@ package com.raisecaterror.meowdisplay.android.session
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.util.Log
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.discovery.ServiceTypes
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
@@ -80,7 +81,7 @@ class MediaController(
     private val state = MutableStateFlow(MediaUiState())
     val ui: StateFlow<MediaUiState> = state.asStateFlow()
 
-    /** The decoder and receiver surface subscribe here (media, cursor, display state). */
+    /** The decoders and receiver surface subscribe here: every session event, in order. */
     @Volatile var mediaEvents: ((SessionEvent) -> Unit)? = null
 
     val session = ReceiverSession(policies, pins::pinnedPeers, panel, ::onEvent)
@@ -89,7 +90,10 @@ class MediaController(
     @Synchronized
     fun start() {
         if (listener != null) return
-        val started = MediaListener(PinnedTls.context(identity.keyManager) { pins.pinnedSPKIs() }, pins::pinnedPeers, session)
+        val started = MediaListener(
+            PinnedTls.context(identity.keyManager) { pins.pinnedSPKIs() }, pins::pinnedPeers, session,
+            log = { Log.w("MeowMedia", it) },
+        )
         try {
             started.start()
         } catch (e: Exception) {
@@ -126,6 +130,7 @@ class MediaController(
     fun answer(id: String, decision: ReceiverApprovalDecision) = session.answerInvitation(id, decision)
 
     private fun onEvent(event: SessionEvent) {
+        mediaEvents?.invoke(event)
         when (event) {
             is SessionEvent.Phase -> state.update { it.copy(phase = event.phase) }
             is SessionEvent.Connected -> state.update { it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null) }
@@ -139,7 +144,7 @@ class MediaController(
                 it.copy(updateMessage = event.message ?: "Update MeowDisplay to keep using your second display.", updateLink = event.storeUrl)
             }
             SessionEvent.UpdateMac -> state.update { it.copy(updateMessage = "Update MeowDisplay on your Mac to reconnect.") }
-            else -> mediaEvents?.invoke(event)
+            else -> Unit
         }
     }
 }

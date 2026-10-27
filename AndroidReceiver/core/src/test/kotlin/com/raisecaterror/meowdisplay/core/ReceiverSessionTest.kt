@@ -334,6 +334,19 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun everyAdmissionRestartsTheDecoderFromAKeyframeWithItsFormat() {
+        val a = connect(MAC_A)
+        session.say(a, invite("s1"))
+        session.onFrame(a, keyframe())
+        assertTrue((events.last { it is SessionEvent.Video } as SessionEvent.Video).sample.newFormat != null)
+        session.say(a, "{\"type\":\"sessionInviteCancel\",\"id\":\"s1\"}")
+        session.say(a, invite("s2"))
+        assertTrue(session.isAdmitted)
+        session.onFrame(a, keyframe())
+        assertTrue("same SPS, yet the new admission's decoder gets it", (events.last { it is SessionEvent.Video } as SessionEvent.Video).sample.newFormat != null)
+    }
+
+    @Test
     fun audioPreferenceIsReassertedOnWelcomeOnlyToAudioCapableMacs() {
         session.audioPreferred = true
         val a = connect(MAC_A, pv = 22)

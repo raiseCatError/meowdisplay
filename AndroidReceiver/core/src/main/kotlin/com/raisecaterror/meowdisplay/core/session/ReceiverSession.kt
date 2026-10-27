@@ -410,6 +410,8 @@ class ReceiverSession(
         val wasAdmitted = admission.admitted
         admission.admit(invitationID, peerID)
         if (wasAdmitted) return
+        // The decoder starts from scratch: the next keyframe carries its parameter sets again.
+        video.reset()
         emit(SessionEvent.Admitted(peerID))
         heldState.values.forEach(::emit)
         heldState.clear()
