@@ -133,6 +133,22 @@ class WorkflowChecksTest < Minitest::Test
                   "release-pr.yml" => ["skip-github-release: true", "skip-github-release: false"])
   end
 
+  # The release state is written by GitHub Actions, so publication trusts
+  # only the stores, the candidate run's provenance and its own checks.
+  def test_forged_release_state_cannot_publish_unverified_artifacts
+    assert_caught("publish-mac must check the candidate run's provenance before using its artifacts",
+                  "release-publish.yml" => ['.github/workflows/release-candidate.yml $SHA release/$VERSION push', "anything"])
+    assert_caught("publish-mac must verify the DMGs and feeds again before the draft",
+                  "release-publish.yml" => ['scripts/release/verify-mac-artifact.sh "dist/$DMG"', 'true "dist/$DMG"'])
+    assert_caught("publish-mac must wait for verify-stores (live store approvals)",
+                  "release-publish.yml" => ["needs: [guard, verify-stores]", "needs: [guard]"])
+    assert_caught("verify-stores must observe the stores live and then pass the gate",
+                  "release-publish.yml" => ['state gate STATE --branch-head "$SHA"', "true"])
+    assert_caught("only release workflows may touch the release state",
+                  "repository-guard.yml" => ["run: scripts/release/check-repository.sh",
+                                             "run: scripts/release/release-state.sh 2.0.0 record STATE"])
+  end
+
   def test_platform_workflows_never_publish_or_submit
     assert_caught("touches a store's review or release",
                   "release-ios.yml" => ["bundle exec fastlane ios upload_candidate", "bundle exec fastlane ios release && submit_for_review"])

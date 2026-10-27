@@ -54,6 +54,17 @@ class IosMonitoringTest < Minitest::Test
     assert_equal ["App Review: METADATA_REJECTED"], state.platform("ios")["blockers"]
   end
 
+  # A recorded approval the store doesn't confirm (forged or stale state)
+  # fails the pass: a platform can't move backwards, so nothing proceeds.
+  def test_a_recorded_approval_the_store_doesnt_confirm_fails_closed
+    state = uploaded_state
+    state.advance("ios", "approved", sha: SHA_A, now: NOW)
+    error = assert_raises(Error) do
+      coordinator(state, config, apple: { observe: [ios(version_state: "IN_REVIEW", attached: 7)] }).tick
+    end
+    assert_match(/approved -> in_review is not allowed/, error.message)
+  end
+
   def test_an_invalid_binary_blocks
     state = uploaded_state
     coordinator(state, config, apple: { observe: [ios(build_state: "INVALID")] }).tick

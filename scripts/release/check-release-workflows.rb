@@ -277,6 +277,26 @@ if (doc = load("release-publish.yml"))
     err(name, "publish-mac must verify the draft's assets before Latest") unless draft && verify && live && draft < verify && verify < live
     err(name, "publish-mac must revert Latest when the live feeds don't verify") unless live && revert && live < revert
   end
+  # The release state is written by GitHub Actions and is not evidence by
+  # itself: approvals are re-observed in the stores before the Mac step, and
+  # the Mac artifacts' run and contents are verified again.
+  vs = jobs["verify-stores"]
+  if vs.nil? || !needs(pm || {}).include?("verify-stores")
+    err(name, "publish-mac must wait for verify-stores (live store approvals)")
+  else
+    vtext = steps(vs).map { |x| run_text(x) }.join("\n")
+    unless vtext.include?("monitor STATE") && vtext.include?("--stores live") && vtext.include?("gate STATE")
+      err(name, "verify-stores must observe the stores live and then pass the gate")
+    end
+  end
+  if pm
+    ptext = steps(pm).map { |x| run_text(x) }
+    prov = ptext.index { |t| t.include?("actions/runs/$run_id") && t.include?(".github/workflows/release-candidate.yml $SHA release/$VERSION push") }
+    reverify = ptext.index { |t| t.include?("verify-mac-artifact.sh") && t.include?("verify-feed.sh") }
+    draft_idx = steps(pm).index { |x| run_text(x).match?(/gh release create\b.*--draft/m) }
+    err(name, "publish-mac must check the candidate run's provenance before using its artifacts") unless prov
+    err(name, "publish-mac must verify the DMGs and feeds again before the draft") unless reverify && draft_idx && reverify < draft_idx
+  end
   stores = jobs["stores"]
   unless stores && needs(stores).include?("publish-mac") && stores["if"].to_s.include?("needs.publish-mac.result == 'success'")
     err(name, "stores must wait for publish-mac (or a resume)")
@@ -309,6 +329,14 @@ if (doc = load("release-dry-run.yml"))
   only_trigger(name, doc, "workflow_dispatch")
   secrets_behind_environments(name, doc, %w[release-build release-pr ios-upload android-upload release-stores website-update])
   no_publishing(name, doc)
+end
+
+# Only release workflows may write the release state.
+Dir[File.join(DIR, "*.yml")].sort.each do |path|
+  name = File.basename(path)
+  next if RELEASE_WORKFLOWS.include?(name)
+
+  err(name, "only release workflows may touch the release state") if File.read(path).match?(/release-state\.sh|refs\/heads\/release-state/)
 end
 
 if (doc = load("release-monitor.yml"))
