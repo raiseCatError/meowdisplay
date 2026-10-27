@@ -1,34 +1,51 @@
 name: Release PR
 
-# Opens or updates the release PR into release/app-store-rc (CHANGELOG,
-# version.txt, manifest). It never creates a tag or a GitHub Release
-# (skip-github-release): publishing is the last, approval-gated job of
-# release.yml. Manual only, from release/app-store-rc.
+# Opens or updates the release PR into the release/<version> branch it is run
+# from (CHANGELOG, version.txt, manifest). It never creates a tag or a GitHub
+# Release (skip-github-release): publishing is release-publish.yml's job.
+# Manual only. Merging the PR is a push to release/<version>, which starts
+# release-candidate.yml.
 #
 # Token: a GitHub App installation token, not GITHUB_TOKEN. This repository
 # doesn't let Actions create pull requests, and a PR opened with GITHUB_TOKEN
-# starts no workflows, so the required `mac` and `conventional` checks would
-# never report and the PR could never merge. A PR opened by the App runs them
-# like any other. Setup: RELEASE.md § "Release workflow".
+# starts no workflows, so the required checks would never report and the PR
+# could never merge. The App's private key lives ONLY in the release-pr
+# environment (deployment branches: release/*), which is checked before a
+# token is minted; the token is scoped to this repository's contents and
+# pull requests. Setup: RELEASE.md § "Credentials".
 on:
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: release-pr
+  group: release-pr-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release-pr:
     runs-on: ubuntu-latest
-    permissions: {}
+    environment: release-pr
+    permissions:
+      contents: read
     steps:
-      - name: Only from release/app-store-rc
-        if: github.ref != 'refs/heads/release/app-store-rc'
+      - name: Only from release/<version>
         run: |
-          echo "::error::Run this from release/app-store-rc (got $GITHUB_REF)"
-          exit 1
+          set -euo pipefail
+          version=${GITHUB_REF#refs/heads/release/}
+          if [ "$GITHUB_REF" = "$version" ] || ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Run this from release/X.Y.Z (got $GITHUB_REF)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-pr
 
       - name: Release App credentials are configured
         env:
@@ -36,7 +53,7 @@ jobs:
           HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
           if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != true ]; then
-            echo "::error::Set the RELEASE_APP_CLIENT_ID variable and RELEASE_APP_PRIVATE_KEY secret (RELEASE.md)"
+            echo "::error::Set the RELEASE_APP_CLIENT_ID variable and the release-pr environment's RELEASE_APP_PRIVATE_KEY secret (RELEASE.md)"
             exit 1
           fi
 
@@ -52,7 +69,7 @@ jobs:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ steps.app-token.outputs.token }}
-          target-branch: release/app-store-rc
+          target-branch: ${{ github.ref_name }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true

@@ -1,54 +1,51 @@
 name: Release dry run
 
-# Checks that release.yml could produce a correct Mac release, without
-# building, signing, notarizing, tagging or uploading anything:
-#  - the release environments exist and are protected (release-build limited
-#    to release/app-store-rc; release-publish also requires a reviewer);
-#  - which release secrets and variables are missing;
-#  - Sparkle-key continuity: the SPARKLE_PRIVATE_KEY secret, project.yml and
-#    the PUBLISHED v1.20.0 apps all use one key;
-#  - the build number to release is above the live feeds' builds;
-#  - the match repository holds the Developer ID certificate (read-only).
-# Manual only. GitHub can dispatch it once this file is on the default branch.
+# Checks that the release pipeline could run, without building, signing,
+# uploading, submitting, tagging or publishing anything. One job per
+# environment (a job sees only its own environment's secrets):
+#  - the environment exists and is protected (deployment branches, and a
+#    required reviewer for release-publish);
+#  - which of its expected secrets and variables are missing (by name only;
+#    no value is ever printed);
+#  - read-only credential checks: Sparkle-key continuity with the PUBLISHED
+#    v1.20.0 apps, the Developer ID certificate in match, App Store Connect
+#    and Google Play API access.
+# Manual only, from release/<version>. GitHub can dispatch it once this file
+# is on the default branch.
 on:
   workflow_dispatch:
-    inputs:
-      build_number:
-        description: Mac CFBundleVersion the release will use (the marketing version, e.g. 2.0.0)
-        required: true
-        default: "2.0.0"
 
 permissions: {}
 
 jobs:
-  dry-run:
+  guard:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Only from release/<version>
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF#refs/heads/release/}
+          if [ "$GITHUB_REF" = "$version" ] || ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Run this from release/X.Y.Z (got $GITHUB_REF)"
+            exit 1
+          fi
+
+  release-build:
+    needs: guard
     runs-on: macos-26
-    # The signing secrets live in this environment only.
     environment: release-build
     permissions:
       contents: read
     steps:
-      - name: Only from release/app-store-rc
-        if: github.ref != 'refs/heads/release/app-store-rc'
-        run: |
-          echo "::error::Run this from release/app-store-rc (got $GITHUB_REF)"
-          exit 1
-
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-
-      - name: Release environments are protected
-        if: ${{ !cancelled() }}
+      - name: Environment is protected
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          status=0
-          scripts/release/check-environment.sh release-build || status=1
-          scripts/release/check-environment.sh release-publish --require-reviewers || status=1
-          exit $status
-
-      - name: Report missing release secrets and variables
+        run: scripts/release/check-environment.sh release-build
+      - name: Missing secrets
         id: secrets
         if: ${{ !cancelled() }}
         env:
@@ -60,63 +57,31 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
-        run: |
-          missing=""
-          for name in DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD \
-                      APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID \
-                      APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY \
-                      RELEASE_APP_PRIVATE_KEY RELEASE_APP_CLIENT_ID; do
-            if [ -z "${!name}" ]; then
-              echo "::warning::$name is not set"
-              missing="$missing $name"
-            fi
-          done
-          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
-
+        run: scripts/release/report-missing.sh DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY
       - name: Sparkle key continuity (secret == project.yml == published apps)
         if: ${{ !cancelled() }}
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          # Same tools and checksum as release.yml.
           SPARKLE_TOOLS_VERSION: "2.10.0"
           SPARKLE_TOOLS_SHA256: "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
         run: |
           set -euo pipefail
           scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "::error::SPARKLE_PRIVATE_KEY is not set"
-            exit 1
-          fi
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PRIVATE_KEY is not set"; exit 1; }
           curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_TOOLS_VERSION}/Sparkle-${SPARKLE_TOOLS_VERSION}.tar.xz"
           echo "${SPARKLE_TOOLS_SHA256}  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
           printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin" "$RUNNER_TEMP/baseline"
-
-      - name: Build number is above the live feeds
-        if: ${{ !cancelled() }}
-        env:
-          BUILD_NUMBER: ${{ inputs.build_number }}
-        run: |
-          set -euo pipefail
-          . scripts/release/baseline.env
-          scripts/release/check-build-number.sh "$BUILD_NUMBER" "$LIVE_FEED_BASE/$SENDER_FEED"
-          scripts/release/check-build-number.sh "$BUILD_NUMBER" "$LIVE_FEED_BASE/$RECEIVER_FEED"
-
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         with:
           ruby-version: '3.3'
           bundler-cache: true
-
-      - name: Set up SSH for match certs repo
+      - uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
-
       - name: Developer ID certificate in match (read-only)
         if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         env:
@@ -127,11 +92,155 @@ jobs:
           bundle exec fastlane run match type:developer_id readonly:true \
             app_identifier:com.raisecaterror.meowdisplay.mac,com.raisecaterror.meowdisplay.mac.receiver \
             team_id:"$DEVELOPMENT_TEAM" platform:macos
-
-      - name: Fail if any release secret or variable is missing
+      - name: Fail if anything is missing
         if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
         env:
           MISSING: ${{ steps.secrets.outputs.missing }}
+        run: echo "::error::release-build is missing $MISSING" && exit 1
+
+  release-publish:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: release-publish
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected and needs your approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-publish --require-reviewers
+
+  release-pr:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: release-pr
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-pr
+      - name: Missing secrets and variables
+        env:
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+        run: scripts/release/report-missing.sh --fail RELEASE_APP_PRIVATE_KEY RELEASE_APP_CLIENT_ID
+
+  ios-upload:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: ios-upload
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh ios-upload
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Missing secrets, then App Store Connect access (read-only)
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_DEPLOY_KEY: ${{ secrets.MATCH_DEPLOY_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
         run: |
-          echo "::error::Missing: $MISSING"
-          exit 1
+          set -euo pipefail
+          scripts/release/report-missing.sh --fail DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD \
+            APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_CONTENT
+          app=$(jq -r .ios.appId .github/release-config.json)
+          ruby -Iscripts/release/lib -rmeow_release -e '
+            latest = MeowRelease::AppStoreConnect.from_env(app_id: ARGV[0]).latest_build_number(ARGV[1])
+            puts "App Store Connect reachable; latest build of #{ARGV[1]}: #{latest || "none"}"' "$app" "${GITHUB_REF#refs/heads/release/}"
+
+  android-upload:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: android-upload
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh android-upload
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Missing secrets, then Google Play access (read-only)
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          ANDROID_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          ANDROID_UPLOAD_CERT_SHA256: ${{ vars.ANDROID_UPLOAD_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          scripts/release/report-missing.sh --fail PLAY_SERVICE_ACCOUNT_JSON ANDROID_UPLOAD_KEYSTORE_BASE64 \
+            ANDROID_UPLOAD_STORE_PASSWORD ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_KEY_PASSWORD ANDROID_UPLOAD_CERT_SHA256
+          package=$(jq -r .android.package .github/release-config.json)
+          ruby -Iscripts/release/lib -rmeow_release -e '
+            highest = MeowRelease::GooglePlay.from_env.highest_version_code(ARGV[0])
+            puts "Google Play reachable; highest versionCode: #{highest || "none"}"' "$package"
+
+  release-stores:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: release-stores
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - name: Missing secrets
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: scripts/release/report-missing.sh --fail APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_CONTENT PLAY_SERVICE_ACCOUNT_JSON
+
+  website-update:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: website-update
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh website-update
+      - name: Missing secrets and variables
+        env:
+          WEBSITE_APP_PRIVATE_KEY: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+          WEBSITE_APP_CLIENT_ID: ${{ vars.WEBSITE_APP_CLIENT_ID }}
+        run: scripts/release/report-missing.sh --fail WEBSITE_APP_PRIVATE_KEY WEBSITE_APP_CLIENT_ID
