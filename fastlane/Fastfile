@@ -166,6 +166,33 @@ platform :ios do
     )
   end
 
+  # The release candidate pipeline's upload (release-ios.yml): the binary
+  # only, numbered one above every build App Store Connect already has for
+  # this version, so a re-run never collides. Review submission and release
+  # belong to the release monitor and publish workflows; nothing here submits.
+  # Writes the build number and IPA path to build/ios-candidate.json.
+  desc "Build and upload the iOS release candidate binary (no submission)"
+  lane :upload_candidate do
+    version = ENV.fetch("APP_MARKETING_VERSION")
+    key = asc_api_key
+    latest = latest_testflight_build_number(api_key: key, app_identifier: IOS_BUNDLE_ID, version: version,
+                                            initial_build_number: 0)
+    ENV["APP_BUILD_NUMBER"] = (latest.to_i + 1).to_s
+    ipa = build_app_store_ipa
+    upload_to_testflight(
+      api_key:                           key,
+      app_identifier:                    IOS_BUNDLE_ID,
+      ipa:                               ipa,
+      skip_submission:                   true,
+      skip_waiting_for_build_processing: true
+    )
+    sh(<<~BASH)
+      set -euo pipefail
+      cd "$(git rev-parse --show-toplevel)"
+      printf '{"build": %s, "ipa": "%s"}\n' "#{ENV['APP_BUILD_NUMBER']}" "#{ipa}" > build/ios-candidate.json
+    BASH
+  end
+
   # Shared by both lanes: App Store-signed Release build of the iOS app.
   private_lane :build_app_store_ipa do
     setup_ci if is_ci

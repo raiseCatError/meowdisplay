@@ -13,6 +13,8 @@
 #                  | stores | website-manifest --out F | website-updated --url U --live-version V
 #                  | finish [--pr N]
 #   meow-release summary   STATE --branch-head SHA
+#   meow-release show      STATE --platform P [--sha SHA --at-least STAGE]
+#   meow-release status    STATE
 #   meow-release next-build ios|android --version V [--latest N]
 #   meow-release attest    STATE --platform android --result approved|published|rejected --actor NAME
 #
@@ -161,6 +163,27 @@ begin
   when "summary"
     o = parse(ARGV.drop(1), :branch_head)
     puts Summary.render(load_state(ARGV.first), branch_head: o.fetch(:branch_head))
+  when "status"
+    # Candidate, publication and stages as one JSON line, for scripts.
+    path = ARGV.shift
+    unless File.exist?(path)
+      puts JSON.generate("candidate" => nil)
+      exit 0
+    end
+    state = load_state(path)
+    puts JSON.generate("candidate" => state.candidate_sha, "mode" => state.mode,
+                       "publication" => state.publication_stage, "website" => state.website["stage"],
+                       "stages" => PLATFORMS.map { |p| [p, state.stage(p)] }.to_h)
+  when "show"
+    # One platform's record as JSON, plus whether it already reached
+    # `--at-least STAGE` for `--sha` (how a re-run skips finished work).
+    path = ARGV.shift
+    o = parse(ARGV, :platform, :sha, :at_least)
+    state = File.exist?(path) ? load_state(path) : nil
+    record = state&.platform(o.fetch(:platform)) || {}
+    done = !!(state && o[:at_least] && record["sha"] == o[:sha] &&
+              Stage.rank(record["stage"]) >= Stage.rank(o[:at_least]))
+    puts JSON.generate(record.merge("done" => done))
   when "next-build"
     platform = ARGV.shift
     o = parse(ARGV, :version, :latest)

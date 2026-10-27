@@ -26,6 +26,9 @@ fi
 # Prints -1, 0 or 1 for a < b, a = b, a > b.
 compare() {
   local IFS=.
+  # Splitting on dots is the point; both inputs were checked to be
+  # dot-separated integers, so nothing can glob.
+  # shellcheck disable=SC2206
   local -a a=($1) b=($2)
   local i n=$(( ${#a[@]} > ${#b[@]} ? ${#a[@]} : ${#b[@]} ))
   for (( i = 0; i < n; i++ )); do
