@@ -211,12 +211,18 @@ extension DemoModeSmokeTests {
     /// Natural Touch is the default; Classic stays available, shows Smart
     /// Touch, and is remembered across a relaunch.
     @MainActor
-    func testTouchStyleDefaultsToNaturalAndClassicPersists() {
+    func testTouchStyleDefaultsToNaturalAndClassicPersists() throws {
         let app = XCUIApplication()
         app.launch()
         openInputSettings(app)
         let natural = app.buttons["Natural Touch"].firstMatch
         let classic = app.buttons["Classic"].firstMatch
+        // Touch Style belongs to Direct Touch; a device set to Trackpad is left as it is.
+        if app.buttons["Trackpad"].firstMatch.waitForExistence(timeout: 3), app.buttons["Trackpad"].firstMatch.isSelected {
+            throw XCTSkip("Input Mode is Trackpad on this device; not changing it")
+        }
+        // Lists load rows only as they scroll into view (the Input page grew).
+        for _ in 0..<5 where !natural.waitForExistence(timeout: 1) { app.swipeUp() }
         XCTAssertTrue(natural.waitForExistence(timeout: 5))
         XCTAssertTrue(natural.isSelected, "Natural Touch is the default")
         XCTAssertFalse(app.staticTexts["Smart Touch"].exists, "Smart Touch belongs to Classic")
@@ -230,6 +236,7 @@ extension DemoModeSmokeTests {
         app.terminate()
         app.launch()
         openInputSettings(app)
+        for _ in 0..<5 where !app.buttons["Classic"].firstMatch.waitForExistence(timeout: 1) { app.swipeUp() }
         XCTAssertTrue(app.buttons["Classic"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Classic"].firstMatch.isSelected, "Classic is remembered")
 

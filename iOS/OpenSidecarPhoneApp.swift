@@ -1460,8 +1460,12 @@ struct IdleView: View {
             Button {
                 wakeConnect.begin(peerID: peerID)
             } label: {
-                OverflowMarqueeText(failed ? "Try Again" : (hasWakeHint ? "Wake & Connect" : "Connect"))
-                    .frame(minWidth: 88, maxWidth: 150)
+                // Full label, never truncated: the row stacks the buttons
+                // under the name when they don't fit beside it.
+                Text(failed ? "Try Again" : (hasWakeHint ? "Wake & Connect" : "Connect"))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minWidth: 72)
             }
             .buttonStyle(.borderedProminent)
             .accessibilityLabel(failed ? Text("Try again with \(mac.name)")
@@ -1546,7 +1550,7 @@ struct IdleView: View {
                 thisDeviceLink
             }
         }
-        .font(.subheadline)
+        .font(.footnote)
     }
 
     private var footerDot: some View {
@@ -1559,11 +1563,12 @@ struct IdleView: View {
         Button(action: action) {
             Text(title)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 8)
+                .foregroundStyle(.tint)
+                .padding(.horizontal, 6)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
     }
 
     private var howToConnectLink: some View {
