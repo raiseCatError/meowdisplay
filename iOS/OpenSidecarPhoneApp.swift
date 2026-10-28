@@ -359,7 +359,8 @@ struct ReceiverScreen: View {
                             model.receiver.sendKeyboardUp(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
                                 modifiers, chord: controlStore.activeChordModifiers))
                         },
-                        onRequestDismiss: { keyboardActive = false }
+                        onRequestDismiss: { keyboardActive = false },
+                        typingTarget: model.workspace.hostName
                     )
                     .frame(width: 1, height: 1)
                     .opacity(0)
@@ -589,6 +590,12 @@ struct ReceiverScreen: View {
         // old, capture paused, or the session ended.
         .onChange(of: keyboardAvailable) { available in
             if !available { keyboardActive = false }
+        }
+        // Caret-following Zoom While Typing: the Mac reads the focused text
+        // caret only while the keyboard is up (a Mac that predates it never
+        // gets this message).
+        .onChange(of: keyboardVisibleRect != nil) { open in
+            model.receiver.sendKeyboardState(open: open)
         }
         // Allow Input OFF must close the keyboard responder too — it's the
         // one interactive element the video-layer hit-testing gate above
@@ -2157,6 +2164,12 @@ struct VideoLayerView: UIViewRepresentable {
         receiver.onCursorImage = { [weak view] image, anchor, normSize in
             view?.setCursorSprite(image, anchor: anchor, normSize: normSize)
         }
+        // The Mac's focused text caret steers Zoom While Typing while the
+        // keyboard is open. Not replayed: a new view starts with the
+        // keyboard closed, and the Mac sends the caret as it opens.
+        receiver.onTextCaret = { [weak view] caret in
+            view?.setTextCaret(caret)
+        }
         // Replay the sprite/position that arrived before this view existed
         // (first frames land after the connect-time sprite) or that the
         // previous view held (metal-renderer toggle rebuilds the view tree).
@@ -2386,7 +2399,16 @@ struct VideoLayerView: UIViewRepresentable {
         // Non-nil sub-rect of `bounds`, above the keyboard (including its
         // accessory view), while our keyboard is open and docked at the
         // bottom; nil whenever the keyboard is closed or not ours.
-        private var keyboardVisibleRect: CGRect?
+        private var keyboardVisibleRect: CGRect? {
+            didSet {
+                // A closed keyboard forgets the caret: the next session starts
+                // from the Mac's first reading, not a stale one.
+                if keyboardVisibleRect == nil {
+                    textCaret = nil
+                    lastCaretBase = nil
+                }
+            }
+        }
         var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
         /// Fired on every new touch beginning on the receiver surface —
         /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
@@ -2406,6 +2428,13 @@ struct VideoLayerView: UIViewRepresentable {
         // keyboard button, or a touch outside the rendered video (those
         // simply never call the note*Anchor* methods below).
         private var lastAnchor: CGPoint?
+        // The Mac's focused text caret, normalized to the remote display
+        // (`textCaret` wire message). While known it replaces the touch anchor
+        // as the typing focus, on both axes; `lastCaretBase` is the picture
+        // placement it produced, so it only moves once the caret leaves the
+        // comfortable inner region (`RemoteViewportCalculator.keyboardOpen`).
+        private var textCaret: CGRect?
+        private var lastCaretBase: CGRect?
         // True only while layoutSubviews is running inside the UIView.animate
         // block a keyboard-frame change (or a live preference toggle) drives
         // — lets the content layer's geometry inherit that animation instead
@@ -2675,6 +2704,22 @@ struct VideoLayerView: UIViewRepresentable {
             videoLayer = layer
             videoContentView.layer.addSublayer(layer)
             setNeedsLayout()
+        }
+
+        /// The Mac's text caret changed (nil: none known). Re-targets the
+        /// open keyboard's viewport with the same short ease as an anchor change.
+        func setTextCaret(_ caret: CGRect?) {
+            guard caret != textCaret else { return }
+            guard keyboardVisibleRect != nil else {
+                textCaret = caret
+                return
+            }
+            // Most caret moves stay inside the comfortable region and leave
+            // the picture where it is: only animate a real change.
+            let before = unzoomedBaseTransform().displayedRect
+            textCaret = caret
+            guard unzoomedBaseTransform().displayedRect != before else { return }
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
         func setZoomWhileTyping(_ enabled: Bool) {
@@ -3002,11 +3047,15 @@ struct VideoLayerView: UIViewRepresentable {
                     displayedRect: rect)
             }
             if let keyboardVisibleRect {
-                return RemoteViewportCalculator.keyboardOpen(
+                let base = RemoteViewportCalculator.keyboardOpen(
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
-                    zoomEnabled: zoomWhileTypingEnabled)
+                    zoomEnabled: zoomWhileTypingEnabled,
+                    caret: textCaret, previous: lastCaretBase)
+                lastCaretBase = textCaret == nil ? nil : base.displayedRect
+                return base
             }
+            lastCaretBase = nil
             return RemoteViewportCalculator.normal(viewBounds: bounds, remoteAspectSize: video)
         }
 

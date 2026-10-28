@@ -28,6 +28,9 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
     /// the bottom edge and can end up hidden behind the system keyboard
     /// itself, so the keyboard needs a dismissal control of its own.
     let onRequestDismiss: () -> Void
+    /// The Mac's name for the strip's placeholder ("Typing to <name>").
+    /// `nil` reads "your Mac".
+    var typingTarget: String?
 
     func makeUIView(context: Context) -> RemoteKeyboardResponderView {
         let view = RemoteKeyboardResponderView()
@@ -36,6 +39,7 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
         view.onHardwareKeyDown = onHardwareKeyDown
         view.onHardwareKeyUp = onHardwareKeyUp
         view.onRequestDismiss = onRequestDismiss
+        view.setTypingTarget(typingTarget)
         return view
     }
 
@@ -47,6 +51,7 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
         uiView.onHardwareKeyDown = onHardwareKeyDown
         uiView.onHardwareKeyUp = onHardwareKeyUp
         uiView.onRequestDismiss = onRequestDismiss
+        uiView.setTypingTarget(typingTarget)
         if isActive, !uiView.isFirstResponder {
             // Diagnostic breadcrumb for a real-device-only first-activation
             // crash under investigation — cheap, no behavior change. Remove
@@ -89,6 +94,11 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
 
     private var isTrimming = false
 
+    /// What the keyboard strip shows: this session's typing as the Mac got it
+    /// (see `TypedTextEcho`). Reset whenever the keyboard opens or closes.
+    private var echo = TypedTextEcho()
+    private let strip = TypingStripView()
+
     // Tracked locally (mirrors the Mac's `HeldKeyTracker`) purely so losing
     // first-responder status can release anything still held — the Mac side
     // tolerates a redundant or spurious "up" regardless. Only ever holds
@@ -114,7 +124,17 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         textColor = .clear
         backgroundColor = .clear
         autocapitalizationType = .sentences
-        inputAccessoryView = keyboardAccessoryToolbar
+        strip.onDone = { [weak self] in self?.dismissTapped() }
+        inputAccessoryView = strip
+    }
+
+    func setTypingTarget(_ name: String?) {
+        strip.setTypingTarget(name)
+    }
+
+    /// Pushes the echo to the strip's label.
+    private func refreshStrip() {
+        strip.show(echo)
     }
 
     @available(*, unavailable)
@@ -141,7 +161,11 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         // `KeyboardEditPlanner` (Shared/, UIKit-free) so they're covered by
         // MacTests; this just executes the plan.
         let deleteCount = KeyboardEditPlanner.graphemeCount(in: textView.text, utf16Range: range)
-        for action in KeyboardEditPlanner.plan(rangeLength: deleteCount, replacementText: text) {
+        let actions = KeyboardEditPlanner.plan(rangeLength: deleteCount, replacementText: text)
+        // The strip mirrors exactly what is about to be sent, in the same order.
+        for edit in TypedTextEcho.edits(for: actions) { echo.apply(edit) }
+        refreshStrip()
+        for action in actions {
             switch action {
             case .backspace:
                 #if DEBUG
@@ -158,6 +182,10 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
     }
 
     func textViewDidChange(_ textView: UITextView) {
+        // The word still being composed (marked text) shows in the strip but
+        // is never sent: only its finished form reaches the Mac.
+        echo.apply(.composing(textView.markedTextRange.flatMap { textView.text(in: $0) } ?? ""))
+        refreshStrip()
         guard !isTrimming, textView.markedTextRange == nil,
               textView.text.count > Self.maxLocalTextLength else { return }
         // Trim off the main thread's current delegate turn so this can't
@@ -179,21 +207,10 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
 
     // MARK: - Guaranteed dismissal
 
-    // Always present while this view is first responder, so the system
-    // keyboard itself carries a way to close it even where the floating
-    // keyboard button ends up covered by the keyboard. `UITextView` already
-    // declares `inputAccessoryView` as a plain settable property (unlike a
-    // bare `UIResponder`, where it would need overriding), so it's just
-    // assigned once here.
-    private lazy var keyboardAccessoryToolbar: UIToolbar = {
-        let toolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
-        toolbar.items = [
-            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
-            UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissTapped)),
-        ]
-        toolbar.sizeToFit()
-        return toolbar
-    }()
+    // The strip attached to the keyboard (`inputAccessoryView`) always
+    // carries Done while this view is first responder, so the system keyboard
+    // itself has a way to close it even where the floating keyboard button
+    // ends up covered by the keyboard.
 
     @objc private func dismissTapped() {
         resignFirstResponder()
@@ -219,6 +236,10 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
             let usage = Int(key.keyCode.rawValue)
             guard Self.forwardedUsages.contains(usage) else { continue }
             heldUsages.insert(usage)
+            // Arrows, Tab, Escape, Forward Delete: the caret moves or leaves
+            // the field, so the strip can no longer say where text lands.
+            echo.clear()
+            refreshStrip()
             onHardwareKeyDown?(usage, Self.modifierNames(key.modifierFlags))
             remaining.remove(press)
         }
@@ -252,6 +273,8 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         // or a resign that raced a press callback). Starting clean means a
         // stray leftover entry can't suppress a genuinely new key's down.
         heldUsages.removeAll()
+        echo.clear()
+        refreshStrip()
         let result = super.becomeFirstResponder()
         // Diagnostic breadcrumb for a real-device-only first-activation
         // crash under investigation — cheap, no behavior change. Remove
@@ -264,6 +287,8 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
         releaseHeldKeys()
+        echo.clear()
+        refreshStrip()
         // Also drop the rolling local text on close — nothing carries it
         // forward across a keyboard session, and it never needs to.
         if markedTextRange == nil { text = "" }
@@ -284,5 +309,142 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         if flags.contains(.command) { names.append("command") }
         if flags.contains(.alphaShift) { names.append("capsLock") }
         return names
+    }
+}
+
+/// The slim strip attached to the top of the on-screen keyboard (the text
+/// view's input accessory). It answers "what have I typed?" without the
+/// picture having to show the right spot: a one-line, right-aligned echo of
+/// this keyboard session's typing as the Mac received it (see
+/// `TypedTextEcho`), styled like a native candidate, with Done at the
+/// trailing edge. The word still being composed is underlined, as marked text
+/// is. Empty, it reads "Typing to <Mac name>".
+///
+/// Backed by `UIInputView` in the keyboard style so it takes the keyboard's
+/// own backdrop in light and dark. The font follows Dynamic Type up to a
+/// ceiling (the strip is height-bounded: it sits between the picture and the
+/// keys), and the label is an updating static text for VoiceOver.
+final class TypingStripView: UIInputView {
+    var onDone: (() -> Void)?
+
+    private static let minimumHeight: CGFloat = 44
+    /// Dynamic Type stops growing the echo here.
+    private static let maximumFontSize: CGFloat = 24
+    private static let maxEchoCharacters = 80
+
+    private let echoLabel = UILabel()
+    private let doneButton = UIButton(type: .system)
+    private var typingTarget: String?
+    private var echo = TypedTextEcho()
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: Self.minimumHeight), inputViewStyle: .keyboard)
+        allowsSelfSizing = true
+        setUp()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    func setTypingTarget(_ name: String?) {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard target != typingTarget else { return }
+        typingTarget = target
+        render()
+    }
+
+    func show(_ echo: TypedTextEcho) {
+        guard echo != self.echo else { return }
+        self.echo = echo
+        render()
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric,
+               height: max(Self.minimumHeight, ceil(Self.echoFont.lineHeight) + 24))
+    }
+
+    @objc private func contentSizeCategoryChanged() {
+        render()
+        invalidateIntrinsicContentSize()
+    }
+
+    // MARK: Layout
+
+    private static var echoFont: UIFont {
+        UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: 17), maximumPointSize: maximumFontSize)
+    }
+
+    private func setUp() {
+        echoLabel.translatesAutoresizingMaskIntoConstraints = false
+        echoLabel.numberOfLines = 1
+        echoLabel.adjustsFontForContentSizeCategory = false   // `render()` re-scales with a ceiling
+        echoLabel.isAccessibilityElement = true
+        echoLabel.accessibilityTraits = [.staticText, .updatesFrequently]
+        addSubview(echoLabel)
+
+        var configuration = UIButton.Configuration.plain()
+        configuration.title = String(localized: "Done")
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = UIFontMetrics(forTextStyle: .body).scaledFont(
+                for: .systemFont(ofSize: 17, weight: .semibold), maximumPointSize: TypingStripView.maximumFontSize)
+            return attributes
+        }
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10)
+        doneButton.configuration = configuration
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
+        doneButton.setContentHuggingPriority(.required, for: .horizontal)
+        doneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        doneButton.addAction(UIAction { [weak self] _ in self?.onDone?() }, for: .primaryActionTriggered)
+        addSubview(doneButton)
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(contentSizeCategoryChanged),
+            name: UIContentSizeCategory.didChangeNotification, object: nil)
+
+        let guide = safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            doneButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -6),
+            doneButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            doneButton.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumHeight),
+            echoLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            echoLabel.trailingAnchor.constraint(equalTo: doneButton.leadingAnchor, constant: -8),
+            echoLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        render()
+    }
+
+    private func render() {
+        let font = Self.echoFont
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .right
+        // Keep the end of the line: the part just typed.
+        paragraph.lineBreakMode = .byTruncatingHead
+        if echo.isEmpty {
+            let name = typingTarget ?? String(localized: "your Mac")
+            let text = String(localized: "Typing to \(name)")
+            echoLabel.attributedText = NSAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
+            ])
+            echoLabel.accessibilityLabel = text
+            echoLabel.accessibilityValue = nil
+            return
+        }
+        let tail = echo.tail(maxCharacters: Self.maxEchoCharacters)
+        let composingCount = min(echo.composing.count, tail.count)
+        let committed = String(tail.dropLast(composingCount))
+        let composing = String(tail.suffix(composingCount))
+        let text = NSMutableAttributedString(string: committed, attributes: [
+            .font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
+        ])
+        text.append(NSAttributedString(string: composing, attributes: [
+            .font: font, .foregroundColor: UIColor.label, .paragraphStyle: paragraph,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]))
+        echoLabel.attributedText = text
+        echoLabel.accessibilityLabel = String(localized: "Typed text")
+        echoLabel.accessibilityValue = tail
     }
 }

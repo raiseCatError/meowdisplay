@@ -331,6 +331,13 @@ enum WireMessage {
     static let sessionInviteResponse = "sessionInviteResponse"
     // Mac -> receiver: `id` — the Mac withdrew or declined this invitation.
     static let sessionInviteCancel = "sessionInviteCancel"
+    // receiver -> Mac: `open` — the on-screen keyboard opened or closed. Only
+    // sent to a Mac whose welcome `features` list `TextCaretWire.welcomeFeature`.
+    static let keyboardState = "keyboardState"
+    // Mac -> receiver: the focused text caret's rectangle, normalized to the
+    // streamed display (`v` 0 = none) — see `TextCaretWire`. Additive; an
+    // older receiver ignores the unknown type.
+    static let textCaret = "textCaret"
 }
 
 enum WireCrypto {

@@ -277,6 +277,32 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         return nil
     }
 
+    /// The text caret (a global rectangle in points) in canvas coordinates,
+    /// normalized to the canvas, when it is inside the window the keyboard is
+    /// typing into — the active tile, or the only tile showing a window that
+    /// contains it. Nil for a caret in any other window, outside the picture
+    /// of its tile (cropped away) or without a live canvas: the receiver
+    /// then keeps following its last touch.
+    func canvasCaretRect(forGlobal g: CGRect) -> CGRect? {
+        guard canvas.width > 0, canvas.height > 0, g.minX.isFinite, g.minY.isFinite, g.width.isFinite, g.height.isFinite else { return nil }
+        let centre = CGPoint(x: g.midX, y: g.midY)
+        let candidates = keyboardTarget.map { [$0] } ?? assignments
+        for a in candidates {
+            guard let frame = windowFrames[a.windowID], frame.contains(centre), let t = transform(for: a) else { continue }
+            let corners = [CGPoint(x: g.minX, y: g.minY), CGPoint(x: g.maxX, y: g.minY),
+                           CGPoint(x: g.minX, y: g.maxY), CGPoint(x: g.maxX, y: g.maxY)].map {
+                t.canvasPoint(fromSource: WorkspacePoint(x: $0.x - frame.minX, y: $0.y - frame.minY))
+            }
+            let xs = corners.map(\.x), ys = corners.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { continue }
+            guard let visible = t.visibleRect,
+                  visible.contains(WorkspacePoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)) else { continue }
+            return CGRect(x: minX / canvas.width, y: minY / canvas.height,
+                          width: (maxX - minX) / canvas.width, height: (maxY - minY) / canvas.height)
+        }
+        return nil
+    }
+
     /// A canvas-pixel delta in the tile under the pointer, in that window's
     /// points (its scale and rotation undone).
     func sourceVector(dx: Double, dy: Double) -> CGVector {

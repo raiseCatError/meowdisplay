@@ -182,6 +182,13 @@ enum RemoteViewportCalculator {
     /// a comfort margin when panning to reveal the anchor.
     static let comfortMarginFraction: CGFloat = 0.12
 
+    /// While following a text caret, the fraction of the keyboard-free
+    /// viewport kept clear on every side as the inner region: the view
+    /// stays put while the caret is inside it, and re-centers on the caret
+    /// (on the axis that left) once it crosses out. Wider than
+    /// `comfortMarginFraction` so ordinary typing never pans per character.
+    static let caretInnerMarginFraction: CGFloat = 0.25
+
     /// The ordinary, keyboard-hidden presentation: the whole remote display
     /// aspect-fit into `viewBounds`.
     static func normal(viewBounds: CGRect, remoteAspectSize: CGSize) -> RemoteViewportTransform {
@@ -201,14 +208,28 @@ enum RemoteViewportCalculator {
     ///     Only its `y` is ever used (vertical-only movement — see the type
     ///     doc); `nil`, or an anchor with no usable `y`, defaults to the
     ///     remote display's vertical center, which is ordinary behavior,
-    ///     not a degraded fallback.
+    ///     not a degraded fallback. Used only when there is no usable
+    ///     `caret`.
     ///   - zoomEnabled: the "Zoom While Typing" preference.
+    ///   - caret: the Mac's text caret, a normalized remote-space rect (the
+    ///     `textCaret` wire message), when the Mac knows one. A usable caret
+    ///     replaces `anchor`: both its x and y steer the view (see
+    ///     `caretTransform`), at the same scale the touch anchor would use.
+    ///     `nil`, or one off the display or not finite, changes nothing — the
+    ///     touch anchor above applies exactly as before.
+    ///   - previous: the `displayedRect` this function returned for the
+    ///     caret last time, so the view only moves once the caret leaves
+    ///     the comfortable inner region of `visibleRect` rather than on
+    ///     every character. Ignored without a `caret`, and when it was for a
+    ///     different scale.
     static func keyboardOpen(viewBounds: CGRect,
                              remoteAspectSize: CGSize,
                              visibleRect: CGRect,
                              anchor: CGPoint?,
                              zoomEnabled: Bool,
-                             maxZoom: CGFloat = defaultMaxZoom) -> RemoteViewportTransform {
+                             maxZoom: CGFloat = defaultMaxZoom,
+                             caret: CGRect? = nil,
+                             previous: CGRect? = nil) -> RemoteViewportTransform {
         guard viewBounds.width > 0, viewBounds.height > 0,
               remoteAspectSize.width > 0, remoteAspectSize.height > 0,
               visibleRect.width > 0, visibleRect.height > 0 else {
@@ -219,8 +240,11 @@ enum RemoteViewportCalculator {
         guard visibleRect.height >= minimumUsableViewportHeight else {
             return fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
         }
+        let caretPoint = usableCaretPoint(caret)
         let anchorY: CGFloat
-        if let anchor, anchor.y.isFinite, (0...1).contains(anchor.y) {
+        if let caretPoint {
+            anchorY = caretPoint.y
+        } else if let anchor, anchor.y.isFinite, (0...1).contains(anchor.y) {
             anchorY = anchor.y
         } else {
             // No usable recent interaction: default to vertical center.
@@ -245,6 +269,11 @@ enum RemoteViewportCalculator {
         let scaleFactor = zoomEnabled
             ? requiredScale * magnification(viewBounds: viewBounds, visibleRect: visibleRect, maxZoom: maxZoom)
             : requiredScale
+        if let caretPoint {
+            return caretTransform(base: base.displayedRect, visibleRect: visibleRect, caret: caretPoint,
+                                  scaleFactor: scaleFactor, previous: previous)
+                ?? fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
+        }
         return verticalTransform(base: base.displayedRect, visibleRect: visibleRect,
                                  anchorY: anchorY, scaleFactor: scaleFactor)
             ?? fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
@@ -382,6 +411,77 @@ enum RemoteViewportCalculator {
         let lowerBound = min(alignNear, alignFar)
         let upperBound = max(alignNear, alignFar)
         return min(max(pan, lowerBound), upperBound)
+    }
+
+    /// The centre of a normalized caret rect when it is a usable steering
+    /// point: finite and on the display. Everything else answers `nil` so the
+    /// caller falls back to the touch anchor.
+    private static func usableCaretPoint(_ caret: CGRect?) -> CGPoint? {
+        guard let caret, !caret.isNull, !caret.isInfinite else { return nil }
+        let x = caret.midX, y = caret.midY
+        guard x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y) else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    /// The caret-following presentation: `base` scaled by `scaleFactor`
+    /// around its own center (the same size `verticalTransform` would use),
+    /// then panned on both axes so the caret sits in the keyboard-free
+    /// area. Unlike the touch anchor it moves horizontally too, but only
+    /// when the scaled picture is wider than the visible area — an
+    /// unmagnified picture already fits across, so its horizontal center
+    /// never moves.
+    ///
+    /// Each axis keeps `previous`'s pan while the caret stays inside the
+    /// inner region (`caretInnerMarginFraction`), and re-centers on the
+    /// caret once it leaves — a pan of a few points per character would read
+    /// as the picture shaking. Both are clamped so no blank space opens up
+    /// beyond the picture's own edges.
+    private static func caretTransform(base: CGRect, visibleRect: CGRect, caret: CGPoint,
+                                       scaleFactor: CGFloat, previous: CGRect?) -> RemoteViewportTransform? {
+        guard scaleFactor.isFinite, scaleFactor > 0 else { return nil }
+        let width = base.width * scaleFactor
+        let height = base.height * scaleFactor
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+        let unpanned = CGRect(x: base.midX - width / 2, y: base.midY - height / 2, width: width, height: height)
+        // The previous pan counts only for the same size: a changed scale
+        // (keyboard resized, rotation) starts over from the caret.
+        var previousPan: CGPoint?
+        if let previous, abs(previous.width - width) < 0.5, abs(previous.height - height) < 0.5 {
+            previousPan = CGPoint(x: previous.minX - unpanned.minX, y: previous.minY - unpanned.minY)
+        }
+        let panX = caretPan(point: unpanned.minX + caret.x * width, contentMin: unpanned.minX, contentMax: unpanned.maxX,
+                            visibleMin: visibleRect.minX, visibleMax: visibleRect.maxX,
+                            previous: previousPan?.x, pansOnlyWhenWider: true)
+        let panY = caretPan(point: unpanned.minY + caret.y * height, contentMin: unpanned.minY, contentMax: unpanned.maxY,
+                            visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY,
+                            previous: previousPan?.y, pansOnlyWhenWider: false)
+        let rect = unpanned.offsetBy(dx: panX, dy: panY)
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        return RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: rect)
+    }
+
+    /// One axis of `caretTransform`. The valid range is the one
+    /// `clampedPan` uses (content edges against visible edges); inside it,
+    /// `previous` stands while the caret stays in the inner region, and
+    /// otherwise the caret is centered in the visible span.
+    private static func caretPan(point: CGFloat, contentMin: CGFloat, contentMax: CGFloat,
+                                 visibleMin: CGFloat, visibleMax: CGFloat,
+                                 previous: CGFloat?, pansOnlyWhenWider: Bool) -> CGFloat {
+        let visibleSize = visibleMax - visibleMin
+        guard visibleSize > 0 else { return 0 }
+        if pansOnlyWhenWider, contentMax - contentMin <= visibleSize + 0.5 { return 0 }
+        let alignNear = visibleMin - contentMin
+        let alignFar = visibleMax - contentMax
+        let lowerBound = min(alignNear, alignFar)
+        let upperBound = max(alignNear, alignFar)
+        func clamped(_ pan: CGFloat) -> CGFloat { min(max(pan, lowerBound), upperBound) }
+        if let previous {
+            let kept = clamped(previous)
+            let inner = visibleSize * caretInnerMarginFraction
+            let at = point + kept
+            if at >= visibleMin + inner, at <= visibleMax - inner { return kept }
+        }
+        return clamped(visibleMin + visibleSize / 2 - point)
     }
 
     // MARK: - Shared geometry primitives

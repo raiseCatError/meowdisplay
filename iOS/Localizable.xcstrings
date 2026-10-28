@@ -1925,7 +1925,13 @@
     "Typed in Notes" : {
 
     },
+    "Typed text" : {
+
+    },
     "Typing %@. Open Notes to type here." : {
+
+    },
+    "Typing to %@" : {
 
     },
     "Unavailable" : {
@@ -2125,6 +2131,9 @@
 
     },
     "Your Mac" : {
+
+    },
+    "your Mac" : {
 
     },
     "Your Mac uses the whole screen and the controls float over it." : {

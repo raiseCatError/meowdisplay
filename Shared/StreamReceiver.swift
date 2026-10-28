@@ -910,13 +910,18 @@ final class StreamReceiver: ObservableObject {
     /// The connected Mac offers Window mode / has confirmed it for this device.
     @MainActor @Published private(set) var macOffersWindows = false
     @MainActor @Published private(set) var windowModeActive = false
+    /// The connected Mac advertised `textCaret` in its welcome features: it
+    /// follows the focused text caret for Zoom While Typing (PROTOCOL.md 6.11).
+    @MainActor private(set) var macSupportsTextCaret = false
 
     @MainActor
     func noteWorkspaceEvent(_ event: WorkspaceEvent) {
         switch event {
-        case .features(let features): macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
+        case .features(let features):
+            macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
+            macSupportsTextCaret = features.contains(TextCaretWire.welcomeFeature)
         case .mode(let window): windowModeActive = window
-        case .disconnected: macOffersWindows = false; windowModeActive = false
+        case .disconnected: macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
         default: break
         }
     }
@@ -1224,6 +1229,7 @@ final class StreamReceiver: ObservableObject {
     // must not.
     private var advertisesAddresses: Bool { deviceKind == "Mac" }
     private var lastCursorSeq: UInt64 = 0
+    private var lastTextCaretSeq: UInt64 = 0
     #if DEBUG
     private var lastCursorPositionTraceAt = Date.distantPast
     /// Throttled to once every 2s — cursor position updates can arrive at
@@ -1346,6 +1352,11 @@ final class StreamReceiver: ObservableObject {
     // them. Main-thread, like the callbacks.
     @MainActor private(set) var cursorState: (x: Double, y: Double, visible: Bool) = (0.5, 0.5, false)
     @MainActor private(set) var cursorSprite: (image: CGImage, anchor: CGPoint, normSize: CGSize)?
+    /// The Mac's focused text caret, normalized to the streamed display
+    /// (`nil` = unknown). Main-thread like the cursor; a late-attaching view
+    /// replays `textCaret`.
+    var onTextCaret: ((_ caret: CGRect?) -> Void)?
+    @MainActor private(set) var textCaret: CGRect?
 
     // Metal renderer path (experimental, "metalRenderer" setting): we decode
     // explicitly and hand BGRA buffers out; called on the receiver queue.
@@ -2532,11 +2543,15 @@ final class StreamReceiver: ObservableObject {
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
+        lastTextCaretSeq = 0
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
         let uiSink = self.uiSink
-        DispatchQueue.main.async { uiSink.publishCursorReset() }
+        DispatchQueue.main.async {
+            uiSink.publishCursorReset()
+            uiSink.publishTextCaret(nil)
+        }
     }
 
     /// The host-only half of the former `onReady` closure: everything except
@@ -2691,6 +2706,8 @@ final class StreamReceiver: ObservableObject {
             macCapFps = obj["capFps"] as? Int ?? macCapFps
         case "cursor":
             applyCursor(obj)
+        case WireMessage.textCaret:
+            applyTextCaret(obj)
         case "cursorImg":
             guard let b64 = obj["png"] as? String,
                   let png = Data(base64Encoded: b64),
@@ -2895,6 +2912,20 @@ final class StreamReceiver: ObservableObject {
         #endif
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishCursorPosition(x: x, y: y, visible: visible) }
+    }
+
+    /// The Mac's focused text caret (PROTOCOL.md 6.11). Malformed frames and
+    /// reordered ones (sequence not newer) are dropped; the main actor gets
+    /// the rectangle, or nil for "no caret".
+    private func applyTextCaret(_ obj: [String: Any]) {
+        guard let update = TextCaretWire.parse(obj) else { return }
+        if let seq = update.sequence {
+            guard seq > lastTextCaretSeq else { return }
+            lastTextCaretSeq = seq
+        }
+        let uiSink = self.uiSink
+        let rect = update.rect
+        DispatchQueue.main.async { uiSink.publishTextCaret(rect) }
     }
 
     private func resetStreamState() {
@@ -3195,6 +3226,15 @@ final class StreamReceiver: ObservableObject {
     @MainActor func sendKeyboardText(_ text: String) {
         guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
         sendUIControl(["type": "keyboard", "action": "text", "text": text])
+    }
+
+    /// Tells the Mac whether the on-screen keyboard is open so it can follow
+    /// the focused text caret for Zoom While Typing (PROTOCOL.md 6.11). Sent
+    /// only to a Mac that advertised `textCaret`; a close is sent whenever
+    /// connected, so the Mac never keeps reading for a keyboard that is gone.
+    @MainActor func sendKeyboardState(open: Bool) {
+        guard macSupportsTextCaret, open ? displayState == .running : connected else { return }
+        sendUIControl(TextCaretWire.keyboardStateMessage(open: open))
     }
 
     /// An atomic special key from the software keyboard (e.g. Return,
@@ -5749,6 +5789,12 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
         cursorState = (x, y, visible)
         onCursor?(x, y, visible)
+    }
+
+    @MainActor func applyTextCaretUpdate(_ rect: CGRect?) {
+        guard rect != textCaret else { return }
+        textCaret = rect
+        onTextCaret?(rect)
     }
 
     @MainActor func applyCursorSpriteUpdate(image: CGImage, anchor: CGPoint, normSize: CGSize) {

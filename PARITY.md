@@ -60,6 +60,7 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Hardware mouse/trackpad: click, drag, hover, right click, scroll | Partial | Partial | Yes | Android: absolute mouse, no pointer capture; not verified physically |
 | Command shortcuts | Yes | Partial | Yes | Android needs Control Key Types ⌘ (Android keeps Meta for itself) |
 | Typing goes only to the active tile's window | Yes | Yes | Yes | Mac checks focus; verified with Android |
+| Typing strip above the keyboard; Zoom While Typing follows the Mac's text caret | Yes | Yes | — | Needs Accessibility on the Mac; apps that expose no caret fall back to the last touch; not yet verified on devices |
 
 ## Help and diagnostics
 

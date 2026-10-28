@@ -586,6 +586,7 @@ Coordinates use the conventions of section 7.
 | `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
 | `smartTouchProbe` | pv 20 | `id` (int), `x`, `y` | Smart Touch (Experimental): ask whether the element at a normalized point is scrollable |
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
+| `keyboardState` | additive (welcome feature `textCaret`) | `open` (bool) | The on-screen keyboard opened or closed, so the sender can follow the text caret (section 6.11) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -847,6 +848,7 @@ section 4.
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
 | `sessionInvite` | pv 21 | `id`, `initiator`, `intent`, `mode`, `awaitingSender` (bool) | Ask the receiver to admit this display session (section 6.9) |
 | `sessionInviteCancel` | pv 21 | `id` | The sender withdrew or declined this invitation |
+| `textCaret` | additive (welcome feature `textCaret`) | `v` (1/0), `x`, `y`, `w`, `h`, `s` | The focused text caret's rectangle, normalized to the streamed display or Window canvas (section 6.11) |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -1359,6 +1361,42 @@ really has that window's app in front (`hostFocus`). Changing a tile's
 window releases held buttons and keys. `cursor` positions are in canvas
 coordinates (hidden when the Mac pointer is over no tile's window).
 
+### 6.11 Text caret (`keyboardState` / `textCaret`)
+
+Optional and additive: no `pv` bump. It lets a receiver keep the line being
+typed into above its on-screen keyboard (Zoom While Typing) wherever the
+display is focused.
+
+* **Capability.** A sender that can follow the focused text caret lists
+  `"textCaret"` in `welcome.features` (next to `"window"`, 6.10). A receiver
+  sends `keyboardState` only to a sender that did, and a peer that does not
+  know either type ignores it.
+* **`keyboardState`** (receiver to sender): `{"type":"keyboardState","open":true}`.
+  `open` is whether the receiver's on-screen keyboard is up. The sender reads
+  the caret only while it is `true`, only for a session that has input granted
+  (6.1 `allowInputState`), and stops when the keyboard closes, the grant is
+  revoked or the connection ends. A receiver sends the closing `false`
+  whenever it sent the opening `true`.
+* **`textCaret`** (sender to receiver):
+  `{"type":"textCaret","v":1,"x":0.4123,"y":0.5,"w":0.002,"h":0.018,"s":12}`.
+  `x`, `y`, `w`, `h` are the caret's rectangle normalized to what this
+  receiver is shown, top-left origin, the same space as `touch.x/y` (section
+  7): the streamed display, or in Window mode the workspace canvas through
+  the tile being typed into. `v` `0` (with no `x`/`y`) means no caret is
+  known: no Accessibility permission, no focused text field, a password field,
+  an app that exposes none, or a caret on another display or in another
+  window. `s` is a sequence number; a receiver drops a frame that is not newer
+  than the last, like `cursor`, and resets at every connection. The sender
+  rate-limits to ten a second at most and sends only on change.
+* **Privacy.** Only a rectangle crosses the wire: never the text, its length,
+  the field's name or its position within it.
+* **Receiver behavior.** With the keyboard up, a usable caret (finite, on the
+  display) replaces the last touch as the typing focus, on both axes; none
+  falls back to the touch. The picture moves only when the caret leaves a
+  comfortable inner region of the keyboard-free area, and the receiver forgets
+  the caret when the keyboard closes. The shared test vectors are in
+  `fixtures/viewport/caret-vectors.json`.
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1523,6 +1561,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
+| 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 
 ---
 
@@ -1620,3 +1659,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-25 | Additive, no `pv` change: `keyboard` `"down"` may carry `repeat`; the Mac Receiver sends the full physical-keyboard usage range |
 | 2026-10-27 | No wire change: Android receivers (section 2.2a); `hello.device` `"Android"` and `updateRequired.target` `"android"`. Cross-platform test vectors in `fixtures/receiver-protocol/` |
 | 2026-10-27 | Additive, no `pv` change: opt-in same-Mac login-session TXT keys `hg`/`hn`/`sl`/`ss` on `_opendisplay-mac-pair._tcp` (section 2.1) |
+| 2026-10-29 | Additive, no `pv` change: text caret (section 6.11), `welcome.features` `textCaret`, `keyboardState`, `textCaret` |

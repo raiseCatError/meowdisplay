@@ -110,12 +110,27 @@ ignore Touch Style.
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | On-screen keyboard (tray Keyboard button) | Yes. **Show Keyboard Button** | Yes | Yes. **Show Keyboard Button** | n/a |
-| Zoom While Typing | Yes, setting | Yes | Partial. Always on, no setting | n/a |
+| Zoom While Typing (follows the Mac's text caret, see Typing) | Yes, setting | Yes | Partial. Always on, no setting | n/a |
 | Hardware keyboard | Partial. Not verified with a real keyboard | Partial | Partial. Same | Yes, after Request Control |
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
+
+## Typing
+
+Two things keep what you type visible. Both work only after the Mac has granted this device **Request Control**.
+
+**The typing strip.** When the on-screen keyboard is up, a slim strip sits on top of it. It shows the end of what you have typed in this keyboard session on one right-aligned line, with **Done** at the trailing edge. It mirrors what the Mac received: deletes and autocorrect replacements show as they land, and the word you are still composing is underlined (it is not sent until it is finished). Empty, it reads "Typing to" and your Mac's name. The strip clears when the keyboard closes, and when an arrow, Tab, Escape or a shortcut makes the position unknown. It is a mirror of the keys sent, so text pasted or changed on the Mac by other means never appears. Taps on the strip never reach the Mac.
+
+**Caret follow.** With the keyboard up, the picture follows the text caret on the Mac instead of your last touch, so the line you are typing into stays above the keyboard wherever the display is focused. With **Zoom While Typing** on (always on for Android) it uses the usual keyboard zoom and also pans sideways; with it off, it only pans. It moves only when the caret leaves the middle of the visible area, so it does not shake while you type along a line. If the Mac reports no caret, the last touch steers as before.
+
+| | iPhone | iPad | Android | Mac Receiver |
+| --- | --- | --- | --- | --- |
+| Typing strip | Yes | Yes | Yes | n/a |
+| Caret follow | Yes | Yes | Yes | n/a |
+
+**On the Mac.** Reading the caret needs MeowDisplay to have Accessibility permission (System Settings > Privacy & Security > Accessibility). Without it, caret follow is quietly off. The Mac reads only the caret's rectangle: never the text, how long it is, or the field's name. Password fields are skipped. It reads at most ten times a second, only while the keyboard is up and only for the device that has control. In Window mode it follows the caret in the window being typed into. Apps that do not expose a text caret to Accessibility give no caret and the picture falls back to your last touch: Terminal-style apps that draw their own text, many Electron and Chromium apps, games. Some apps answer only after VoiceOver or another assistive tool is on. A Mac that predates caret follow is never sent the keyboard message, and an older receiver ignores the caret message (PROTOCOL.md 6.11).
 
 ## Window mode
 

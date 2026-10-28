@@ -168,6 +168,44 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(t, twoTiles())
     }
 
+    func testTheCaretIsMappedThroughTheTileOfItsWindow() throws {
+        let t = twoTiles()
+        // No tile is active yet: the caret's own window decides.
+        let inA = try XCTUnwrap(t.canvasCaretRect(forGlobal: CGRect(x: 500, y: 400, width: 2, height: 20)))
+        XCTAssertEqual(inA.minX, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(inA.minY, 0.4, accuracy: 1e-9)
+        XCTAssertEqual(inA.width, 0.001, accuracy: 1e-9)
+        XCTAssertEqual(inA.height, 0.02, accuracy: 1e-9)
+        // Window b sits letterboxed inside its tile (content y 250...750).
+        let inB = try XCTUnwrap(t.canvasCaretRect(forGlobal: CGRect(x: 3500, y: 350, width: 0, height: 20)))
+        XCTAssertEqual(inB.minX, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(inB.minY, 0.5, accuracy: 1e-9)
+    }
+
+    func testTheCaretOutsideTheTypedWindowIsNotSent() {
+        var t = twoTiles()
+        _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))      // tile a becomes the keyboard target
+        XCTAssertNotNil(t.canvasCaretRect(forGlobal: CGRect(x: 500, y: 400, width: 0, height: 20)))
+        XCTAssertNil(t.canvasCaretRect(forGlobal: CGRect(x: 3500, y: 350, width: 0, height: 20)),
+                     "a caret in a window the keyboard is not typing into")
+        XCTAssertNil(t.canvasCaretRect(forGlobal: CGRect(x: 1500, y: 400, width: 0, height: 20)), "on the desktop, in no tile window")
+        XCTAssertNil(WorkspaceInputTargeting().canvasCaretRect(forGlobal: CGRect(x: 1, y: 1, width: 0, height: 20)), "no canvas")
+    }
+
+    func testTheCaretIsFollowedThroughARotatedTile() throws {
+        var t = WorkspaceInputTargeting()
+        t.canvas = CGSize(width: 1000, height: 1000)
+        t.windowFrames = [10: CGRect(x: 100, y: 100, width: 400, height: 200)]
+        _ = t.update(assignments: [
+            WorkspaceTileAssignment(tileID: "a", rect: .init(x: 0, y: 0, width: 1, height: 1), windowID: 10, windowGeneration: 1,
+                                    pid: 100, bundleID: "a", follow: .window, rotation: .quarter, fit: .fit, assignmentGeneration: 1),
+        ])
+        // A quarter turn lays the window on its side: the caret's tall thin box becomes a wide flat one.
+        let r = try XCTUnwrap(t.canvasCaretRect(forGlobal: CGRect(x: 200, y: 150, width: 2, height: 20)))
+        XCTAssertGreaterThan(r.width, r.height)
+        XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(CGPoint(x: r.midX, y: r.midY)))
+    }
+
     func testADragStaysInTheWindowItStartedIn() {
         var t = twoTiles()
         _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))

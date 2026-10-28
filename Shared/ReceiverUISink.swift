@@ -151,6 +151,10 @@ final class ReceiverUISink: Sendable {
         target?.applyCursorPositionUpdate(x: x, y: y, visible: visible)
     }
 
+    func publishTextCaret(_ rect: CGRect?) {
+        target?.applyTextCaretUpdate(rect)
+    }
+
     func publishCursorSprite(image: CGImage, anchor: CGPoint, normSize: CGSize) {
         target?.applyCursorSpriteUpdate(image: image, anchor: anchor, normSize: normSize)
     }

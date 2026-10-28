@@ -193,6 +193,7 @@ targets:
       - Mac/OriginRestore.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
+      - Mac/TextCaretFollower.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
       - MacReceiver/ReceiverInputForwarding.swift
@@ -286,6 +287,8 @@ targets:
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
       - Shared/KeyboardEditPlanner.swift
+      - Shared/TypedTextEcho.swift
+      - Shared/TextCaretWire.swift
       - Shared/ControlProfile.swift
       - Shared/StagePeek.swift
       - Shared/ControlInteraction.swift

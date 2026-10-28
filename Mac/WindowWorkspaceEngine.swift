@@ -848,6 +848,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.canvasPoint(forGlobal: g) }
     }
 
+    /// The focused text caret (global points) in normalized canvas
+    /// coordinates, when it is in the window being typed into.
+    func caretCanvasRect(forGlobal g: CGRect) -> CGRect? {
+        inputLock.withLock { targeting.canvasCaretRect(forGlobal: g) }
+    }
+
     private func activateBounded(_ a: WorkspaceTileAssignment) {
         guard let frame = inputLock.withLock({ targeting.windowFrames[a.windowID] }) else { return }
         Self.raise(pid: a.pid, frame: frame)

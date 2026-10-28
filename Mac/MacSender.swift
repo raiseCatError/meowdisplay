@@ -885,6 +885,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
     private var lastCursorPNGHash = 0
     private var cursorSeq: UInt64 = 0
+    // Caret-following Zoom While Typing (PROTOCOL.md 6.11): while this
+    // receiver has control and reports its keyboard open, the focused text
+    // caret's rectangle is read through Accessibility and sent to it. Used
+    // on `queue` only; the reads themselves run on the shared reader queue.
+    private static let textCaretReadQueue = DispatchQueue(label: "textCaret.reader", qos: .userInitiated)
+    private var textCaretSeq: UInt64 = 0
+    private lazy var textCaretFollower = TextCaretFollower(
+        provider: AXFocusedCaretProvider(), readQueue: Self.textCaretReadQueue, ownerQueue: queue,
+        isPermitted: { [weak self] in self?.textCaretFollowingPermitted() ?? false },
+        normalize: { [weak self] in self?.normalizedTextCaret($0) },
+        send: { [weak self] in self?.sendTextCaret($0) })
     private var captureDisplayID: CGDirectDisplayID = 0
     private let captureLifecycleLock = NSLock()
     private var captureLifecycle = CaptureLifecycleState()
@@ -2870,6 +2881,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func stopOnQueue() {
         stopWorkspaceEngine()
+        textCaretFollower.stop()
         let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
         // A stopped pipeline holds no admission and no grant: a late
@@ -4583,6 +4595,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    // MARK: - Text caret (Mac -> receiver)
+
+    /// Following the caret needs what keyboard input needs: this
+    /// connection's own control grant and a capture that is fully running.
+    private func textCaretFollowingPermitted() -> Bool {
+        !stopped && sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
+            && captureStateSnapshot().allowsKeyboardInput
+    }
+
+    /// A caret rectangle in global points -> the space this receiver is
+    /// shown: the streamed display, or in Window mode the workspace canvas
+    /// through the tile being typed into. Nil when it is somewhere else.
+    private func normalizedTextCaret(_ global: CGRect) -> CGRect? {
+        if mode == .window { return workspaceEngine?.caretCanvasRect(forGlobal: global) }
+        guard captureDisplayID != 0 else { return nil }
+        return TextCaretNormalizer.normalized(global, in: CGDisplayBounds(captureDisplayID))
+    }
+
+    private func sendTextCaret(_ rect: CGRect?) {
+        textCaretSeq &+= 1
+        sendJSONObject(TextCaretWire.message(rect: rect, sequence: textCaretSeq))
+    }
+
     // MARK: - Local cursor echo (Mac -> phone)
 
     private func startCursorEcho() {
@@ -5215,6 +5250,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             default:
                 break   // unknown keyboard action from a newer peer — ignore
             }
+            // The caret just moved (or is about to): read it soon.
+            textCaretFollower.noteInput()
+        case WireMessage.keyboardState:
+            // Optional (PROTOCOL.md 6.11). Reached only for an admitted
+            // session (gate above); the follower re-checks control on every
+            // step, so an open keyboard without a grant reads nothing.
+            guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
+            textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.workspaceRequest,
              WireMessage.workspaceFocus, WireMessage.windowAction:
             // Admitted sessions only (gate above). Window metadata exists only
@@ -5581,6 +5624,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// input the old connection held — a grant, or a request still waiting
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
+        textCaretFollower.stop()
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
         if dropped {
@@ -6326,7 +6370,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
                                       "min": WireProtocol.minSupportedPeer]
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
-        if WindowStreamingPolicy.isAllowed() { welcome["features"] = [WindowWorkspaceWire.welcomeFeature] }
+        var features = [TextCaretWire.welcomeFeature]
+        if WindowStreamingPolicy.isAllowed() { features.insert(WindowWorkspaceWire.welcomeFeature, at: 0) }
+        welcome["features"] = features
         sendJSONObject(welcome)
     }
 
