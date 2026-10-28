@@ -1,6 +1,7 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
 import android.app.Activity
+import android.os.Build
 import android.view.HapticFeedbackConstants
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -118,7 +119,7 @@ fun ReceiverScreen(
     // MeowDisplay (the Mac is told to expect this device back). The keyboard and Settings take Back first.
     BackHandler { (context as? Activity)?.moveTaskToBack(true) }
     LaunchedEffect(Unit) {
-        controller.hapticEvents.collect { haptic -> hostView.performHapticFeedback(hapticConstant(haptic)) }
+        controller.hapticEvents.collect { haptic -> hapticConstant(haptic)?.let(hostView::performHapticFeedback) }
     }
     DisposableEffect(Unit) {
         val accessibility = context.getSystemService(AccessibilityManager::class.java)
@@ -318,18 +319,22 @@ private fun rememberFoldRegions(): List<CGRect> {
     return regions
 }
 
-private fun hapticConstant(haptic: ReceiverHaptic): Int = when (haptic) {
-    is ReceiverHaptic.Control -> when (haptic.event) {
-        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Selection -> HapticFeedbackConstants.CLOCK_TICK
-        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Confirmation,
-        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Reset -> HapticFeedbackConstants.CONFIRM
-        else -> HapticFeedbackConstants.KEYBOARD_TAP
+/** The Android feedback for a receiver haptic; null plays nothing. CONFIRM needs API 30, so 29 falls back to a tap. */
+private fun hapticConstant(haptic: ReceiverHaptic): Int? {
+    val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.KEYBOARD_TAP
+    return when (haptic) {
+        is ReceiverHaptic.Control -> when (haptic.event) {
+            com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Selection -> HapticFeedbackConstants.CLOCK_TICK
+            com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Confirmation,
+            com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Reset -> confirm
+            else -> HapticFeedbackConstants.KEYBOARD_TAP
+        }
+        is ReceiverHaptic.SmartTouch -> when (haptic.feedback) {
+            SmartTouchFeedback.DirectTouchOverride -> HapticFeedbackConstants.LONG_PRESS
+            SmartTouchFeedback.WindowDragArmed -> confirm
+            // No continuous ramp on Android: the build-up is silent, the arming tick confirms.
+            else -> null
+        }
+        ReceiverHaptic.RotationSnap -> HapticFeedbackConstants.CLOCK_TICK
     }
-    is ReceiverHaptic.SmartTouch -> when (haptic.feedback) {
-        SmartTouchFeedback.DirectTouchOverride -> HapticFeedbackConstants.LONG_PRESS
-        SmartTouchFeedback.WindowDragArmed -> HapticFeedbackConstants.CONFIRM
-        // No continuous ramp on Android: the build-up is silent, the arming tick confirms.
-        else -> HapticFeedbackConstants.NO_HAPTICS
-    }
-    ReceiverHaptic.RotationSnap -> HapticFeedbackConstants.CLOCK_TICK
 }
