@@ -775,6 +775,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 target.point = again.point
             }
         }
+        if phase == .down, !target.activates, !isTopmost(target.windowID, at: target.point, cached: false) {
+            // The active tile's window was covered on the Mac since (someone
+            // clicked another app there): a press in its tile brings it back,
+            // as a press on another tile does.
+            target.activates = true
+        }
         if target.activates {
             Self.raise(pid: target.pid, frame: targeting.windowFrames[target.windowID] ?? .zero)
             keyboardCheckedAt = 0
@@ -808,6 +814,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.sourceVector(dx: dx, dy: dy) }
     }
 
+    func locate(x: Double, y: Double) -> CGPoint? {
+        inputLock.withLock { targeting.globalPoint(at: WorkspacePoint(x: x, y: y)) }
+    }
+
     func keyboardTargetReady() -> Bool {
         inputLock.lock()
         defer { inputLock.unlock() }
@@ -820,8 +830,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             var isChild = false
             if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
                 isChild = info.isChild
-                focusedID = inputLock.withLock { targeting.windowFrames }
-                    .first { Self.framesMatch($0.value, info.frame) }?.key ?? (info.isChild ? nil : 0)
+                focusedID = WorkspaceKeyboardGate.focusedTileWindow(
+                    active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
+                    frames: inputLock.withLock { targeting.windowFrames }, matches: Self.framesMatch)
             }
             let decision = WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
                                                         focusedWindowIsChild: isChild)

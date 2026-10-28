@@ -716,8 +716,11 @@ final class InputInjector {
 
     /// Global CG point for a normalized video coordinate on this injector's
     /// target display — the same mapping touch/pointer input uses.
-    func globalPoint(x: Double, y: Double) -> CGPoint {
-        InputCoordinateMapper.point(x: x, y: y, in: CGDisplayBounds(displayID))
+    /// The Mac point under video point `x`/`y`. In Window mode it goes through
+    /// the tile under it (nil over gaps and letterbox).
+    func globalPoint(x: Double, y: Double) -> CGPoint? {
+        if let mapper = inputLock.withLock({ targetMapper }) { return mapper.locate(x: x, y: y) }
+        return InputCoordinateMapper.point(x: x, y: y, in: CGDisplayBounds(displayID))
     }
 
     private func screenPoint(nx: Double, ny: Double) -> CGPoint {

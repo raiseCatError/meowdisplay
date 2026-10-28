@@ -157,6 +157,17 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(t.keyboardTarget?.tileID, "a", "keyboard stays with the clicked tile")
     }
 
+    func testLocatingAPointChangesNothing() {
+        // Smart Touch asks what is under a finger before the press: it must
+        // land in the tile's window and leave hover, focus and bindings alone.
+        let t = twoTiles()
+        let p = try! XCTUnwrap(t.globalPoint(at: .init(x: 0.75, y: 0.5)))
+        XCTAssertEqual(p.x, 3500, accuracy: 1e-6)
+        XCTAssertEqual(p.y, 350, accuracy: 1e-6)
+        XCTAssertNil(t.globalPoint(at: .init(x: 0.75, y: 0.1)), "letterbox: nothing under it")
+        XCTAssertEqual(t, twoTiles())
+    }
+
     func testADragStaysInTheWindowItStartedIn() {
         var t = twoTiles()
         _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))
@@ -247,6 +258,20 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
     }
 
     // MARK: Budget
+
+    func testTwoWindowsWithOneFrameStillTypeIntoTheActiveOne() {
+        // Measured on the Moto: two windows stacked exactly on the Mac; the
+        // focused one must resolve to the active tile's window, not its twin.
+        let frame = CGRect(x: 300, y: 200, width: 800, height: 532)
+        let frames: [UInt32: CGRect] = [7: frame, 9: frame, 11: CGRect(x: 0, y: 0, width: 400, height: 300)]
+        let match = WindowWorkspaceEngine.framesMatch
+        for active: UInt32 in [7, 9] {
+            XCTAssertEqual(WorkspaceKeyboardGate.focusedTileWindow(active: active, focusedFrame: frame, isChild: false, frames: frames, matches: match), active)
+        }
+        XCTAssertEqual(WorkspaceKeyboardGate.focusedTileWindow(active: 7, focusedFrame: frames[11]!, isChild: false, frames: frames, matches: match), 11)
+        XCTAssertEqual(WorkspaceKeyboardGate.focusedTileWindow(active: 7, focusedFrame: CGRect(x: 5, y: 5, width: 50, height: 50), isChild: false, frames: frames, matches: match), 0)
+        XCTAssertNil(WorkspaceKeyboardGate.focusedTileWindow(active: 7, focusedFrame: CGRect(x: 5, y: 5, width: 50, height: 50), isChild: true, frames: frames, matches: match))
+    }
 
     func testCaptureBudgetFavoursTheActiveTile() {
         XCTAssertEqual(WorkspaceCaptureBudget.fps(isActive: true, tileCount: 9, streamFPS: 60, available: true), 60)

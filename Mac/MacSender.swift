@@ -5151,12 +5151,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // `scrollable` and the additive `windowDrag`.
             guard let id = obj["id"] as? Int else { return }
             guard receiverInputIsAllowed(), let injector = inputInjector,
-                  let x = obj["x"] as? Double, let y = obj["y"] as? Double else {
+                  let x = obj["x"] as? Double, let y = obj["y"] as? Double,
+                  let point = injector.globalPoint(x: x, y: y) else {
                 sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id,
                                 "scrollable": false, "windowDrag": false])
                 return
             }
-            let point = injector.globalPoint(x: x, y: y)
             let selfBox = self.selfBox
             SmartTouchTargetClassifier.queue.async {
                 let decision = SmartTouchTargetClassifier.classify(at: point)

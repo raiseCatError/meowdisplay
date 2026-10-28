@@ -113,6 +113,9 @@ protocol InputTargetMapper: AnyObject, Sendable {
     /// pointer (scale and rotation applied).
     func scrollVector(dx: Double, dy: Double) -> CGVector
     func keyboardTargetReady() -> Bool
+    /// Where canvas point `x`/`y` (normalized) lands on the Mac, without
+    /// changing hover, focus or bindings. Nil outside every tile.
+    func locate(x: Double, y: Double) -> CGPoint?
 }
 
 /// Where one input event goes. Hover, active tile and the Mac's own focus are
@@ -212,6 +215,12 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         }
     }
 
+    /// The Mac point under canvas point `p` (normalized), changing nothing.
+    func globalPoint(at p: WorkspacePoint) -> CGPoint? {
+        guard let a = tile(at: p) else { return nil }
+        return global(a, p, clamped: false)
+    }
+
     /// Relative motion (Trackpad mode, mice): moves the workspace pointer in
     /// canvas pixels, then resolves like an absolute move. The pointer moves
     /// freely across tiles; it is never trapped in the active one.
@@ -300,6 +309,16 @@ enum WorkspaceKeyboardGate {
 
     /// `focusedWindowIsChild`: the focused window is a dialog/sheet/panel of
     /// the same app (followed as part of the tile).
+    /// Which tiled window the Mac's focused window is, by frame (AX has no window
+    /// id). The active tile's own window is checked first, so another tile's
+    /// window with the same frame never takes its place. 0: some untiled window;
+    /// nil: a dialog or panel of the app (its child).
+    static func focusedTileWindow(active: UInt32, focusedFrame: CGRect, isChild: Bool, frames: [UInt32: CGRect],
+                                  matches: (CGRect, CGRect) -> Bool) -> UInt32? {
+        if let own = frames[active], matches(own, focusedFrame) { return active }
+        return frames.first { matches($0.value, focusedFrame) }?.key ?? (isChild ? nil : 0)
+    }
+
     static func decide(active: WorkspaceTileAssignment?, frontmostPID: Int32?, focusedWindowID: UInt32?,
                        focusedWindowIsChild: Bool) -> Decision {
         guard let active else { return .noActiveTile }
