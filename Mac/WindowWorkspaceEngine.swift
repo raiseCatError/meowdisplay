@@ -858,7 +858,16 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         // The point must also be inside the target itself, on screen.
         let ok = covering == nil && (Self.currentFrame(windowID)?.contains(point) ?? false)
-        topmostCache[windowID] = (now, ok ? CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80) : covering!, ok)
+        let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
+        // Cached only as "covered by this window" or "fine near here"; outside the
+        // target (or off screen) is never cached, so it is re-checked every time.
+        if ok {
+            topmostCache[windowID] = (now, around, true)
+        } else if let covering {
+            topmostCache[windowID] = (now, covering, false)
+        } else {
+            topmostCache[windowID] = nil
+        }
         return ok
     }
 
