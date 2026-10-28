@@ -180,6 +180,8 @@ struct SystemSettingsView: View {
                             .accessibilityHidden(true)
                     }
                 }
+            } footer: {
+                Text(ProjectLinks.tagline)
             }
         }
         .formStyle(.grouped)

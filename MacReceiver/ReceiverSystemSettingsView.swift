@@ -65,7 +65,7 @@ private struct ReceiverSystemPage: View {
                     .controlSize(.small)
             }
 
-            Section("About") {
+            Section {
                 ReceiverValueRow("Version", value: appVersion)
                 Link(destination: ProjectLinks.gitHub) {
                     Label("MeowDisplay on GitHub", systemImage: "link")
@@ -75,6 +75,10 @@ private struct ReceiverSystemPage: View {
                         Label("Support MeowDisplay", systemImage: "heart")
                     }
                 }
+            } header: {
+                Text("About")
+            } footer: {
+                Text(ProjectLinks.tagline)
             }
         }
     }

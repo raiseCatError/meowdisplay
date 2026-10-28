@@ -4,7 +4,7 @@
 
 # MeowDisplay
 
-**Mac everywhere.<br>On whatever display.**
+**Mac Everywhere, On Whatever Display**
 
 Use your iPhone or iPad as another display for your Mac — and control the Mac
 right from it.

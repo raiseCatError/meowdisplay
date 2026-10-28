@@ -1338,6 +1338,8 @@ private struct AboutSettingsPage: View {
                         Image(systemName: "pawprint.fill").accessibilityHidden(true)
                     }
                 }
+            } footer: {
+                Text(ProjectLinks.tagline)
             }
             Section {
                 Link(destination: macAppURL) {

@@ -4,6 +4,9 @@
 import Foundation
 
 enum ProjectLinks {
+    /// The product tagline. Shown under About only, never on a home screen.
+    static let tagline = String(localized: "Mac Everywhere, On Whatever Display")
+
     /// The source repository and project page: how to get, update and
     /// report issues for every MeowDisplay app.
     static let gitHub = URL(string: "https://github.com/raiseCatError/meowdisplay")!
