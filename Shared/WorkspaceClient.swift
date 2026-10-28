@@ -398,7 +398,13 @@ final class WorkspaceModel: ObservableObject {
         }
     }
     func move(_ tile: String, to target: WorkspaceDropTarget) { edit { $0.materializing(hinge: hinge).moving(tile, to: target) } }
-    func resize(_ divider: WorkspaceDivider, delta: Double) { edit { WorkspaceGeometry.resizing($0, divider: divider, delta: delta, in: size) } }
+    /// A divider drag: every step resizes, the whole drag is one undo step. Call `endResize()` when it ends.
+    func resize(_ divider: WorkspaceDivider, delta: Double) {
+        history.beginGroup()
+        edit { WorkspaceGeometry.resizing($0, divider: divider, delta: delta, in: size) }
+    }
+
+    func endResize() { history.endGroup() }
     func rotate(_ tile: String) { edit { $0.rotating(tile) } }
     func toggleFit(_ tile: String) { edit { l in l.settingFit(l.tiles[tile]?.fit == .fill ? .fit : .fill, for: tile) } }
     func toggleMaximize(_ tile: String) { edit { l in l.maximized == tile ? l.restoringMaximized() : l.maximizing(tile) } }

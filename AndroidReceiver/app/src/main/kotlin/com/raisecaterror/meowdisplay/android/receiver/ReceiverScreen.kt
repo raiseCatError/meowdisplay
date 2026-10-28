@@ -264,7 +264,7 @@ fun ReceiverScreen(
             LaunchedEffect(frame, folds, transform) {
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
             }
-            WorkspaceChrome(workspace, transform, state.inputAllowed)
+            WorkspaceChrome(workspace, transform, state.inputAllowed, avoid = occupied)
             if (wsUi.available) WindowRail(workspace)
         }
 

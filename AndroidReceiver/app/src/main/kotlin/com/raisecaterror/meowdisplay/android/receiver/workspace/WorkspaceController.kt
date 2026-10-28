@@ -82,6 +82,9 @@ class WorkspaceController(context: Context, private val media: MediaController) 
     private val state = MutableStateFlow(WorkspaceUi(railEdge = runCatching { RailEdge.valueOf(prefs.getString(RAIL_EDGE, null) ?: "") }.getOrDefault(RailEdge.Top)))
     val ui: StateFlow<WorkspaceUi> = state.asStateFlow()
 
+    /** Where the collapsed rail handle is (window dp), so tile pills stay clear of it. UI only. */
+    val railHandle = androidx.compose.runtime.mutableStateOf<com.raisecaterror.meowdisplay.core.controls.CGRect?>(null)
+
     private val thumbs = MutableStateFlow<Map<Long, ImageBitmap>>(emptyMap())
     val thumbnails: StateFlow<Map<Long, ImageBitmap>> = thumbs.asStateFlow()
     private val iconState = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
@@ -260,7 +263,13 @@ class WorkspaceController(context: Context, private val media: MediaController) 
 
     fun swap(a: String, b: String) = edit { it.swapping(a, b) }
     fun move(tile: String, target: WDropTarget) = edit { it.materializing(hinge).moving(tile, target) }
-    fun resize(divider: WDivider, delta: Double) = edit { WGeometry.resizing(it, divider, delta, size) }
+    /** A divider drag: every step resizes, the whole drag is one undo step. Call [endResize] when it ends. */
+    fun resize(divider: WDivider, delta: Double) {
+        history.beginGroup()
+        edit { WGeometry.resizing(it, divider, delta, size) }
+    }
+
+    fun endResize() = history.endGroup()
     fun rotate(tile: String) = edit { it.rotating(tile) }
     fun toggleFit(tile: String) = edit { l -> l.settingFit(if (l.tiles[tile]?.fit == WFit.Fill) WFit.Fit else WFit.Fill, tile) }
     fun toggleMaximize(tile: String) = edit { l -> if (l.maximized == tile) l.restoringMaximized() else l.maximizing(tile) }

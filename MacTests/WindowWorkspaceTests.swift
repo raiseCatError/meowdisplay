@@ -279,6 +279,21 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertLessThanOrEqual(history.past.count, WorkspaceHistory.depth)
     }
 
+    func testAGroupIsOneUndoStep() {
+        var history = WorkspaceHistory()
+        let a = WorkspaceLayout(preset: .grid2x2, tiles: tiles(4))
+        let b = a.rotating("t0"), c = b.rotating("t1"), d = c.rotating("t2")
+        history.record(a)
+        history.beginGroup()
+        history.record(b); history.record(c)   // a drag in progress
+        history.beginGroup()                    // repeated begins stay in the same group
+        history.record(d)
+        history.endGroup()
+        XCTAssertEqual(history.undo(), b)
+        XCTAssertEqual(history.undo(), a)
+        XCTAssertNil(history.undo())
+    }
+
     // MARK: Hinge
 
     func testNoTileEverSitsInsideAHinge() {

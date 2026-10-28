@@ -955,10 +955,28 @@ enum WorkspaceAdaptation {
 struct WorkspaceHistory: Equatable, Sendable {
     static let depth = 20
     private(set) var past: [WorkspaceLayout] = []
+    private var grouping = false
+    private var groupRecorded = false
 
     var canUndo: Bool { !past.isEmpty }
 
+    /// Until `endGroup()`, changes are one undo step (a divider drag sends many).
+    mutating func beginGroup() {
+        guard !grouping else { return }
+        grouping = true
+        groupRecorded = false
+    }
+
+    mutating func endGroup() {
+        grouping = false
+        groupRecorded = false
+    }
+
     mutating func record(_ layout: WorkspaceLayout) {
+        if grouping {
+            if groupRecorded { return }
+            groupRecorded = true
+        }
         if past.last == layout { return }
         past.append(layout)
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }

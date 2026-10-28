@@ -115,6 +115,30 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual((request?["tiles"] as? [[String: Any]])?.compactMap { $0["window"] as? Int }, [12])
     }
 
+    func testOneDividerDragIsOneUndoStepAndTracksTheFinger() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-d"))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(30, 1, "a"), (31, 1, "b")]))
+        m.updateSpace(WorkspaceSize(width: 1366, height: 1024), hinge: nil)
+        for w in m.catalog!.windows { m.choose(w, asNewTile: true) }
+        let before = m.layout
+        let divider = WorkspaceGeometry.frames(for: m.layout, in: WorkspaceSize(width: 1366, height: 1024)).dividers[0]
+        for _ in 0..<20 { m.resize(divider, delta: 0.01) }   // one drag, many small steps
+        m.endResize()
+        let ratio = { (l: WorkspaceLayout) -> Double in
+            if case .split(_, _, let ratios) = l.root { return ratios[0] }
+            return .nan
+        }
+        XCTAssertEqual(ratio(m.layout), ratio(before) + 0.2, accuracy: 0.001, "every step of the drag applies")
+        m.resize(divider, delta: -0.05)   // a second drag
+        m.endResize()
+        m.undo()
+        XCTAssertEqual(ratio(m.layout), ratio(before) + 0.2, accuracy: 0.001, "undo reverts only the second drag")
+        m.undo()
+        XCTAssertEqual(m.layout, before, "a second undo reverts the whole first drag")
+    }
+
     func testCompactSpaceStacksTilesAndKeepsThem() {
         let m = model { _ in }
         m.apply(.connected(peerID: "mac-c"))

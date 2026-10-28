@@ -50,6 +50,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.key
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +73,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.raisecaterror.meowdisplay.core.controls.CGPoint
 import com.raisecaterror.meowdisplay.core.controls.CGRect
@@ -98,7 +105,13 @@ private fun RemoteViewportTransform.viewRect(r: WRect): CGRect {
  * dividers take touches; everything else in a tile goes to the Mac as usual.
  */
 @Composable
-fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTransform, inputAllowed: Boolean) {
+fun WorkspaceChrome(
+    controller: WorkspaceController,
+    transform: RemoteViewportTransform,
+    inputAllowed: Boolean,
+    /** On-screen controls (window dp): tile pills and the Arrange bar stay clear of them. */
+    avoid: List<CGRect> = emptyList(),
+) {
     val ui by controller.ui.collectAsState()
     val icons by controller.icons.collectAsState()
     if (!ui.windowMode || !transform.isValid) return
@@ -111,9 +124,11 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
     val multi = ui.layout.tiles.size > 1
     // Pills at the top edge stay clear of the cutout and any visible status bar.
     val topInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getTop(this).toDp().value.toDouble() }
+    val railHandle by controller.railHandle
+    var box by remember { mutableStateOf(IntSize.Zero) }
 
-    Box(Modifier.fillMaxSize()) {
-        for ((id, rect) in frames.tiles) {
+    Box(Modifier.fillMaxSize().onSizeChanged { box = it }) {
+        for ((id, rect) in frames.tiles) key(id) {
             val r = transform.viewRect(rect)
             val tile = ui.layout.tiles[id] ?: continue
             val remote = ui.tileState(id)
@@ -150,10 +165,15 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                 }
                 if (multi || ui.arranging) {
                     var menu by remember { mutableStateOf(false) }
+                    var pill by remember { mutableStateOf(IntSize.Zero) }
                     val name = remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
+                    // Where the pill would sit; if the rail handle or a control is there, it moves down below it.
+                    val nominal = CGRect(r.minX + 6, maxOf(r.minY, topInset) + 6, pill.width / density.toDouble(), pill.height / density.toDouble())
+                    val clear = (avoid + listOfNotNull(railHandle)).filter { !nominal.isEmpty && it.intersects(nominal) }
+                        .maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
                     Row(
                         Modifier
-                            .padding(top = maxOf(0.0, topInset - r.minY).dp)
+                            .padding(top = (maxOf(0.0, topInset - r.minY) + clear).dp)
                             .padding(6.dp)
                             .background(if (active) Accent.copy(alpha = 0.9f) else Chip, RoundedCornerShape(14.dp))
                             .pointerInput(id) {
@@ -172,6 +192,7 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                             }
                             .clickable { menu = true }
                             .semantics { contentDescription = "$name tile options" + if (active) ", typing goes here" else "" }
+                            .onSizeChanged { pill = it }
                             .padding(horizontal = 10.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -219,16 +240,23 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
 
         // Arrange: divider grips and Done.
         if (ui.arranging) {
-            for (divider in frames.dividers) {
+            for (divider in frames.dividers) key(divider.path, divider.index, divider.axis) {
                 val r = transform.viewRect(divider.hitRect)
                 val horizontal = divider.axis == com.raisecaterror.meowdisplay.core.workspace.WAxis.Horizontal
+                // Keyed by which divider it is, not where it is: each resize step moves the
+                // divider, and a changing key would cancel the drag after the first step.
+                val current by rememberUpdatedState(divider)
+                val scale by rememberUpdatedState(if (horizontal) transform.displayedRect.width else transform.displayedRect.height)
                 Box(
                     Modifier.offset { IntOffset((r.minX * density).roundToInt(), (r.minY * density).roundToInt()) }.size(r.width.dp, r.height.dp)
-                        .pointerInput(divider) {
-                            detectDragGestures { change, amount ->
+                        .pointerInput(divider.path, divider.index, divider.axis) {
+                            detectDragGestures(
+                                onDragEnd = controller::endResize,
+                                onDragCancel = controller::endResize,
+                            ) { change, amount ->
                                 change.consume()
-                                val delta = if (horizontal) amount.x / density / transform.displayedRect.width else amount.y / density / transform.displayedRect.height
-                                controller.resize(divider, delta.toDouble())
+                                val delta = (if (horizontal) amount.x else amount.y) / density / scale
+                                controller.resize(current, delta.toDouble())
                             }
                         }
                         .semantics { contentDescription = "Resize tiles" },
@@ -237,7 +265,10 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                     Box(Modifier.size(if (horizontal) 6.dp else 44.dp, if (horizontal) 44.dp else 6.dp).background(Color.White.copy(alpha = 0.85f), CircleShape))
                 }
             }
-            Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp).background(Chip, RoundedCornerShape(20.dp)).padding(4.dp)) {
+            // Lifted above any control sitting at the bottom centre (the collapsed tray's button).
+            val band = CGRect(box.width / density / 2.0 - 110, box.height / density - 24.0 - 48, 220.0, 48.0)
+            val lift = avoid.filter { it.intersects(band) }.maxOfOrNull { band.maxY - it.minY + 8 } ?: 0.0
+            Row(Modifier.align(Alignment.BottomCenter).padding(bottom = (24 + lift).dp).background(Chip, RoundedCornerShape(20.dp)).padding(4.dp)) {
                 if (ui.canUndo) TextButton(onClick = controller::undo) { Text("Undo", color = Color.White) }
                 TextButton(onClick = { controller.setArranging(false) }) { Text("Done", color = Accent) }
             }
@@ -273,8 +304,14 @@ fun WindowRail(controller: WorkspaceController) {
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         if (!ui.railExpanded) {
             val current = ui.active?.let { ui.tileState(it)?.app }?.takeIf { it.isNotEmpty() }
+            DisposableEffect(Unit) { onDispose { controller.railHandle.value = null } }
+            val d = LocalDensity.current.density.toDouble()
             Box(
                 Modifier.align(align).padding(4.dp)
+                    .onGloballyPositioned { c ->
+                        val b = c.boundsInWindow()
+                        controller.railHandle.value = CGRect(b.left / d, b.top / d, b.width / d, b.height / d)
+                    }
                     .clickable { controller.setRailExpanded(true) }
                     .semantics {
                         contentDescription = "Show windows"

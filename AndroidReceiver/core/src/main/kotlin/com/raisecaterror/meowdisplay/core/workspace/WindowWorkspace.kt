@@ -580,10 +580,28 @@ object WAdaptation {
 
 class WHistory {
     private val past = ArrayDeque<WLayout>()
+    private var grouping = false
+    private var groupRecorded = false
     val canUndo get() = past.isNotEmpty()
     val depth get() = past.size
 
+    /** Until [endGroup], changes are one undo step (a divider drag sends many). */
+    fun beginGroup() {
+        if (grouping) return
+        grouping = true
+        groupRecorded = false
+    }
+
+    fun endGroup() {
+        grouping = false
+        groupRecorded = false
+    }
+
     fun record(layout: WLayout) {
+        if (grouping) {
+            if (groupRecorded) return
+            groupRecorded = true
+        }
         if (past.lastOrNull() == layout) return
         past.addLast(layout)
         while (past.size > DEPTH) past.removeFirst()

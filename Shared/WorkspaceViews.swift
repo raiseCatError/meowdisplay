@@ -194,7 +194,8 @@ struct WorkspaceChromeView: View {
                 .frame(width: r.width, height: r.height)
                 .contentShape(Rectangle())
                 .position(x: r.midX, y: r.midY)
-                .gesture(DragGesture()
+                // Measured in the workspace, not the grip: the grip moves with each step.
+                .gesture(DragGesture(coordinateSpace: .named("workspace"))
                     .onChanged { v in
                         // The change since the last event, as a share of the picture.
                         let dx = v.translation.width - lastDividerTranslation.width
@@ -202,7 +203,10 @@ struct WorkspaceChromeView: View {
                         lastDividerTranslation = v.translation
                         model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1))
                     }
-                    .onEnded { _ in lastDividerTranslation = .zero })
+                    .onEnded { _ in
+                        lastDividerTranslation = .zero
+                        model.endResize()
+                    })
                 .accessibilityLabel("Resize tiles")
         }
         HStack {
