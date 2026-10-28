@@ -177,6 +177,13 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
                 allowIdentityChange: Bool) -> Bool {
         pinWriteLock.lock()
         defer { pinWriteLock.unlock() }
+        snapshotLock.lock()
+        let heldElsewhere = pinState.isHeldByAnotherPeer(peerID, spki: spki)
+        snapshotLock.unlock()
+        guard !heldElsewhere else {
+            Log.info("SECURITY: refused a pin another peer already holds (peer \(peerID))")
+            return false
+        }
         switch TrustPinPolicy.decision(existing: pin(peerID: peerID), presented: spki) {
         case .match:
             return true

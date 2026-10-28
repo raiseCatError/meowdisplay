@@ -265,9 +265,9 @@ final class OwnerAuthTests: XCTestCase {
     // 2b. Defense in depth: the finalizer refuses to recreate a vanished pin from a stale classification.
     func testFinalizerRefusesToRecreatePinFromStaleSameKeyClassification() throws {
         let phone = PairingHandshake(role: .initiator, deviceID: "22222222-2222-2222-2222-222222222222",
-                                     displayName: "Phone", identitySPKI: Data("phone".utf8))
+                                     displayName: "Phone", identitySPKI: TestSPKI.of("phone"))
         let mac = PairingHandshake(role: .responder, deviceID: "11111111-1111-1111-1111-111111111111",
-                                   displayName: "Mac", identitySPKI: Data("mac".utf8))
+                                   displayName: "Mac", identitySPKI: TestSPKI.of("mac"))
         let result = try phone.result(peerHello: mac.localHello)
         let macResult = try mac.result(peerHello: phone.localHello)
         var stale = result.pending; stale.classification = .rePairSameKey

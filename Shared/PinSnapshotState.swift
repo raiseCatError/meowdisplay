@@ -57,7 +57,16 @@ struct PinSnapshotState: Sendable {
     }
 
     /// Which pinned peerID owns this SPKI; nil if it matches no current pin.
+    /// The peer that holds this key — only when exactly one does. Media
+    /// sessions derive the Mac from its certificate alone, so an ambiguous key
+    /// must not be judged by whichever entry happens to come first (F1).
     func peerID(forSPKI spki: Data) -> String? {
-        pins.first { $0.spki == spki }?.peerID
+        let holders = pins.filter { $0.spki == spki }
+        return holders.count == 1 ? holders[0].peerID : nil
+    }
+
+    /// Another peer already holds this key (pairing never proves possession of it).
+    func isHeldByAnotherPeer(_ peerID: String, spki: Data) -> Bool {
+        pins.contains { $0.peerID != peerID && $0.spki == spki }
     }
 }

@@ -34,6 +34,17 @@ enum PairingError: LocalizedError, Equatable {
 
 /// First-pairing messages only. The media protocol never accepts these and
 /// the pairing port never accepts media frames.
+/// Only an identity a TLS handshake could ever present may become a pin: a
+/// P-256 SPKI in its canonical DER. Every real peer sends its certificate's
+/// key, so this refuses nothing genuine; it stops a pairing from storing a pin
+/// that can never authenticate yet still occupies that peer id (F1; Android 29512b7).
+enum PairingIdentity {
+    static func isPinnable(_ spki: Data) -> Bool {
+        guard let key = try? P256.Signing.PublicKey(derRepresentation: spki) else { return false }
+        return key.derRepresentation == spki
+    }
+}
+
 struct PairingHello: Codable, Equatable {
     let version: Int
     let deviceID: String
@@ -48,6 +59,7 @@ struct PairingHello: Codable, Equatable {
               !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               displayName.utf8.count <= 128,
               identitySPKI.count <= 512,
+              PairingIdentity.isPinnable(identitySPKI),
               ephemeralPublicKey.count == 65,
               nonce.count == 32,
               (try? P256.KeyAgreement.PublicKey(x963Representation: ephemeralPublicKey)) != nil
