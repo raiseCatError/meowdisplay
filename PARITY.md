@@ -14,7 +14,11 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Connect from the device (Mac dials in) | Yes | Yes | Yes | Android: Connect, Connect with Extend/Mirror |
 | Same Wi-Fi discovery | Yes | Yes | Yes | |
 | USB cable | Yes | No | — | Android has no USB transport yet; Help says so. Mac Receiver connects over the network |
-| Remote (another network, e.g. Tailscale) | Yes | No | Yes | Android: not built; Help says so |
+| Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android: unit-tested; Tailscale off-LAN not yet seen on a phone |
+| Add Remote Mac: Pair over Remote, and an address for a paired Mac | Yes | Yes | Yes | Android: one Address field; the Mac must have Pair over Remote open for new pairs |
+| Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac |
+| Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; unit-tested only |
+| Route shown in the performance overlay | Yes | Yes | — | iOS shows its transport tag. Android shows Remote (Tailscale) on a remote session and nothing on a local one; it names Tailscale only when a VPN network covers the Mac's address |
 | How to Connect on the home screen | Yes | Yes | — | |
 | Settings & Help from the home screen | Yes | Yes | Yes | |
 | Home while connected, return to the picture | Yes | Yes | — | |
@@ -76,4 +80,4 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 
 Small: Switched Out, Video on/off, Resync. Medium: Streaming Profile and Maximum FPS, Mirror Display
 picker and Extend Shape, Zoom While Typing. Large: Custom Layout editor, Function Tray editor, Explore
-Demo, Remote pairing, a USB transport (Android has no usbmux; would need an accessory or adb-forward design).
+Demo, a USB transport (Android has no usbmux; would need an accessory or adb-forward design).

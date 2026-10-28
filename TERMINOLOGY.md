@@ -28,6 +28,12 @@ sentences where one is shown. Where an app differs today, the
 | **Forget This Mac** / **Forget This Device** | remove the pairing; pair again to use it. A row that already names the Mac may say just **Forget…** | unpair, remove trust |
 | **Allow** / **Not Now** / **Always Allow** / **Block** | the Mac's answers | Accept, Deny (as labels) |
 | **Wi-Fi**, **USB**, **Remote** (another network, e.g. Tailscale) | how devices connect | WiFi, wireless, LAN (in UI), tunnel |
+| **Add Remote Mac** | Android: the sheet and the link under the Macs list for reaching a Mac outside this Wi-Fi. One **Address** field, then **Pair New Mac** or **Use for a Paired Mac**. Pair over Remote is the Mac's window for the first pairing | Add Server, Add Host, Add Endpoint |
+| **Address** | where to reach a Mac on another network: a name (MagicDNS) or an IP address, with an optional `:port`. It is a hint; the pairing decides who the Mac is. Menu items: **Add Address for…**, **Edit Address for…**, **Remove Address** | Endpoint, Host, IP (in UI) |
+| **Security Details** | Android per-Mac menu item: the Mac's security key, short ID and saved address | Fingerprint, Certificate |
+| **Contacting your Mac…** · **Waiting for your Mac to connect…** · **Needs approval on your Mac** · **Reconnecting…** | Android Remote status while Connect is under way: the request is being sent, the request is delivered and the Mac should dial back, the Mac user must allow it, recovery after a lost connection | Knocking, Pinging, Dialing back |
+| **Remote** · **Local** | where a connected session runs: **Connected · Remote · Tailscale** on the card and **Remote (Tailscale)** in the Performance Overlay. Tailscale is named only when the evidence shows it; otherwise **Remote** or **VPN**. A session on this Wi-Fi shows no route in the overlay | Tunnel, Relay, Cloud |
+| **Nearby** | a paired Mac this device sees on the local network right now (Android Macs list). A saved address shows as **Saved remote · address** | Available locally, Online |
 | **Auto-Reconnect** | reconnect by itself after a lost connection | Automatic Reconnection |
 | **Settings & Help** | the settings entry on a home screen. Inside a session the same screen is titled **Settings** | Preferences, Options |
 | **Macs** · **How to Connect** · **This Device** | the home screen: one **Macs** card, then the links **How to Connect** · **Try the Demo** (iPhone/iPad) · **This Device**. This Device shows the name Macs list (and, on Android, the security key) | Your Macs, Nearby Devices, Device Details |

@@ -135,6 +135,18 @@ other end. It does not by itself admit a session:
   an identity or a trust mechanism** — the same pinned mutual-TLS session
   described above still authenticates the connection regardless of which
   route carried it.
+  On Android the saved address is stored per verified Mac, never trusted,
+  and never replaces a pin: a different key at the address ends the attempt
+  as "different Mac" and is not retried, and the same goes for a Mac that
+  does not accept this device. Retries are bounded, run only while the app
+  is in front, and never follow a security failure. The knock is a single
+  frame inside the pinned connection and changes nothing on the Mac that a
+  local request would not. The app creates no VPN and opens no relay or
+  port mapping; "Remote · Tailscale" on screen is a label drawn from the
+  phone's own network facts, not a security claim. Logs name only the kind of
+  address (IPv4, IPv6, DNS or Tailscale range). Android 17 asks for a Local
+  Network permission only from apps that target API 37; MeowDisplay targets
+  36 today and must declare the permission when it moves.
 - **MeowDisplay does not operate its own relay, cloud service, or account
   system.** Media (video/audio/input) travels directly between your two
   devices over whichever route is active; MeowDisplay itself never sees or

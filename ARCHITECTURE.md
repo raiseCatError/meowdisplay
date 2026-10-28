@@ -280,6 +280,16 @@ Sender's per-session Allow Input consent turns it on.
 - **Remote Access** connects to a stored, validated private-network endpoint
   (`RemoteEndpointStore`, `RemoteEndpointValidation`). The address is a
   routing hint only; the pinned TLS session still authenticates.
+- **Android Remote Access** (`AndroidReceiver/core/.../core/remote/`) is the
+  same design in Kotlin: `RemoteEndpoint` (validation shared by fixture with
+  `RemoteEndpointValidation`), `RemoteKnockClient`/`RemoteKnocker` (the pinned
+  knock to port 9003, one in flight per Mac), `RemoteConnectCoordinator`
+  (Connect, dial-back wait, bounded recovery by `RemoteRecoveryPolicy`),
+  `RemoteMacStore` (addresses keyed by verified peer ID), `MacStatusReducer`
+  (the row text), `RouteClassifier` and `RemotePairingRunner` (Pair over
+  Remote on port 9004). The app wires them in `android/remote/RemoteAccess.kt`
+  (`RouteMonitor` reads `ConnectivityManager`; `RemoteMacPrefs` persists) and
+  draws them in `ui/ReceiverHome.kt` and `ui/RemoteAccessUi.kt`.
 - **Wake & Connect** (`WakeConnectCoordinator`, `WakeOnLAN`) asks a paired
   Mac's network to wake it and then connects. It depends on supported
   hardware, Wake for Network Access and network conditions, and targets a

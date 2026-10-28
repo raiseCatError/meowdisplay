@@ -171,9 +171,29 @@ Android Keystore; its pin is that key's SubjectPublicKeyInfo DER, compared
 byte-for-byte exactly like every other pin. It sends `hello.device`
 `"Android"`. It has no USB binding yet (section 2.2 is usbmuxd, which only
 reaches Apple devices) and does not list `"quic"` in `transports` until it
-has a QUIC listener, so senders reach it over TCP on the local network. A
-future USB binding would tunnel the same pinned-mTLS port (for example
-`adb reverse`) and change nothing above it.
+has a QUIC listener, so senders reach it over TCP. A future USB binding
+would tunnel the same pinned-mTLS port (for example `adb reverse`) and change
+nothing above it.
+
+Android also reaches a paired Mac that is not on the local network (Remote
+Access), over TCP only, with the two bindings every receiver uses and nothing
+new on the wire. **Knock:** the receiver opens a pinned mutual-TLS 1.3
+connection to the Mac's `remoteRequestPort` (TCP 9003) at a saved address,
+sends the one `remoteConnectRequest` frame of section 6.9 (`manual` only while
+its user's own Connect is outstanding, `automatic` for its bounded recovery
+after a lost remote session) and closes. The Mac decides, then dials the
+receiver's TCP 9001 listener exactly as for a local request (Bonjour first,
+then its saved hint, then the knock's source address). The receiver pins the
+Mac's key, never the address, and treats a different key at the address as a
+security failure, not a retry. **Pair over Remote:** the receiver dials the
+Mac's remote pairing listener (TCP 9004, open for 180 s after the Mac user
+starts Pair over Remote) and runs the same pairing ceremony as section 2.3 as
+initiator: commit/reveal, six-digit code on both screens, confirmation on both.
+Neither binding grants input, and an address is a hint saved per verified
+peer ID. Android validates the typed address with the same rules as the Mac
+(`fixtures/remote/endpoint-vectors.json`, which both test suites replay) and
+frames the knock byte-for-byte as `fixtures/remote/knock-frame-vectors.json`
+(both sides test it).
 
 ### 2.3 First pairing (pv 11)
 
@@ -1660,3 +1680,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-27 | No wire change: Android receivers (section 2.2a); `hello.device` `"Android"` and `updateRequired.target` `"android"`. Cross-platform test vectors in `fixtures/receiver-protocol/` |
 | 2026-10-27 | Additive, no `pv` change: opt-in same-Mac login-session TXT keys `hg`/`hn`/`sl`/`ss` on `_opendisplay-mac-pair._tcp` (section 2.1) |
 | 2026-10-29 | Additive, no `pv` change: text caret (section 6.11), `welcome.features` `textCaret`, `keyboardState`, `textCaret` |
+| 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |

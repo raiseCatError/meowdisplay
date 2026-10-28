@@ -149,6 +149,36 @@ in the app's connection/endpoint settings. The endpoint address is only a
 routing hint — the same pairing-derived encrypted session still authenticates
 the connection; see [README.md § Security](README.md#security).
 
+### On Android
+
+MeowDisplay does not create a VPN of its own, so install the Tailscale app on
+the phone, sign in to the same tailnet as the Mac and leave it on. The app
+needs no extra permission for this.
+
+1. **Pair a new Mac over Remote.** On the Mac, open Settings → Devices and
+   choose **Open Pair over Remote** (it stays open for 3 minutes). On the
+   phone, tap **Add Remote Mac**, type the Mac's Tailscale address or MagicDNS
+   name in **Address** (add `:port` only if the Mac uses another one), and tap
+   **Pair New Mac**. Both screens show the same six digits; confirm on both.
+2. **Or add an address to a Mac you already paired.** In **Add Remote Mac**,
+   type the address, tap **Use for a Paired Mac** and choose the Mac. The same
+   is under that Mac's ••• menu: **Add Address…** or **Edit Address…**. Remove
+   it with **Remove Address**. An address is a hint; it never makes a different
+   Mac trusted, and **Security Details** shows the key that decides.
+3. **Connect.** Tap **Connect** on the Mac. When it is not on this Wi-Fi the
+   phone asks it to connect (**Contacting your Mac…**, then **Waiting for your
+   Mac to connect…**) and the Mac dials back to the phone over Tailscale. If
+   the Mac asks for approval, the phone shows **Needs approval on your Mac**;
+   **Cancel** withdraws the request. A paired Mac that is on this Wi-Fi is
+   connected locally; **Connect over Remote** in its menu forces the remote
+   path.
+
+The Mac needs **Auto-Reconnect** on to answer a request that the phone makes
+by itself after a dropped remote session; a request you start by tapping
+Connect is always shown to the Mac's own policy. If the Mac connects but you
+cannot see its picture, check that Tailscale allows the Mac to reach the
+phone as well as the phone to reach the Mac; the Mac dials the phone.
+
 ## Using MeowDisplay
 
 ### Mirror vs. Extend
@@ -276,6 +306,15 @@ automatically after you log in.
   and that the Mac isn't asleep (Remote Access wake has the local-only
   limitation described in the
   [current status](REMOTE_WAKE_ON_LAN.md#current-status) of Wake & Connect).
+  On Android the status under the Mac says what failed: **Offline · address not
+  found** (check the address), **timed out** (Mac asleep or Tailscale off),
+  **connection refused** (open MeowDisplay on the Mac), **no route** (turn
+  Tailscale or the VPN on), **The Mac didn't connect back** (the Mac got the
+  request but could not reach the phone; check Auto-Reconnect, the Mac's
+  firewall and Tailscale access in that direction), **Connection failed:
+  different Mac at this address** and **This Mac doesn't accept this device**
+  (both are identity problems: the phone never retries them; check the
+  address, or forget the Mac here and pair again).
 - **Wake & Connect doesn't work**: confirm Wake for Network Access is
   enabled on the Mac (System Settings → Energy) and that the Mac's
   hardware/firmware supports Wake-on-LAN; this currently only works over
