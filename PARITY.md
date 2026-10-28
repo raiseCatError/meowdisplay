@@ -19,7 +19,7 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Settings & Help from the home screen | Yes | Yes | Yes | |
 | Home while connected, return to the picture | Yes | Yes | — | |
 | Auto-Reconnect switch | Yes | Yes | Yes | |
-| Request Input Automatically (per Mac) | Yes | Yes | No | |
+| Request Control Automatically (per Mac) | Yes | Yes | No | |
 | Another Mac waits until its invitation is accepted (F2) | Yes | Yes | Yes | unit-tested both; two-Mac physical test blocked (one Mac) |
 | Switched Out (same-Mac account switch) | Yes | No | Yes | |
 | Explore Demo | Yes | No | No | |

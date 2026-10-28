@@ -46,7 +46,7 @@ later). Both are free.
 | **Display** | Mirror an existing Mac display · Extend with a separate virtual workspace · Windows: Mac windows you pick, side by side (Window mode) · clamshell and headless workflows |
 | **Control** | Direct Touch (Natural Touch or Classic) · Trackpad · Precise Control in Classic and Trackpad · Smart Touch (Experimental, Classic) · keyboard · Apple Pencil · Mac gestures |
 | **Devices & permissions** | Active Display · Known Devices · Nearby pairing · connection policies · Allow Input and per-session control requests |
-| **Picture in Picture** | Keep a view-only window of the live Mac on screen while you use other apps (iPhone and iPad) |
+| **Picture in Picture** | Keep a View Only window of the live Mac on screen while you use other apps (iPhone and iPad) |
 | **Shortcuts** | Main Control Tray · Function Tray · Chords and modifier palettes · customizable actions · profiles · Auto-hide |
 | **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
 | **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
@@ -158,9 +158,9 @@ the **Settings gear stays reachable**. The Mac can **Revoke Control** in the
 device's settings, or the receiver can **Turn Off** control. These permissions
 are separate from permission to connect.
 
-A touch that input doesn't allow shows a brief **Request Input** prompt; it
+A touch that control doesn't allow shows a brief **Request Control** prompt; it
 never changes a setting on its own. Requests are only sent automatically when
-you turn on **Request Input Automatically** for that Mac, and the Mac still
+you turn on **Request Control Automatically** for that Mac, and the Mac still
 decides.
 
 **Local view navigation is separate from input.** With **Allow Local View
@@ -388,7 +388,7 @@ stream the receiver is already showing.
   live session can enter the system floating window when you leave the app,
   when supported and available. Receiver Settings also offers **Start Picture
   in Picture** and **Stop Picture in Picture**.
-- **For glancing, not controlling.** The window is view-only: it shows what
+- **For glancing, not controlling.** The window is View Only: it shows what
   your Mac is doing, but touches in it never reach the Mac. All interaction
   stays in the full receiver.
 - **One tap back.** The window's restore button returns you to the full

@@ -24,7 +24,7 @@ and tablet differences are in the note.
 | Area | iPhone / iPad | Android | Mac Receiver |
 | --- | --- | --- | --- |
 | Open settings | Gear in the control tray; **Settings & Help** on Home | Gear in the control tray; **Settings & Help** on Home | **Settings…** (⌘,) |
-| Pages | General · Display · Input · Gestures · Controls · Audio · Connections · Paired Macs · Remote Access · Permissions · Diagnostics · About | Input · Gestures · Controls · Tablet Layout · Display · Audio · Session · Help & About | Overview · Displays · Streaming · Devices · Remote Access · System |
+| Pages | General · Display · Input · Gestures · Controls · Audio · Connections · Paired Macs · Remote Access · Permissions · Diagnostics · About | Input · Gestures · Controls · Tablet Layout · Display · Audio · Session · Help | Overview · Displays · Streaming · Devices · Remote Access · System |
 | Settings search | Yes | No | Yes |
 | Input mode, Touch Style, Smart Touch, scroll direction | Input | Input | n/a |
 | Haptics | **General** | **Input** (under Scrolling) | n/a |
@@ -33,23 +33,23 @@ and tablet differences are in the note.
 | Strip / Overlay / Custom layouts | Controls (iPad only) | **Tablet Layout** | n/a |
 | Window Switcher (Stage Peek / Rail) | **Controls** | **Display** | n/a (no switcher; Windows button) |
 | Choose windows | Display: **Show Mac Windows…** (**Choose Windows…** in Window view) | Display: **Choose Windows…** | **Windows** button in the title bar, ⌃⌥W |
-| Display Mode | Display | Display (**What This Device Shows**) | Displays |
+| Display Mode | Display | Display | Displays |
 | Audio, A/V Sync | Audio | Audio | **Streaming** |
 | Auto-Reconnect | **General** (also Home) | **Session** | **System** (also Overview) |
-| Request Input | Input: **Request Control** button | Input: **Request Input** button | Title bar: **Request Control** |
-| Request Input Automatically | Paired Macs | **Home**, in a Mac's ••• menu | No |
-| Performance overlay | Diagnostics | Session | System |
+| Request Control | Input: **Request Control** button | Input: **Request Control** button | Title bar: **Request Control** |
+| Request Control Automatically | Paired Macs | **Home**, in a Mac's ••• menu | No |
+| Performance Overlay | Diagnostics | Session | System |
 | Keyboard ⌘ from a hardware keyboard | Works as is | Input: **Control Key Types ⌘** | Works as is |
 
 ## Pointer input
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| Input Mode: Direct Touch / Trackpad | Yes. Direct Touch default | Yes | Yes. Labelled **Touch Mode** | n/a. Mac keyboard and trackpad drive the Mac after Request Control |
+| Input Mode: Direct Touch / Trackpad | Yes. Direct Touch default | Yes | Yes | n/a. Mac keyboard and trackpad drive the Mac after Request Control |
 | Touch Style: Natural Touch (default) / Classic | Yes, Direct Touch only | Yes | Yes, Direct Touch only | n/a |
 | Smart Touch (Experimental) | Yes, Classic only. Haptics toggle follows Haptics | Yes | Yes, Classic only | n/a |
-| Trackpad Sensitivity (0.5 to 2.0×) | Yes, Trackpad only | Yes | Yes. Labelled **Trackpad Speed** | n/a |
-| Scroll direction per axis | Yes. **Invert** Vertical/Horizontal Scrolling (on = natural) | Yes | Yes. **Natural** Vertical/Horizontal Scrolling (same preference) | Follows this Mac's own setting |
+| Trackpad Sensitivity (0.5 to 2.0×) | Yes, Trackpad only | Yes | Yes | n/a |
+| Scroll direction per axis | Yes. **Natural** Vertical/Horizontal Scrolling (on = natural) | Yes | Yes. Same names, same preference | Follows this Mac's own setting |
 | Natural Touch hint (once) | Yes | Yes | Yes | n/a |
 | Precise Control (second finger fine-tunes) | Partial. Classic and Trackpad, not Natural | Partial | Partial. Same engine | n/a |
 | Apple Pencil / stylus | n/a | Yes (hover, tilt) | Partial. Stylus is handled in code, not verified | n/a |
@@ -92,13 +92,13 @@ ignore Touch Style.
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| Control tray (⌘ ⌥ ⌃ ⇧ esc tab Dock Keyboard Settings) | Yes. Shown only while input is allowed | Yes, as **Main Controls** | Yes. **Main Tray** | n/a |
-| Show / collapse / auto-hide | Yes | Yes. The Strip never hides | Yes. **Show Controls**, **Collapse to Settings Button**, **Auto-hide** | n/a |
+| Control tray (⌘ ⌥ ⌃ ⇧ esc tab Dock Keyboard Settings) | Yes. Shown only while input is allowed | Yes, as **Main Controls** | Yes. **Control Tray** | n/a |
+| Show / collapse / auto-hide | Yes | Yes. The Strip never hides | Yes. **Show Control Tray**, **Collapse Control Tray**, **Auto-hide Control Trays** | n/a |
 | Profiles (Default, Profile 1, Profile 2) and tray item order | Yes. Full editor | Yes | Partial. Show/hide and Up only | n/a |
 | Chord palettes (hold a modifier for shortcuts) | Yes. Editable | Yes | Yes. Not editable | n/a |
 | Function tray (Zoom In/Out, Undo, Redo by default) | Yes | Yes, as **Function Controls** | Yes | n/a |
 | Function tray editor (add, rename, sequences, faces) | Yes | Yes | No. Show/hide and Up only | n/a |
-| Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Side**, **Position**, **Avoid Cutouts** | n/a |
+| Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Tray Side**, **Function Tray Position**, **Avoid Cutouts** | n/a |
 | Layouts: Strip / Overlay / Custom | n/a | Yes | Yes on large windows (tablet, unfolded) | n/a |
 | Edges, Palette Style (Keys / Wheel), Control Size, Control Hints, Standard Controls | n/a | Yes | Yes (Tablet Layout page) | n/a |
 | Custom layout editor (up to 5, landscape and portrait, Two-Hand Assist) | n/a | Yes | No. **New Radial Layout** only | n/a |
@@ -109,7 +109,7 @@ ignore Touch Style.
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| On-screen keyboard (tray Keyboard button) | Yes. **Show Keyboard Button** | Yes | Yes. **Keyboard Button** | n/a |
+| On-screen keyboard (tray Keyboard button) | Yes. **Show Keyboard Button** | Yes | Yes. **Show Keyboard Button** | n/a |
 | Zoom While Typing | Yes, setting | Yes | Partial. Always on, no setting | n/a |
 | Hardware keyboard | Partial. Not verified with a real keyboard | Partial | Partial. Same | Yes, after Request Control |
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
@@ -133,7 +133,7 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Stage Peek **Expand** and **Add as Tile** | Yes | Yes | Yes | n/a |
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |
-| Tile menu (Type Here, Change Window…, Rotate, Fill Tile, Maximize, Arrange Tiles, Remove Tile, Close Window on Mac…) | Yes | Yes | Yes. Sentence-case labels | Yes (shared view) |
+| Tile menu (Type Here, Change Window…, Rotate, Fill Tile, Maximize, Arrange Tiles, Remove Tile, Close Window on Mac…) | Yes | Yes | Yes | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
 | Hinge-aware tiles on foldables | Yes. Simulator only | n/a | Yes. Emulator only | n/a |
@@ -144,25 +144,25 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| Mirror / Extend | Yes. **Display Mode** picker | Yes | Yes. Chips under **What This Device Shows** | Yes. **Mode** control |
+| Mirror / Extend | Yes. **Display Mode** picker | Yes | Yes. Chips under **Display Mode** | Yes. **Display Mode** control |
 | Mirror Display (Auto or pick a display) | Yes | Yes | No | Yes |
 | Extend Shape, Use Full Display | Yes | Yes | No | Yes |
 | Video on / off | Yes | Yes | No | Yes |
 | Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | No | Yes (Streaming) |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
-| Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Window |
+| Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
 
 ## Audio and connection
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| Audio (Mac system audio; off by default) | Yes. **Audio** | Yes | Yes. **Mac Audio** | Yes. **Audio** |
+| Audio (Mac system audio; off by default) | Yes. **Audio** | Yes | Yes. **Audio** | Yes. **Audio** |
 | A/V Sync (−1000 to +1000 ms, 25 ms steps) | Yes | Yes | Yes | Yes |
 | Resync | Yes | Yes | No | Yes |
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
-| Request Input (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
-| Request Input Automatically (per Mac) | Yes | Yes | Yes | No |
+| Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
+| Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
 
 ## Gaps
 
@@ -179,12 +179,11 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 **Mac Receiver compared with the mobile apps**
 - No Stage Peek, Rail, Full Desktop card or **Switch to Window view?** prompt. Windows opens the overview.
 - No Window Switcher setting, no Local View Navigation, no on-screen trays (its own keyboard and trackpad are the controls).
-- No Request Input Automatically.
-- The Overview page still says the Mac's keyboard and trackpad are not sent (`MacReceiver/ReceiverOverviewSettingsView.swift:140`); they are, after **Request Control**. See [TERMINOLOGY.md](TERMINOLOGY.md).
+- No Request Control Automatically.
 
 **iOS compared with Android**
 - Windows is not in the Display Mode picker; it is a separate button.
 - Settings are spread over twelve pages; Android has eight. Window Switcher is under Controls on iOS but Display on Android; Haptics under General on iOS but Input on Android; Auto-Reconnect under General on iOS but Session on Android.
 
 **All receivers**
-- Names for the same setting differ (Request Control / Request Input, Touch Mode / Input Mode, and more). Proposed fixes are in [TERMINOLOGY.md](TERMINOLOGY.md).
+- Names for the same setting now match across apps ([TERMINOLOGY.md](TERMINOLOGY.md)). The one deliberate difference is Avoid Notch on iPhone and Avoid Cutouts on Android.

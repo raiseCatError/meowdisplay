@@ -91,7 +91,7 @@ other means, or a documented platform difference. **Gap** = not on Android yet.
 | Custom Layout editor (drag placements, corners, preview) | Gap | |
 | Auto-hide (9 s), reveal on any touch | Ported | Emulator-verified |
 | Input consent: View Only start, Request/Turn Off, on-surface prompt, blocked attempts | Ported | Emulator-verified grant and revoke |
-| Per-Mac "Request Input Automatically" | Gap | Store and UI not ported |
+| Per-Mac "Request Control Automatically" | Gap | Store and UI not ported |
 | Prefer MeowDisplay Gestures (claim screen edges) | Gap | Stored; Android system-gesture exclusion not applied |
 | Accessibility: TalkBack labels, roles, states; multi-finger gestures step aside for TalkBack; Remove animations = Reduce Motion | Adapted | Needs a TalkBack pass on hardware |
 | Haptics | Adapted | Android feedback constants |
@@ -126,8 +126,8 @@ available; same Wi-Fi.
 
 1. **Pair and connect.** Pair from the phone, connect from the Mac: video
    appears, the controls show View Only behavior (no tray), touches do
-   nothing on the Mac and the Request Input prompt appears.
-2. **Grant.** Request Input → allow on the Mac: the tray appears (phone) or
+   nothing on the Mac and the Request Control prompt appears.
+2. **Grant.** Request Control → allow on the Mac: the tray appears (phone) or
    the radial clusters (tablet). Revoke on the Mac: input stops at once,
    nothing stays held (type on the Mac: lower case).
 3. **Direct Touch.** Tap, double-tap a word, drag a window, two-finger tap
@@ -155,7 +155,7 @@ available; same Wi-Fi.
 13. **Tablet layouts.** Strip, Overlay, Custom; edges, size, hints, Wheel;
     share a layout to an iPad and import one from it.
 14. **Auto-hide.** Controls retreat after 9 s idle and return on touch.
-15. **Audio.** Mac Audio on: clean sound, no robotic artefacts; Delay Audio
+15. **Audio.** Audio on: clean sound, no robotic artefacts; Delay Audio
     shifts it; audio off/on and a network blip recover.
 16. **Accessibility.** TalkBack reads every control with its state; with
     TalkBack on, multi-finger gestures don't fire.

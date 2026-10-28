@@ -238,7 +238,7 @@ automatically after you log in.
   doesn't show up.
 - **Logs for a bug report**: on the Mac, click **Logs** in the app panel
   (opens `~/Library/Logs/MeowDisplay` in Finder). On iOS, shake the device or
-  open **Settings & Help** → **Connection log**.
+  open **Settings & Help** → **Diagnostics** → **Connection Log**.
 - **Pairing fails / trust reset**: forget the device in the app's device
   list and pair again.
 - **An already-paired device shows "Pair" instead of Connect/Wake & Connect**:

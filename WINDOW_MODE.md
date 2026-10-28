@@ -45,7 +45,7 @@ selected, and only while that window's app really is in front on the Mac. If
 something else comes to the front, the tile shows **Typing paused** and
 nothing is typed until you tap to resume.
 
-Input still needs the Mac's permission for each session (Request Input). View
+Control still needs the Mac's permission for each session (Request Control). View
 Only sessions can arrange tiles and pick windows but send nothing to the Mac.
 
 A press into a tile brings its window to the front first when another window

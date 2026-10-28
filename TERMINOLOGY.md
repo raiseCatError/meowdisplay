@@ -12,7 +12,7 @@ Control and settings parity by platform: [RECEIVER_CONTROLS.md](RECEIVER_CONTROL
 
 Title Case in labels, buttons and headings; the lowercase form in running
 sentences where one is shown. Where an app differs today, the
-[inconsistencies](#inconsistencies-found-proposals-only) list says where.
+[inconsistencies](#inconsistencies-found-and-fixed) list says what changed.
 
 ### Basics
 
@@ -59,18 +59,22 @@ sentences where one is shown. Where an app differs today, the
 
 | Use | Meaning | Don't use |
 | --- | --- | --- |
-| **Input Mode** | the setting: **Direct Touch** or **Trackpad** | Touch Mode, Pointer Mode |
+| **Input Mode** | the setting: **Direct Touch** or **Trackpad**. "Input" names input-mode settings and the Input settings page only; asking the Mac for permission is "control" | Touch Mode, Pointer Mode |
 | **Direct Touch** | touch where you want the pointer | absolute mode, touchscreen mode |
 | **Trackpad** | the pointer moves relative to your finger, like a laptop trackpad. "trackpad" lowercase is the physical one | Mouse mode, Relative mode |
 | **Touch Style** | the Direct Touch setting: **Natural Touch** (default) or **Classic**. Not shown in Trackpad | Touch Mode |
 | **Natural Touch** | tap to click, swipe to scroll, press then move to drag, touch and hold to right-click | Natural (alone), macOS mode |
 | **Classic** | the original Direct Touch: the finger is the pointer, tap then hold to drag | Legacy, Old |
 | **Smart Touch** (Experimental) | Classic only. Scroll with one finger where the Mac says the area scrolls; hold a title bar to move its window. Brand name; never translated | Smart Scroll |
-| **Request Input** | ask the Mac to let this device control it | Request Control, ask for control, enable input |
-| **Allow Input** | the Mac's own master switch. Receivers can't change it | |
+| **Request Control** | ask the Mac to let this device control it. The same label in Settings and on the screen, on iPhone, iPad, Android and Mac Receiver (title bar) | Request Input, Enable Input, ask for control |
+| **Requesting Control…** | the request is waiting for the Mac | Requesting Input…, Requesting… |
+| **Control Allowed** | the Mac said yes for this session | Input Allowed, Input Enabled, Allowed for this session |
+| **Control Declined** | the Mac said no, or the prompt timed out | Input Declined, Not allowed |
+| **Control Not Available** | the Mac doesn't accept control requests from this device. The sentence form is "This Mac isn't accepting control requests" | Input Not Available, Requests disabled by Mac |
+| **Controlling** / **Paused** | the Mac Receiver's active states. Paused: control is paused here and a click resumes it | Control Paused |
+| **Allow Input** | the Mac app's own master switch. Receivers can't change it. Its per-device policy on the Mac is **Input Requests** (Ask, Always Allow Requests, Never Allow Requests) | |
 | **View Only** | the device shows the Mac but can't control it. Every session starts here | read-only, locked, view-only |
-| **Input Allowed** | the Mac said yes for this session | Allowed for this session |
-| **Request Input Automatically** | per Mac: a blocked touch asks by itself; the Mac still decides | |
+| **Request Control Automatically** | per Mac: a blocked touch asks by itself; the Mac still decides | Request Input Automatically |
 | **Trackpad Sensitivity** | the speed slider for Trackpad | Trackpad Speed |
 | **Local View Navigation** | pan, zoom and reset your own view; never sent to the Mac | |
 | **Viewport** / **App** / **Disabled** | what pinch or rotate does | |
@@ -85,7 +89,7 @@ sentences where one is shown. Where an app differs today, the
 | **chord** / **palette** | hold a modifier and a palette of matching shortcuts appears | |
 | **Strip**, **Overlay**, **Custom** | iPad and tablet control layouts | |
 | **Haptics** | vibration feedback; **Smart Touch Haptics** is the hold feedback | Vibration |
-| **Picture in Picture** | a view-only floating window of the Mac while you use other apps | picture-in-picture, PiP (in UI) |
+| **Picture in Picture** | a View Only floating window of the Mac while you use other apps | picture-in-picture, PiP (in UI) |
 | **Performance Overlay** | live frame rate, bitrate and latency over the picture | Performance overlay, HUD, analytics |
 
 ## Tone and writing rules
@@ -104,7 +108,7 @@ sentences where one is shown. Where an app differs today, the
 - Name a feature the same way on every screen. If a label and a note use different words for one thing, one of them is wrong.
 - Name the Mac by its name when known ("Show Macbook here?"), otherwise "your Mac".
 - Numbers keep units: "66 ms", "+250 ms".
-- Use the typographic apostrophe consistently within an app; don't mix `'` and `’` in sibling strings.
+- One apostrophe style per app: the straight `'` in the Apple apps and in Android (most strings already used it). Don't mix `'` and `’` in sibling strings.
 - Paths in docs use arrows: Settings → Display → Choose Windows…. Keep each name exactly as the app shows it, including the ellipsis.
 
 ## Identifiers that must not change
@@ -127,61 +131,72 @@ What each app calls the same thing today. A blank row is not an inconsistency.
 | Window picker | — | Show Mac Windows… / Choose Windows… | Choose Windows… | Windows |
 | Window switcher setting | — | Controls → Window Switcher | Display → Window Switcher | — |
 | Picture in Picture | — | Picture in Picture | Picture in Picture | — |
-| Performance numbers | — | Performance overlay (Diagnostics) | Performance Overlay (Session) | Performance Overlay (System) |
-| Ask for control | Input Requests (policy), Always Allow Requests | Request Control (Settings), Request Input (on screen) | Request Input | Request Control |
-| Display Mode setting | Display Mode | Display Mode | What This Device Shows | Mode, under Display Mode |
+| Performance numbers | — | Performance Overlay (Diagnostics) | Performance Overlay (Session) | Performance Overlay (System) |
+| Ask for control | Input Requests (policy), Always Allow Requests | Request Control (Settings and on screen) | Request Control (Settings and on screen) | Request Control (title bar) |
+| Display Mode setting | Display Mode | Display Mode | Display Mode | Display Mode |
+| Help page | — | About | Help | — |
 
-## Inconsistencies found (proposals only)
+
+## Inconsistencies found and fixed
 
 Found by reading the string literals in `iOS/`, `Shared/`, `MacReceiver/` and
-`AndroidReceiver/` (2026-10-29). **Fix** means the proposal should become the
-canonical wording; **Keep** means the difference is deliberate. Nothing here has
-been changed in code; UI tests depend on exact strings, so change string and
-test together.
+`AndroidReceiver/` (2026-10-29), reviewed with the product owner, then applied
+in code, tests and docs (2026-10-29). **Outcome** is one of: **Done** (applied
+as proposed), **Changed** (applied, but the decision differs from the proposal),
+**Kept** (the difference is deliberate) or **Already done** (fixed earlier).
+Three rows changed on review: the permission to interact with the Mac is
+**Request Control** everywhere, not Request Input (rows 1, 28, 30).
 
-File paths: a bare `ReceiverSettings.swift` is `iOS/ReceiverSettings.swift`.
-Bare Kotlin files are under
+The "differs" column records the wording before the change; line numbers refer
+to the code at that time. Bare Swift file names are under `iOS/`; bare Kotlin
+files are under
 `AndroidReceiver/app/src/main/kotlin/com/raisecaterror/meowdisplay/android/`
 (`receiver/`, `ui/`, `receiver/workspace/`).
 
-| # | Concept | Where it differs (file:line, text) | Proposed canonical | Verdict |
+| # | Concept | Where it differed (file:line, text) | Canonical | Outcome |
 | --- | --- | --- | --- | --- |
-| 1 | Asking the Mac for control | `iOS/ReceiverSettings.swift:623` "Request Control"; `MacReceiver/ReceiverInputController.swift:270` "Request Control"; `MacReceiver/ReceiverInputForwarding.swift:429-434` "Requesting Control…", "Control Declined", "Control Not Available", "Control Allowed", "Control Paused"; `Shared/Protocol.swift:428-432` "Allowed for this session", "Not allowed", "Requests disabled by Mac"; vs `iOS/OpenSidecarPhoneApp.swift:4528` and `AndroidReceiver/.../ReceiverScreen.kt:459` "Request Input" | **Request Input**, **Requesting Input…**, **Input Allowed**, **Input Declined**, **Input Not Available**; **Controlling** may stay as the Mac Receiver's active state, with **Paused** | Fix |
-| 2 | The setting for Direct Touch / Trackpad | `AndroidReceiver/.../ReceiverSettings.kt:160` "Touch Mode"; iOS `ReceiverSettings.swift:645,670` "Input Mode" | **Input Mode** | Fix |
-| 3 | Trackpad speed | `ReceiverSettings.kt:163` "Trackpad Speed"; iOS `ReceiverSettings.swift:674,685` "Trackpad Sensitivity" | **Trackpad Sensitivity** | Fix |
-| 4 | Scroll direction (same preference, on = natural) | iOS `ReceiverSettings.swift:697,699` "Invert Vertical Scrolling" / "Invert Horizontal Scrolling"; Android `ReceiverSettings.kt:188-189` "Natural Vertical Scrolling" / "Natural Horizontal Scrolling" | **Natural Vertical Scrolling** / **Natural Horizontal Scrolling** (on is the default; "Invert" reads backwards) | Fix |
-| 5 | The main tray | iOS `ReceiverSettings.swift:849,853,854` "Show Control Tray", "Collapse Control Tray", "Auto-hide Control Trays", header `:869` "Main Controls", note `:943` "Main Tray"; Android `ReceiverSettings.kt:211-213` "Main Tray", "Show Controls", "Collapse to Settings Button" | **Control Tray** for the section and toggles; keep "Main Controls" only for the iPad Strip and Overlay edge pickers | Fix |
-| 6 | Keyboard button | iOS `ReceiverSettings.swift:852` "Show Keyboard Button"; Android `ReceiverSettings.kt:214` "Keyboard Button" | **Show Keyboard Button** | Fix |
-| 7 | Tray profile pickers | iOS `ReceiverSettings.swift:895,925` "Active Profile", "Function Profile"; Android `ReceiverSettings.kt:215,220` "Profile" (twice, for different trays) | **Control Profile** and **Function Profile** | Fix |
-| 8 | Landscape side | iOS `ReceiverSettings.swift:857` "Landscape Tray Side"; Android `ReceiverSettings.kt:216` "Landscape Side" | **Landscape Tray Side** | Fix |
-| 9 | Function tray position | iOS `ReceiverSettings.swift:920` "Function Tray Position"; Android `ReceiverSettings.kt:221` "Position" | **Function Tray Position** | Fix |
-| 10 | Palette style | iOS `ReceiverSettings.swift:1019` "Palette Style"; Android `ReceiverSettings.kt:232` "Palette" | **Palette Style** | Fix |
-| 11 | Control hints | iOS `ReceiverSettings.swift:1025` "Show Control Hints"; Android `ReceiverSettings.kt:236` "Control Hints (Strip)" | **Show Control Hints**, with the Strip-only note below | Fix |
-| 12 | Surface grid | iOS `ReceiverSettings.swift:330` "Show Surface Grid"; Android `ReceiverSettings.kt:263` "Surface Grid When Video Is Off" | **Show Surface Grid**, note "Shown while Video is off." | Fix |
-| 13 | Local View Navigation | iOS `ReceiverSettings.swift:782` "Allow Local View Navigation"; Android `ReceiverSettings.kt:199` "Local View Navigation" | **Allow Local View Navigation** | Fix |
-| 14 | Pinch and rotate pickers | iOS `ReceiverSettings.swift:759,761` "Pinch / Zoom", "Rotation"; Android `ReceiverSettings.kt:194,198` "Pinch", "Rotate" | **Pinch / Zoom**, **Rotation** | Fix |
-| 15 | Mac audio toggle | iOS `ReceiverSettings.swift:1078` and Mac Receiver `ReceiverStreamingSettingsView.swift:139` "Audio"; Android `ReceiverSettings.kt:288` "Mac Audio" | **Audio** | Fix |
-| 16 | Notch / cutout | iOS `ReceiverSettings.swift:863` "Avoid Notch"; Android `ReceiverSettings.kt:225` "Avoid Cutouts" (same preference, `avoidNotch`) | Keep both: Android phones have punch-hole cameras, not notches | Keep |
-| 17 | Performance overlay | iOS `ReceiverSettings.swift:1299` "Performance overlay", `:1301` "Metal renderer (experimental)"; Android `ReceiverSettings.kt:320` and Mac Receiver `ReceiverSystemSettingsView.swift:49` "Performance Overlay" | **Performance Overlay**, **Metal Renderer** with an Experimental badge | Fix |
-| 18 | Connection log | iOS `ReceiverSettings.swift:1293` "Connection log"; Android `HelpPage.kt:72` "Share Connection Log"; Mac Receiver `ReceiverSystemSettingsView.swift:64` "Reveal Log Files in Finder" | Name the object **Connection Log** everywhere; verbs may differ (Share, Reveal) | Fix |
-| 19 | Display Mode setting | iOS `ReceiverSettings.swift:372` "Display Mode"; Android `ReceiverSettings.kt:247` "What This Device Shows"; Mac Receiver `ReceiverDisplaysSettingsView.swift:87` picker "Mode" under header `:119` "Display Mode" | **Display Mode** | Fix |
-| 20 | Window view vs Window mode in app copy | `iOS/ReceiverSettings.swift:892` and `ReceiverSettings.kt:284` "Used in Window mode."; vs `iOS/OpenSidecarPhoneApp.swift:4467` and `StagePeekOverlay.kt:706` "Switch to Window view?" | **Used in Window view.** Keep "Window mode" for docs | Fix |
-| 21 | The whole-screen side of Window view | `iOS/StagePeekView.swift:136` and `StagePeekOverlay.kt:347` "Full Desktop"; `Shared/WorkspaceViews.swift:356` and `WorkspaceOverlay.kt:409` "Whole display:"; subtitle "Show the whole Mac screen" | **Full Desktop:** as the overview label | Fix |
-| 22 | Tile menu casing | iOS `Shared/WorkspaceViews.swift:152-159` Title Case ("Arrange Tiles", "Remove Tile", "Show Whole Window"); Android `WorkspaceOverlay.kt:202-210` sentence case ("Arrange tiles", "Remove tile", "Show whole window", "Type here") | Title Case, as iOS | Fix |
-| 23 | View Only spelling | `ReceiverInputForwarding.swift:428` and Android `ReceiverSettings.kt:158,417` "View Only"; `iOS/ReceiverSettings.swift:336` and `DemoMode.swift:295` "view-only"; Android `ReceiverSettings.kt:268` and `ReceiverHome.kt:247` "view only" | **View Only**; reword the Picture in Picture note: "It shows your Mac; control stays in MeowDisplay." | Fix |
-| 24 | Android home summary | `AndroidReceiver/.../ReceiverHome.kt:242-244` "Mirroring a display", "Extended desktop", "Showing Mac windows" | **Mirror**, **Extend**, **Windows** (for example "Mirror · View Only") | Fix |
-| 25 | Picture in Picture | iOS `ReceiverSettings.swift:335` "Picture in Picture"; Android `ReceiverSettings.kt:267` "picture-in-picture" | **Picture in Picture** | Fix |
-| 26 | Settings and Help names | `ReceiverHome.kt:102` and `iOS/OpenSidecarPhoneApp.swift:1522` "Settings & Help"; Android page title `ReceiverSettings.kt:81` "Help & About" (words reversed; iOS calls it "About"); the Natural Touch hint (`OpenSidecarPhoneApp.swift:4559`, `ReceiverScreen.kt:385`) says "Settings & Help > Input" but the in-session screen is titled "Settings" (`iOS/ReceiverSettings.swift:57`, `ReceiverSettings.kt:104`) | Android page **Help**; hint: "go to Settings → Input" | Fix |
-| 27 | Touch help is out of date | `iOS/ReceiverSettings.swift:1160` "Touch: tap to click, drag to drag, two-finger pan to scroll." describes Classic; Natural Touch is the default | "Touch: tap to click, swipe to scroll, press then move to drag." | Fix |
-| 28 | Mac Receiver says input isn't sent | `MacReceiver/ReceiverOverviewSettingsView.swift:140` "This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request." but `ReceiverInputController.swift:270` offers **Request Control** (see RECEIVER_INPUT.md). Code comment `ReceiverSettingsCategory.swift:7-8` says the same | "Use Request Input in the video window's title bar to control the other Mac with this Mac's keyboard and trackpad." | Fix |
-| 29 | "Window" means two things on Mac Receiver | `MacReceiver/ReceiverDisplaysSettingsView.swift:71` section "Window" holds Open in Full Screen and Show Window; Window mode is also in this app (Windows button) | Section **Video Window** | Fix |
-| 30 | Apostrophes and wording | `iOS/OpenSidecarPhoneApp.swift:4531` "isn’t accepting input requests" (curly); `iOS/ReceiverSettings.swift:635` "isn't accepting control requests" (straight); Android `ReceiverScreen.kt:462`, `ReceiverSettings.kt:416` "isn't accepting input requests" | One apostrophe style per app; "input requests" everywhere | Fix |
-| 31 | Connect with order | iOS `OpenSidecarPhoneApp.swift:1578-1579` Mirror, then Extend; Android `ReceiverHome.kt:141-142` Extend, then Mirror | Mirror, then Extend, as in every other list | Fix |
-| 32 | Mac app casing | Android `HelpPage.kt:62` "Get the Mac App"; iOS `ReceiverSettings.swift:1378` "Get the Mac app" | **Get the Mac app** | Fix |
-| 33 | Forget | iOS `ReceiverSettings.swift:1190` "Forget"; Mac Receiver `ReceiverDevicesSettingsView.swift:78` "Forget…"; Android `ReceiverHome.kt:148` "Forget This Mac" | **Forget…** in a row that names the Mac (it opens a confirmation); **Forget This Mac** in a menu | Fix |
-| 34 | Jargon in a note | Android `ReceiverSettings.kt:181` "when the Mac says the element under it scrolls"; iOS `ReceiverSettings.swift:730` is plainer | "Scroll with one finger where the Mac says the area scrolls. Hold a title bar, then drag, to move its window." | Fix |
+| 1 | Asking the Mac for control | `iOS/ReceiverSettings.swift:623` "Request Control"; `MacReceiver/ReceiverInputController.swift:270` "Request Control"; `MacReceiver/ReceiverInputForwarding.swift:429-434` "Requesting Control…", "Control Declined", "Control Not Available", "Control Allowed", "Control Paused"; `Shared/Protocol.swift:428-432` "Allowed for this session", "Not allowed", "Requests disabled by Mac"; vs `iOS/OpenSidecarPhoneApp.swift:4528` and `ReceiverScreen.kt:459` "Request Input" | **Request Control**, **Requesting Control…**, **Control Allowed**, **Control Declined**, **Control Not Available**. **Controlling** and **Paused** stay as the Mac Receiver's active states | Changed. The proposal was Request Input; the decision is Request Control. Also changed: the iOS and Android on-screen prompt (Enable Input and Request Input both read Request Control; Input Enabled reads Control Allowed), the accessibility hint, Request Control Automatically, the demo controls, Android's Input page status lines and the Mac Receiver's "Control Paused" (now Paused) |
+| 2 | The setting for Direct Touch / Trackpad | `ReceiverSettings.kt:160` "Touch Mode"; iOS `ReceiverSettings.swift:645,670` "Input Mode" | **Input Mode** | Done |
+| 3 | Trackpad speed | `ReceiverSettings.kt:163` "Trackpad Speed"; iOS "Trackpad Sensitivity" | **Trackpad Sensitivity** | Done |
+| 4 | Scroll direction (same preference, on = natural) | iOS `ReceiverSettings.swift:697,699` "Invert Vertical Scrolling" / "Invert Horizontal Scrolling"; Android `ReceiverSettings.kt:188-189` "Natural Vertical Scrolling" / "Natural Horizontal Scrolling" | **Natural Vertical Scrolling** / **Natural Horizontal Scrolling** | Done. Checked first: `ScrollDirectionPolicy` is the same on both platforms (the gesture pipeline delivers natural deltas; on passes them through, off flips that axis) and both default to on, so on is natural scrolling on iOS too. The stored keys `invertVerticalScroll` and `invertHorizontalScroll` are unchanged |
+| 5 | The main tray | iOS "Show Control Tray", "Collapse Control Tray", "Auto-hide Control Trays", header "Main Controls", note "Main Tray", editor section "Main Tray"; Android "Main Tray", "Show Controls", "Collapse to Settings Button", "Auto-hide" | **Control Tray** for the section and toggles; "Main Controls" stays only for the iPad Strip and Overlay edge pickers | Done |
+| 6 | Keyboard button | iOS "Show Keyboard Button"; Android "Keyboard Button" | **Show Keyboard Button** | Done |
+| 7 | Tray profile pickers | iOS "Active Profile", "Function Profile"; Android "Profile" (twice) | **Control Profile** and **Function Profile** | Done |
+| 8 | Landscape side | iOS "Landscape Tray Side"; Android "Landscape Side" | **Landscape Tray Side** | Done |
+| 9 | Function tray position | iOS "Function Tray Position"; Android "Position" | **Function Tray Position** | Done |
+| 10 | Palette style | iOS "Palette Style"; Android "Palette" | **Palette Style** | Done |
+| 11 | Control hints | iOS "Show Control Hints"; Android "Control Hints (Strip)" | **Show Control Hints**, with the note "Hints appear on the Strip layout only." on Android | Done |
+| 12 | Surface grid | iOS "Show Surface Grid"; Android "Surface Grid When Video Is Off" | **Show Surface Grid**, note "Shown while Video is off." | Done |
+| 13 | Local View Navigation | iOS "Allow Local View Navigation"; Android "Local View Navigation" | **Allow Local View Navigation** | Done |
+| 14 | Pinch and rotate pickers | iOS "Pinch / Zoom", "Rotation"; Android "Pinch", "Rotate" | **Pinch / Zoom**, **Rotation** | Done |
+| 15 | Mac audio toggle | iOS and Mac Receiver "Audio"; Android "Mac Audio" | **Audio** | Done |
+| 16 | Notch / cutout | iOS "Avoid Notch"; Android "Avoid Cutouts" (same preference, `avoidNotch`) | Keep both: Android phones have punch-hole cameras, not notches | Kept |
+| 17 | Performance overlay | iOS "Performance overlay", "Metal renderer (experimental)"; Android and Mac Receiver "Performance Overlay" | **Performance Overlay**, **Metal Renderer** with an Experimental badge (the same orange badge Smart Touch uses) | Done |
+| 18 | Connection log | iOS "Connection log"; Android "Share Connection Log"; Mac Receiver "Reveal Log Files in Finder" | Name the object **Connection Log** everywhere; verbs may differ (Share, Reveal) | Done. iOS, its screen title and search entry; Mac Receiver button "Reveal Connection Log in Finder" and its search entry. The Mac app keeps its own "Reveal Log Files in Finder" |
+| 19 | Display Mode setting | iOS "Display Mode"; Android "What This Device Shows"; Mac Receiver picker "Mode" | **Display Mode** | Done |
+| 20 | Window view vs Window mode in app copy | iOS and Android "Used in Window mode."; "Switch to Window view?" | **Used in Window view.** "Window mode" stays in docs | Done |
+| 21 | The whole-screen side of Window view | "Full Desktop" on the Stage Peek card; "Whole display:" on the overview | **Full Desktop:** as the overview label | Done |
+| 22 | Tile menu casing | iOS Title Case; Android sentence case | Title Case, as iOS | Done (Android menu and the emulator smoke test that taps "Remove Tile") |
+| 23 | View Only spelling | "view-only", "view only" in Picture in Picture notes and the Android home summary | **View Only**; Picture in Picture note: "It shows your Mac; control stays in MeowDisplay." | Done |
+| 24 | Android home summary | "Mirroring a display", "Extended desktop", "Showing Mac windows" | **Mirror**, **Extend**, **Windows**, joined with **View Only** or **Controlling** ("Mirror · View Only") | Done |
+| 25 | Picture in Picture | Android "picture-in-picture" | **Picture in Picture** | Done |
+| 26 | Settings and Help names | Android page title "Help & About"; the Natural Touch hint said "Settings & Help > Input" | Android page **Help**; hint: "go to Settings → Input" on both platforms | Done |
+| 27 | Touch help is out of date | `iOS/ReceiverSettings.swift` "Touch: tap to click, drag to drag, two-finger pan to scroll." | "Touch: tap to click, swipe to scroll, press and move to drag, hold to right-click." | Already done (commit c8d0132) |
+| 28 | Mac Receiver says input isn't sent | `MacReceiver/ReceiverOverviewSettingsView.swift:140` "…there is no input permission to request."; the code comment in `ReceiverSettingsCategory.swift` said the same | "Use Request Control in the video window's title bar to control the other Mac with this Mac's keyboard and trackpad." The section is headed **Control** | Changed. The proposal said Request Input; the decision is Request Control. Caption and code comment fixed |
+| 29 | "Window" means two things on Mac Receiver | `MacReceiver/ReceiverDisplaysSettingsView.swift:71` section "Window" | Section **Video Window** | Done |
+| 30 | Apostrophes and wording | `iOS/OpenSidecarPhoneApp.swift:4531` "isn’t accepting input requests" (curly); `iOS/ReceiverSettings.swift:635` "isn't" (straight); Android "isn't accepting input requests" | One apostrophe style per app, straight `'` (it is what most Apple strings already use, so the curly ones in `iOS/` and `MacReceiver/` were straightened); "control requests" everywhere | Changed. The proposal said "input requests"; the decision is "control requests" |
+| 31 | Connect with order | iOS Mirror, then Extend; Android Extend, then Mirror | Mirror, then Extend | Done |
+| 32 | Mac app casing | Android "Get the Mac App"; iOS "Get the Mac app" | **Get the Mac app** | Done |
+| 33 | Forget | iOS "Forget"; Mac Receiver "Forget…"; Android "Forget This Mac" | **Forget…** in a row that names the Mac (it opens a confirmation); **Forget This Mac** in a menu | Done (iOS row; the confirmation button stays "Forget") |
+| 34 | Jargon in a note | Android "when the Mac says the element under it scrolls" | "Scroll with one finger where the Mac says the area scrolls. Hold a title bar, then drag, to move its window." | Done |
 
-34 differences: 33 to fix, 1 to keep (#16). Items 27 and 28 are stale copy that
-contradicts the product. Docs that follow the old wording today: README.md and SETUP.md say
-"Request Control" (matches iOS Settings), and RECEIVER_INPUT.md says "Request
-Control" and "Controlling". Update them with items 1 and 28, not before.
+34 rows: 29 done, 3 changed on review (1, 28, 30), 1 kept (16), 1 already done
+(27). Row 4 was done after checking that on means natural scrolling on both
+platforms.
+
+Left alone on purpose: the Mac app's own names **Allow Input** (the master
+switch) and **Input Requests** (the per-device policy). They belong to the Mac
+that answers requests, not to the receivers that make them. If they should read
+"control" too, change them together with the Mac app's Settings search keywords.
+The String Catalogs hold only English, so no translations moved; their keys were
+renamed to match the new wording.

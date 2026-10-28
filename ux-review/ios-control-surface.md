@@ -38,7 +38,7 @@ App Store build, `release/app-store-rc`). It is independent of the Mac PRs
 | Apple Pencil | Pen-tablet events with pressure and tilt, hover, palm rejection while the tip is down, tap/double-tap clicks. | Code path reviewed. Needs hardware to verify. |
 | Picture in Picture | View-only PiP of the live Mac. Toggle in Settings › Display. | Needs a live session; not exercised in Demo Mode. |
 | Video Off | Turns the receiver into a trackpad and control panel: trays, keyboard and input mode stay live, and a trackpad preview replaces the picture. | This is already the "Control Surface" mode. See the assessment below. |
-| Input permission | The Mac is authoritative. Settings › Input shows the confirmed state with Request/Turn Off. A blocked touch shows a short-lived on-surface **Request Input** prompt that rate-limits its requests. The gear stays reachable with input off. | Clear and safe. |
+| Input permission | The Mac is authoritative. Settings › Input shows the confirmed state with Request/Turn Off. A blocked touch shows a short-lived on-surface **Request Control** prompt that rate-limits its requests. The gear stays reachable with input off. | Clear and safe. |
 | Rotation / iPad resizing | Tray geometry is pure and unit-tested (safe areas, notch side, iOS 27.1 reserved regions and folds, keyboard). | Solid. Two placement bugs found (findings 1 and 2). |
 
 ## Findings
@@ -247,7 +247,7 @@ is a product decision, so it isn't in this branch.
 - [ ] Live session keyboard bar on iPhone and iPad: position relative to the
       keyboard (see the gap note above).
 - [ ] Live session at the largest accessibility text size: the on-surface
-      Request Input prompt and the interruption card stay legible and
+      Request Control prompt and the interruption card stay legible and
       tappable (Demo Mode has its own chips, so this couldn't be checked
       here).
 - [ ] Return from the Function Tray, the keyboard bar and the iPad radial
