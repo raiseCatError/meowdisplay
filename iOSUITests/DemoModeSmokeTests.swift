@@ -117,27 +117,34 @@ extension DemoModeSmokeTests {
         openControlsSettings(app)
         let stagePeek = app.buttons["Stage Peek"].firstMatch
         let rail = app.buttons["Rail"].firstMatch
-        for _ in 0..<6 where !stagePeek.exists { app.swipeUp() }
         XCTAssertTrue(stagePeek.waitForExistence(timeout: 5))
-        XCTAssertTrue(stagePeek.isSelected, "Stage Peek is the default switcher")
+        for _ in 0..<6 where !rail.isHittable { app.swipeUp() }
+        // The default itself is unit-tested (StagePeekTests); a run that failed
+        // mid-way may have left Rail selected, so start from Stage Peek.
+        if !stagePeek.isSelected { stagePeek.tap() }
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: stagePeek)
+        waitForExpectations(timeout: 3)
         XCTAssertTrue(app.otherElements["stagePeekEdgePicker"].exists || app.buttons["stagePeekEdgePicker"].exists
                       || app.staticTexts["Stage Peek Edge"].exists, "the edge choice shows for Stage Peek")
         snapshot(app, "window-switcher-stage-peek")
 
         rail.tap()
-        XCTAssertTrue(rail.isSelected)
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: rail)
+        waitForExpectations(timeout: 3)
         XCTAssertFalse(app.staticTexts["Stage Peek Edge"].exists, "no edge choice for the Rail")
         snapshot(app, "window-switcher-rail")
 
         app.terminate()
         app.launch()
         openControlsSettings(app)
-        for _ in 0..<6 where !app.buttons["Rail"].firstMatch.exists { app.swipeUp() }
         XCTAssertTrue(app.buttons["Rail"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Rail"].firstMatch.isSelected, "Rail is remembered")
+        for _ in 0..<6 where !app.buttons["Rail"].firstMatch.isHittable { app.swipeUp() }
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Rail"].firstMatch)
+        waitForExpectations(timeout: 3)   // Rail is remembered
 
         app.buttons["Stage Peek"].firstMatch.tap()   // leave the simulator on the default
-        XCTAssertTrue(app.buttons["Stage Peek"].firstMatch.isSelected)
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Stage Peek"].firstMatch)
+        waitForExpectations(timeout: 3)
     }
 
     private func openControlsSettings(_ app: XCUIApplication) {
