@@ -1,5 +1,10 @@
 package com.raisecaterror.meowdisplay.android.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import com.raisecaterror.meowdisplay.android.R
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Arrangement
@@ -90,7 +95,9 @@ fun ReceiverHome(
             item {
                 Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 24.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary,
+                        Image(painterResource(R.drawable.meow_logo), contentDescription = null, modifier = Modifier.size(56.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.weight(1f).semantics { heading() })
                         onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings") } }
                     }
