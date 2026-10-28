@@ -1,6 +1,7 @@
 package com.raisecaterror.meowdisplay.android.media
 
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
@@ -11,6 +12,7 @@ import android.view.Surface
 import com.raisecaterror.meowdisplay.core.session.StreamCodec
 import com.raisecaterror.meowdisplay.core.video.DecodableSample
 import com.raisecaterror.meowdisplay.core.video.DecodeQueue
+import com.raisecaterror.meowdisplay.core.video.StreamStats
 import java.nio.ByteBuffer
 
 /**
@@ -25,6 +27,10 @@ import java.nio.ByteBuffer
 class VideoDecoder(
     private val requestKeyframe: () -> Unit,
     private val onVideoSize: (width: Int, height: Int) -> Unit,
+    /** For the performance overlay. */
+    private val stats: StreamStats? = null,
+    /** A Mac capture time on this device's wall clock; null until the clocks are synced. */
+    private val captureToLocalMs: (Double) -> Double? = { null },
 ) {
     private val thread = HandlerThread("meow-video").apply { start() }
     private val handler = Handler(thread.looper)
@@ -36,6 +42,10 @@ class VideoDecoder(
     private var codec: MediaCodec? = null
     private var inputCapacity = 0
     private var decodedFrames = 0L
+    /** Queue time (µs, the codec's presentation time) -> Mac capture time, for latency. Bounded. */
+    private val captureTimes = object : LinkedHashMap<Long, Double>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Double>?) = size > 64
+    }
 
     // Diagnostics: a bounded trace after each (re)configuration.
     private var traced = 0
@@ -57,6 +67,7 @@ class VideoDecoder(
     }
 
     fun submit(sample: DecodableSample) = handler.post {
+        stats?.frameArrived(sample.data.size, System.currentTimeMillis().toDouble())
         when (queue.offer(sample)) {
             DecodeQueue.Offer.HeldNeedsDecoder -> {
                 trace("format ${sample.codec.wire} sets=" + sample.newFormat!!.joinToString { "${it.size}B" })
@@ -69,6 +80,7 @@ class VideoDecoder(
                 requestKeyframe()
             }
             DecodeQueue.Offer.Overflowed -> {
+                stats?.frameDropped(System.currentTimeMillis().toDouble())
                 Log.w(TAG, "decoder fell behind: dropped its queue, waiting for a keyframe")
                 requestKeyframe()
             }
@@ -115,7 +127,9 @@ class VideoDecoder(
                 }
                 input.clear()
                 input.put(sample.data)
-                active.queueInputBuffer(index, 0, sample.data.size, System.nanoTime() / 1000, if (sample.isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                val queuedUs = System.nanoTime() / 1000
+                sample.captureMs?.let { captureTimes[queuedUs] = it }
+                active.queueInputBuffer(index, 0, sample.data.size, queuedUs, if (sample.isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
                 trace("queued #$index key=${sample.isKeyframe} bytes=${sample.data.size} held=${queue.size}")
             } catch (e: IllegalStateException) {
                 failed(active, e)
@@ -143,13 +157,36 @@ class VideoDecoder(
                 if (inputCapacity > 0 && queue.largestUnit > inputCapacity) {
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minOf(queue.largestUnit.toLong() * 2, MAX_UNIT_BYTES.toLong()).toInt())
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
             val created = MediaCodec.createDecoderByType(mime)
+            // Low-latency mode only where the decoder offers it: some hardware decoders (the Moto
+            // G5S Plus's OMX.qcom AVC) refuse to configure at all when asked, which used to drop
+            // every session to the much slower software decoder. Qualcomm decoders also hold a
+            // frame for reordering unless told to output in decode order (the stream has none).
+            val optional = buildList {
+                val claimsLowLatency = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && runCatching {
+                    created.codecInfo.getCapabilitiesForType(mime).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
+                }.getOrDefault(false)
+                if (claimsLowLatency) add(MediaFormat.KEY_LOW_LATENCY)
+                if (created.name.startsWith("OMX.qcom.") || created.name.startsWith("c2.qti.")) {
+                    add(QCOM_PICTURE_ORDER); add(QCOM_LOW_LATENCY)
+                }
+            }
+            optional.forEach { format.setInteger(it, 1) }
             trace("codec ${created.name} hw=${created.codecInfo.isHardwareAccelerated} configure $format")
             created.setCallback(Callbacks(created), handler)
-            created.configure(format, target, null, 0)
+            try {
+                created.configure(format, target, null, 0)
+            } catch (e: MediaCodec.CodecException) {
+                if (optional.isEmpty()) throw e
+                // Refused: the same decoder, without the optional keys.
+                Log.w(TAG, "${created.name} refused $optional; configuring without them")
+                created.reset()
+                optional.forEach { format.removeKey(it) }
+                created.setCallback(Callbacks(created), handler)
+                created.configure(format, target, null, 0)
+            }
             codec = created
             created.start()
             inputCapacity = created.inputFormat.takeIf { it.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE) }
@@ -177,6 +214,11 @@ class VideoDecoder(
             } catch (e: IllegalStateException) {
                 failed(owner, e)
                 return
+            }
+            stats?.let { st ->
+                val nowMs = System.currentTimeMillis().toDouble()
+                val latency = captureTimes.remove(info.presentationTimeUs)?.let(captureToLocalMs)?.let { nowMs - it }
+                st.frameShown((System.nanoTime() / 1000 - info.presentationTimeUs) / 1000.0, latency, nowMs)
             }
             if (++decodedFrames % LOG_EVERY == 1L) Log.i(TAG, "decoded $decodedFrames frames (${queue.codec.wire})")
         }
@@ -220,6 +262,9 @@ class VideoDecoder(
         if (containsKey("crop-bottom") && containsKey("crop-top")) getInteger("crop-bottom") - getInteger("crop-top") + 1 else null
 
     private companion object {
+        /** Qualcomm vendor keys: output in decode order, and its own low-latency switch. */
+        const val QCOM_PICTURE_ORDER = "vendor.qti-ext-dec-picture-order.enable"
+        const val QCOM_LOW_LATENCY = "vendor.qti-ext-dec-low-latency.enable"
         const val TAG = "MeowDecoder"
         const val TRACE = "MeowDecoderTrace"
         const val TRACE_LIMIT = 40
