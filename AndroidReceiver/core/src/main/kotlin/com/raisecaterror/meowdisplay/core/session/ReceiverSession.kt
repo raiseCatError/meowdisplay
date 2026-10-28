@@ -61,7 +61,7 @@ class ReceiverSession(
     private val helloFields: () -> HelloFields,
     private val events: (SessionEvent) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
-) {
+) : InputChannel {
     private val lifecycle = ReceiverSessionState()
     private val admission = ReceiverSessionAdmission()
     private val approvals = PendingSessionApprovals()
@@ -95,8 +95,14 @@ class ReceiverSession(
     val peerID: String? @Synchronized get() = link?.peerID
     val isAdmitted: Boolean @Synchronized get() = link != null && admission.admitted
     val senderProtocolVersion: Int? @Synchronized get() = macPV
-    val clockOffsetMs: Double? @Synchronized get() = clock.offsetMs
+    override val clockOffsetMs: Double? @Synchronized get() = clock.offsetMs
     val rttMs: Double? @Synchronized get() = clock.lastRttMs
+
+    /**
+     * Every remote input message goes through here, sharing this session's
+     * lock. It forgets what it holds whenever the grant or the connection ends.
+     */
+    val input = ReceiverInputSender(this, nowMs = { now().toDouble() }, lock = this)
 
     /** Input may leave this device only on an admitted, live, unpaused connection the Mac granted it on. */
     val inputAllowed: Boolean
@@ -124,6 +130,8 @@ class ReceiverSession(
         }
         admission.beginConnection()
         currentInvitationID = null
+        // A new connection starts with no grant and nothing held.
+        input.forget()
         inputGranted = false
         paused = false
         incompatible = false
@@ -247,7 +255,7 @@ class ReceiverSession(
 
     /** Sends one input message when [inputAllowed] and the Mac speaks [minimumPV]; false when withheld. */
     @Synchronized
-    fun sendInput(message: JsonObject, minimumPV: Int = WireProtocol.ALLOW_INPUT): Boolean {
+    override fun sendInput(message: JsonObject, minimumPV: Int): Boolean {
         if (!inputAllowed || (macPV ?: 0) < minimumPV) return false
         return send(message)
     }
@@ -320,6 +328,7 @@ class ReceiverSession(
                 if (approvals.resolve(message.id) != null) emit(SessionEvent.ApprovalDismissed(message.id))
                 if (message.id == currentInvitationID && admission.admitted) {
                     admission.revoke()
+                    input.forget()
                     inputGranted = false
                     emit(SessionEvent.AdmissionWithdrawn)
                     emit(SessionEvent.InputState(InputWireState.Off, false))
@@ -329,6 +338,8 @@ class ReceiverSession(
                 // A grant applies only to this connection, and only while it is admitted.
                 if (!admission.admitted) return
                 inputGranted = message.allowed && message.state == InputWireState.Allowed
+                // Revoked: the Mac has already released everything this device held.
+                if (!inputGranted) input.forget()
                 emit(SessionEvent.InputState(message.state, inputGranted))
             }
             is SenderMessage.VideoState -> {
@@ -342,6 +353,8 @@ class ReceiverSession(
                 deliver("codec", SessionEvent.CodecChanged(message.codec))
             }
             is SenderMessage.DisplayPaused -> {
+                // Release while the gate is still open: nothing stays held through a pause.
+                if (message.paused && !paused) input.releaseAll()
                 paused = message.paused
                 val changed = if (message.paused) lifecycle.displayPaused() else lifecycle.displayResumed()
                 if (changed) reportPhase()
@@ -358,7 +371,10 @@ class ReceiverSession(
                 }
                 emit(SessionEvent.Cursor(message.x, message.y, message.visible))
             }
-            SenderMessage.InputReset -> if (admission.admitted) emit(SessionEvent.InputReset)
+            SenderMessage.InputReset -> if (admission.admitted) {
+                input.forget()
+                emit(SessionEvent.InputReset)
+            }
             SenderMessage.Closing -> closeCurrent(SessionLossReason.PeerClosed)
             is SenderMessage.Other -> deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
         }
@@ -451,6 +467,8 @@ class ReceiverSession(
         link = null
         closing.close()
         admission.beginConnection()
+        // The Mac releases held input on session loss; a reconnect starts clean.
+        input.forget()
         inputGranted = false
         paused = false
         heldState.clear()

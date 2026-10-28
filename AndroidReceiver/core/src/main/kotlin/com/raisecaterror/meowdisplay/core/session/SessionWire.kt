@@ -25,7 +25,9 @@ object WireProtocol {
     const val DISPLAY_MODE = 7
     const val ALLOW_INPUT = 8
     const val VIDEO_CONTROL = 9
+    const val NATIVE_APP_GESTURE = 10
     const val AUDIO = 12
+    const val SMART_TOUCH = 20
     const val SESSION_INVITATION = 21
     const val MEDIA_PORT = 9001
     const val DEVICE_KIND = "Android"
