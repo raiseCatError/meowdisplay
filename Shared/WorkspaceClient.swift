@@ -227,6 +227,10 @@ final class WorkspaceModel: ObservableObject {
     @Published var overviewOpen = false
     @Published private(set) var replacingTile: String?
     @Published var railExpanded = false { didSet { if railExpanded { startRefreshing() } } }
+    /// Stage Peek is warming (finger holding the edge) or open: keeps the
+    /// catalog and thumbnails fresh. Read-only requests; never a layout,
+    /// capture or focus change.
+    @Published var stagePeekOpen = false { didSet { if stagePeekOpen, !oldValue { startRefreshing() } } }
     @Published var railEdge: WorkspaceRailEdge { didSet { defaults.set(railEdge.rawValue, forKey: Self.railKey) } }
     @Published var arranging = false
     @Published private(set) var hovered: String?
@@ -300,7 +304,7 @@ final class WorkspaceModel: ObservableObject {
             icons[bundle] = image
         case .disconnected:
             sendTask?.cancel()
-            windowMode = false; remote = nil; available = false; arranging = false
+            windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
         }
     }
 
@@ -334,12 +338,13 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func requestThumbnails() {
-        guard overviewOpen || railExpanded, let c = catalog else { return }
+        guard overviewOpen || railExpanded || stagePeekOpen, let c = catalog else { return }
         let now = Date()
         let ids = c.windows.filter { now.timeIntervalSince(thumbAge[$0.id] ?? .distantPast) > 8 }.map(\.id)
         let wantedIcons = c.apps.map(\.bundleID).filter { icons[$0] == nil }
         guard !ids.isEmpty || !wantedIcons.isEmpty else { return }
-        _ = send(WorkspaceRequests.thumbnails(Array(ids.prefix(24)), maxWidth: 240, icons: wantedIcons))
+        // Stage Peek shows larger cards (its expanded browser): the sender's maximum.
+        _ = send(WorkspaceRequests.thumbnails(Array(ids.prefix(24)), maxWidth: stagePeekOpen ? 320 : 240, icons: wantedIcons))
     }
 
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: inputAllowed())) }
@@ -464,13 +469,23 @@ final class WorkspaceModel: ObservableObject {
 
     func closeOverview() { overviewOpen = false; replacingTile = nil }
 
+    /// The window shown in the tile a switcher would replace: the active
+    /// tile, or the only one.
+    var currentWindowID: UInt32? {
+        let tile = active ?? (layout.orderedTileIDs.count == 1 ? layout.orderedTileIDs.first : nil)
+        return tile.flatMap { layout.tiles[$0]?.source?.windowID }
+    }
+
+    /// Whether another tile can be added (Stage Peek's "Add as Tile").
+    var canAddTile: Bool { layout.tiles.count < capacity }
+
     private func startRefreshing() {
         refreshTask?.cancel()
         requestCatalog()
         refreshTask = Task { [weak self] in
-            while let self, self.overviewOpen || self.railExpanded {
-                try? await Task.sleep(nanoseconds: self.overviewOpen ? 3_000_000_000 : 5_000_000_000)
-                guard !Task.isCancelled, self.overviewOpen || self.railExpanded else { break }
+            while let self, self.overviewOpen || self.railExpanded || self.stagePeekOpen {
+                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen ? 3_000_000_000 : 5_000_000_000)
+                guard !Task.isCancelled, self.overviewOpen || self.railExpanded || self.stagePeekOpen else { break }
                 self.requestCatalog()
             }
         }

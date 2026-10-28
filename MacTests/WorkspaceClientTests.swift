@@ -77,6 +77,49 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(close?["gen"] as? Int, 5)
     }
 
+    /// Stage Peek browsing (hold, scrub, expand, lift) only refreshes the
+    /// catalog and thumbnails; the layout and the Mac's windows are untouched.
+    /// A tap on a card replaces only the active tile's window.
+    func testStagePeekBrowsingChangesNothingAndATapReplacesOnlyTheActiveTile() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 1, "dev.qa.a"), (11, 1, "dev.qa.b"), (12, 1, "dev.qa.c")]))
+        m.updateSpace(WorkspaceSize(width: 844, height: 390), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        let ids = m.layout.orderedTileIDs
+        XCTAssertEqual(ids.count, 2)
+        let state = WorkspaceEvent.parse(type: WireMessage.workspaceState, [
+            "tiles": [["id": ids[0], "window": 10, "gen": 1, "state": "live"], ["id": ids[1], "window": 11, "gen": 1, "state": "live"]],
+            "active": ids[1]])!
+        m.apply(state)
+        XCTAssertEqual(m.currentWindowID, 11, "Stage Peek starts on the active tile's window")
+        let settle = expectation(description: "debounced send")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { settle.fulfill() }
+        wait(for: [settle], timeout: 2)
+
+        let before = m.layout
+        sent.removeAll()
+        m.stagePeekOpen = true
+        m.stagePeekOpen = false
+        let browse = expectation(description: "nothing else is sent")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { browse.fulfill() }
+        wait(for: [browse], timeout: 2)
+        XCTAssertEqual(m.layout, before)
+        XCTAssertFalse(sent.isEmpty, "opening refreshes the catalog")
+        XCTAssertTrue(sent.allSatisfy {
+            [WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest].contains($0["type"] as? String)
+        }, "browsing sends only catalog and thumbnail requests: \(sent.map { $0["type"] ?? "?" })")
+
+        m.choose(m.catalog!.windows[2], asNewTile: false)
+        XCTAssertEqual(m.layout.orderedTileIDs, ids, "no tile added or removed")
+        XCTAssertEqual(m.layout.tiles[ids[0]]?.source?.windowID, 10, "the other tile keeps its window")
+        XCTAssertEqual(m.layout.tiles[ids[1]]?.source?.windowID, 12)
+    }
+
     func testTheSameWindowNumberOnAnotherMacNeverReachesThisMacsTiles() {
         let m = model { _ in }
         m.apply(.connected(peerID: "mac-a"))

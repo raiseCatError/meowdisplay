@@ -114,6 +114,7 @@ enum MobileSettingsSearchIndex {
         // Input
         .init("control", String(localized: "Control"), .input, keywords: ["request control", "allow input", "permission"]),
         .init("inputMode", String(localized: "Input Mode"), .input, keywords: ["direct touch", "trackpad", "pointer", "mouse"]),
+        .init("touchStyle", String(localized: "Touch Style"), .input, keywords: ["natural touch", "classic", "tap to click", "long press", "right click"]),
         .init("smartTouch", "Smart Touch", .input, keywords: ["scroll", "one finger", "title bar", "window"]),
         .init("smartTouchHaptics", String(localized: "Smart Touch Haptics"), .input, keywords: ["vibration"]),
         .init("trackpadSensitivity", String(localized: "Trackpad Sensitivity"), .input, keywords: ["speed", "pointer"]),
@@ -135,6 +136,7 @@ enum MobileSettingsSearchIndex {
         .init("customLayouts", String(localized: "Custom Layouts"), .controls, keywords: ["two hand assist", "radial", "share", "import", "editor", "shortcut button"], availability: .padOnly),
         .init("showTray", String(localized: "Show Control Tray"), .controls, keywords: ["controls", "hide"]),
         .init("autoHide", String(localized: "Auto-hide Control Trays"), .controls, keywords: ["auto hide", "fade"]),
+        .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("controlProfile", String(localized: "Active Profile"), .controls, keywords: ["control profile", "shortcuts", "palette", "modifier"]),
         .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),

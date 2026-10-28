@@ -370,8 +370,10 @@ struct ReceiverScreen: View {
                         .offsetBy(dx: canvas.minX, dy: canvas.minY)
                     WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                    WindowRailView(model: model.workspace)
-                        .padding(.top, effectiveSafeInsets.top)
+                    if controlStore.preferences.windowSwitcher == .rail {
+                        WindowRailView(model: model.workspace)
+                            .padding(.top, effectiveSafeInsets.top)
+                    }
                     ReceiverControlOverlay(
                         store: controlStore,
                         receiver: model.receiver,
@@ -402,6 +404,22 @@ struct ReceiverScreen: View {
                             .frame(maxWidth: 460)
                             .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
                             .transition(.opacity)
+                    }
+                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.windowMode {
+                        // Window mode only: in Mirror/Extend the edge belongs to the Mac (its own
+                        // Stage Manager). Above the controls; only the edge strip takes touches until it opens.
+                        let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
+                                                width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
+                                                height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
+                        StagePeekOverlay(
+                            model: model.workspace,
+                            edge: controlStore.preferences.stagePeekEdge,
+                            frame: canvas,
+                            safe: screenSafe.intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY),
+                            avoiding: (occupiedControlFrames
+                                       + ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                            hapticsEnabled: controlStore.preferences.hapticsEnabled)
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
                                        inputAllowed: inputReachesMac,

@@ -824,7 +824,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 19
+    static let schemaVersion = 20
 
     var version = schemaVersion
     var trayEnabled = true
@@ -870,6 +870,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var touchStyle = DirectTouchStyle.natural
     /// Whether the one-time "Natural Touch is on" hint has been shown.
     var naturalTouchHintShown = false
+    /// Window mode's switcher (schema 20). Stage Peek for everyone unless a
+    /// switcher was chosen; Rail keeps all its own settings.
+    var windowSwitcher = WindowSwitcherStyle.stagePeek
+    /// The edge Stage Peek opens from.
+    var stagePeekEdge = StagePeekEdge.left
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults on (schema 16).
@@ -1018,6 +1023,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // installs too. Nothing else is rewritten.
         touchStyle = try value(.touchStyle, fallback.touchStyle)
         naturalTouchHintShown = try value(.naturalTouchHintShown, fallback.naturalTouchHintShown)
+        // Absent (schema < 20): Stage Peek from the left edge.
+        windowSwitcher = try value(.windowSwitcher, fallback.windowSwitcher)
+        stagePeekEdge = try value(.stagePeekEdge, fallback.stagePeekEdge)
         profiles = try value(.profiles, fallback.profiles)
         // Absent (schema < 6) means "written before the Function Tray
         // existed" — default to ON with canonical Undo/Redo profiles,
@@ -1273,6 +1281,11 @@ struct ReceiverControlPreferencesRepository {
         // to Natural Touch (hint not yet shown) — nothing to transform.
         if value.version < 19 {
             value.version = 19
+        }
+        // Schema 19 predates the window switcher choice; the decoder already
+        // defaulted it to Stage Peek on the left — nothing to transform.
+        if value.version < 20 {
+            value.version = 20
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

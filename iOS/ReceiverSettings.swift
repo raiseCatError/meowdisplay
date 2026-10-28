@@ -873,6 +873,25 @@ private struct ControlSettingsPage: View {
                 }
             }
             Section {
+                Picker("Window Switcher", selection: preferenceBinding(controlStore, \.windowSwitcher)) {
+                    ForEach(WindowSwitcherStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .settingsAnchor("windowSwitcher")
+                .accessibilityIdentifier("windowSwitcherPicker")
+                if controlStore.preferences.windowSwitcher == .stagePeek {
+                    Picker("Stage Peek Edge", selection: preferenceBinding(controlStore, \.stagePeekEdge)) {
+                        ForEach(StagePeekEdge.allCases) { Text($0.title).tag($0) }
+                    }
+                    .accessibilityIdentifier("stagePeekEdgePicker")
+                }
+            } header: {
+                Text("Window Switcher")
+            } footer: {
+                Text(controlStore.preferences.windowSwitcher.explanation
+                     + " " + String(localized: "Used in Window mode."))
+            }
+            Section {
                 Picker("Active Profile", selection: Binding(
                     get: { controlStore.preferences.activeControlProfile },
                     set: { profile in
