@@ -164,17 +164,23 @@ fun ReceiverScreen(
 
         val transform = state.transform
         val frame = transform.displayedRect
-        // The picture: a SurfaceView can't rotate, so it is sized and placed to the zoomed frame (Android keeps
-        // viewport rotation off; see the parity notes).
-        if (state.videoEnabled && !frame.isEmpty) {
-            AndroidView(
-                factory = { ctx -> videoSurface(ctx, pipeline) },
-                modifier = Modifier
-                    .offset { IntOffset((frame.minX * density.density).roundToInt(), (frame.minY * density.density).roundToInt()) }
-                    .size(frame.width.dp, frame.height.dp),
-            )
+        // The picture. The SurfaceView is always composed: the decoder needs its surface to produce the
+        // first frame that sizes it, and recreating it mid-session is avoided. Until a size is known it
+        // fills the window. It can't rotate, so it is sized and placed to the zoomed frame (viewport
+        // rotation is off on Android; see the parity notes).
+        val videoModifier = if (!frame.isEmpty) {
+            Modifier
+                .offset { IntOffset((frame.minX * density.density).roundToInt(), (frame.minY * density.density).roundToInt()) }
+                .size(frame.width.dp, frame.height.dp)
+        } else {
+            Modifier.fillMaxSize()
         }
-        if (!state.videoEnabled && !frame.isEmpty) VideoOffSurface(frame, prefs.showSurfaceGrid)
+        AndroidView(factory = { ctx -> videoSurface(ctx, pipeline) }, modifier = videoModifier)
+        // Video off: the last frame is discarded from view (PROTOCOL.md 6.2) and the mapped surface shown.
+        if (!state.videoEnabled) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+            if (!frame.isEmpty) VideoOffSurface(frame, prefs.showSurfaceGrid)
+        }
 
         // The streamed cursor, at the Mac's position under the current zoom.
         val cursor = state.cursor

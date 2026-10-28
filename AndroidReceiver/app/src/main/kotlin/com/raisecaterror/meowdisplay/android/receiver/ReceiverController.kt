@@ -206,7 +206,15 @@ class ReceiverController(
         val png = (body["png"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
         if (png.length > MAX_CURSOR_BASE64) return null
         val bytes = runCatching { Base64.decode(png, Base64.DEFAULT) }.getOrNull() ?: return null
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        // A small PNG can declare huge dimensions: check the header before allocating any pixels.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth !in 1..MAX_CURSOR_SIDE || bounds.outHeight !in 1..MAX_CURSOR_SIDE) return null
+        val bitmap = try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: OutOfMemoryError) {
+            null
+        } ?: return null
         val nw = num("nw")?.takeIf { it > 0 && it <= 1 } ?: return null
         val nh = num("nh")?.takeIf { it > 0 && it <= 1 } ?: return null
         return CursorSprite(bitmap, nw, nh, (num("ax") ?: 0.0).coerceIn(0.0, 1.0), (num("ay") ?: 0.0).coerceIn(0.0, 1.0))
@@ -425,5 +433,8 @@ class ReceiverController(
     companion object {
         /** `cursorImg.png` is kept under 24000 bytes before encoding (PROTOCOL.md 6.2). */
         const val MAX_CURSOR_BASE64 = 64_000
+
+        /** macOS cursors are at most 256 pt at 2x; anything larger than this is not a cursor. */
+        const val MAX_CURSOR_SIDE = 512
     }
 }
