@@ -85,7 +85,10 @@ class ReceiverControlStore(blobs: PreferenceBlobStore) {
     val activeFunctionTrayProfile: FunctionTrayProfile get() = current.functionTrayProfile(current.activeFunctionTrayProfile)
 
     private val autoHideRunnable = Runnable {
-        if (autoHideAllowed) mutate { it.copy(autoHidden = true) }
+        if (autoHideAllowed) {
+            android.util.Log.i("MeowControls", "auto-hide")
+            mutate { it.copy(autoHidden = true) }
+        }
     }
 
     fun projectChord(modifiers: Set<ControlModifier>) {

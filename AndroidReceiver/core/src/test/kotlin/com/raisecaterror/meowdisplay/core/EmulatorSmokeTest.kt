@@ -62,8 +62,13 @@ class EmulatorSmokeTest {
 
     /** A PNG of the emulator screen, for the visual parity review. */
     private fun shot(name: String) {
+        val file = File(shots, "$profile-$name.png")
         ProcessBuilder(adbPath, "-s", serial!!, "exec-out", "screencap", "-p")
-            .redirectOutput(File(shots, "$profile-$name.png")).start().waitFor(30, TimeUnit.SECONDS)
+            .redirectOutput(file).start().waitFor(30, TimeUnit.SECONDS)
+        // A foldable has two displays and screencap prefixes a warning: keep only the PNG.
+        val bytes = file.readBytes()
+        val start = (0..bytes.size - 4).firstOrNull { bytes[it] == 0x89.toByte() && bytes[it + 1] == 'P'.code.toByte() && bytes[it + 2] == 'N'.code.toByte() } ?: 0
+        if (start > 0) file.writeBytes(bytes.copyOfRange(start, bytes.size))
     }
 
     private fun screenSize(): Pair<Int, Int> {
@@ -365,7 +370,8 @@ class EmulatorSmokeTest {
             assertEquals(listOf("down", "up"), arrow.map { it["action"]!!.jsonPrimitive.content })
             assertTrue(arrow.all { it["usage"]!!.jsonPrimitive.content == "80" })
             shot("keyboard")
-            adb("shell", "input", "keyevent", "KEYCODE_BACK")
+            // The keyboard bar's Hide Keyboard (or the Keyboard chip again when no software keyboard showed).
+            if (descBounds("Hide Keyboard").containsMatchIn(screen())) tapDesc("Hide Keyboard") else tapDesc("Keyboard")
 
             // Auto-hide: idle for longer than 9 s and the controls retreat; the next touch brings them back.
             Thread.sleep(10_500)

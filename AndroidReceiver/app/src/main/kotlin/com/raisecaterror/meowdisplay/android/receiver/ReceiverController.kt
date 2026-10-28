@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import com.raisecaterror.meowdisplay.android.controls.ReceiverControlStore
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.core.controls.CGRect
@@ -136,6 +137,7 @@ class ReceiverController(
     // MARK: - Session
 
     private fun onSessionEvent(event: SessionEvent) {
+        if (event.isDiagnostic) Log.i(TAG, "session ${event.javaClass.simpleName}: ${event.summary}")
         when (event) {
             is SessionEvent.InputState -> {
                 store.applySessionInputState(event.state)
@@ -430,7 +432,23 @@ class ReceiverController(
 
     private fun now(): Double = SystemClock.uptimeMillis() / 1000.0
 
+    private val SessionEvent.isDiagnostic: Boolean
+        get() = this is SessionEvent.InputState || this is SessionEvent.Admitted || this is SessionEvent.Connected ||
+            this is SessionEvent.Disconnected || this === SessionEvent.AdmissionWithdrawn || this is SessionEvent.DisplayPaused ||
+            this === SessionEvent.InputReset || this is SessionEvent.VideoState
+
+    private val SessionEvent.summary: String
+        get() = when (this) {
+            is SessionEvent.InputState -> "${state.wire} allowed=$allowed"
+            is SessionEvent.Disconnected -> reason.name
+            is SessionEvent.DisplayPaused -> "paused=$paused"
+            is SessionEvent.VideoState -> "enabled=$enabled"
+            else -> ""
+        }
+
     companion object {
+        private const val TAG = "MeowControls"
+
         /** `cursorImg.png` is kept under 24000 bytes before encoding (PROTOCOL.md 6.2). */
         const val MAX_CURSOR_BASE64 = 64_000
 

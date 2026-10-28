@@ -5,6 +5,7 @@ import android.view.HapticFeedbackConstants
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.accessibility.AccessibilityManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -113,6 +114,9 @@ fun ReceiverScreen(
     val folds = rememberFoldRegions()
 
     LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
+    // Back never ends a live session by accident: like leaving the app on iOS, it only backgrounds
+    // MeowDisplay (the Mac is told to expect this device back). The keyboard and Settings take Back first.
+    BackHandler { (context as? Activity)?.moveTaskToBack(true) }
     LaunchedEffect(Unit) {
         controller.hapticEvents.collect { haptic -> hostView.performHapticFeedback(hapticConstant(haptic)) }
     }
