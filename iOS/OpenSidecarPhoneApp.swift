@@ -3399,7 +3399,7 @@ struct VideoLayerView: UIViewRepresentable {
         private var pointerEngineOwnsAnchor: Bool {
             switch pointerEngine.mode {
             case .absolutePointer, .relativePointerSession, .leftDragHeld, .chordPending, .rightDragHeld,
-                 .smartScroll:
+                 .smartScroll, .touchConsumed:
                 return true
             case .twoFingerPending:
                 return pointerEngine.isChordContinuation

@@ -1316,3 +1316,165 @@ final class AppGestureCommandAccumulatorTests: XCTestCase {
         XCTAssertEqual(rotation.advance(by: 0.05), 0)   // a few degrees: nothing
     }
 }
+
+// MARK: - Natural Touch
+
+/// Replays fixtures/gestures/natural-touch.json (shared with the Android
+/// port's NaturalTouchVectorsTest) against the Swift engine.
+final class NaturalTouchVectorTests: XCTestCase {
+    private static var fixtureURL: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("fixtures/gestures/natural-touch.json")
+    }
+
+    private func render(_ command: PointerCommand) -> [String] {
+        switch command {
+        case .moveAbsolute(let x, let y): return ["move", "\(x)", "\(y)"]
+        case .moveRelative(let dx, let dy): return ["rel", "\(dx)", "\(dy)"]
+        case .mouseDown(let b, let n): return ["down", b.wireValue, "\(n)"]
+        case .mouseUp(let b, let n): return ["up", b.wireValue, "\(n)"]
+        case .scroll(let dx, let dy): return ["scroll", "\(dx)", "\(dy)"]
+        case .scrollEnded(let momentum): return ["scrollEnd", momentum ? "momentum" : "cancel"]
+        case .smartTouchFeedback(let f): return ["feedback", "\(f)"]
+        case .probeScrollTarget(let id, _, _): return ["probe", "\(id)"]
+        }
+    }
+
+    private func matches(_ actual: [String], _ expected: String) -> Bool {
+        let want = expected.split(separator: " ").map(String.init)
+        guard want.count == actual.count else { return false }
+        return zip(actual, want).allSatisfy { a, w in
+            if let x = Double(a), let y = Double(w) { return abs(x - y) < 1e-6 }
+            return a == w
+        }
+    }
+
+    func testSharedVectors() throws {
+        let data = try Data(contentsOf: Self.fixtureURL)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let cases = try XCTUnwrap(root["cases"] as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(cases.count, 20)
+        for testCase in cases {
+            let name = testCase["name"] as? String ?? "?"
+            let engine = PointerGestureEngine()
+            engine.setTouchStyle(.natural)
+            var out: [PointerCommand] = []
+            for step in testCase["steps"] as? [[String: Any]] ?? [] {
+                if let t = step["poll"] as? Double {
+                    out += engine.poll(now: t)
+                } else if let style = step["style"] as? String {
+                    out += engine.setTouchStyle(DirectTouchStyle(rawValue: style)!)
+                } else if let mode = step["inputMode"] as? String {
+                    out += engine.setInputMode(PointerInputMode(rawValue: mode)!)
+                } else if step["reset"] != nil {
+                    out += engine.reset()
+                } else {
+                    let phase: PointerTouchSample.Phase
+                    switch step["phase"] as? String {
+                    case "began": phase = .began
+                    case "moved": phase = .moved
+                    case "ended": phase = .ended
+                    default: phase = .cancelled
+                    }
+                    let view = step["view"] as! [Double]
+                    let norm = (step["norm"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) }
+                    out += engine.handle(PointerTouchSample(
+                        id: AnyHashable(step["id"] as! Int), phase: phase,
+                        viewPoint: CGPoint(x: view[0], y: view[1]), normalized: norm,
+                        time: step["t"] as! Double))
+                }
+            }
+            let expected = testCase["expect"] as? [String] ?? []
+            let rendered = out.map(render)
+            let ok = rendered.count == expected.count && zip(rendered, expected).allSatisfy { matches($0, $1) }
+            XCTAssertTrue(ok, "\(name)\n got: \(rendered.map { $0.joined(separator: " ") })\nwant: \(expected)")
+            XCTAssertNil(engine.heldMouseButton, "\(name): a button is still held")
+        }
+    }
+
+    func testBareEngineStaysClassicSoExistingBehaviorIsUnchanged() {
+        XCTAssertEqual(PointerGestureEngine().touchStyle, .classic)
+    }
+
+    func testNaturalTouchIgnoresSmartTouchProbes() {
+        let engine = PointerGestureEngine()
+        engine.smartTouchEnabled = true
+        engine.setTouchStyle(.natural)
+        let down = engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .began,
+                                                    viewPoint: CGPoint(x: 10, y: 10),
+                                                    normalized: CGPoint(x: 0.1, y: 0.1), time: 0))
+        XCTAssertEqual(down, [])
+    }
+
+    func testLongPressDeadlineIsReportedForPolling() {
+        let engine = PointerGestureEngine()
+        engine.setTouchStyle(.natural)
+        engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .began, viewPoint: .zero,
+                                         normalized: CGPoint(x: 0.5, y: 0.5), time: 10))
+        XCTAssertEqual(engine.pollDelay(now: 10)!, PointerGestureConfig.naturalLongPressDelay, accuracy: 1e-9)
+    }
+
+    func testLiftFarFromTouchDownWithoutMoveEventsDoesNotClick() {
+        let engine = PointerGestureEngine()
+        engine.setTouchStyle(.natural)
+        engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .began, viewPoint: .zero,
+                                         normalized: CGPoint(x: 0.5, y: 0.5), time: 0))
+        let up = engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .ended,
+                                                  viewPoint: CGPoint(x: 80, y: 0),
+                                                  normalized: CGPoint(x: 0.6, y: 0.5), time: 0.1))
+        XCTAssertEqual(up, [])
+    }
+}
+
+/// Touch Style preference: Natural for everyone unless Classic was chosen;
+/// nothing else in a saved blob changes.
+final class TouchStylePreferenceTests: XCTestCase {
+    func testNewInstallIsNatural() {
+        XCTAssertEqual(ReceiverControlPreferences().touchStyle, .natural)
+        XCTAssertFalse(ReceiverControlPreferences().naturalTouchHintShown)
+    }
+
+    func testBlobWithoutTheFieldDecodesToNaturalAndKeepsEverythingElse() throws {
+        var old = ReceiverControlPreferences()
+        old.inputMode = .trackpad
+        old.smartTouchEnabled = false
+        old.pinchTarget = .app
+        old.trayEnabled = false
+        old.functionTrayPosition = .sameSide
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        json.removeValue(forKey: "touchStyle")
+        json.removeValue(forKey: "naturalTouchHintShown")
+        json["version"] = 18
+        let data = try JSONSerialization.data(withJSONObject: json)
+
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "TouchStylePreferenceTests.\(UUID())"))
+        defaults.set(data, forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+
+        XCTAssertEqual(loaded.touchStyle, .natural)
+        XCTAssertFalse(loaded.naturalTouchHintShown)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+        var expected = old
+        expected.touchStyle = .natural
+        expected.naturalTouchHintShown = false
+        XCTAssertEqual(loaded, expected, "only the new fields may differ")
+        XCTAssertEqual(loaded.inputMode, .trackpad, "Trackpad users stay on Trackpad")
+    }
+
+    func testClassicPersistsAcrossRestart() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "TouchStylePreferenceTests.\(UUID())"))
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.touchStyle = .classic
+        preferences.naturalTouchHintShown = true
+        repository.save(preferences)
+        let reloaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertEqual(reloaded.touchStyle, .classic)
+        XCTAssertTrue(reloaded.naturalTouchHintShown)
+    }
+
+    func testStoredRawValuesAreStable() {
+        XCTAssertEqual(DirectTouchStyle.natural.rawValue, "natural")
+        XCTAssertEqual(DirectTouchStyle.classic.rawValue, "classic")
+    }
+}

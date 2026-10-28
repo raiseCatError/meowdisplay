@@ -78,6 +78,8 @@ enum SmartTouchFeedback: Equatable {
     /// The title bar hold reached its threshold: the left button is now
     /// held and the window follows the finger.
     case windowDragArmed
+    /// Natural Touch: a still long press just right-clicked.
+    case longPressRightClick
 }
 
 /// What the Mac confidently identified under a Smart Touch touch-down.
@@ -175,6 +177,45 @@ enum PointerGestureConfig {
     /// without either extreme feeling broken.
     static let trackpadSensitivityRange: ClosedRange<Double> = 0.5...2.0
     static let defaultTrackpadSensitivity: Double = 1.0
+
+    /// Natural Touch: a finger that rests at least this long before moving
+    /// past `dragSlop` drags (left button pressed at the touch-down point);
+    /// one that moves sooner scrolls. Matches macOS 27's touch model, where
+    /// "touch and immediate pan" scrolls (TN3212).
+    static let naturalPressDelay: TimeInterval = 0.25
+    /// Natural Touch: a finger held still (within `dragSlop`) this long from
+    /// touch-down right-clicks at the touch-down point, once.
+    static let naturalLongPressDelay: TimeInterval = 0.55
+    /// Natural Touch sends each tap's click on lift. A tap that lands within
+    /// this long of the previous tap's lift, and within
+    /// `tapChainMaxDistance`, counts as the next click (double, triple).
+    static let naturalClickChainWindow: TimeInterval = 0.4
+}
+
+/// How a Direct Touch finger behaves. Persisted as `touchStyle` in
+/// `ReceiverControlPreferences`; stable raw values. Trackpad mode and every
+/// multi-finger gesture ignore it.
+enum DirectTouchStyle: String, Codable, CaseIterable, Identifiable {
+    /// macOS 27-style touch: tap clicks, swipe scrolls, press then move
+    /// drags, long press right-clicks. The default.
+    case natural
+    /// The original Direct Touch: the finger is the pointer (tap-then-hold
+    /// to drag), with Smart Touch if enabled.
+    case classic
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .natural: return String(localized: "Natural Touch", comment: "Touch style: macOS-style touch (swipe scrolls).")
+        case .classic: return String(localized: "Classic", comment: "Touch style: the original mouse-style Direct Touch.")
+        }
+    }
+    var explanation: String {
+        switch self {
+        case .natural: return String(localized: "Swipe to scroll, press to drag, pinch to zoom.")
+        case .classic: return String(localized: "Familiar mouse-style control, ideal for precise dragging.")
+        }
+    }
 }
 
 /// User-selectable primary one-finger pointer model. Persisted receiver
@@ -274,6 +315,11 @@ enum PointerEngineMode: Equatable {
     /// The engine steps aside entirely — the existing system-gesture
     /// recognizers own this touch sequence.
     case deferredSystemGesture
+    /// Natural Touch: the anchor finger's one action already happened (a
+    /// long-press right click) or it has nothing to act on (it landed
+    /// outside the picture). Everything else that finger does is ignored
+    /// until it lifts.
+    case touchConsumed
 }
 
 /// The receiver's pointer/click gesture policy — a pure, testable
@@ -328,7 +374,19 @@ final class PointerGestureEngine {
     /// only affects the next touch-down's probe and commit decision.
     var smartTouchEnabled = false
 
-    private var smartTouchIsActive: Bool { smartTouchEnabled && inputMode == .direct }
+    private var smartTouchIsActive: Bool { smartTouchEnabled && inputMode == .direct && touchStyle == .classic }
+
+    /// Direct Touch style. Defaults to `.classic` so a bare engine (and every
+    /// pre-existing test) behaves exactly as before; the apps set the stored
+    /// preference, whose own default is `.natural`. Change it only through
+    /// `setTouchStyle(_:)`.
+    private(set) var touchStyle: DirectTouchStyle = .classic
+
+    private var naturalIsActive: Bool { touchStyle == .natural && inputMode == .direct }
+
+    /// Natural Touch click counting: the last click's count, touch-down view
+    /// point and lift time. Only ever set by a Natural tap.
+    private var naturalLastClick: (count: Int, point: CGPoint, time: TimeInterval)?
 
     /// Whether the Mac has classified the current `.firstTouchPending`
     /// finger's touch-down target (`resolved(nil)`: nothing Smart Touch
@@ -499,7 +557,11 @@ final class PointerGestureEngine {
     func poll(now: TimeInterval) -> [PointerCommand] {
         var out: [PointerCommand] = []
         if mode == .firstTouchPending, let start = pendingStart, let pid = pendingID {
-            if tapChain != nil {
+            if naturalIsActive {
+                if now - start.time >= PointerGestureConfig.naturalLongPressDelay {
+                    out += naturalLongPress(id: pid)
+                }
+            } else if tapChain != nil {
                 if now - start.time >= PointerGestureConfig.holdCommitDelay {
                     out += inputMode == .trackpad
                         ? beginTrackpadDrag(id: pid, at: pendingLastView ?? start.view, time: now)
@@ -577,7 +639,9 @@ final class PointerGestureEngine {
 
         if mode == .firstTouchPending, let start = pendingStart, pendingID != nil {
             let delay: TimeInterval
-            if tapChain != nil {
+            if naturalIsActive {
+                delay = PointerGestureConfig.naturalLongPressDelay
+            } else if tapChain != nil {
                 delay = PointerGestureConfig.holdCommitDelay
             } else if let target = smartTouchDeferredTarget {
                 delay = target == .windowDrag
@@ -746,7 +810,7 @@ final class PointerGestureEngine {
             chordPositions.removeAll()
             return []
 
-        case .leftDragHeld, .rightDragHeld, .smartScroll:
+        case .leftDragHeld, .rightDragHeld, .smartScroll, .touchConsumed:
             // Extra fingers while a drag (or Smart Touch scroll) is
             // already committed don't change its meaning — ignore until
             // release.
@@ -872,7 +936,7 @@ final class PointerGestureEngine {
         if sample.id == anchorID { anchorViewPoint = sample.viewPoint }
 
         switch mode {
-        case .idle, .deferredSystemGesture, .tapBuffered:
+        case .idle, .deferredSystemGesture, .tapBuffered, .touchConsumed:
             return []
 
         case .firstTouchPending:
@@ -881,6 +945,20 @@ final class PointerGestureEngine {
             pendingLastView = sample.viewPoint
             let moved = hypot(sample.viewPoint.x - start.view.x, sample.viewPoint.y - start.view.y)
             guard moved > PointerGestureConfig.dragSlop else { return [] }
+            if naturalIsActive {
+                // Natural Touch: moving straight away scrolls; resting first
+                // (but not long enough to right-click, which `poll()` would
+                // already have done) drags from the touch-down point.
+                guard start.normalized != nil else { return consumeTouch(id: sample.id) }
+                if sample.time - start.time >= PointerGestureConfig.naturalPressDelay {
+                    let chained = naturalChainedCount(at: start.view, time: start.time)
+                    naturalLastClick = nil
+                    return beginLeftDrag(id: sample.id, pressAt: start.normalized, current: sample.normalized,
+                                         clickCount: chained)
+                }
+                naturalLastClick = nil
+                return commitToSmartScroll(id: sample.id, viewPoint: sample.viewPoint)
+            }
             // Enough movement evidence to commit now, without waiting out
             // the rest of the arbitration window — either a drag
             // continuation of an already-buffered tap chain, or a genuine
@@ -1010,6 +1088,30 @@ final class PointerGestureEngine {
         switch mode {
         case .idle, .deferredSystemGesture, .tapBuffered:
             break
+
+        case .touchConsumed:
+            if sample.id == anchorID { resetToIdle() }
+
+        case .firstTouchPending where naturalIsActive:
+            guard sample.id == pendingID, let start = pendingStart else { break }
+            pendingID = nil
+            pendingStart = nil
+            pendingLastNormalized = nil
+            pendingLastView = nil
+            mode = .idle
+            // Still under the slop (it never committed to a scroll or drag)
+            // and lifted before the long press: a click at the touch-down
+            // point, sent now — no waiting for a possible second tap.
+            let liftDistance = hypot(sample.viewPoint.x - start.view.x, sample.viewPoint.y - start.view.y)
+            guard !cancelled, liftDistance <= PointerGestureConfig.dragSlop, let n = start.normalized else {
+                naturalLastClick = nil
+                break
+            }
+            let count = naturalChainedCount(at: start.view, time: start.time) ?? 1
+            naturalLastClick = (count, start.view, sample.time)
+            out += [.moveAbsolute(x: Double(n.x), y: Double(n.y)),
+                    .mouseDown(button: .left, clickCount: count),
+                    .mouseUp(button: .left, clickCount: count)]
 
         case .firstTouchPending:
             guard sample.id == pendingID, let start = pendingStart else { break }
@@ -1386,8 +1488,9 @@ final class PointerGestureEngine {
     /// Presses where the finger came down (`pressAt`), then drags to where it
     /// is now: pressing at the point the drag was recognised would start
     /// every drag a slop's distance off its target.
-    private func beginLeftDrag(id: AnyHashable, pressAt: CGPoint?, current: CGPoint?) -> [PointerCommand] {
-        let clickCount = tapChain?.count ?? 0
+    private func beginLeftDrag(id: AnyHashable, pressAt: CGPoint?, current: CGPoint?,
+                               clickCount explicitCount: Int? = nil) -> [PointerCommand] {
+        let clickCount = explicitCount ?? tapChain?.count ?? 0
         tapChain = nil
         pendingID = nil
         pendingStart = nil
@@ -1433,6 +1536,53 @@ final class PointerGestureEngine {
         mode = .rightDragHeld
         heldMouseButton = .right
         return [.mouseDown(button: .right, clickCount: 1)]
+    }
+
+    /// Natural Touch: the click count a touch landing at `point` at `time`
+    /// continues (previous count + 1, at most 3), or nil when it starts fresh.
+    private func naturalChainedCount(at point: CGPoint, time: TimeInterval) -> Int? {
+        guard let last = naturalLastClick,
+              time - last.time >= 0,
+              time - last.time <= PointerGestureConfig.naturalClickChainWindow,
+              hypot(point.x - last.point.x, point.y - last.point.y)
+                <= PointerGestureConfig.tapChainMaxDistance else { return nil }
+        return min(last.count + 1, 3)
+    }
+
+    /// Natural Touch long press: one right click at the touch-down point,
+    /// then the rest of this touch is ignored.
+    private func naturalLongPress(id: AnyHashable) -> [PointerCommand] {
+        let start = pendingStart
+        naturalLastClick = nil
+        var out = consumeTouch(id: id)
+        guard let n = start?.normalized else { return out }
+        out += [.moveAbsolute(x: Double(n.x), y: Double(n.y)),
+                .mouseDown(button: .right, clickCount: 1),
+                .mouseUp(button: .right, clickCount: 1),
+                .smartTouchFeedback(.longPressRightClick)]
+        return out
+    }
+
+    /// Ends the still-undecided first touch without an action of its own.
+    private func consumeTouch(id: AnyHashable) -> [PointerCommand] {
+        pendingID = nil
+        pendingStart = nil
+        pendingLastNormalized = nil
+        pendingLastView = nil
+        anchorID = id
+        mode = .touchConsumed
+        return []
+    }
+
+    /// Switches the Direct Touch style. Like `setInputMode(_:)`, cancels the
+    /// gesture in flight (releasing any held button) so the next touch
+    /// starts clean; nothing else about the session changes.
+    @discardableResult
+    func setTouchStyle(_ newStyle: DirectTouchStyle) -> [PointerCommand] {
+        guard newStyle != touchStyle else { return [] }
+        let out = reset()
+        touchStyle = newStyle
+        return out
     }
 
     /// Switches the primary one-finger pointer model. A no-op when already
@@ -1497,6 +1647,7 @@ final class PointerGestureEngine {
         smartScrollLastView = nil
         smartScrollAxis = .free
         titleBarHoldActive = false
+        naturalLastClick = nil
     }
 }
 

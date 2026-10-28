@@ -237,6 +237,9 @@ final class SmartTouchHaptics {
             stopBuildUp()
             guard isEnabled else { return }
             UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.8)
+        case .longPressRightClick:
+            guard isEnabled else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 

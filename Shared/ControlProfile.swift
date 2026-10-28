@@ -824,7 +824,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 18
+    static let schemaVersion = 19
 
     var version = schemaVersion
     var trayEnabled = true
@@ -863,6 +863,13 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `defaultTrackpadSensitivity`. Never affects Direct Touch or any
     /// multi-finger gesture.
     var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
+    /// Direct Touch style (schema 19). Natural Touch for everyone, new and
+    /// upgraded: a blob without this key decodes to `.natural`, and only an
+    /// explicit Classic choice is stored as `.classic`. Never affects
+    /// Trackpad mode.
+    var touchStyle = DirectTouchStyle.natural
+    /// Whether the one-time "Natural Touch is on" hint has been shown.
+    var naturalTouchHintShown = false
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults on (schema 16).
@@ -1007,6 +1014,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // setting existed" — default to exactly the pre-setting movement
         // speed, never a silently different one.
         trackpadSensitivity = try value(.trackpadSensitivity, fallback.trackpadSensitivity)
+        // Absent (schema < 19): Natural Touch — the new default for upgraded
+        // installs too. Nothing else is rewritten.
+        touchStyle = try value(.touchStyle, fallback.touchStyle)
+        naturalTouchHintShown = try value(.naturalTouchHintShown, fallback.naturalTouchHintShown)
         profiles = try value(.profiles, fallback.profiles)
         // Absent (schema < 6) means "written before the Function Tray
         // existed" — default to ON with canonical Undo/Redo profiles,
@@ -1257,6 +1268,11 @@ struct ReceiverControlPreferencesRepository {
         // the decoder already defaulted them to the unchanged behavior.
         if value.version < 18 {
             value.version = 18
+        }
+        // Schema 18 predates Touch Style; the decoder already defaulted it
+        // to Natural Touch (hint not yet shown) — nothing to transform.
+        if value.version < 19 {
+            value.version = 19
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
