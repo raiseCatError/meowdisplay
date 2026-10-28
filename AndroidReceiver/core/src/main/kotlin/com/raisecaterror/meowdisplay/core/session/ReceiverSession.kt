@@ -51,7 +51,9 @@ sealed interface SessionEvent {
 /**
  * The receiver's media session (Shared/StreamReceiver.swift, PROTOCOL.md 6,
  * 8, 9). Serves one sender at a time; a newly adopted connection replaces
- * the old one. Per connection: `hello` first, nothing admitted, input off.
+ * the old one, except that another Mac arriving while a session is admitted
+ * waits until its own invitation is accepted (make-before-break, PROTOCOL.md
+ * 1). Per connection: `hello` first, nothing admitted, input off.
  * Media is dropped until the session is admitted on that same connection,
  * and input leaves only while the Mac's grant for that connection stands.
  *
@@ -71,6 +73,18 @@ class ReceiverSession(
     private val video = ParameterSetTracker()
 
     private var link: MediaLink? = null
+
+    /**
+     * Another Mac that connected while a session was admitted: greeted, but only its `welcome`,
+     * invitation and withdrawal are read. It replaces the session once its invitation is
+     * accepted; declined, blocked, withdrawn or silent, it closes and the session carries on.
+     */
+    private var candidate: MediaLink? = null
+    private var candidateLastMs = 0L
+    private var candidatePingMs = 0L
+    private var candidatePanel: HelloFields? = null
+    private var candidateWelcome: SenderMessage.Welcome? = null
+    private var candidateInvitation: SessionInvitation? = null
     private var macPV: Int? = null
     private var currentInvitationID: String? = null
     private var inputGranted = false
@@ -119,7 +133,8 @@ class ReceiverSession(
     /**
      * A new connection that completed pinned TLS and resolved to exactly one
      * peer. It replaces the current one (PROTOCOL.md 1), except that a Mac
-     * this device blocked is closed before it can disturb anything.
+     * this device blocked is closed before it can disturb anything, and
+     * another Mac waits while a session is admitted (see [candidate]).
      */
     @Synchronized
     fun adopt(newLink: MediaLink): Boolean {
@@ -127,6 +142,56 @@ class ReceiverSession(
             newLink.close()
             return false
         }
+        val current = link
+        if (current != null && current.peerID != newLink.peerID && admission.admitted) {
+            park(newLink)
+            return true
+        }
+        promote(newLink, greetedWith = null)
+        return true
+    }
+
+    private fun park(newLink: MediaLink) {
+        dropCandidate()
+        val t = now()
+        candidate = newLink
+        candidateLastMs = t
+        candidatePingMs = t
+        val fields = helloFields()
+        candidatePanel = fields
+        newLink.send(ReceiverMessages.encode(ReceiverMessages.hello(fields)))
+    }
+
+    /** Closes the waiting Mac, answering its invitation with [answer] first; its prompt goes too. */
+    private fun dropCandidate(answer: InvitationResult? = null) {
+        val parked = candidate ?: return
+        val invitation = candidateInvitation
+        candidate = null
+        candidateWelcome = null
+        candidateInvitation = null
+        candidatePanel = null
+        if (invitation != null) {
+            answer?.let { parked.send(ReceiverMessages.encode(ReceiverMessages.invitationResponse(invitation.id, it))) }
+            if (approvals.resolve(invitation.id) != null) emit(SessionEvent.ApprovalDismissed(invitation.id))
+        }
+        parked.close()
+    }
+
+    /** The waiting Mac becomes the session, with the `welcome` it already sent. */
+    private fun promoteCandidate(): MediaLink? {
+        val parked = candidate ?: return null
+        val welcome = candidateWelcome
+        val panel = candidatePanel
+        candidate = null
+        candidateWelcome = null
+        candidateInvitation = null
+        candidatePanel = null
+        promote(parked, greetedWith = panel)
+        welcome?.let { handle(parked, it) }
+        return parked
+    }
+
+    private fun promote(newLink: MediaLink, greetedWith: HelloFields?) {
         val previous = link
         link = newLink
         if (previous != null) {
@@ -155,18 +220,28 @@ class ReceiverSession(
         reportPhase()
         emit(SessionEvent.Connected(newLink.peerID))
         emit(SessionEvent.InputState(InputWireState.Off, false))
-        announce(force = true)
-        return true
+        if (greetedWith != null) {
+            // Greeted while it waited: say it again only if the panel changed since.
+            announcedPanel = greetedWith
+            announce(force = false)
+        } else {
+            announce(force = true)
+        }
     }
 
     /** Any bytes from the Mac keep the connection alive (PROTOCOL.md 8.2), not only whole frames. */
     @Synchronized
     fun onBytes(from: MediaLink) {
-        if (from === link) lastReceivedMs = now()
+        if (from === link) lastReceivedMs = now() else if (from === candidate) candidateLastMs = now()
     }
 
     @Synchronized
     fun onFrame(from: MediaLink, payload: ByteArray) {
+        if (from === candidate) {
+            candidateLastMs = now()
+            handleCandidate(from, payload)
+            return
+        }
         if (from !== link) return
         lastReceivedMs = now()
         when (val frame = IncomingFrame.classify(payload)) {
@@ -180,12 +255,13 @@ class ReceiverSession(
     /** The transport failed or ended. */
     @Synchronized
     fun onClosed(from: MediaLink) {
-        if (from === link) closeCurrent(SessionLossReason.TransportLost)
+        if (from === link) closeCurrent(SessionLossReason.TransportLost) else if (from === candidate) dropCandidate()
     }
 
     /** This device ends the session: `closing` (quit) or `sleeping` (locked), best effort, then close. */
     @Synchronized
     fun disconnect(sleeping: Boolean = false) {
+        dropCandidate(InvitationResult.Declined)
         if (link == null) return
         send(if (sleeping) ReceiverMessages.sleeping() else ReceiverMessages.closing())
         closeCurrent(SessionLossReason.ExplicitDisconnect)
@@ -198,6 +274,7 @@ class ReceiverSession(
      */
     @Synchronized
     fun revoke(peerID: String, blocked: Boolean) {
+        if (candidate?.peerID == peerID) dropCandidate(if (blocked) InvitationResult.Blocked else InvitationResult.Declined)
         val current = link?.peerID
         for (approval in approvals.removeAll(peerID)) {
             if (current == peerID) {
@@ -228,8 +305,22 @@ class ReceiverSession(
                 send(ReceiverMessages.ping(t))
             }
         }
+        candidate?.let { parked ->
+            if (t - candidateLastMs > LIVENESS_TIMEOUT_MS) {
+                dropCandidate()
+            } else if (t - candidatePingMs >= PING_INTERVAL_MS) {
+                candidatePingMs = t
+                parked.send(ReceiverMessages.encode(ReceiverMessages.ping(t)))
+            }
+        }
         for (expired in approvals.expire(t)) {
-            if (link?.peerID == expired.peerID) send(ReceiverMessages.invitationResponse(expired.id, InvitationResult.Declined))
+            if (candidateInvitation?.id == expired.id) {
+                candidateInvitation = null
+                candidate?.send(ReceiverMessages.encode(ReceiverMessages.invitationResponse(expired.id, InvitationResult.Declined)))
+                dropCandidate()
+            } else if (link?.peerID == expired.peerID) {
+                send(ReceiverMessages.invitationResponse(expired.id, InvitationResult.Declined))
+            }
             emit(SessionEvent.ApprovalDismissed(expired.id))
         }
         advanceReconnect(t)
@@ -326,6 +417,25 @@ class ReceiverSession(
     fun answerInvitation(id: String, decision: ReceiverApprovalDecision) {
         val approval = approvals.resolve(id) ?: return
         emit(SessionEvent.ApprovalDismissed(id))
+        val parked = candidate
+        if (parked != null && parked.peerID == approval.peerID && candidateInvitation?.id == id) {
+            candidateInvitation = null
+            val policy = policies.policy(approval.peerID)
+            val revoked = approval.peerID !in pins() || policy == PeerSessionPolicy.Blocked
+            if (revoked || !decision.accept) {
+                if (!revoked) decision.persist?.let { policies.setPolicy(approval.peerID, it) }
+                val result = when {
+                    policy == PeerSessionPolicy.Blocked -> InvitationResult.Blocked
+                    revoked -> InvitationResult.Declined
+                    else -> decision.result
+                }
+                parked.send(ReceiverMessages.encode(ReceiverMessages.invitationResponse(id, result)))
+                dropCandidate()
+                return
+            }
+            // Accepted: only now does the session it replaces end.
+            promoteCandidate()
+        }
         // Raised on an earlier connection: it can no longer be answered.
         if (link?.peerID != approval.peerID) return
         // Forget or Block since the prompt appeared makes the answer inert.
@@ -416,6 +526,44 @@ class ReceiverSession(
             }
             SenderMessage.Closing -> closeCurrent(SessionLossReason.PeerClosed)
             is SenderMessage.Other -> deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
+        }
+    }
+
+    /** From the waiting Mac: its `welcome`, its invitation and its withdrawal; nothing else acts. */
+    private fun handleCandidate(from: MediaLink, payload: ByteArray) {
+        val frame = IncomingFrame.classify(payload) as? IncomingFrame.Control ?: return
+        when (val message = SenderMessage.parse(frame.json) ?: return) {
+            is SenderMessage.Welcome -> {
+                candidateWelcome = message
+                if (message.pv < WireProtocol.SESSION_INVITATION) {
+                    // Can't be asked in-band: replaces the session only when an automatic invitation would.
+                    val accept = from.peerID in pins() &&
+                        IncomingSessionPolicy.decision(from.peerID, InvitationIntent.Automatic, policies) == IncomingDecision.Accept
+                    if (accept) promoteCandidate() else dropCandidate()
+                }
+            }
+            is SenderMessage.Invite -> judgeCandidate(from, message.invitation)
+            is SenderMessage.InviteCancel -> if (message.id == candidateInvitation?.id) dropCandidate()
+            else -> Unit
+        }
+    }
+
+    private fun judgeCandidate(from: MediaLink, invitation: SessionInvitation) {
+        val peerID = from.peerID
+        val decision = if (peerID in pins()) IncomingSessionPolicy.decision(peerID, invitation.intent, policies) else IncomingDecision.Decline
+        fun answer(result: InvitationResult) = from.send(ReceiverMessages.encode(ReceiverMessages.invitationResponse(invitation.id, result)))
+        when (decision) {
+            IncomingDecision.Accept -> promoteCandidate()?.let { handleInvitation(it, invitation) }
+            IncomingDecision.AskUser -> {
+                candidateInvitation = invitation
+                val approval = PendingSessionApproval(invitation.id, peerID, invitation.mode, now())
+                val (started, superseded) = approvals.begin(approval)
+                superseded?.let { emit(SessionEvent.ApprovalDismissed(it)) }
+                if (started) emit(SessionEvent.ApprovalRequested(approval))
+                answer(InvitationResult.Pending)
+            }
+            IncomingDecision.Decline -> { answer(InvitationResult.Declined); dropCandidate() }
+            IncomingDecision.Block -> { answer(InvitationResult.Blocked); dropCandidate() }
         }
     }
 
@@ -518,6 +666,10 @@ class ReceiverSession(
         emit(SessionEvent.InputState(InputWireState.Off, false))
         emit(SessionEvent.Disconnected(closing.peerID, effective))
         reportPhase()
+        // The session a waiting Mac would have replaced is gone: it is judged as any new
+        // connection (its prompt, dismissed above, comes back). disconnect() drops it first.
+        val invitation = candidateInvitation
+        promoteCandidate()?.let { promoted -> invitation?.let { handleInvitation(promoted, it) } }
     }
 
     private fun dismissApprovals(answer: InvitationResult?) {

@@ -144,12 +144,132 @@ class ReceiverSessionTest {
         assertTrue(session.isAdmitted)
         // Mac B presents A's invitation id: judged afresh by B's own policy.
         val b = connect(MAC_B)
-        assertEquals(MAC_B, session.peerID)
         session.say(b, invite("shared-id"))
         assertEquals(listOf("shared-id" to "declined"), b.responses())
-        assertFalse(session.isAdmitted)
+        assertTrue(b.closed)
         session.onFrame(b, keyframe())
         assertEquals(0, videoEvents())
+        // ...and A, which it would have replaced, never noticed.
+        assertFalse(a.closed)
+        assertEquals(MAC_A, session.peerID)
+        assertTrue(session.isAdmitted)
+    }
+
+    // MARK: Make-before-break (F2): another Mac waits until its own invitation is accepted
+
+    private fun streamingA(): FakeLink {
+        policies.automaticallyAllow = false
+        policies.setPolicy(MAC_A, PeerSessionPolicy.AlwaysAllow)
+        return connect(MAC_A).also { session.say(it, invite("a1")); assertTrue(session.isAdmitted) }
+    }
+
+    @Test
+    fun anotherMacWaitsGreetedUntilTheUserLetsItIn() {
+        val a = streamingA()
+        val b = connect(MAC_B)
+        assertEquals("greeted while it waits", "hello", b.types().first())
+        session.say(b, invite("b1", intent = "manual"))
+        assertEquals(listOf("b1" to "pending"), b.responses())
+        assertTrue(events.any { it is SessionEvent.ApprovalRequested })
+        // A keeps streaming while the prompt is up; B's media goes nowhere.
+        session.onFrame(b, keyframe())
+        assertEquals(0, videoEvents())
+        session.onFrame(a, keyframe())
+        assertEquals(1, videoEvents())
+        assertFalse(a.closed)
+        assertEquals(MAC_A, session.peerID)
+        session.answerInvitation("b1", ReceiverApprovalDecision.Allow)
+        assertTrue("only an accepted invitation ends the session it replaces", a.closed)
+        assertEquals(MAC_B, session.peerID)
+        assertTrue(session.isAdmitted)
+        assertEquals("b1" to "accepted", b.responses().last())
+        assertEquals("not greeted twice", 1, b.types().count { it == "hello" })
+    }
+
+    @Test
+    fun aDeclinedSilentOrUnansweredMacNeverInterruptsTheSession() {
+        val a = streamingA()
+        fun stillStreaming() {
+            assertFalse(a.closed)
+            assertEquals(MAC_A, session.peerID)
+            assertTrue(session.isAdmitted)
+        }
+        val declined = connect(MAC_B)
+        session.say(declined, invite("b1", intent = "manual"))
+        session.answerInvitation("b1", ReceiverApprovalDecision.RejectForSession)
+        assertEquals("b1" to "declined", declined.responses().last())
+        assertTrue(declined.closed)
+        stillStreaming()
+
+        val withdrawn = connect(MAC_B)
+        session.say(withdrawn, invite("b2", intent = "manual"))
+        session.say(withdrawn, "{\"type\":\"sessionInviteCancel\",\"id\":\"b2\"}")
+        assertTrue(withdrawn.closed)
+        assertTrue(events.last() is SessionEvent.ApprovalDismissed)
+        stillStreaming()
+
+        val silent = FakeLink(MAC_B).also { session.adopt(it) }
+        clock += 6_000
+        session.say(a, "{\"type\":\"ping\"}")
+        session.tick()
+        assertTrue("a waiting Mac that says nothing is dropped", silent.closed)
+        stillStreaming()
+
+        val unanswered = connect(MAC_B)
+        session.say(unanswered, invite("b3", intent = "manual"))
+        repeat(31) {
+            clock += 2_000
+            session.say(a, "{\"type\":\"ping\"}")
+            session.say(unanswered, "{\"type\":\"ping\"}")
+            session.tick()
+        }
+        assertTrue("pinged while it waits", unanswered.types().count { it == "ping" } >= 25)
+        assertEquals("b3" to "declined", unanswered.responses().last())
+        assertTrue(unanswered.closed)
+        stillStreaming()
+    }
+
+    @Test
+    fun anAllowedMacReplacesTheSessionAtOnceAndTheSameMacAlwaysDoes() {
+        val a = streamingA()
+        policies.setPolicy(MAC_B, PeerSessionPolicy.AlwaysAllow)
+        val b = connect(MAC_B)
+        session.say(b, invite("b1"))
+        assertTrue(a.closed)
+        assertEquals(MAC_B, session.peerID)
+        assertEquals(listOf("b1" to "accepted"), b.responses())
+        // A reconnect from the same Mac is never held back.
+        val again = connect(MAC_B)
+        assertTrue(b.closed)
+        assertEquals(MAC_B, session.peerID)
+        session.say(again, invite("b1"))
+        assertTrue(session.isAdmitted)
+    }
+
+    @Test
+    fun whenTheSessionEndsFirstTheWaitingMacIsJudgedAsANewConnection() {
+        val a = streamingA()
+        val b = connect(MAC_B)
+        session.say(b, invite("b1", intent = "manual"))
+        session.onClosed(a)
+        assertEquals(MAC_B, session.peerID)
+        assertFalse(session.isAdmitted)
+        assertTrue("its prompt comes back", events.last() is SessionEvent.ApprovalRequested)
+        session.answerInvitation("b1", ReceiverApprovalDecision.Allow)
+        assertTrue(session.isAdmitted)
+        assertEquals(MAC_B, session.peerID)
+    }
+
+    @Test
+    fun forgettingOrBlockingTheWaitingMacClosesOnlyIt() {
+        val a = streamingA()
+        val b = connect(MAC_B)
+        session.say(b, invite("b1", intent = "manual"))
+        session.revoke(MAC_B, blocked = true)
+        assertEquals("b1" to "blocked", b.responses().last())
+        assertTrue(b.closed)
+        assertFalse(a.closed)
+        assertTrue(session.isAdmitted)
     }
 
     @Test
