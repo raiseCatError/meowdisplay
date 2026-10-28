@@ -3101,7 +3101,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue(),
                   self.updateCaptureState({ $0.requestResume() }) else { return }
             self.captureRecoveryBudget.reset()
-            self.workspaceEngine?.setSuspended(!self.videoEnabled)
+            self.syncWorkspaceSuspension()
             Task { await self.resumeCapture() }
         }
     }
@@ -3112,7 +3112,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         videoEnabled = enabled
-        workspaceEngine?.setSuspended(!enabled)
+        syncWorkspaceSuspension()
         sendVideoState()
         if !enabled {
             let phase = captureStateSnapshot().phase
@@ -6807,6 +6807,15 @@ extension MacSender {
         engine.start()
     }
 
+    /// `queue` only. Window streams run only while video is on and the
+    /// display isn't paused or stopping: a Video On request during a pause
+    /// must not restart them.
+    func syncWorkspaceSuspension() {
+        let phase = captureStateSnapshot().phase
+        let paused = phase == .pausing || phase == .paused || phase == .stopped
+        workspaceEngine?.setSuspended(!videoEnabled || paused)
+    }
+
     /// `queue` only. Stops every window stream this receiver owns.
     func stopWorkspaceEngine() {
         guard let engine = workspaceEngine else { return }
@@ -6818,7 +6827,8 @@ extension MacSender {
     /// `queue` only: one composited frame, through the same gates as a
     /// captured display frame.
     private func deliverWorkspaceFrame(_ pixelBuffer: CVPixelBuffer) {
-        guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil else { return }
+        guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
+              captureStateSnapshot().phase == .running else { return }
         lastPixelBuffer = pixelBuffer
         lastCaptureAt = Date()
         capFrames += 1
