@@ -11,6 +11,12 @@ import com.raisecaterror.meowdisplay.android.R
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,7 +26,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -42,11 +47,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
@@ -62,9 +71,9 @@ import com.raisecaterror.meowdisplay.core.session.ReceiverApprovalDecision
 import com.raisecaterror.meowdisplay.core.session.SessionPhase
 
 /**
- * Home: what's connected (and the way back to it), your Macs, Macs to pair,
- * how to connect, and this device's details. While a session is live this is
- * shown over the running picture, so returning to it is instant.
+ * Home: the name and one short status line, one card of Macs (paired ones with Connect, nearby
+ * ones with Pair), a quiet row of links (How to Connect, This Device) and Settings & Help. While
+ * a session is live this is shown over the running picture, so returning to it is instant.
  */
 @Composable
 fun ReceiverHome(
@@ -84,14 +93,17 @@ fun ReceiverHome(
     val autoRequestPeers by autoRequestFlow.collectAsState()
     val macName = { peerID: String? -> paired.firstOrNull { it.peerID == peerID }?.name ?: "your Mac" }
     var showDetails by remember { mutableStateOf(false) }
-    var showSteps by rememberSaveable { mutableStateOf(paired.isEmpty()) }
+    var showSteps by rememberSaveable { mutableStateOf(false) }
+    // Short phones (landscape) keep the links in the scrolling list so the Macs keep their room.
+    val windowHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
+    val compactHeight = windowHeight < 500.dp
     val pairedNames = paired.map { it.name }.toSet()
-    // Bonjour names only: a nearby Mac with a paired Mac's name is shown once, under Your Macs.
+    // Bonjour names only: a nearby Mac with a paired Mac's name is shown once, with the paired Macs in the Macs card.
     val toPair = nearby.filter { it.serviceName !in pairedNames }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-      // Same arrangement as the iPhone: centred logo and name on top, the list, then
-      // Settings & Help at the bottom centre, always in reach.
+      // Same arrangement as the iPhone: centred logo, name and one status line on top, the Macs
+      // card, then the links and Settings & Help at the bottom centre, always in reach.
       Column(Modifier.fillMaxSize().safeDrawingPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
@@ -99,10 +111,10 @@ fun ReceiverHome(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 28.dp, bottom = 4.dp),
+                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 20.dp, bottom = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Image(painterResource(R.drawable.meow_logo), contentDescription = null, modifier = Modifier.size(104.dp))
-                    Spacer(Modifier.height(12.dp))
+                    Image(painterResource(R.drawable.meow_logo), contentDescription = null, modifier = Modifier.size(72.dp))
+                    Spacer(Modifier.height(8.dp))
                     Text("MeowDisplay", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.semantics { heading() })
                 }
@@ -116,78 +128,89 @@ fun ReceiverHome(
             ui.message?.let { message -> item { Notice(message, onDismiss = pairing::dismissMessage) } }
             mediaUi.connectFailedFor?.let { peer ->
                 item {
-                    Notice("${macName(peer)} didn't connect. Check that MeowDisplay is open on it and that both are on the same Wi-Fi, then try again.",
+                    Notice("${macName(peer)} didn't connect. Open MeowDisplay on it and check that both are on the same Wi-Fi.",
                         onDismiss = media::dismissConnectFailure)
                 }
             }
 
-            item { SectionTitle("Your Macs") }
-            if (paired.isEmpty()) item { Hint("None yet. Pair a Mac below; after that, Connect is one tap.") }
-            items(paired, key = { "paired-" + it.peerID }) { mac ->
-                val live = mediaUi.peerID == mac.peerID && mediaUi.admitted
-                val connecting = mediaUi.connectingTo == mac.peerID
-                MacRow(
-                    title = mac.name,
-                    subtitle = when {
-                        live -> "Connected"
-                        connecting -> "Asking it to connect…"
-                        else -> null
-                    },
-                    primary = when {
-                        live && onReturnToDisplay != null -> "Show" to onReturnToDisplay
-                        live -> null
-                        connecting -> "Cancel" to media::cancelConnect
-                        else -> "Connect" to { media.requestConnect(mac.peerID) }
-                    },
-                    enabled = mediaUi.listening || live,
-                    menu = buildList {
-                        if (!live && !connecting) {
-                            add("Connect with Mirror" to { media.requestConnect(mac.peerID, DisplayMode.Mirror) })
-                            add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
-                        }
-                        media.inputAutoRequest?.let { auto ->
-                            val on = mac.peerID in autoRequestPeers
-                            add((if (on) "Request Control Automatically: On" else "Request Control Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
-                        }
-                        add("Forget This Mac" to { media.forget(mac.peerID) })
-                    },
-                )
-            }
-
-            item { SectionTitle("Pair a Mac") }
-            if (toPair.isEmpty()) item { Hint(if (mediaUi.listening) "Looking for Macs with MeowDisplay open on this Wi-Fi…" else "Open MeowDisplay to look for Macs.") }
-            items(toPair, key = { "nearby-" + it.serviceName }) { mac ->
-                MacRow(
-                    title = mac.serviceName, subtitle = null,
-                    primary = (if (ui.pairingWith == mac.serviceName) "Pairing…" else "Pair") to { pairing.pair(mac) },
-                    enabled = ui.pairingWith == null, menu = emptyList(),
-                )
-            }
-
             item {
-                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
-                    TextButton(onClick = { showSteps = !showSteps }) { Text(if (showSteps) "Hide How to Connect" else "How to Connect") }
-                    if (showSteps) Steps()
-                }
-            }
-            item {
-                Row(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(bottom = 24.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("This device", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(DeviceIdentity.displayName(LocalContext.current), style = MaterialTheme.typography.bodyLarge)
+                MacsCard {
+                    if (paired.isEmpty() && toPair.isEmpty()) {
+                        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (mediaUi.listening) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(10.dp))
+                            }
+                            Text(
+                                if (mediaUi.listening) "Looking for Macs on this Wi-Fi…" else "Open MeowDisplay to look for Macs.",
+                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
-                    TextButton(onClick = { showDetails = true }) { Text("Device Details") }
+                    paired.forEach { mac ->
+                        val live = mediaUi.peerID == mac.peerID && mediaUi.admitted
+                        val connecting = mediaUi.connectingTo == mac.peerID
+                        val isNearby = nearby.any { it.serviceName == mac.name }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        MacRow(
+                            title = mac.name,
+                            subtitle = when {
+                                live -> "Connected"
+                                connecting -> "Asking it to connect…"
+                                isNearby -> "Nearby"
+                                else -> "Not found"
+                            },
+                            primary = when {
+                                live && onReturnToDisplay != null -> "Show" to onReturnToDisplay
+                                live -> null
+                                connecting -> "Cancel" to media::cancelConnect
+                                else -> "Connect" to { media.requestConnect(mac.peerID) }
+                            },
+                            enabled = mediaUi.listening || live,
+                            menu = buildList {
+                                if (!live && !connecting) {
+                                    add("Connect with Mirror" to { media.requestConnect(mac.peerID, DisplayMode.Mirror) })
+                                    add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
+                                }
+                                media.inputAutoRequest?.let { auto ->
+                                    val on = mac.peerID in autoRequestPeers
+                                    add((if (on) "Request Control Automatically: On" else "Request Control Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
+                                }
+                                add("Forget This Mac" to { media.forget(mac.peerID) })
+                            },
+                        )
+                    }
+                    toPair.forEach { mac ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        MacRow(
+                            title = mac.serviceName, subtitle = "Not paired",
+                            primary = (if (ui.pairingWith == mac.serviceName) "Pairing…" else "Pair") to { pairing.pair(mac) },
+                            enabled = ui.pairingWith == null, menu = emptyList(),
+                        )
+                    }
                 }
             }
+
+            if (compactHeight) item { FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }) }
         }
+        if (!compactHeight) FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }, Modifier.padding(horizontal = 20.dp))
         onOpenSettings?.let { open ->
-            OutlinedButton(onClick = open, modifier = Modifier.padding(top = 8.dp, bottom = 16.dp)) {
+            OutlinedButton(onClick = open, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)) {
                 GlyphIcon(OverlayGlyph.Gear, 18.dp, MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp))
                 Text("Settings & Help")
             }
         }
       }
+    }
+
+    if (showSteps) {
+        AlertDialog(
+            onDismissRequest = { showSteps = false },
+            title = { Text("How to Connect") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) { Steps() } },
+            confirmButton = { TextButton(onClick = { showSteps = false }) { Text("Done") } },
+        )
     }
 
     if (showDetails) DeviceDetails(identity.fingerprint) { showDetails = false }
@@ -278,7 +301,7 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
 
 @Composable
 private fun Steps() {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         com.raisecaterror.meowdisplay.android.receiver.connectionHelp.forEach { (title, body) ->
             Column {
                 Text(title, style = MaterialTheme.typography.titleSmall)
@@ -296,7 +319,7 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
     var copied by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Device Details") },
+        title = { Text("This Device") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Name: ${DeviceIdentity.displayName(context)}")
@@ -323,23 +346,43 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
     )
 }
 
+/** One short line for the home screen and Settings. What to do about a state is in How to Connect. */
 internal fun sessionStatus(ui: MediaUiState, mac: String): String = when (ui.phase) {
-    SessionPhase.Connected -> if (ui.admitted) "Showing $mac." else "Connecting to $mac…"
+    SessionPhase.Connected -> if (ui.admitted) "Connected to $mac" else "Connecting to $mac…"
     SessionPhase.Connecting -> "Connecting to $mac…"
-    SessionPhase.Paused -> "$mac paused the picture."
+    SessionPhase.Paused -> "Paused by $mac"
     SessionPhase.Reconnecting -> "Reconnecting to $mac…"
-    SessionPhase.ReconnectFailed -> "Lost the connection to $mac. It reconnects when the Mac is back, or tap Connect."
-    SessionPhase.Unrecoverable -> "$mac needs a newer MeowDisplay (or this device does) to work together."
-    SessionPhase.PeerDisconnected -> "$mac ended the session."
-    SessionPhase.Disconnected -> ui.listenerError ?: if (ui.listening) "Ready. Tap Connect, or choose this device in MeowDisplay on your Mac." else "Not available while MeowDisplay is in the background."
+    SessionPhase.ReconnectFailed -> "Connection to $mac lost"
+    SessionPhase.Unrecoverable -> "Update MeowDisplay to use $mac"
+    SessionPhase.PeerDisconnected -> "$mac ended the session"
+    SessionPhase.Disconnected -> ui.listenerError ?: if (ui.listening) "Ready to connect" else "Not available in the background"
 }
 
+/** The one card the home screen's Macs live in: a heading, then a row per Mac. */
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.secondary,
-        modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 12.dp).semantics { heading() },
-    )
+private fun MacsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text(
+                "Macs", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.padding(bottom = 4.dp).semantics { heading() },
+            )
+            content()
+        }
+    }
+}
+
+/** How to Connect · This Device: quiet text links under the card. */
+@Composable
+private fun FooterLinks(onSteps: () -> Unit, onDevice: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier.widthIn(max = 640.dp).fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onSteps, modifier = Modifier.weight(1f, fill = false)) { Text("How to Connect", textAlign = TextAlign.Center) }
+        Text("·", color = MaterialTheme.colorScheme.outline, modifier = Modifier.clearAndSetSemantics {})
+        TextButton(onClick = onDevice, modifier = Modifier.weight(1f, fill = false)) { Text("This Device", textAlign = TextAlign.Center) }
+    }
 }
 
 @Composable
@@ -358,26 +401,41 @@ private fun Notice(text: String, onDismiss: () -> Unit) {
     }
 }
 
+/** One Mac in the card: name and one-word subtitle, a prominent action, and a ••• menu for the rest. */
 @Composable
 private fun MacRow(title: String, subtitle: String?, primary: Pair<String, () -> Unit>?, enabled: Boolean, menu: List<Pair<String, () -> Unit>>) {
     var open by remember { mutableStateOf(false) }
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge)
-                subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            Spacer(Modifier.padding(4.dp))
-            primary?.let { (label, action) -> TextButton(onClick = action, enabled = enabled) { Text(label) } }
-            if (menu.isNotEmpty()) {
-                androidx.compose.foundation.layout.Box {
-                    TextButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "More for $title" }) { Text("•••") }
-                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                        menu.forEach { (label, action) -> DropdownMenuItem(text = { Text(label) }, onClick = { open = false; action() }) }
-                    }
+    // Large font scales stack the buttons under the name instead of squeezing the name.
+    val stacked = LocalDensity.current.fontScale >= 1.5f
+    val name: @Composable (Modifier) -> Unit = { modifier ->
+        Column(modifier.semantics(mergeDescendants = true) {}) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+    val actions: @Composable () -> Unit = {
+        primary?.let { (label, action) ->
+            Button(onClick = action, enabled = enabled, modifier = Modifier.semantics { contentDescription = "$label, $title" }) { Text(label) }
+        }
+        if (menu.isNotEmpty()) {
+            Box {
+                TextButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "More for $title" }) { Text("•••") }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    menu.forEach { (label, action) -> DropdownMenuItem(text = { Text(label) }, onClick = { open = false; action() }) }
                 }
             }
         }
     }
+    if (stacked) {
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            name(Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) { actions() }
+        }
+    } else {
+        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            name(Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            actions()
+        }
+    }
 }
-

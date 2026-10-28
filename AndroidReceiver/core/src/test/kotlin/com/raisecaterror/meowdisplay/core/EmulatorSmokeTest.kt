@@ -287,7 +287,7 @@ class EmulatorSmokeTest {
         adb("forward", "tcp:$PAIRING", "tcp:9002")
         adb("forward", "tcp:$MEDIA", "tcp:9001")
         adb("shell", "am", "start", "-W", "-n", "$APP/com.raisecaterror.meowdisplay.android.ui.MainActivity")
-        waitFor("home") { it.contains("Your Macs") }
+        waitFor("home") { it.contains("text=\"Macs\"") }
 
         val mac = TestIdentity("smoke-mac")
         val macName = "Smoke Mac " + UUID.randomUUID().toString().take(4)
@@ -475,7 +475,7 @@ class EmulatorSmokeTest {
         adb("forward", "tcp:$PAIRING", "tcp:9002")
         adb("forward", "tcp:$MEDIA", "tcp:9001")
         adb("shell", "am", "start", "-W", "-n", "$APP/com.raisecaterror.meowdisplay.android.ui.MainActivity")
-        waitFor("home") { it.contains("Your Macs") }
+        waitFor("home") { it.contains("text=\"Macs\"") }
         val mac = TestIdentity("window-mac")
         val macName = "Window Mac " + UUID.randomUUID().toString().take(4)
         val macStore = InMemoryPeerTrustStore()

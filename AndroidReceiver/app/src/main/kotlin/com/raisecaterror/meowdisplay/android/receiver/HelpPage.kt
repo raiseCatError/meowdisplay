@@ -44,6 +44,8 @@ internal val connectionHelp = listOf(
     "USB cable" to "Not available on Android yet. Use Wi-Fi.",
     "Another network" to "Not available on Android yet. Both devices need to be on the same Wi-Fi.",
     "Can't find the Mac?" to "Check that MeowDisplay is open on the Mac and that both are on the same Wi-Fi. Guest networks often keep devices apart.",
+    "Connection lost" to "This device reconnects by itself when the Mac is back (Auto-Reconnect in Settings). Or tap Connect on the home screen.",
+    "Needs an update" to "If a Mac needs a newer MeowDisplay, or this device does, update the older one so both match.",
 )
 
 @Composable
