@@ -314,7 +314,7 @@ class SecondQARefinementTests {
         store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = kotlinx.serialization.json.JsonObject(json).toString()
         val repository = ReceiverControlPreferencesRepository(store)
         val loaded = repository.load()
-        assertEquals(18, loaded.version)
+        assertEquals(ReceiverControlPreferences.SCHEMA_VERSION, loaded.version)
         assertTrue("a schema-17 choice survives", loaded.padShowControlHints)
         assertTrue(loaded.invertVerticalScroll)
         loaded.invertHorizontalScroll = false

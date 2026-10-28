@@ -54,6 +54,8 @@ data class SurfaceInputConfig(
     val inputMode: PointerInputMode = PointerInputMode.Direct,
     val trackpadSensitivity: Double = PointerGestureConfig.defaultTrackpadSensitivity,
     val smartTouchEnabled: Boolean = true,
+    /** Direct Touch style. Classic here so a bare config behaves as before; the app passes the stored preference. */
+    val touchStyle: DirectTouchStyle = DirectTouchStyle.Classic,
     val localNavigationAllowed: Boolean = true,
     val pinchTarget: ReceiverGestureTarget = ReceiverGestureTarget.Viewport,
     val rotateTarget: ReceiverGestureTarget = ReceiverGestureTarget.Disabled,
@@ -175,6 +177,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         engine.trackpadSensitivity = next.trackpadSensitivity
         engine.smartTouchEnabled = next.smartTouchEnabled && next.senderPV >= SMART_TOUCH_PV
         if (previous.inputMode != next.inputMode) dispatch(engine.setInputMode(next.inputMode))
+        if (engine.touchStyle != next.touchStyle) dispatch(engine.setTouchStyle(next.touchStyle))
         if (previous.allowsInput && !next.allowsInput) cancelAll()
         if (previous.videoEnabled != next.videoEnabled) cancelAll()
         if (previous.moveViewActive != next.moveViewActive) {

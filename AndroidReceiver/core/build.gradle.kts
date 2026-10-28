@@ -27,4 +27,8 @@ tasks.test {
     val workspaceFixtures = rootProject.layout.projectDirectory.dir("../fixtures/workspace")
     inputs.dir(workspaceFixtures)
     systemProperty("meow.workspaceFixtures", workspaceFixtures.asFile.absolutePath)
+    // Natural Touch gesture vectors shared with the Swift engine (fixtures/gestures).
+    val gestureFixtures = rootProject.layout.projectDirectory.dir("../fixtures/gestures")
+    inputs.dir(gestureFixtures)
+    systemProperty("meow.gestureFixtures", gestureFixtures.asFile.absolutePath)
 }

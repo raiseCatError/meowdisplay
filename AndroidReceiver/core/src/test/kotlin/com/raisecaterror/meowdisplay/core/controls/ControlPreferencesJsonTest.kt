@@ -98,3 +98,56 @@ class ControlPreferencesJsonTest {
         assertNull(ReceiverUIPreferenceUpdate.parse(parseJson("""{"type":"receiverUI"}""").obj()!!))
     }
 }
+
+/** Touch Style preference: Natural for everyone unless Classic was chosen; nothing else in a saved blob changes. */
+class TouchStylePreferenceTest {
+    private class MapStore : PreferenceBlobStore {
+        val values = mutableMapOf<String, String>()
+        override fun read(key: String) = values[key]
+        override fun write(key: String, value: String) {
+            values[key] = value
+        }
+    }
+
+    @Test
+    fun newInstallIsNatural() {
+        assertEquals(DirectTouchStyle.Natural, ReceiverControlPreferences().touchStyle)
+        assertFalse(ReceiverControlPreferences().naturalTouchHintShown)
+        assertEquals(19, ReceiverControlPreferences.SCHEMA_VERSION)
+    }
+
+    @Test
+    fun blobWithoutTheFieldDecodesToNaturalAndKeepsEverythingElse() {
+        val old = ReceiverControlPreferences()
+        old.inputMode = PointerInputMode.Trackpad
+        old.smartTouchEnabled = false
+        old.pinchTarget = ReceiverGestureTarget.App
+        old.trayEnabled = false
+        val json = kotlinx.serialization.json.JsonObject(
+            old.toJson().filterKeys { it != "touchStyle" && it != "naturalTouchHintShown" } +
+                ("version" to kotlinx.serialization.json.JsonPrimitive(18)),
+        )
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = json.toString()
+        val loaded = ReceiverControlPreferencesRepository(store).load()
+        assertEquals(DirectTouchStyle.Natural, loaded.touchStyle)
+        assertFalse(loaded.naturalTouchHintShown)
+        assertEquals(ReceiverControlPreferences.SCHEMA_VERSION, loaded.version)
+        val expected = old.deepCopy()
+        expected.version = ReceiverControlPreferences.SCHEMA_VERSION
+        assertEquals(expected, loaded)
+        assertEquals(PointerInputMode.Trackpad, loaded.inputMode)
+    }
+
+    @Test
+    fun classicPersistsAcrossRestart() {
+        val store = MapStore()
+        val p = ReceiverControlPreferences()
+        p.touchStyle = DirectTouchStyle.Classic
+        p.naturalTouchHintShown = true
+        ReceiverControlPreferencesRepository(store).save(p)
+        val reloaded = ReceiverControlPreferencesRepository(store).load()
+        assertEquals(DirectTouchStyle.Classic, reloaded.touchStyle)
+        assertTrue(reloaded.naturalTouchHintShown)
+    }
+}

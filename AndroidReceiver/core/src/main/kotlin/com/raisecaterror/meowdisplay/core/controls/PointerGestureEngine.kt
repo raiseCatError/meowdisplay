@@ -94,6 +94,9 @@ sealed interface SmartTouchFeedback {
 
     /** The title bar hold reached its threshold: the left button is now held and the window follows. */
     data object WindowDragArmed : SmartTouchFeedback
+
+    /** Natural Touch: a still long press just right-clicked. */
+    data object LongPressRightClick : SmartTouchFeedback
 }
 
 /** What the Mac confidently identified under a Smart Touch touch-down. */
@@ -185,6 +188,39 @@ object PointerGestureConfig {
      */
     val trackpadSensitivityRange: ClosedFloatingPointRange<Double> = 0.5..2.0
     const val defaultTrackpadSensitivity: Double = 1.0
+
+    /**
+     * Natural Touch: a finger that rests at least this long before moving past `dragSlop` drags
+     * (left button pressed at the touch-down point); one that moves sooner scrolls.
+     */
+    const val naturalPressDelay: TimeInterval = 0.25
+
+    /** Natural Touch: a finger held still (within `dragSlop`) this long right-clicks at the touch-down point, once. */
+    const val naturalLongPressDelay: TimeInterval = 0.55
+
+    /**
+     * Natural Touch sends each tap's click on lift. A tap landing within this long of the previous
+     * tap's lift, and within `tapChainMaxDistance`, counts as the next click (double, triple).
+     */
+    const val naturalClickChainWindow: TimeInterval = 0.4
+}
+
+/**
+ * How a Direct Touch finger behaves. Persisted as `touchStyle` in `ReceiverControlPreferences`;
+ * stable raw values. Trackpad mode and every multi-finger gesture ignore it.
+ */
+enum class DirectTouchStyle(val raw: String) {
+    /** macOS-style touch: tap clicks, swipe scrolls, press then move drags, long press right-clicks. */
+    Natural("natural"),
+
+    /** The original Direct Touch: the finger is the pointer (tap-then-hold to drag), with Smart Touch if enabled. */
+    Classic("classic");
+
+    val id: String get() = raw
+
+    companion object {
+        fun of(raw: String?): DirectTouchStyle? = entries.firstOrNull { it.raw == raw }
+    }
 }
 
 /**
@@ -280,6 +316,13 @@ enum class PointerEngineMode {
 
     /** 3+ fingers arrived together, fresh, with no established anchor. The engine steps aside entirely. */
     DeferredSystemGesture,
+
+    /**
+     * Natural Touch: the anchor finger's one action already happened (a long-press right click)
+     * or it has nothing to act on (it landed outside the picture). Everything else that finger
+     * does is ignored until it lifts.
+     */
+    TouchConsumed,
 }
 
 /**
@@ -323,7 +366,23 @@ class PointerGestureEngine {
      */
     var smartTouchEnabled: Boolean = false
 
-    private val smartTouchIsActive: Boolean get() = smartTouchEnabled && inputMode == PointerInputMode.Direct
+    private val smartTouchIsActive: Boolean
+        get() = smartTouchEnabled && inputMode == PointerInputMode.Direct && touchStyle == DirectTouchStyle.Classic
+
+    /**
+     * Direct Touch style. Defaults to Classic so a bare engine behaves exactly as before; the app
+     * sets the stored preference, whose own default is Natural. Change it only through [setTouchStyle].
+     */
+    var touchStyle: DirectTouchStyle = DirectTouchStyle.Classic
+        private set
+
+    private val naturalIsActive: Boolean
+        get() = touchStyle == DirectTouchStyle.Natural && inputMode == PointerInputMode.Direct
+
+    // Natural Touch click counting: the last click's count, touch-down view point and lift time.
+    private data class NaturalClick(val count: Int, val point: CGPoint, val time: TimeInterval)
+
+    private var naturalLastClick: NaturalClick? = null
 
     /**
      * Whether the Mac has classified the current `FirstTouchPending` finger's touch-down target
@@ -464,7 +523,11 @@ class PointerGestureEngine {
         val pStart = pendingStart
         val pid = pendingID
         if (mode == PointerEngineMode.FirstTouchPending && pStart != null && pid != null) {
-            if (tapChain != null) {
+            if (naturalIsActive) {
+                if (now - pStart.time >= PointerGestureConfig.naturalLongPressDelay) {
+                    out += naturalLongPress(pid)
+                }
+            } else if (tapChain != null) {
                 if (now - pStart.time >= PointerGestureConfig.holdCommitDelay) {
                     out += if (inputMode == PointerInputMode.Trackpad) {
                         beginTrackpadDrag(pid, pendingLastView ?: pStart.view, now)
@@ -564,7 +627,9 @@ class PointerGestureEngine {
         val start = pendingStart
         if (mode == PointerEngineMode.FirstTouchPending && start != null && pendingID != null) {
             val target = smartTouchDeferredTarget
-            val delay: TimeInterval = if (tapChain != null) {
+            val delay: TimeInterval = if (naturalIsActive) {
+                PointerGestureConfig.naturalLongPressDelay
+            } else if (tapChain != null) {
                 PointerGestureConfig.holdCommitDelay
             } else if (target != null) {
                 if (target == SmartTouchTarget.WindowDrag) {
@@ -727,7 +792,8 @@ class PointerGestureEngine {
                 return emptyList()
             }
 
-            PointerEngineMode.LeftDragHeld, PointerEngineMode.RightDragHeld, PointerEngineMode.SmartScroll -> {
+            PointerEngineMode.LeftDragHeld, PointerEngineMode.RightDragHeld, PointerEngineMode.SmartScroll,
+            PointerEngineMode.TouchConsumed -> {
                 // Extra fingers while a drag (or Smart Touch scroll) is already committed don't
                 // change its meaning - ignore until release.
                 return emptyList()
@@ -845,7 +911,8 @@ class PointerGestureEngine {
         if (sample.id == anchorID) anchorViewPoint = sample.viewPoint
 
         when (mode) {
-            PointerEngineMode.Idle, PointerEngineMode.DeferredSystemGesture, PointerEngineMode.TapBuffered ->
+            PointerEngineMode.Idle, PointerEngineMode.DeferredSystemGesture, PointerEngineMode.TapBuffered,
+            PointerEngineMode.TouchConsumed ->
                 return emptyList()
 
             PointerEngineMode.FirstTouchPending -> {
@@ -855,6 +922,18 @@ class PointerGestureEngine {
                 pendingLastView = sample.viewPoint
                 val movedDist = hypot(sample.viewPoint.x - start.view.x, sample.viewPoint.y - start.view.y)
                 if (!(movedDist > PointerGestureConfig.dragSlop)) return emptyList()
+                if (naturalIsActive) {
+                    // Natural Touch: moving straight away scrolls; resting first (but not long enough
+                    // to right-click, which poll() would already have done) drags from the touch-down point.
+                    if (start.normalized == null) return consumeTouch(sample.id)
+                    if (sample.time - start.time >= PointerGestureConfig.naturalPressDelay) {
+                        val chained = naturalChainedCount(start.view, start.time)
+                        naturalLastClick = null
+                        return beginLeftDrag(sample.id, start.normalized, sample.normalized, chained)
+                    }
+                    naturalLastClick = null
+                    return commitToSmartScroll(sample.id, sample.viewPoint)
+                }
                 // Enough movement evidence to commit now, without waiting out the rest of the
                 // arbitration window - either a drag continuation of an already-buffered tap chain,
                 // or a genuine solo pointer drag.
@@ -987,7 +1066,30 @@ class PointerGestureEngine {
         when (mode) {
             PointerEngineMode.Idle, PointerEngineMode.DeferredSystemGesture, PointerEngineMode.TapBuffered -> {}
 
-            PointerEngineMode.FirstTouchPending -> {
+            PointerEngineMode.TouchConsumed -> if (sample.id == anchorID) resetToIdle()
+
+            PointerEngineMode.FirstTouchPending -> if (naturalIsActive) {
+                val start = pendingStart
+                if (sample.id != pendingID || start == null) return out
+                pendingID = null
+                pendingStart = null
+                pendingLastNormalized = null
+                pendingLastView = null
+                mode = PointerEngineMode.Idle
+                // Still under the slop and lifted before the long press: a click at the touch-down
+                // point, sent now - no waiting for a possible second tap.
+                val liftDistance = hypot(sample.viewPoint.x - start.view.x, sample.viewPoint.y - start.view.y)
+                val n = start.normalized
+                if (cancelled || liftDistance > PointerGestureConfig.dragSlop || n == null) {
+                    naturalLastClick = null
+                } else {
+                    val count = naturalChainedCount(start.view, start.time) ?: 1
+                    naturalLastClick = NaturalClick(count, start.view, sample.time)
+                    out.add(PointerCommand.MoveAbsolute(n.x, n.y))
+                    out.add(PointerCommand.MouseDown(PointerButton.Left, count))
+                    out.add(PointerCommand.MouseUp(PointerButton.Left, count))
+                }
+            } else {
                 val start = pendingStart
                 if (sample.id != pendingID || start == null) return out
                 out += endTitleBarHold()
@@ -1373,8 +1475,13 @@ class PointerGestureEngine {
      * Presses where the finger came down ([pressAt]), then drags to where it is now: pressing
      * at the point the drag was recognised would start every drag a slop's distance off target.
      */
-    private fun beginLeftDrag(id: Any, pressAt: CGPoint?, current: CGPoint?): List<PointerCommand> {
-        val clickCount = tapChain?.count ?: 0
+    private fun beginLeftDrag(
+        id: Any,
+        pressAt: CGPoint?,
+        current: CGPoint?,
+        explicitCount: Int? = null,
+    ): List<PointerCommand> {
+        val clickCount = explicitCount ?: tapChain?.count ?: 0
         tapChain = null
         pendingID = null
         pendingStart = null
@@ -1409,6 +1516,51 @@ class PointerGestureEngine {
         relativeDragFingerID = id
         heldMouseButton = PointerButton.Left
         return listOf(PointerCommand.MouseDown(PointerButton.Left, max(clickCount, 1)))
+    }
+
+    /** Natural Touch: the click count a touch at [point]/[time] continues (previous + 1, at most 3), or null to start fresh. */
+    private fun naturalChainedCount(point: CGPoint, time: TimeInterval): Int? {
+        val last = naturalLastClick ?: return null
+        val dt = time - last.time
+        if (dt < 0 || dt > PointerGestureConfig.naturalClickChainWindow) return null
+        if (hypot(point.x - last.point.x, point.y - last.point.y) > PointerGestureConfig.tapChainMaxDistance) return null
+        return min(last.count + 1, 3)
+    }
+
+    /** Natural Touch long press: one right click at the touch-down point, then the rest of this touch is ignored. */
+    private fun naturalLongPress(id: Any): List<PointerCommand> {
+        val start = pendingStart
+        naturalLastClick = null
+        consumeTouch(id)
+        val n = start?.normalized ?: return emptyList()
+        return listOf(
+            PointerCommand.MoveAbsolute(n.x, n.y),
+            PointerCommand.MouseDown(PointerButton.Right, 1),
+            PointerCommand.MouseUp(PointerButton.Right, 1),
+            PointerCommand.SmartTouchFeedback(SmartTouchFeedback.LongPressRightClick),
+        )
+    }
+
+    /** Ends the still-undecided first touch without an action of its own. */
+    private fun consumeTouch(id: Any): List<PointerCommand> {
+        pendingID = null
+        pendingStart = null
+        pendingLastNormalized = null
+        pendingLastView = null
+        anchorID = id
+        mode = PointerEngineMode.TouchConsumed
+        return emptyList()
+    }
+
+    /**
+     * Switches the Direct Touch style. Like [setInputMode], cancels the gesture in flight
+     * (releasing any held button) so the next touch starts clean; nothing else changes.
+     */
+    fun setTouchStyle(newStyle: DirectTouchStyle): List<PointerCommand> {
+        if (newStyle == touchStyle) return emptyList()
+        val out = reset()
+        touchStyle = newStyle
+        return out
     }
 
     private fun commitRightDrag(): List<PointerCommand> {
@@ -1476,6 +1628,7 @@ class PointerGestureEngine {
         smartScrollLastView = null
         smartScrollAxis = SmartScrollAxis.Free
         titleBarHoldActive = false
+        naturalLastClick = null
     }
 }
 

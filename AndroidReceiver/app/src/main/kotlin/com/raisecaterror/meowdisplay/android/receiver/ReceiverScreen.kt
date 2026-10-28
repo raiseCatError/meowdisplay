@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -79,6 +80,8 @@ import com.raisecaterror.meowdisplay.core.controls.ControlReservedRegion
 import com.raisecaterror.meowdisplay.core.controls.ControlSafeInsets
 import com.raisecaterror.meowdisplay.core.controls.LandscapeTraySide
 import com.raisecaterror.meowdisplay.core.controls.ReceiverInputPrompt
+import com.raisecaterror.meowdisplay.core.controls.DirectTouchStyle
+import com.raisecaterror.meowdisplay.core.controls.PointerInputMode
 import com.raisecaterror.meowdisplay.core.controls.SmartTouchFeedback
 import kotlin.math.roundToInt
 
@@ -282,6 +285,14 @@ fun ReceiverScreen(
             onTap = controller::requestInputTapped,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 - 22).dp),
         )
+        if (state.inputAllowed && prefs.inputMode == PointerInputMode.Direct &&
+            prefs.touchStyle == DirectTouchStyle.Natural && !prefs.naturalTouchHintShown
+        ) {
+            NaturalTouchHint(
+                onDone = { controller.store.update { it.naturalTouchHintShown = true } },
+                modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = (insets.top + 12).dp),
+            )
+        }
         if (showPerformance) {
             com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(
                 pipeline.stats, rttMs,
@@ -289,6 +300,34 @@ fun ReceiverScreen(
             )
         }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
+    }
+}
+
+/** One-time note after Natural Touch became the default: what changed and where Classic is. */
+@Composable
+private fun NaturalTouchHint(onDone: () -> Unit, modifier: Modifier = Modifier) {
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(12_000)
+        onDone()
+    }
+    androidx.compose.material3.Surface(
+        modifier = modifier.widthIn(max = 460.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+    ) {
+        androidx.compose.foundation.layout.Row(Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
+            androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                Text("Natural Touch is on", fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                Text(
+                    "Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings & Help > Input.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            androidx.compose.material3.TextButton(onClick = onDone) { Text("OK", fontWeight = FontWeight.SemiBold) }
+        }
     }
 }
 
@@ -410,6 +449,7 @@ private fun hapticConstant(haptic: ReceiverHaptic): Int? {
         is ReceiverHaptic.SmartTouch -> when (haptic.feedback) {
             SmartTouchFeedback.DirectTouchOverride -> HapticFeedbackConstants.LONG_PRESS
             SmartTouchFeedback.WindowDragArmed -> confirm
+            SmartTouchFeedback.LongPressRightClick -> HapticFeedbackConstants.LONG_PRESS
             // No continuous ramp on Android: the build-up is silent, the arming tick confirms.
             else -> null
         }

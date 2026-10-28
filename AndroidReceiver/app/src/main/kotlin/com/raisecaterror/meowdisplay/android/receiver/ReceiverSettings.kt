@@ -59,6 +59,7 @@ import com.raisecaterror.meowdisplay.core.controls.PadControlScale
 import com.raisecaterror.meowdisplay.core.controls.PadPaletteStyle
 import com.raisecaterror.meowdisplay.core.controls.PadStandardControl
 import com.raisecaterror.meowdisplay.core.controls.PointerGestureConfig
+import com.raisecaterror.meowdisplay.core.controls.DirectTouchStyle
 import com.raisecaterror.meowdisplay.core.controls.PointerInputMode
 import com.raisecaterror.meowdisplay.core.controls.ReceiverControlPreferences
 import com.raisecaterror.meowdisplay.core.controls.ReceiverGestureTarget
@@ -161,9 +162,23 @@ private fun SettingsPageContent(
                     PointerGestureConfig.trackpadSensitivityRange.start.toFloat()..PointerGestureConfig.trackpadSensitivityRange.endInclusive.toFloat(),
                 ) { value -> set { it.trackpadSensitivity = value.toDouble() } }
             }
-            Toggle("Smart Touch (Experimental)", prefs.smartTouchEnabled) { on -> set { it.smartTouchEnabled = on } }
-            Caption("A one-finger swipe scrolls when the Mac says the element under it scrolls; hold on a title bar to drag the window.")
-            Toggle("Smart Touch Haptics", prefs.smartTouchLongPressHapticEnabled) { on -> set { it.smartTouchLongPressHapticEnabled = on } }
+            if (prefs.inputMode == PointerInputMode.Direct) {
+                Choice("Touch Style", DirectTouchStyle.entries, prefs.touchStyle, { if (it == DirectTouchStyle.Natural) "Natural Touch" else "Classic" }) { style ->
+                    set { it.touchStyle = style }
+                }
+                Caption(
+                    if (prefs.touchStyle == DirectTouchStyle.Natural) {
+                        "Tap to click, swipe to scroll, press then move to drag, touch and hold to right-click. Pinch follows the Pinch setting in Gestures."
+                    } else {
+                        "The finger is the pointer: tap to click, tap then hold to drag. Choose Natural Touch for macOS-style touch."
+                    },
+                )
+            }
+            if (prefs.inputMode == PointerInputMode.Direct && prefs.touchStyle == DirectTouchStyle.Classic) {
+                Toggle("Smart Touch (Experimental)", prefs.smartTouchEnabled) { on -> set { it.smartTouchEnabled = on } }
+                Caption("A one-finger swipe scrolls when the Mac says the element under it scrolls; hold on a title bar to drag the window.")
+                Toggle("Smart Touch Haptics", prefs.smartTouchLongPressHapticEnabled) { on -> set { it.smartTouchLongPressHapticEnabled = on } }
+            }
             Section("Hardware Keyboard")
             Toggle("Control Key Types ⌘", prefs.controlKeyAsCommand) { on -> set { it.controlKeyAsCommand = on } }
             Caption("Android keeps the ⌘ (Meta) key's shortcuts for itself, so turn this on to press Control-C for ⌘C on your Mac. The on-screen ^ key still sends Control.")

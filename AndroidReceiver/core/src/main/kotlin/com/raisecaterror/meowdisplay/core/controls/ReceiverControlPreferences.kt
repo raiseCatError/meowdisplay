@@ -59,6 +59,13 @@ data class ReceiverControlPreferences(
     /** Smart Touch hold haptics; also silenced while [hapticsEnabled] is off. Original persisted name kept. */
     var smartTouchLongPressHapticEnabled: Boolean = true,
     /**
+     * Direct Touch style (schema 19). Natural for everyone, new and upgraded: a blob without this key
+     * decodes to Natural; only an explicit Classic choice is stored. Never affects Trackpad mode.
+     */
+    var touchStyle: DirectTouchStyle = DirectTouchStyle.Natural,
+    /** Whether the one-time "Natural Touch is on" hint has been shown. */
+    var naturalTouchHintShown: Boolean = false,
+    /**
      * Hardware keyboards: Control sends ⌘. Android keeps Meta-key (⌘) combinations for its own
      * shortcuts and never passes them to apps, so this is the only way to type ⌘ shortcuts from a
      * physical keyboard. Off by default; the on-screen ^ key still sends Control.
@@ -153,6 +160,8 @@ data class ReceiverControlPreferences(
         put("trackpadSensitivity", jsonOf(trackpadSensitivity))
         put("smartTouchEnabled", jsonOf(smartTouchEnabled))
         put("smartTouchLongPressHapticEnabled", jsonOf(smartTouchLongPressHapticEnabled))
+        put("touchStyle", jsonOf(touchStyle.raw))
+        put("naturalTouchHintShown", jsonOf(naturalTouchHintShown))
         put("controlKeyAsCommand", jsonOf(controlKeyAsCommand))
         put("autoReconnectEnabled", jsonOf(autoReconnectEnabled))
         put("profiles", jsonArrayOf(profiles.map { it.toJson() }))
@@ -185,7 +194,7 @@ data class ReceiverControlPreferences(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 18
+        const val SCHEMA_VERSION = 19
 
         /**
          * The hand-written Swift `init(from:)`: a key added by a later schema
@@ -235,6 +244,8 @@ data class ReceiverControlPreferences(
                 p.smartTouchEnabled = value("smartTouchEnabled", fallback.smartTouchEnabled) { it.bool() }
                 p.smartTouchLongPressHapticEnabled =
                     value("smartTouchLongPressHapticEnabled", fallback.smartTouchLongPressHapticEnabled) { it.bool() }
+                p.touchStyle = value("touchStyle", fallback.touchStyle) { DirectTouchStyle.of(it.str()) }
+                p.naturalTouchHintShown = value("naturalTouchHintShown", fallback.naturalTouchHintShown) { it.bool() }
                 p.controlKeyAsCommand = value("controlKeyAsCommand", fallback.controlKeyAsCommand) { it.bool() }
                 p.autoReconnectEnabled = value("autoReconnectEnabled", fallback.autoReconnectEnabled) { it.bool() }
                 p.pictureInPictureEnabled = value("pictureInPictureEnabled", fallback.pictureInPictureEnabled) { it.bool() }
@@ -320,6 +331,8 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
             value.version = 17
         }
         if (value.version < 18) value.version = 18
+        // Schema 18 predates Touch Style; the decoder already defaulted it to Natural.
+        if (value.version < 19) value.version = 19
         // Resolve current canonical Function Tray metadata by ID without rewriting the user's choices.
         value.functionTrayProfiles = value.functionTrayProfiles.map { it.resolvingCanonicalMetadata() }
         return value

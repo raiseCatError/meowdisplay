@@ -125,6 +125,11 @@ class ReceiverController(
         }
         override fun smartTouchFeedback(feedback: SmartTouchFeedback) {
             val p = store.current
+            // The Natural Touch right click confirms with the global Haptics switch alone.
+            if (feedback == SmartTouchFeedback.LongPressRightClick) {
+                if (p.hapticsEnabled) haptics.tryEmit(ReceiverHaptic.SmartTouch(feedback))
+                return
+            }
             if (p.hapticsEnabled && SmartTouchHapticPolicy.isEnabled(p.hapticsEnabled, p.smartTouchLongPressHapticEnabled)) haptics.tryEmit(ReceiverHaptic.SmartTouch(feedback))
         }
         override fun threeFingerHoldArmed(delaySeconds: Double) {
@@ -255,6 +260,7 @@ class ReceiverController(
                 inputMode = p.inputMode,
                 trackpadSensitivity = p.trackpadSensitivity,
                 smartTouchEnabled = p.smartTouchEnabled,
+                touchStyle = p.touchStyle,
                 localNavigationAllowed = p.allowLocalViewNavigation,
                 pinchTarget = p.pinchTarget,
                 // A SurfaceView can't rotate the picture, so the view never rotates on Android
