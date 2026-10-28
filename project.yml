@@ -251,6 +251,7 @@ targets:
       - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
+      - Shared/WindowWorkspace.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift
