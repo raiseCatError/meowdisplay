@@ -8,7 +8,8 @@ never uses a plaintext transport.
 | Module | What it holds | Tests |
 | --- | --- | --- |
 | `core` | The protocol in plain Kotlin/JVM: pairing v13 (P-256 ECDH, transcript-bound HKDF, six-digit code, HMAC confirmations, commit/reveal, authenticated commit/ack/abort, the responder throttle), pinned mutual TLS 1.3 over JSSE, pin fingerprints, media framing and the channel demux, audio media frames | Host JVM: replays the Swift implementation's vectors (`../fixtures/receiver-protocol/swift-vectors.json`), runs both pairing roles in-process and over loopback sockets, and real loopback TLS handshakes |
-| `app` | The Android app: Keystore identity, pin store, DNS-SD advertisement and browsing, the pairing listener (TCP 9002) and "nearby Mac → Pair", Compose UI | JVM unit tests; device checks in the QA checklist |
+| `core/controls` | The receiver controls ported from the iOS receiver's `Shared/*.swift`: profiles, trays, chords, pointer engine, viewport, tray/iPad/radial geometry, keyboard rules, touch arbitration (see RECEIVER_CONTROLS.md) | Host JVM: the matching Mac tests, ported |
+| `app` | The Android app: Keystore identity, pin store, DNS-SD advertisement and browsing, the pairing listener (TCP 9002) and "nearby Mac → Pair", the media listener and decoders, the live receiver screen with the control overlay, input, adaptive layout and Settings | JVM unit tests; `EmulatorSmokeTest` on phone, tablet and foldable AVDs; physical checklist in RECEIVER_CONTROLS.md |
 
 ## Build and test
 
@@ -33,8 +34,22 @@ implementation; `core`'s `SwiftVectorsTest` replays them. After a deliberate
 protocol change, regenerate them on the Mac
 (`TEST_RUNNER_MEOW_WRITE_FIXTURES=1`, see that file) and make both suites pass.
 
+## Emulator test
+
+With one AVD booted and the debug APK installed (never alongside a Gradle
+build on an 8 GB machine; `-gpu host` recommended):
+
+```sh
+MEOW_EMULATOR_SERIAL=emulator-5554 MEOW_EMULATOR_PROFILE=phone \
+  MEOW_SMOKE_SHOTS=/path/to/shots ./gradlew :core:test --tests '*EmulatorSmokeTest' --rerun
+```
+
+`MEOW_EMULATOR_PROFILE` is `phone`, `tablet` or `foldable` (folds and
+unfolds mid-session).
+
 ## Status
 
-Secure core and pairing are implemented. Media (the TLS 9001 listener,
-session admission, H.264/HEVC decoding, audio), the receiver controls and the
-adaptive phone/tablet/foldable UI follow.
+Secure pairing, the authenticated media session, H.264/HEVC decoding, audio,
+the receiver controls and the adaptive phone/tablet/foldable UI are
+implemented. RECEIVER_CONTROLS.md has the iOS parity matrix with the
+remaining gaps and the physical QA checklist.
