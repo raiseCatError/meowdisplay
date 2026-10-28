@@ -24,6 +24,15 @@ class ConnectRequestState(private val random: SecureRandom = SecureRandom()) {
         return Request(peerID, mode, token, now + TOKEN_MS, now + REQUEST_MS).also { current = it }
     }
 
+    /**
+     * A Connect that travels as a Remote Access knock instead: it has no Bonjour token to publish
+     * (nothing on the LAN is told), but the request stands for the same time, so `requestedMode`
+     * and the pending state behave exactly like the local Connect.
+     */
+    @Synchronized
+    fun requestRemote(peerID: String, mode: DisplayMode?, now: Long): Request =
+        Request(peerID, mode, token = "", tokenUntil = now, until = now + REQUEST_MS).also { current = it }
+
     /** The token to advertise now, if any. */
     @Synchronized
     fun token(now: Long): String? = current?.takeIf { now < it.tokenUntil }?.token

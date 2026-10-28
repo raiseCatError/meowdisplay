@@ -39,4 +39,8 @@ tasks.test {
     val viewportFixtures = rootProject.layout.projectDirectory.dir("../fixtures/viewport")
     inputs.dir(viewportFixtures)
     systemProperty("meow.viewportFixtures", viewportFixtures.asFile.absolutePath)
+    // Remote Access endpoint and knock-frame vectors shared with the Swift code (fixtures/remote).
+    val remoteFixtures = rootProject.layout.projectDirectory.dir("../fixtures/remote")
+    inputs.dir(remoteFixtures)
+    systemProperty("meow.remoteFixtures", remoteFixtures.asFile.absolutePath)
 }

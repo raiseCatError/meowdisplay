@@ -23,7 +23,11 @@ import org.junit.Test
 
 /** The session state machine against in-memory links: admission, input, identity and liveness rules. */
 class ReceiverSessionTest {
-    private class FakeLink(override val peerID: String) : MediaLink {
+    private class FakeLink(
+        override val peerID: String,
+        override val remoteAddress: java.net.InetAddress? = null,
+        override val localAddress: java.net.InetAddress? = null,
+    ) : MediaLink {
         val sent = mutableListOf<JsonObject>()
         var closed = false
 
@@ -53,7 +57,8 @@ class ReceiverSessionTest {
     private fun ReceiverSession.say(link: MediaLink, json: String) = onFrame(link, frame(json))
     private fun invite(id: String, intent: String = "automatic", initiator: String = "sender") =
         "{\"type\":\"sessionInvite\",\"id\":\"$id\",\"initiator\":\"$initiator\",\"intent\":\"$intent\",\"mode\":\"extend\",\"awaitingSender\":false}"
-    private fun connect(peer: String, pv: Int = 22): FakeLink = FakeLink(peer).also {
+    private fun connect(peer: String, pv: Int = 22, remote: String? = null, local: String? = null): FakeLink =
+        FakeLink(peer, remote?.let(java.net.InetAddress::getByName), local?.let(java.net.InetAddress::getByName)).also {
         session.adopt(it)
         session.say(it, "{\"type\":\"welcome\",\"pv\":$pv,\"min\":1}")
     }
@@ -520,6 +525,98 @@ class ReceiverSessionTest {
         assertTrue(a.sent.any { it["type"]!!.jsonPrimitive.content == "audioRequest" && it["enabled"]!!.jsonPrimitive.content == "true" })
         val old = connect(MAC_A, pv = 11)
         assertFalse(old.types().contains("audioRequest"))
+    }
+
+    // MARK: Remote Access: the route changes nothing about who may replace whom
+
+    @Test
+    fun aRemoteDialBackFromAnotherMacIsHeldExactlyLikeALocalOne() {
+        val a = streamingA()
+        // Mac B dials in over Tailscale (a 100.x address), asking for a session, while A streams.
+        val b = connect(MAC_B, remote = "100.101.102.103", local = "100.64.0.9")
+        session.say(b, invite("b1", intent = "manual", initiator = "receiver"))
+        assertEquals("greeted, then asked to wait for the user: no silent takeover", listOf("b1" to "pending"), b.responses())
+        assertTrue(events.any { it is SessionEvent.ApprovalRequested })
+        session.onFrame(b, keyframe())
+        assertEquals("its media goes nowhere", 0, videoEvents())
+        assertFalse(a.closed)
+        assertEquals(MAC_A, session.peerID)
+        assertTrue(session.isAdmitted)
+        session.answerInvitation("b1", ReceiverApprovalDecision.RejectForSession)
+        assertTrue(b.closed)
+        assertEquals(MAC_A, session.peerID)
+        assertFalse(a.closed)
+    }
+
+    @Test
+    fun theConnectedEventCarriesTheAddressesOfThePathForDescribingIt() {
+        val link = connect(MAC_A, remote = "100.101.102.103", local = "100.64.0.9")
+        val connected = events.filterIsInstance<SessionEvent.Connected>().single()
+        assertEquals(MAC_A, connected.peerID)
+        assertEquals("100.101.102.103", connected.remoteAddress?.hostAddress)
+        assertEquals("100.64.0.9", connected.localAddress?.hostAddress)
+        assertEquals(MAC_A, link.peerID)
+        events.clear()
+        connect(MAC_A)
+        assertNull("a link that doesn't know its path says nothing", events.filterIsInstance<SessionEvent.Connected>().single().remoteAddress)
+    }
+
+    @Test
+    fun aRemoteSessionStartsWithInputOffAndNoGrantCarriesOver() {
+        val first = connect(MAC_A, remote = "100.101.102.103", local = "100.64.0.9")
+        session.say(first, invite("s1", intent = "manual", initiator = "receiver"))
+        assertTrue(session.isAdmitted)
+        assertFalse("admission over Remote Access is not input approval", session.inputAllowed)
+        session.say(first, "{\"type\":\"allowInputState\",\"allowed\":true,\"state\":\"allowed\"}")
+        assertTrue(session.inputAllowed)
+        // The Mac dials back after a drop, again over Remote Access: the grant was for the old connection.
+        val again = connect(MAC_A, remote = "100.101.102.103", local = "100.64.0.9")
+        session.say(again, invite("s1", intent = "automatic", initiator = "receiver"))
+        assertTrue(session.isAdmitted)
+        assertFalse("Request Control is asked for again", session.inputAllowed)
+    }
+
+    // MARK: Waiting for the Mac's own user
+
+    private fun inviteAwaiting(id: String) =
+        "{\"type\":\"sessionInvite\",\"id\":\"$id\",\"initiator\":\"receiver\",\"intent\":\"manual\",\"mode\":\"extend\",\"awaitingSender\":true}"
+
+    @Test
+    fun aRequestTheMacsUserHasNotApprovedYetIsReportedUntilTheMacSendsPicture() {
+        val a = connect(MAC_A)
+        session.say(a, inviteAwaiting("r1"))
+        assertEquals(
+            "said before the admission, so the screen never shows an empty picture in between",
+            listOf("SenderApproval", "Admitted"),
+            events.filter { it is SessionEvent.SenderApproval || it is SessionEvent.Admitted }.map { it::class.simpleName },
+        )
+        assertEquals(SessionEvent.SenderApproval(true), events.filterIsInstance<SessionEvent.SenderApproval>().single())
+        session.onFrame(a, keyframe())
+        assertEquals(listOf(SessionEvent.SenderApproval(true), SessionEvent.SenderApproval(false)), events.filterIsInstance<SessionEvent.SenderApproval>())
+    }
+
+    @Test
+    fun theMacRefusingOrTheSessionEndingClearsTheWait() {
+        val withdrawn = connect(MAC_A)
+        session.say(withdrawn, inviteAwaiting("r1"))
+        session.say(withdrawn, "{\"type\":\"sessionInviteCancel\",\"id\":\"r1\"}")
+        assertEquals(SessionEvent.SenderApproval(false), events.filterIsInstance<SessionEvent.SenderApproval>().last())
+        events.clear()
+        val dropped = connect(MAC_A)
+        session.say(dropped, inviteAwaiting("r2"))
+        session.onClosed(dropped)
+        // A fresh connection starts with nothing pending; the next video never reports a stale wait.
+        val next = connect(MAC_A)
+        session.say(next, invite("r2", initiator = "receiver"))
+        session.onFrame(next, keyframe())
+        assertTrue(events.filterIsInstance<SessionEvent.SenderApproval>().none { !it.pending })
+    }
+
+    @Test
+    fun anInvitationTheMacStartedNeverShowsAsWaitingForTheMac() {
+        val a = connect(MAC_A)
+        session.say(a, "{\"type\":\"sessionInvite\",\"id\":\"s1\",\"initiator\":\"sender\",\"intent\":\"manual\",\"mode\":\"extend\",\"awaitingSender\":true}")
+        assertTrue(events.filterIsInstance<SessionEvent.SenderApproval>().isEmpty())
     }
 
     private companion object {

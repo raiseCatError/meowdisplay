@@ -30,11 +30,17 @@ object PinnedTls {
     /**
      * A fresh context per connection or listener: no session cache is shared
      * with another trust decision. `pinnedSPKIs` is read during each handshake
-     * and must be an in-memory snapshot.
+     * and must be an in-memory snapshot. `onPeerKey` only OBSERVES the key the
+     * peer presented (null when it is not a P-256 key), before the pin check
+     * decides; it can name who answered a failed dial, and never trusts it.
      */
-    fun context(identity: X509KeyManager, pinnedSPKIs: () -> Collection<ByteArray>): SSLContext =
+    fun context(
+        identity: X509KeyManager,
+        onPeerKey: ((ByteArray?) -> Unit)? = null,
+        pinnedSPKIs: () -> Collection<ByteArray>,
+    ): SSLContext =
         SSLContext.getInstance(PROTOCOL).apply {
-            init(arrayOf(identity), arrayOf(PinTrustManager(pinnedSPKIs)), SecureRandom())
+            init(arrayOf(identity), arrayOf(PinTrustManager(pinnedSPKIs, onPeerKey)), SecureRandom())
         }
 
     fun clientSocket(context: SSLContext, address: InetSocketAddress, timeoutMs: Int): SSLSocket {
@@ -82,14 +88,19 @@ object PinnedTls {
         }
     }
 
-    private class PinTrustManager(private val pinnedSPKIs: () -> Collection<ByteArray>) : X509TrustManager {
+    private class PinTrustManager(
+        private val pinnedSPKIs: () -> Collection<ByteArray>,
+        private val onPeerKey: ((ByteArray?) -> Unit)?,
+    ) : X509TrustManager {
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = check(chain)
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = check(chain)
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 
         private fun check(chain: Array<out X509Certificate>?) {
             val leaf = chain?.firstOrNull() ?: throw CertificateException("no peer certificate")
-            val spki = spki(leaf) ?: throw CertificateException("peer key is not P-256")
+            val spki = spki(leaf)
+            onPeerKey?.invoke(spki)
+            if (spki == null) throw CertificateException("peer key is not P-256")
             if (pinnedSPKIs().none { it.contentEquals(spki) }) throw CertificateException("peer is not pinned")
         }
     }

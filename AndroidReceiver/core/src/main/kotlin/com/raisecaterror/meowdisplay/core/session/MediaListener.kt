@@ -158,6 +158,8 @@ class MediaListener(
         private val closer: ExecutorService,
         private val log: (String) -> Unit,
     ) : MediaLink {
+        override val remoteAddress get() = socket.inetAddress
+        override val localAddress get() = socket.localAddress
         private val output = socket.outputStream
         private val closed = AtomicBoolean()
         private val queuedBytes = AtomicLong()

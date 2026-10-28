@@ -18,6 +18,10 @@ interface MediaLink {
      */
     val peerID: String
 
+    /** The peer's network address and this device's own address on the connection, for describing the route. Never trust. */
+    val remoteAddress: java.net.InetAddress? get() = null
+    val localAddress: java.net.InetAddress? get() = null
+
     /** Frames and sends one control message; false once the link is closed. */
     fun send(payload: ByteArray): Boolean
     fun close()
@@ -25,10 +29,20 @@ interface MediaLink {
 
 sealed interface SessionEvent {
     data class Phase(val phase: SessionPhase) : SessionEvent
-    data class Connected(val peerID: String) : SessionEvent
+    data class Connected(
+        val peerID: String,
+        val remoteAddress: java.net.InetAddress? = null,
+        val localAddress: java.net.InetAddress? = null,
+    ) : SessionEvent
     data class Disconnected(val peerID: String, val reason: SessionLossReason) : SessionEvent
     data class Admitted(val peerID: String) : SessionEvent
     data object AdmissionWithdrawn : SessionEvent
+
+    /**
+     * This device's own Connect was accepted but the Mac's user has not approved it yet
+     * (`sessionInvite.awaitingSender`); `false` once the Mac starts sending, or the request ends.
+     */
+    data class SenderApproval(val pending: Boolean) : SessionEvent
     data class ApprovalRequested(val approval: PendingSessionApproval) : SessionEvent
     data class ApprovalDismissed(val id: String) : SessionEvent
     data class InputState(val state: InputWireState, val allowed: Boolean) : SessionEvent
@@ -90,6 +104,7 @@ class ReceiverSession(
     private var macPV: Int? = null
     private var currentInvitationID: String? = null
     private var inputGranted = false
+    private var senderApprovalPending = false
     private var paused = false
     private var incompatible = false
     private var lastReceivedMs = 0L
@@ -225,7 +240,8 @@ class ReceiverSession(
         lifecycle.connectionAdopted()
         lifecycle.connectionEstablished()
         reportPhase()
-        emit(SessionEvent.Connected(newLink.peerID))
+        senderApprovalPending = false
+        emit(SessionEvent.Connected(newLink.peerID, newLink.remoteAddress, newLink.localAddress))
         emit(SessionEvent.InputState(InputWireState.Off, false))
         if (greetedWith != null) {
             // Greeted while it waited: say it again only if the panel changed since.
@@ -486,6 +502,7 @@ class ReceiverSession(
                     admission.revoke()
                     input.forget()
                     inputGranted = false
+                    endSenderApproval()
                     emit(SessionEvent.AdmissionWithdrawn)
                     emit(SessionEvent.InputState(InputWireState.Off, false))
                 }
@@ -600,6 +617,12 @@ class ReceiverSession(
         }
         when (decision) {
             IncomingDecision.Accept -> {
+                // Our own request, accepted here, but the Mac's user still has to say yes. Said before
+                // the admission so the screen never shows an empty picture in between.
+                if (invitation.awaitingSender && invitation.initiator == SessionRole.Receiver && !senderApprovalPending) {
+                    senderApprovalPending = true
+                    emit(SessionEvent.SenderApproval(true))
+                }
                 admit(invitation.id, peerID)
                 for (dismissed in approvals.removeAll(peerID)) emit(SessionEvent.ApprovalDismissed(dismissed.id))
                 send(ReceiverMessages.invitationResponse(invitation.id, InvitationResult.Accepted))
@@ -658,7 +681,15 @@ class ReceiverSession(
             if (video.needsKeyframe) requestKeyframeThrottled()
             return
         }
+        // The Mac is sending: whatever it was waiting for has been decided.
+        endSenderApproval()
         emit(SessionEvent.Video(sample, unit.captureMs?.let(clock::toLocal)))
+    }
+
+    private fun endSenderApproval() {
+        if (!senderApprovalPending) return
+        senderApprovalPending = false
+        emit(SessionEvent.SenderApproval(false))
     }
 
     private fun requestKeyframeThrottled() {
@@ -676,6 +707,7 @@ class ReceiverSession(
         inputGranted = false
         paused = false
         heldState.clear()
+        senderApprovalPending = false
         dismissApprovals(answer = null)
         val effective = if (incompatible && reason.automaticallyRecoverable) SessionLossReason.ProtocolIncompatible else reason
         lifecycle.connectionLost(effective, autoReconnectEnabled)

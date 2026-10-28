@@ -1,0 +1,1085 @@
+{
+ "comment": "Remote Access endpoint syntax shared by Swift and Kotlin. `validate` = RemoteEndpointValidation.validate(host:port:) (host comes back as typed). `pairingEndpoint` = RemotePairingEndpoint.make(host:port:) (empty port = 9004, brackets removed). Both are run by MacTests/RemoteEndpointVectorTests.swift and core RemoteEndpointTest.kt. `address` is the Android Address field (one string); it is split and then judged by the same rules, and only Kotlin runs it.",
+ "validate": [
+  {
+   "name": "ipv4",
+   "host": "100.101.102.103",
+   "port": "9004",
+   "expect": {
+    "host": "100.101.102.103",
+    "port": 9004
+   }
+  },
+  {
+   "name": "ipv4 trimmed",
+   "host": "  100.64.0.7  ",
+   "port": " 9003 ",
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9003
+   }
+  },
+  {
+   "name": "ipv4 trimmed with newlines",
+   "host": "\n100.64.0.7\r\n",
+   "port": "9003\n",
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9003
+   }
+  },
+  {
+   "name": "ipv4 non-breaking spaces trimmed",
+   "host": "\u00a0100.64.0.7\u00a0",
+   "port": "9003",
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9003
+   }
+  },
+  {
+   "name": "ipv4 octet over 255 is a hostname of digits",
+   "host": "256.1.1.1",
+   "port": "9004",
+   "expect": {
+    "host": "256.1.1.1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "three numeric labels are a hostname",
+   "host": "1.2.3",
+   "port": "9004",
+   "expect": {
+    "host": "1.2.3",
+    "port": 9004
+   }
+  },
+  {
+   "name": "five numeric labels are a hostname",
+   "host": "1.2.3.4.5",
+   "port": "9004",
+   "expect": {
+    "host": "1.2.3.4.5",
+    "port": 9004
+   }
+  },
+  {
+   "name": "ipv4 leading zero is not an address",
+   "host": "01.2.3.4",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "ipv4 plus sign is not an address",
+   "host": "+1.2.3.4",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "ipv4 trailing dot",
+   "host": "1.2.3.4.",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "ipv4 with a port inside the host field",
+   "host": "100.64.0.7:9003",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "single label",
+   "host": "mac",
+   "port": "9004",
+   "expect": {
+    "host": "mac",
+    "port": 9004
+   }
+  },
+  {
+   "name": "magicdns",
+   "host": "mac.tailnet-name.ts.net",
+   "port": "9004",
+   "expect": {
+    "host": "mac.tailnet-name.ts.net",
+    "port": 9004
+   }
+  },
+  {
+   "name": "case is kept",
+   "host": "MAC.Example.COM",
+   "port": "9004",
+   "expect": {
+    "host": "MAC.Example.COM",
+    "port": 9004
+   }
+  },
+  {
+   "name": "leading hyphen",
+   "host": "-mac.ts.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "trailing hyphen",
+   "host": "mac-.ts.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "empty label",
+   "host": "mac..ts.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "trailing dot",
+   "host": "mac.ts.net.",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "leading dot",
+   "host": ".mac",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "underscore",
+   "host": "mac_name.local",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "non-ascii letter",
+   "host": "m\u00e4c.local",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "zero width space",
+   "host": "mac\u200b.ts.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "inner space",
+   "host": "mac name",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "inner tab",
+   "host": "mac\t.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "path",
+   "host": "mac/path",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "url",
+   "host": "http://mac",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "label of 63",
+   "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ts.net",
+   "port": "9004",
+   "expect": {
+    "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ts.net",
+    "port": 9004
+   }
+  },
+  {
+   "name": "label of 64",
+   "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ts.net",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "name of 253",
+   "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "port": "9004",
+   "expect": {
+    "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "port": 9004
+   }
+  },
+  {
+   "name": "name of 254",
+   "host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "loopback",
+   "host": "::1",
+   "port": "9004",
+   "expect": {
+    "host": "::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "unspecified",
+   "host": "::",
+   "port": "9004",
+   "expect": {
+    "host": "::",
+    "port": 9004
+   }
+  },
+  {
+   "name": "tailscale ula",
+   "host": "fd7a:115c:a1e0::1",
+   "port": "9004",
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "tailscale ula bracketed is kept as typed",
+   "host": "[fd7a:115c:a1e0::1]",
+   "port": "9004",
+   "expect": {
+    "host": "[fd7a:115c:a1e0::1]",
+    "port": 9004
+   }
+  },
+  {
+   "name": "upper case hex",
+   "host": "FD7A:115C:A1E0::1",
+   "port": "9004",
+   "expect": {
+    "host": "FD7A:115C:A1E0::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "documentation prefix",
+   "host": "2001:db8::1",
+   "port": "9004",
+   "expect": {
+    "host": "2001:db8::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "full form",
+   "host": "1:2:3:4:5:6:7:8",
+   "port": "9004",
+   "expect": {
+    "host": "1:2:3:4:5:6:7:8",
+    "port": 9004
+   }
+  },
+  {
+   "name": "all zero groups",
+   "host": "0:0:0:0:0:0:0:0",
+   "port": "9004",
+   "expect": {
+    "host": "0:0:0:0:0:0:0:0",
+    "port": 9004
+   }
+  },
+  {
+   "name": "compressed tail",
+   "host": "1:2:3:4:5:6:7::",
+   "port": "9004",
+   "expect": {
+    "host": "1:2:3:4:5:6:7::",
+    "port": 9004
+   }
+  },
+  {
+   "name": "compressed head",
+   "host": "::2:3:4:5:6:7:8",
+   "port": "9004",
+   "expect": {
+    "host": "::2:3:4:5:6:7:8",
+    "port": 9004
+   }
+  },
+  {
+   "name": "embedded ipv4",
+   "host": "::ffff:100.64.0.1",
+   "port": "9004",
+   "expect": {
+    "host": "::ffff:100.64.0.1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "embedded ipv4 after compression",
+   "host": "::1.2.3.4",
+   "port": "9004",
+   "expect": {
+    "host": "::1.2.3.4",
+    "port": 9004
+   }
+  },
+  {
+   "name": "embedded ipv4 octet over 255",
+   "host": "::1.2.3.256",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "embedded ipv4 leading zero",
+   "host": "::ffff:1.2.3.04",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "ipv4 first",
+   "host": "1.2.3.4::",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "nine groups",
+   "host": "1:2:3:4:5:6:7:8:9",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "seven groups",
+   "host": "1:2:3:4:5:6:7",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "two compressions",
+   "host": "1::2::3",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "three colons",
+   "host": ":::",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "compression standing for nothing",
+   "host": "1:2:3:4:5:6:7::8",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "leading single colon",
+   "host": ":1:2:3:4:5:6:7",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "trailing single colon",
+   "host": "1:2:3:4:5:6:7:",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "group of five digits",
+   "host": "12345::1",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "non hex digit",
+   "host": "g::1",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "zone id",
+   "host": "fe80::1%en0",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "zone id bracketed",
+   "host": "[fe80::1%en0]",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "unclosed bracket",
+   "host": "[::1",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "unopened bracket",
+   "host": "::1]",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "empty brackets",
+   "host": "[]",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "double brackets",
+   "host": "[[::1]]",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "bracketed hostname is a hostname",
+   "host": "[mac]",
+   "port": "9004",
+   "expect": {
+    "host": "[mac]",
+    "port": 9004
+   }
+  },
+  {
+   "name": "bracketed ipv4",
+   "host": "[1.2.3.4]",
+   "port": "9004",
+   "expect": {
+    "host": "[1.2.3.4]",
+    "port": 9004
+   }
+  },
+  {
+   "name": "empty host",
+   "host": "",
+   "port": "9004",
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "blank host",
+   "host": "   \t",
+   "port": "9004",
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "empty host beats bad port",
+   "host": "",
+   "port": "x",
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "bad host beats bad port",
+   "host": "bad host",
+   "port": "x",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "port 1",
+   "host": "mac",
+   "port": "1",
+   "expect": {
+    "host": "mac",
+    "port": 1
+   }
+  },
+  {
+   "name": "port 65535",
+   "host": "mac",
+   "port": "65535",
+   "expect": {
+    "host": "mac",
+    "port": 65535
+   }
+  },
+  {
+   "name": "port 0",
+   "host": "mac",
+   "port": "0",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port 65536",
+   "host": "mac",
+   "port": "65536",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port negative",
+   "host": "mac",
+   "port": "-1",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port negative zero",
+   "host": "mac",
+   "port": "-0",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port letters",
+   "host": "mac",
+   "port": "abc",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port empty",
+   "host": "mac",
+   "port": "",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port blank",
+   "host": "mac",
+   "port": "  ",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port inner space",
+   "host": "mac",
+   "port": "9 004",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port plus sign is accepted",
+   "host": "mac",
+   "port": "+9004",
+   "expect": {
+    "host": "mac",
+    "port": 9004
+   }
+  },
+  {
+   "name": "port plus alone",
+   "host": "mac",
+   "port": "+",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port leading zeros",
+   "host": "mac",
+   "port": "009004",
+   "expect": {
+    "host": "mac",
+    "port": 9004
+   }
+  },
+  {
+   "name": "port huge",
+   "host": "mac",
+   "port": "99999999999",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port fullwidth digits",
+   "host": "mac",
+   "port": "\uff19\uff10\uff10\uff14",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port hex",
+   "host": "mac",
+   "port": "0x2328",
+   "expect": {
+    "error": "invalidPort"
+   }
+  }
+ ],
+ "pairingEndpoint": [
+  {
+   "name": "default pairing port",
+   "host": "mac.tailnet.ts.net",
+   "port": "",
+   "expect": {
+    "host": "mac.tailnet.ts.net",
+    "port": 9004
+   }
+  },
+  {
+   "name": "blank port is the default",
+   "host": "mac.tailnet.ts.net",
+   "port": "  ",
+   "expect": {
+    "host": "mac.tailnet.ts.net",
+    "port": 9004
+   }
+  },
+  {
+   "name": "explicit port",
+   "host": "mac.tailnet.ts.net",
+   "port": "9010",
+   "expect": {
+    "host": "mac.tailnet.ts.net",
+    "port": 9010
+   }
+  },
+  {
+   "name": "bracketed ipv6 is unwrapped",
+   "host": "[fd7a:115c:a1e0::1]",
+   "port": "",
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "bracketed ipv6 with port",
+   "host": "[fd7a:115c:a1e0::1]",
+   "port": "9005",
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9005
+   }
+  },
+  {
+   "name": "bare ipv6",
+   "host": "::1",
+   "port": "",
+   "expect": {
+    "host": "::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "bracketed hostname is unwrapped",
+   "host": "[mac]",
+   "port": "",
+   "expect": {
+    "host": "mac",
+    "port": 9004
+   }
+  },
+  {
+   "name": "trimmed",
+   "host": "  100.64.0.7  ",
+   "port": "",
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9004
+   }
+  },
+  {
+   "name": "empty host",
+   "host": "",
+   "port": "",
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "bad host",
+   "host": "bad host",
+   "port": "",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "port out of range",
+   "host": "100.64.0.7",
+   "port": "70000",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port zero",
+   "host": "100.64.0.7",
+   "port": "0",
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "zone id",
+   "host": "fe80::1%en0",
+   "port": "",
+   "expect": {
+    "error": "invalidHost"
+   }
+  }
+ ],
+ "address": [
+  {
+   "name": "ipv4 default pairing",
+   "input": "100.64.0.7",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9004
+   }
+  },
+  {
+   "name": "ipv4 default knock",
+   "input": "100.64.0.7",
+   "defaultPort": 9003,
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9003
+   }
+  },
+  {
+   "name": "ipv4 with port",
+   "input": "100.64.0.7:9010",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "100.64.0.7",
+    "port": 9010
+   }
+  },
+  {
+   "name": "magicdns with port",
+   "input": "mac.tailnet.ts.net:9003",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "mac.tailnet.ts.net",
+    "port": 9003
+   }
+  },
+  {
+   "name": "magicdns",
+   "input": "mac.tailnet.ts.net",
+   "defaultPort": 9003,
+   "expect": {
+    "host": "mac.tailnet.ts.net",
+    "port": 9003
+   }
+  },
+  {
+   "name": "single label",
+   "input": "mac",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "mac",
+    "port": 9004
+   }
+  },
+  {
+   "name": "single label with port",
+   "input": "mac:9003",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "mac",
+    "port": 9003
+   }
+  },
+  {
+   "name": "bracketed ipv6 with port",
+   "input": "[fd7a:115c:a1e0::1]:9010",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9010
+   }
+  },
+  {
+   "name": "bracketed ipv6",
+   "input": "[fd7a:115c:a1e0::1]",
+   "defaultPort": 9003,
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9003
+   }
+  },
+  {
+   "name": "bare ipv6",
+   "input": "fd7a:115c:a1e0::1",
+   "defaultPort": 9003,
+   "expect": {
+    "host": "fd7a:115c:a1e0::1",
+    "port": 9003
+   }
+  },
+  {
+   "name": "bare ipv6 loopback",
+   "input": "::1",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "::1",
+    "port": 9004
+   }
+  },
+  {
+   "name": "bare ipv6 ending in digits is not a port",
+   "input": "::1:9004",
+   "defaultPort": 9003,
+   "expect": {
+    "host": "::1:9004",
+    "port": 9003
+   }
+  },
+  {
+   "name": "trimmed",
+   "input": "  mac.ts.net:9003  ",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "mac.ts.net",
+    "port": 9003
+   }
+  },
+  {
+   "name": "space after the colon",
+   "input": "mac.ts.net: 9003",
+   "defaultPort": 9004,
+   "expect": {
+    "host": "mac.ts.net",
+    "port": 9003
+   }
+  },
+  {
+   "name": "empty",
+   "input": "",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "blank",
+   "input": "   ",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "only a port",
+   "input": ":9004",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "emptyHost"
+   }
+  },
+  {
+   "name": "colon without a port",
+   "input": "mac.ts.net:",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "bracketed colon without a port",
+   "input": "[::1]:",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port zero",
+   "input": "mac:0",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port too big",
+   "input": "mac:70000",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "port letters",
+   "input": "mac:abc",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "two ports",
+   "input": "[::1]:9004:1",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidPort"
+   }
+  },
+  {
+   "name": "bad host beats bad port",
+   "input": "bad host:abc",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "garbage after the bracket",
+   "input": "[::1]x",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "unclosed bracket",
+   "input": "[::1",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "ipv4 and two ports",
+   "input": "1.2.3.4:5:6",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "zone id",
+   "input": "fe80::1%en0",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "zone id bracketed with port",
+   "input": "[fe80::1%en0]:9004",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "url scheme",
+   "input": "http://mac.ts.net",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "url scheme with a path",
+   "input": "https://mac.ts.net:9003/x",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "host and port with a space",
+   "input": "100.64.0.7 9003",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "trailing dot",
+   "input": "mac.ts.net.",
+   "defaultPort": 9004,
+   "expect": {
+    "error": "invalidHost"
+   }
+  }
+ ]
+}

@@ -5,7 +5,8 @@ import Foundation
 /// be unit tested without SwiftUI or networking. Deliberately does not
 /// resolve DNS or require a `100.x` Tailscale address: a MagicDNS name or a
 /// normal hostname is valid, and the target machine may be offline (asleep,
-/// off Tailscale) at the moment its endpoint is saved.
+/// off Tailscale) at the moment its endpoint is saved. The Android app checks
+/// the same text with the same rules (fixtures/remote/endpoint-vectors.json).
 enum RemoteEndpointValidation {
     enum Error: Swift.Error, Equatable {
         case emptyHost
@@ -40,6 +41,18 @@ enum RemoteEndpointValidation {
 
         // IPv4 or IPv6 literal.
         if candidate.contains(":") || isIPv4Literal(candidate) {
+            // A zone id ("fe80::1%en0") names an interface on THIS device: it is no address for
+            // another network, and `inet_pton` would otherwise let it through.
+            guard !candidate.contains("%") else { return false }
+            // "010.0.0.1" is 10.0.0.1 to some parsers and 8.0.0.1 (octal) to others, and the system
+            // `inet_pton` accepts it. An address that can mean two machines is not accepted.
+            let dotted = candidate.contains(":")
+                ? String(candidate.split(separator: ":", omittingEmptySubsequences: false).last ?? "")
+                : candidate
+            if dotted.contains("."),
+               dotted.split(separator: ".", omittingEmptySubsequences: false).contains(where: { $0.count > 1 && $0.hasPrefix("0") }) {
+                return false
+            }
             var addr = in6_addr()
             if candidate.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 { return true }
             var addr4 = in_addr()
