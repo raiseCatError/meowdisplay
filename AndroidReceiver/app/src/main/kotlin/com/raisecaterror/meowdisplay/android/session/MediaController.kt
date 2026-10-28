@@ -33,6 +33,28 @@ import kotlinx.coroutines.flow.update
  * Per-Mac connection policy (Always Allow / Blocked) and "Automatically Allow
  * Connections". App-private and, like pins, never backed up or transferred.
  */
+/**
+ * The per-Mac "Request Input Automatically" opt-in (iOS `InputAutoRequestStore`): a blocked touch
+ * may send the normal input request by itself for these Macs only. Off unless turned on; Forget
+ * removes it. The Mac still decides.
+ */
+class InputAutoRequestPrefs(context: Context) {
+    private val prefs = context.getSharedPreferences("inputAutoRequest", Context.MODE_PRIVATE)
+    private val peers = MutableStateFlow(prefs.getStringSet(PEERS, emptySet()).orEmpty().toSet())
+    val enabledPeers: StateFlow<Set<String>> = peers.asStateFlow()
+
+    fun isEnabled(peerID: String?): Boolean = peerID != null && peerID in peers.value
+
+    @SuppressLint("ApplySharedPref", "UseKtx")
+    fun setEnabled(peerID: String, enabled: Boolean) {
+        val next = if (enabled) peers.value + peerID else peers.value - peerID
+        peers.value = next
+        prefs.edit().putStringSet(PEERS, next).commit()
+    }
+
+    private companion object { const val PEERS = "peers" }
+}
+
 class SessionPolicyPrefs(context: Context) : SessionPolicyStore {
     private val prefs = context.getSharedPreferences("sessionPolicy", Context.MODE_PRIVATE)
 
@@ -88,6 +110,8 @@ class MediaController(
     private val bonjour: Bonjour,
     private val localName: () -> String,
     private val panel: () -> HelloFields,
+    /** Per-Mac "Request Input Automatically"; null (tests, previews): never. */
+    val inputAutoRequest: InputAutoRequestPrefs? = null,
 ) {
     private val state = MutableStateFlow(MediaUiState())
     val ui: StateFlow<MediaUiState> = state.asStateFlow()
@@ -185,6 +209,7 @@ class MediaController(
         state.update { if (it.connectingTo == peerID) it.copy(connectingTo = null) else it }
         pins.forget(peerID)
         policies.setPolicy(peerID, null)
+        inputAutoRequest?.setEnabled(peerID, false)
         session.revoke(peerID, blocked = false)
     }
 

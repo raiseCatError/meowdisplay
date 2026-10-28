@@ -72,6 +72,8 @@ fun ReceiverHome(
     val mediaUi by media.ui.collectAsState()
     val nearby by bonjour.nearbyMacs.collectAsState()
     val paired by pins.paired.collectAsState()
+    val autoRequestFlow = remember(media) { media.inputAutoRequest?.enabledPeers ?: kotlinx.coroutines.flow.MutableStateFlow(emptySet<String>()) }
+    val autoRequestPeers by autoRequestFlow.collectAsState()
     val macName = { peerID: String? -> paired.firstOrNull { it.peerID == peerID }?.name ?: "your Mac" }
     var showDetails by remember { mutableStateOf(false) }
     var showSteps by rememberSaveable { mutableStateOf(paired.isEmpty()) }
@@ -129,6 +131,10 @@ fun ReceiverHome(
                         if (!live && !connecting) {
                             add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
                             add("Connect with Mirror" to { media.requestConnect(mac.peerID, DisplayMode.Mirror) })
+                        }
+                        media.inputAutoRequest?.let { auto ->
+                            val on = mac.peerID in autoRequestPeers
+                            add((if (on) "Request Input Automatically: On" else "Request Input Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
                         }
                         add("Forget This Mac" to { media.forget(mac.peerID) })
                     },

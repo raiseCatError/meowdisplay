@@ -13,6 +13,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.media.MediaPipeline
 import com.raisecaterror.meowdisplay.android.pairing.PairingController
+import com.raisecaterror.meowdisplay.android.session.InputAutoRequestPrefs
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.android.session.SessionPolicyPrefs
 import com.raisecaterror.meowdisplay.android.trust.PinStore
@@ -28,7 +29,8 @@ class MeowReceiverApplication : Application() {
         PairingController(identity, pins, bonjour, localName = { DeviceIdentity.displayName(this) })
     }
     val media: MediaController by lazy {
-        MediaController(identity, pins, SessionPolicyPrefs(this), bonjour, localName = { DeviceIdentity.displayName(this) }, panel = ::panel)
+        MediaController(identity, pins, SessionPolicyPrefs(this), bonjour, localName = { DeviceIdentity.displayName(this) }, panel = ::panel,
+            inputAutoRequest = InputAutoRequestPrefs(this))
     }
 
     val pipeline: MediaPipeline by lazy { MediaPipeline(media, avSyncOffsetMs = { controls.current.avSyncOffsetMs }) }

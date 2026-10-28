@@ -410,7 +410,8 @@ class ReceiverController(
     // MARK: - Input prompt
 
     private fun noteBlockedAttempt() {
-        val effects = prompt.blockedAttempt(now(), store.transient.value.userTurnedOffInput, InputAutoRequestPolicy.shouldAutoRequest(peerOptedIn = false))
+        val optedIn = media.inputAutoRequest?.isEnabled(media.ui.value.peerID) == true
+        val effects = prompt.blockedAttempt(now(), store.transient.value.userTurnedOffInput, InputAutoRequestPolicy.shouldAutoRequest(peerOptedIn = optedIn))
         performPromptEffects(effects)
         schedulePromptTick()
     }
