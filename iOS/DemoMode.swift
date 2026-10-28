@@ -31,7 +31,7 @@ enum DemoControlStoreFactory {
 /// The sample stream size: this device's own screen in pixels, landscape.
 @MainActor
 func demoVideoSize() -> CGSize {
-    let bounds = UIScreen.main.nativeBounds.size
+    let bounds = ActiveScene.screen.nativeBounds.size
     return CGSize(width: max(bounds.width, bounds.height), height: min(bounds.width, bounds.height))
 }
 
@@ -203,7 +203,7 @@ struct DemoSettingsPage: View {
 
     /// This device's screen in pixels, current orientation.
     private var receiverPixels: CGSize {
-        let screen = UIScreen.main
+        let screen = ActiveScene.screen
         return CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
     }
 

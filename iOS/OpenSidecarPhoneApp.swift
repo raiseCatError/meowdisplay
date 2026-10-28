@@ -1696,14 +1696,14 @@ final class ReceiverModel: ObservableObject {
                                   fallbackServiceName: UIDevice.current.name,
                                   maxEncodeWide: iOSDecodeCeiling.maxEncodeWide,
                                   maxEncodeHigh: iOSDecodeCeiling.maxEncodeHigh,
-                                  maxFPS: UIScreen.main.maximumFramesPerSecond)
+                                  maxFPS: ActiveScene.screen.maximumFramesPerSecond)
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
         // Announce the native panel size to the Mac.
-        let native = UIScreen.main.nativeBounds.size   // portrait pixels
+        let native = ActiveScene.screen.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
                                 short: Int(min(native.width, native.height)),
-                                scale: Double(UIScreen.main.nativeScale))
+                                scale: Double(ActiveScene.screen.nativeScale))
         let savedName = UserDefaults.standard.string(forKey: "deviceName")
         receiver.serviceName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
         receiver.objectWillChange
@@ -4443,6 +4443,19 @@ private extension VerticalAlignment {
 
 /// The small Request Input / Enable Input affordance on the receiver
 /// surface — see `ReceiverInputPrompt`.
+/// The screen this app's scene is on (foldables, external displays, Stage
+/// Manager) rather than `UIScreen.main`, which only names the built-in panel.
+@MainActor
+enum ActiveScene {
+    static var windowScene: UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+
+    /// Falls back to the main screen only before any scene has connected.
+    static var screen: UIScreen { windowScene?.screen ?? UIScreen.main }
+}
+
 /// Full-desktop view: a small yes/no offer to switch to Window view.
 private struct WindowModePrompt: View {
     let onYes: () -> Void

@@ -98,7 +98,7 @@ struct DemoReceiverScreen: View {
                     showSettings: $showSettings,
                     keyboardAvailable: demo.inputAllowed,
                     keyboardVisibleRect: DemoDisplayGeometry.keyboardVisibleRect(
-                        keyboardFrame: keyboardRect, canvas: canvas, screenBounds: UIScreen.main.bounds),
+                        keyboardFrame: keyboardRect, canvas: canvas, screenBounds: ActiveScene.screen.bounds),
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
