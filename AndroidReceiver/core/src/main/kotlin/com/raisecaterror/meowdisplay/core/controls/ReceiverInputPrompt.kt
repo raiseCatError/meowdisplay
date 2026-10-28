@@ -5,7 +5,7 @@ package com.raisecaterror.meowdisplay.core.controls
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 
 /**
- * The on-surface "Request Input" affordance: when a touch was meant for the
+ * The on-surface "Request Control" affordance: when a touch was meant for the
  * Mac but input isn't allowed, offer the existing request flow right there.
  * Ephemeral, never spams requests; the Mac stays the only authority.
  */

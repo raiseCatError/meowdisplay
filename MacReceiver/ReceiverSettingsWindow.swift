@@ -398,7 +398,7 @@ struct MirrorUnavailableOfferAlert: ViewModifier {
     @ObservedObject var controller: ReceiverController
 
     func body(content: Content) -> some View {
-        content.alert("Mirror isn’t available",
+        content.alert("Mirror isn't available",
                       isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
             Button("Cancel", role: .cancel) { controller.declineMirrorUnavailableOffer() }
             Button("Use Extend") { controller.acceptMirrorUnavailableOffer() }

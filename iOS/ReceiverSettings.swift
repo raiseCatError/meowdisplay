@@ -333,7 +333,7 @@ private struct DisplaySettingsPage: View {
             Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Picture in Picture", isOn: preferenceBinding(controlStore, \.pictureInPictureEnabled))
-                    SettingNote("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It’s view-only — control stays in MeowDisplay.")
+                    SettingNote("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It shows your Mac; control stays in MeowDisplay.")
                     if let note = pictureInPictureNote {
                         Text(note).font(.footnote).foregroundStyle(.secondary)
                     }
@@ -584,7 +584,7 @@ private struct DisplaySettingsPage: View {
     private var pictureInPictureNote: String? {
         switch pictureInPicture.availability {
         case .unsupported:
-            return String(localized: "Picture in Picture isn’t supported on this device.")
+            return String(localized: "Picture in Picture isn't supported on this device.")
         case .requiresSystemVideoLayer:
             return String(localized: "Unavailable while the experimental Metal renderer is on.")
         case .available, .turnedOff, .waitingForVideo:
@@ -620,14 +620,14 @@ private struct InputSettingsPage: View {
                     .settingsAnchor("control")
                 switch controlStore.sessionInputState {
                 case .off, .notAllowed:
-                    Button(isDemo ? String(localized: "Allow Input (Demo)") : String(localized: "Request Control")) {
+                    Button(isDemo ? String(localized: "Request Control (Demo)") : String(localized: "Request Control")) {
                         controlStore.noteInputTurnedOffByUser(false)
                         requestInput(true)
                     }
                 case .requesting:
                     EmptyView()
                 case .allowed:
-                    Button(isDemo ? String(localized: "Turn Off Input (Demo)") : String(localized: "Turn Off"), role: .destructive) {
+                    Button(isDemo ? String(localized: "Turn Off Control (Demo)") : String(localized: "Turn Off"), role: .destructive) {
                         controlStore.noteInputTurnedOffByUser(true)
                         requestInput(false)
                     }
@@ -636,9 +636,9 @@ private struct InputSettingsPage: View {
                 }
             } footer: {
                 if isDemo {
-                    Text("Demo: Allow Input is simulated on this \(deviceKind). No Mac is asked and nothing is sent. Settings always stays reachable, even with input turned off.")
+                    Text("Demo: Request Control is simulated on this \(deviceKind). No Mac is asked and nothing is sent. Settings always stays reachable, even in View Only.")
                 } else {
-                    Text("Settings always stays reachable, even with input turned off.")
+                    Text("Settings always stays reachable, even in View Only.")
                 }
             }
             Section {
@@ -694,13 +694,13 @@ private struct InputSettingsPage: View {
                 Text("Sensitivity only affects Trackpad mode's one-finger pointer movement.")
             }
             Section {
-                Toggle("Invert Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
+                Toggle("Natural Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
                     .settingsAnchor("scrollDirection")
-                Toggle("Invert Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
+                Toggle("Natural Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
             } header: {
                 Text("Scrolling")
             } footer: {
-                Text("On, content moves with your fingers, like a Mac trackpad’s natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn’t affected.")
+                Text("On, content moves with your fingers, like a Mac trackpad's natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn't affected.")
             }
             Section {
                 Toggle("Zoom While Typing", isOn: $zoomWhileTyping)
@@ -776,7 +776,7 @@ private struct GestureSettingsPage: View {
                 Toggle("Prefer MeowDisplay Gestures", isOn: preferenceBinding(controlStore, \.preferMeowDisplayGestures))
                     .settingsAnchor("preferGestures")
             } footer: {
-                Text("While you’re controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren’t taken by editing shortcuts. Some \(deviceKind) and accessibility gestures always stay with the system, and VoiceOver always takes precedence.")
+                Text("While you're controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren't taken by editing shortcuts. Some \(deviceKind) and accessibility gestures always stay with the system, and VoiceOver always takes precedence.")
             }
             Section {
                 Toggle("Allow Local View Navigation", isOn: preferenceBinding(controlStore, \.allowLocalViewNavigation))
@@ -793,9 +793,9 @@ private struct GestureSettingsPage: View {
                 Text("Viewport")
             } footer: {
                 if controlStore.isPad {
-                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Move View lets one finger move the picture without clicking or scrolling on the Mac; two-finger scrolling always goes to the Mac.")
+                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even in View Only. Move View lets one finger move the picture without clicking or scrolling on the Mac; two-finger scrolling always goes to the Mac.")
                 } else {
-                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Two-finger scrolling always goes to the Mac.")
+                    Text("Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even in View Only. Two-finger scrolling always goes to the Mac.")
                 }
             }
         }
@@ -861,12 +861,12 @@ private struct ControlSettingsPage: View {
                     .settingsAnchor("trayPlacement")
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("Avoid Notch", isOn: preferenceBinding(controlStore, \.avoidNotch))
-                        SettingNote("Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape.")
+                        SettingNote("Keeps controls clear of the iPhone's notch or Dynamic Island in landscape.")
                         Text("Experimental").font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
             } header: {
-                Text("Main Controls")
+                Text("Control Tray")
             } footer: {
                 if controlStore.isPad {
                     Text("Auto-hide fades Overlay and Custom controls after a few seconds without use. The Strip always stays visible.")
@@ -889,10 +889,10 @@ private struct ControlSettingsPage: View {
                 Text("Window Switcher")
             } footer: {
                 Text(controlStore.preferences.windowSwitcher.explanation
-                     + " " + String(localized: "Used in Window mode."))
+                     + " " + String(localized: "Used in Window view."))
             }
             Section {
-                Picker("Active Profile", selection: Binding(
+                Picker("Control Profile", selection: Binding(
                     get: { controlStore.preferences.activeControlProfile },
                     set: { profile in
                         controlStore.update { $0.activeControlProfile = profile }
@@ -940,9 +940,9 @@ private struct ControlSettingsPage: View {
                 Text("Function Tray")
             } footer: {
                 if visibility.showsPhoneTrayPlacement {
-                    Text("A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the Main Tray above. \"Same Side\" groups it with the Main Tray; \"Opposite Side\" puts it on the other edge of the screen.")
+                    Text("A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the control tray above. \"Same Side\" groups it with the control tray; \"Opposite Side\" puts it on the other edge of the screen.")
                 } else {
-                    Text("A second, independent set of one-tap shortcuts (Undo, Redo, …), separate from the Main controls.")
+                    Text("A second, independent set of one-tap shortcuts (Undo, Redo, …), separate from the control tray.")
                 }
             }
         }
@@ -1187,7 +1187,7 @@ private struct PairedMacsSettingsPage: View {
                         HStack {
                             Text(peer.displayName)
                             Spacer()
-                            Button("Forget", role: .destructive) {
+                            Button("Forget…", role: .destructive) {
                                 forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
                             }
                             .buttonStyle(.borderless)
@@ -1198,7 +1198,7 @@ private struct PairedMacsSettingsPage: View {
                     }
                 }
             } footer: {
-                Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired. Request Input Automatically lets a touch on the Mac’s screen ask that Mac for control without tapping Request Input first — the Mac still decides.")
+                Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired. Request Control Automatically lets a touch on the Mac's screen ask that Mac for control without tapping Request Control first — the Mac still decides.")
             }
             .id(trustRefresh)
         }
@@ -1227,7 +1227,7 @@ private struct RequestInputAutomaticallyToggle: View {
     @State private var enabled = false
 
     var body: some View {
-        Toggle("Request Input Automatically", isOn: Binding(
+        Toggle("Request Control Automatically", isOn: Binding(
             get: { enabled },
             set: { value in
                 enabled = value
@@ -1290,16 +1290,26 @@ private struct DiagnosticsSettingsPage: View {
                 NavigationLink {
                     DiagnosticsLogView()
                 } label: {
-                    Label("Connection log", systemImage: "doc.text.magnifyingglass")
+                    Label("Connection Log", systemImage: "doc.text.magnifyingglass")
                 }
             } footer: {
                 Text("What this \(deviceKind) saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the \(deviceKind) unless you share it. Attach it to a GitHub issue if a connection won't come up.")
             }
             Section {
-                Toggle("Performance overlay", isOn: $showAnalytics)
+                Toggle("Performance Overlay", isOn: $showAnalytics)
                     .settingsAnchor("performanceOverlay")
-                Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
-                    .settingsAnchor("metalRenderer")
+                Toggle(isOn: $metalRenderer) {
+                    HStack(spacing: 6) {
+                        Text("Metal Renderer")
+                        Text("Experimental")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange.opacity(0.2)))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .settingsAnchor("metalRenderer")
             } header: {
                 Text("Analytics")
             } footer: {
@@ -1423,7 +1433,7 @@ private struct DeveloperSettingsPage: View {
                 Toggle("Notch Debug Overlay", isOn: $notchDebugOverlayEnabled)
                     .settingsAnchor("notchDebug")
             } footer: {
-                Text("Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
+                Text("Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted control tray frame (yellow/green) directly over the stream.")
             }
             Section {
                 LabeledContent("Production Codec", value: "AAC")

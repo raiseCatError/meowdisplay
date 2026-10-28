@@ -3,7 +3,7 @@ import XCTest
 
 /// Second physical-QA pass: system actions, rail anchoring, software-keyboard
 /// chords, the editable Function Tray and its sequences, scroll direction,
-/// Wheel and fan geometry, editor/import flows, and Request Input.
+/// Wheel and fan geometry, editor/import flows, and Request Control.
 final class SecondQARefinementTests: XCTestCase {
     private let container = CGRect(x: 0, y: 0, width: 1194, height: 834)
     private let safe = ControlSafeInsets(top: 24, leading: 0, bottom: 20, trailing: 0)
@@ -436,7 +436,7 @@ final class SecondQARefinementTests: XCTestCase {
         XCTAssertFalse(String(decoding: json, as: UTF8.self).contains("unused"))
     }
 
-    // MARK: - Request Input
+    // MARK: - Request Control
 
     func testBlockedTouchOffersRequestInputThenFades() {
         var prompt = ReceiverInputPrompt()

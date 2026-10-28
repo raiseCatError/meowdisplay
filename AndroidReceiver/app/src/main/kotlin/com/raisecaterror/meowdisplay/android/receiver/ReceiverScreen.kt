@@ -382,7 +382,7 @@ private fun NaturalTouchHint(onDone: () -> Unit, modifier: Modifier = Modifier) 
             androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
                 Text("Natural Touch is on", fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
                 Text(
-                    "Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings & Help > Input.",
+                    "Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings → Input.",
                     style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -450,16 +450,16 @@ private fun VideoOffSurface(frame: CGRect, showGrid: Boolean) {
     }
 }
 
-/** The on-surface Request Input affordance (iOS InputPromptButton). */
+/** The on-surface Request Control affordance (iOS InputPromptButton). */
 @Composable
 private fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Unit, modifier: Modifier = Modifier) {
     AnimatedVisibility(visible = kind != null, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
         val title = when (kind) {
-            ReceiverInputPrompt.Kind.EnableInput -> "Enable Input"
-            ReceiverInputPrompt.Kind.RequestInput -> "Request Input"
-            ReceiverInputPrompt.Kind.Requesting -> "Requesting Input…"
-            ReceiverInputPrompt.Kind.Enabled -> "Input Enabled"
-            ReceiverInputPrompt.Kind.Unavailable -> "This Mac isn't accepting input requests"
+            ReceiverInputPrompt.Kind.EnableInput -> "Request Control"
+            ReceiverInputPrompt.Kind.RequestInput -> "Request Control"
+            ReceiverInputPrompt.Kind.Requesting -> "Requesting Control…"
+            ReceiverInputPrompt.Kind.Enabled -> "Control Allowed"
+            ReceiverInputPrompt.Kind.Unavailable -> "This Mac isn't accepting control requests"
             null -> ""
         }
         val tappable = kind == ReceiverInputPrompt.Kind.RequestInput || kind == ReceiverInputPrompt.Kind.EnableInput
@@ -472,7 +472,7 @@ private fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Uni
                 .semantics { contentDescription = title }
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
     }
 }

@@ -283,13 +283,13 @@ struct CustomLayoutImportPage: View {
         case .skippedControls(let count):
             return String(localized: "\(count) controls from a newer MeowDisplay were skipped.")
         case .unknownActions(let count):
-            return String(localized: "\(count) Function actions aren’t available in this version and won’t appear.")
+            return String(localized: "\(count) Function actions aren't available in this version and won't appear.")
         }
     }
 
     private func errorText(_ error: CustomLayoutShareCode.ShareCodeError) -> String {
         switch error {
-        case .notAShareCode: return String(localized: "This isn’t a MeowDisplay layout share code.")
+        case .notAShareCode: return String(localized: "This isn't a MeowDisplay layout share code.")
         case .unsupportedVersion: return String(localized: "This layout was shared from a newer MeowDisplay. Update to import it.")
         case .corrupted: return String(localized: "This share code is damaged or incomplete. Copy it again.")
         case .tooLarge: return String(localized: "This share code is too large.")
@@ -300,15 +300,15 @@ struct CustomLayoutImportPage: View {
 // MARK: - Help
 
 private enum HelpText {
-    static let alignmentGuides = String(localized: "Dots or grid lines for lining controls up while you edit. They aren’t part of your Mac’s screen and never appear during normal use.")
+    static let alignmentGuides = String(localized: "Dots or grid lines for lining controls up while you edit. They aren't part of your Mac's screen and never appear during normal use.")
     static let snapToEdges = String(localized: "A control dropped near the edge of the usable area, or near its center lines, settles exactly against it.")
     static let snapToGuides = String(localized: "A control dropped near a guide line settles exactly on it. Needs Alignment Guides on.")
-    static let paletteStyle = String(localized: "How a modifier’s shortcuts appear while you hold or latch it. Wheel surrounds it with wedge-shaped segments; Arc fans them along the next ring out; Ring circles it; Row and Column line them up.")
+    static let paletteStyle = String(localized: "How a modifier's shortcuts appear while you hold or latch it. Wheel surrounds it with wedge-shaped segments; Arc fans them along the next ring out; Ring circles it; Row and Column line them up.")
     static let paletteDistance = String(localized: "How far the shortcuts sit from the modifier.")
     static let paletteDirection = String(localized: "Which way the shortcuts open. Toward Screen Center keeps them clear of the edges.")
     static let twoHandAssist = String(localized: "While a modifier is held or latched, modifier keys appear on the opposite side, so your other hand can add to the same chord. Otherwise that side offers actions like Undo, Redo and Zoom.")
     static let orientations = String(localized: "Landscape and portrait are arranged separately — MeowDisplay uses whichever matches how you hold your iPad.")
-    static let systemArea = String(localized: "The shaded strips are the system’s areas (status bar and Home indicator). Controls always stay inside the dashed outline.")
+    static let systemArea = String(localized: "The shaded strips are the system's areas (status bar and Home indicator). Controls always stay inside the dashed outline.")
 }
 
 /// A small ⓘ that explains one concept in a popover.
@@ -806,7 +806,7 @@ struct CustomLayoutEditorScreen: View {
                 InfoButton(title: "Palette Style", text: HelpText.paletteStyle)
             }
         } footer: {
-            Text("The canvas shows this modifier’s palette while it’s selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier.")
+            Text("The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier.")
         }
     }
 

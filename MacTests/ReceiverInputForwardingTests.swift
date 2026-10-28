@@ -464,6 +464,22 @@ final class ReceiverInputForwardingTests: XCTestCase {
         XCTAssertTrue(ReceiverControlStatus.controlling.hint!.contains(ReceiverInputForwarder.releaseShortcutLabel))
     }
 
+    /// Asking the Mac for control is "Request Control" in every app (TERMINOLOGY.md).
+    func testControlLabelsUseTheCanonicalRequestControlNames() {
+        XCTAssertEqual(ReceiverControlStatus.requesting.title, "Requesting Control…")
+        XCTAssertEqual(ReceiverControlStatus.declined.title, "Control Declined")
+        XCTAssertEqual(ReceiverControlStatus.requestsDisabled.title, "Control Not Available")
+        XCTAssertEqual(ReceiverControlStatus.inactive.title, "Control Allowed")
+        XCTAssertEqual(ReceiverControlStatus.paused.title, "Paused")
+        XCTAssertEqual(ReceiverControlStatus.controlling.title, "Controlling")
+        XCTAssertEqual(SessionInputWireState.requesting.receiverDisplayText, "Requesting Control…")
+        XCTAssertEqual(SessionInputWireState.allowed.receiverDisplayText, "Control Allowed")
+        XCTAssertEqual(SessionInputWireState.notAllowed.receiverDisplayText, "Control Declined")
+        XCTAssertEqual(SessionInputWireState.requestsDisabled.receiverDisplayText, "Control Not Available")
+        XCTAssertEqual(ReceiverControlStatus.requestsDisabled.hint,
+                       "The other Mac doesn't accept control requests from this Mac.")
+    }
+
     func testCursorEchoHandsBackToTheSendingMacAfterLocalMovementStops() {
         var echo = CursorEchoPolicy()
         XCTAssertTrue(echo.appliesRemotePosition(at: 10))

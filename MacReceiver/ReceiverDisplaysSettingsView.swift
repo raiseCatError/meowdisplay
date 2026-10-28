@@ -68,7 +68,7 @@ private struct ReceiverDisplaysPage: View {
                     }
                 }
             } header: {
-                Text("Window")
+                Text("Video Window")
             } footer: {
                 // The green button writes the same preference, so the toggle
                 // always shows what the next window will do.
@@ -84,7 +84,7 @@ private struct ReceiverDisplaysPage: View {
                 confirmed: receiver.confirmedDisplayMode, pending: receiver.pendingDisplayMode,
                 connected: receiver.connected, macProtocolVersion: receiver.macProtocolVersion,
                 videoEnabled: receiver.videoEnabled) {
-                Picker("Mode", selection: Binding(
+                Picker("Display Mode", selection: Binding(
                     get: { state.selection },
                     set: { receiver.requestDisplayMode($0) })) {
                     ForEach(ReceiverDisplayMode.allCases) { mode in
@@ -112,7 +112,7 @@ private struct ReceiverDisplaysPage: View {
                     }
                 }
             } else {
-                ReceiverValueRow("Mode", value: receiver.connected
+                ReceiverValueRow("Display Mode", value: receiver.connected
                                  ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
             }
         } header: {

@@ -61,7 +61,7 @@ private struct ReceiverSystemPage: View {
             }
 
             Section("Support") {
-                Button("Reveal Log Files in Finder") { Log.revealInFinder() }
+                Button("Reveal Connection Log in Finder") { Log.revealInFinder() }
                     .controlSize(.small)
             }
 

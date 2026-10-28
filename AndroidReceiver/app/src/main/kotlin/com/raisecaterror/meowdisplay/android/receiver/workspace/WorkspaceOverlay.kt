@@ -199,15 +199,15 @@ fun WorkspaceChrome(
                         tile.source?.bundleID?.let { icons[it] }?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
                         Text(name, color = if (active) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Type here") }, onClick = { menu = false; controller.focus(id) })
-                            DropdownMenuItem(text = { Text("Change window…") }, onClick = { menu = false; controller.openOverview(replacing = id) })
+                            DropdownMenuItem(text = { Text("Type Here") }, onClick = { menu = false; controller.focus(id) })
+                            DropdownMenuItem(text = { Text("Change Window…") }, onClick = { menu = false; controller.openOverview(replacing = id) })
                             DropdownMenuItem(text = { Text("Rotate") }, onClick = { menu = false; controller.rotate(id) })
-                            DropdownMenuItem(text = { Text(if (tile.fit == WFit.Fill) "Show whole window" else "Fill tile") }, onClick = { menu = false; controller.toggleFit(id) })
-                            DropdownMenuItem(text = { Text(if (ui.layout.maximized == id) "Restore layout" else "Maximize") }, onClick = { menu = false; controller.toggleMaximize(id) })
-                            DropdownMenuItem(text = { Text("Arrange tiles") }, onClick = { menu = false; controller.setArranging(true) })
-                            DropdownMenuItem(text = { Text("Remove tile") }, onClick = { menu = false; controller.removeTile(id) })
+                            DropdownMenuItem(text = { Text(if (tile.fit == WFit.Fill) "Show Whole Window" else "Fill Tile") }, onClick = { menu = false; controller.toggleFit(id) })
+                            DropdownMenuItem(text = { Text(if (ui.layout.maximized == id) "Restore Layout" else "Maximize") }, onClick = { menu = false; controller.toggleMaximize(id) })
+                            DropdownMenuItem(text = { Text("Arrange Tiles") }, onClick = { menu = false; controller.setArranging(true) })
+                            DropdownMenuItem(text = { Text("Remove Tile") }, onClick = { menu = false; controller.removeTile(id) })
                             DropdownMenuItem(
-                                text = { Text("Close window on Mac…") }, enabled = inputAllowed && tile.source?.generation != null,
+                                text = { Text("Close Window on Mac…") }, enabled = inputAllowed && tile.source?.generation != null,
                                 onClick = { menu = false; confirmClose = id },
                             )
                         }
@@ -406,7 +406,7 @@ fun WindowOverview(controller: WorkspaceController, macName: String, inputAllowe
                         }
                         OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true, placeholder = { Text("Search windows and apps") }, modifier = Modifier.fillMaxWidth())
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Whole display:", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+                            Text("Full Desktop:", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
                             FilledTonalButton(onClick = { controller.closeOverview(); onMirror() }) { Text("Mirror") }
                             FilledTonalButton(onClick = { controller.closeOverview(); onExtend() }) { Text("Extend") }
                         }

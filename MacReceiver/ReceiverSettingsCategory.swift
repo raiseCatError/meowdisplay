@@ -4,8 +4,8 @@ import Combine
 /// The Mac Receiver's Settings sidebar taxonomy. Same names and SF Symbols
 /// as Mac Sender's `SettingsCategory` wherever the concept is shared, but
 /// only the pages that hold real receiver functionality — there is no Input
-/// page because this Mac only displays the stream (its keyboard and
-/// trackpad are not forwarded to the sending Mac).
+/// page because control is requested from the video window's title bar
+/// (Request Control), not from Settings.
 enum ReceiverSettingsCategory: String, CaseIterable, Identifiable {
     case overview, displays, streaming, devices, remoteAccess, system
     #if DEBUG
@@ -158,7 +158,7 @@ struct ReceiverSettingsSearchIndex {
                 id: "system.updates", title: String(localized: "Software Updates"), category: .system,
                 keywords: ["updates", "sparkle", "check for updates", "software update"], systemImage: "arrow.down.circle"),
             ReceiverSettingsSearchItem(
-                id: "system.logs", title: String(localized: "Logs"), category: .system,
+                id: "system.logs", title: String(localized: "Connection Log"), category: .system,
                 keywords: ["logs", "log files", "support", "diagnostics", "finder"], systemImage: "doc.text.magnifyingglass"),
         ]
 

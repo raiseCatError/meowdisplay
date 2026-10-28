@@ -112,13 +112,13 @@ enum MobileSettingsSearchIndex {
         .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "priority", "fps"]),
         .init("maxFPS", String(localized: "Enforce Maximum FPS"), .display, keywords: ["frame rate", "fps", "limit"]),
         // Input
-        .init("control", String(localized: "Control"), .input, keywords: ["request control", "allow input", "permission"]),
+        .init("control", String(localized: "Control"), .input, keywords: ["request control", "request input", "allow input", "permission"]),
         .init("inputMode", String(localized: "Input Mode"), .input, keywords: ["direct touch", "trackpad", "pointer", "mouse"]),
         .init("touchStyle", String(localized: "Touch Style"), .input, keywords: ["natural touch", "classic", "tap to click", "long press", "right click"]),
         .init("smartTouch", "Smart Touch", .input, keywords: ["scroll", "one finger", "title bar", "window"]),
         .init("smartTouchHaptics", String(localized: "Smart Touch Haptics"), .input, keywords: ["vibration"]),
         .init("trackpadSensitivity", String(localized: "Trackpad Sensitivity"), .input, keywords: ["speed", "pointer"]),
-        .init("scrollDirection", String(localized: "Invert Vertical Scrolling"), .input, keywords: ["invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
+        .init("scrollDirection", String(localized: "Natural Vertical Scrolling"), .input, keywords: ["natural horizontal scrolling", "invert vertical scrolling", "invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
         .init("zoomWhileTyping", String(localized: "Zoom While Typing"), .input, keywords: ["keyboard"]),
         // Gestures
         .init("pinch", String(localized: "Pinch / Zoom"), .gestures, keywords: ["magnify", "zoom"]),
@@ -138,7 +138,7 @@ enum MobileSettingsSearchIndex {
         .init("autoHide", String(localized: "Auto-hide Control Trays"), .controls, keywords: ["auto hide", "fade"]),
         .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
-        .init("controlProfile", String(localized: "Active Profile"), .controls, keywords: ["control profile", "shortcuts", "palette", "modifier"]),
+        .init("controlProfile", String(localized: "Control Profile"), .controls, keywords: ["active profile", "shortcuts", "palette", "modifier"]),
         .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),
         .init("paletteStyle", String(localized: "Palette Style"), .controls, keywords: ["wheel", "chord", "keys"], availability: .padOnly),
         // Audio
@@ -153,9 +153,9 @@ enum MobileSettingsSearchIndex {
         // Permissions
         .init("localNetwork", String(localized: "Open iOS Settings for MeowDisplay"), .permissions, keywords: ["local network", "privacy"]),
         // Diagnostics
-        .init("connectionLog", String(localized: "Connection log"), .diagnostics, keywords: ["logs", "debug"]),
-        .init("performanceOverlay", String(localized: "Performance overlay"), .diagnostics, keywords: ["fps", "latency", "analytics"]),
-        .init("metalRenderer", String(localized: "Metal renderer (experimental)"), .diagnostics, keywords: ["rendering"]),
+        .init("connectionLog", String(localized: "Connection Log"), .diagnostics, keywords: ["logs", "debug"]),
+        .init("performanceOverlay", String(localized: "Performance Overlay"), .diagnostics, keywords: ["fps", "latency", "analytics"]),
+        .init("metalRenderer", String(localized: "Metal Renderer"), .diagnostics, keywords: ["experimental", "rendering"]),
         // About
         .init("version", String(localized: "Version"), .about, keywords: ["about", "github", "mac app"]),
         // Developer (DEBUG builds only — filtered with its category)

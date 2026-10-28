@@ -136,15 +136,15 @@ final class ReceiverControlsTourTests: XCTestCase {
             sleep(1)
         }
 
-        // Input off: the trays give way to the gear.
-        let input = element("Allow Input (Demo)")
+        // View Only: the trays give way to the gear.
+        let input = element("Control (Demo)")
         XCTAssertTrue(input.exists)
         input.tap()
         sleep(1)
         element("Sample Mac desktop").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         sleep(1)
         snapshot("\(prefix)-04-input-off")
-        XCTAssertTrue(element("Settings").exists, "Settings stays reachable with input off")
+        XCTAssertTrue(element("Settings").exists, "Settings stays reachable in View Only")
         input.tap()
         sleep(1)
 

@@ -78,7 +78,7 @@ import kotlin.math.roundToInt
 /** The receiver categories of the iOS Settings (MobileSettingsCategory), plus the session actions. */
 enum class SettingsPage(val title: String) {
     Input("Input"), Gestures("Gestures"), Controls("Controls"), TabletLayout("Tablet Layout"),
-    Display("Display"), Audio("Audio"), Session("Session"), Help("Help & About"),
+    Display("Display"), Audio("Audio"), Session("Session"), Help("Help"),
 }
 
 /**
@@ -151,16 +151,16 @@ private fun SettingsPageContent(
             Text(inputStatus(view.inputState), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = { controller.requestInput(true) }, enabled = view.inputState != InputWireState.Allowed && view.inputState != InputWireState.RequestsDisabled) {
-                    Text("Request Input")
+                    Text("Request Control")
                 }
                 OutlinedButton(onClick = { controller.requestInput(false) }, enabled = view.inputState == InputWireState.Allowed) { Text("Turn Off") }
             }
-            Caption("Your Mac decides. Every session starts View Only; input stops the moment the Mac revokes it.")
+            Caption("Your Mac decides. Every session starts View Only; control stops the moment the Mac revokes it.")
             Section("Pointer")
-            Choice("Touch Mode", PointerInputMode.entries, prefs.inputMode, { it.title }) { mode -> set { it.inputMode = mode } }
+            Choice("Input Mode", PointerInputMode.entries, prefs.inputMode, { it.title }) { mode -> set { it.inputMode = mode } }
             if (prefs.inputMode == PointerInputMode.Trackpad) {
                 LabeledSlider(
-                    "Trackpad Speed", prefs.trackpadSensitivity.toFloat(),
+                    "Trackpad Sensitivity", prefs.trackpadSensitivity.toFloat(),
                     PointerGestureConfig.trackpadSensitivityRange.start.toFloat()..PointerGestureConfig.trackpadSensitivityRange.endInclusive.toFloat(),
                 ) { value -> set { it.trackpadSensitivity = value.toDouble() } }
             }
@@ -178,7 +178,7 @@ private fun SettingsPageContent(
             }
             if (prefs.inputMode == PointerInputMode.Direct && prefs.touchStyle == DirectTouchStyle.Classic) {
                 Toggle("Smart Touch (Experimental)", prefs.smartTouchEnabled) { on -> set { it.smartTouchEnabled = on } }
-                Caption("A one-finger swipe scrolls when the Mac says the element under it scrolls; hold on a title bar to drag the window.")
+                Caption("Scroll with one finger where the Mac says the area scrolls. Hold a title bar, then drag, to move its window.")
                 Toggle("Smart Touch Haptics", prefs.smartTouchLongPressHapticEnabled) { on -> set { it.smartTouchLongPressHapticEnabled = on } }
             }
             Section("Hardware Keyboard")
@@ -191,12 +191,12 @@ private fun SettingsPageContent(
         }
         SettingsPage.Gestures -> {
             Section("Two-Finger Gestures")
-            Choice("Pinch", ReceiverGestureTarget.entries, prefs.pinchTarget, { it.title }) { target -> set { it.pinchTarget = target } }
+            Choice("Pinch / Zoom", ReceiverGestureTarget.entries, prefs.pinchTarget, { it.title }) { target -> set { it.pinchTarget = target } }
             // Android draws the picture on a SurfaceView, which can't rotate: rotation offers App or Disabled.
             val rotateChoices = listOf(ReceiverGestureTarget.App, ReceiverGestureTarget.Disabled)
             val rotation = if (prefs.rotateTarget == ReceiverGestureTarget.Viewport) ReceiverGestureTarget.Disabled else prefs.rotateTarget
-            Choice("Rotate", rotateChoices, rotation, { it.title }) { target -> set { it.rotateTarget = target } }
-            Toggle("Local View Navigation", prefs.allowLocalViewNavigation) { on -> set { it.allowLocalViewNavigation = on } }
+            Choice("Rotation", rotateChoices, rotation, { it.title }) { target -> set { it.rotateTarget = target } }
+            Toggle("Allow Local View Navigation", prefs.allowLocalViewNavigation) { on -> set { it.allowLocalViewNavigation = on } }
             Caption("Pinch to zoom the picture up to 8×, two fingers to pan, two-finger double tap to reset and restore. Never sent to the Mac.")
             Toggle("Prefer MeowDisplay Gestures", prefs.preferMeowDisplayGestures) { on -> set { it.preferMeowDisplayGestures = on } }
             Section("App Gesture Commands")
@@ -208,20 +208,20 @@ private fun SettingsPageContent(
             OutlinedButton(onClick = { set { it.resetAppGestureCommands() } }) { Text("Reset to Defaults") }
         }
         SettingsPage.Controls -> {
-            Section("Main Tray")
-            Toggle("Show Controls", prefs.trayEnabled) { on -> set { it.trayEnabled = on } }
-            Toggle("Collapse to Settings Button", prefs.trayCollapsed) { on -> set { it.trayCollapsed = on } }
-            Toggle("Keyboard Button", prefs.keyboardButtonEnabled) { on -> set { it.keyboardButtonEnabled = on } }
-            Choice("Profile", ControlProfileSlot.entries, prefs.activeControlProfile, { it.title }) { slot -> set { it.activeControlProfile = slot } }
-            Choice("Landscape Side", LandscapeTraySide.entries, prefs.preferredLandscapeSide, { it.title }) { side -> set { it.preferredLandscapeSide = side } }
+            Section("Control Tray")
+            Toggle("Show Control Tray", prefs.trayEnabled) { on -> set { it.trayEnabled = on } }
+            Toggle("Collapse Control Tray", prefs.trayCollapsed) { on -> set { it.trayCollapsed = on } }
+            Toggle("Show Keyboard Button", prefs.keyboardButtonEnabled) { on -> set { it.keyboardButtonEnabled = on } }
+            Choice("Control Profile", ControlProfileSlot.entries, prefs.activeControlProfile, { it.title }) { slot -> set { it.activeControlProfile = slot } }
+            Choice("Landscape Tray Side", LandscapeTraySide.entries, prefs.preferredLandscapeSide, { it.title }) { side -> set { it.preferredLandscapeSide = side } }
             ProfileTrayEditor(controller)
             Section("Function Tray")
             Toggle("Show Function Tray", prefs.functionTrayEnabled) { on -> set { it.functionTrayEnabled = on } }
-            Choice("Profile", ControlProfileSlot.entries, prefs.activeFunctionTrayProfile, { it.title }) { slot -> set { it.activeFunctionTrayProfile = slot } }
-            Choice("Position", FunctionTrayPosition.entries, prefs.functionTrayPosition, { it.title }) { position -> set { it.functionTrayPosition = position } }
+            Choice("Function Profile", ControlProfileSlot.entries, prefs.activeFunctionTrayProfile, { it.title }) { slot -> set { it.activeFunctionTrayProfile = slot } }
+            Choice("Function Tray Position", FunctionTrayPosition.entries, prefs.functionTrayPosition, { it.title }) { position -> set { it.functionTrayPosition = position } }
             FunctionTrayEditor(controller)
             Section("Behavior")
-            Toggle("Auto-hide", prefs.autoHideEnabled) { on -> set { it.autoHideEnabled = on } }
+            Toggle("Auto-hide Control Trays", prefs.autoHideEnabled) { on -> set { it.autoHideEnabled = on } }
             Toggle("Avoid Cutouts", prefs.avoidNotch) { on -> set { it.avoidNotch = on } }
         }
         SettingsPage.TabletLayout -> {
@@ -229,11 +229,12 @@ private fun SettingsPageContent(
             Choice("Control Layout", PadControlLayoutMode.entries, prefs.padControlLayout, { it.title }) { mode -> set { it.padControlLayout = mode } }
             Choice("Main Controls", ControlEdge.entries, prefs.padMainEdge, { it.title }) { edge -> set { it.padMainEdge = edge } }
             Choice("Function Controls", ControlEdge.entries, prefs.padFunctionEdge, { it.title }) { edge -> set { it.padFunctionEdge = edge } }
-            Choice("Palette", PadPaletteStyle.entries, prefs.padOverlayPaletteStyle, { it.title }) { style -> set { it.padOverlayPaletteStyle = style } }
+            Choice("Palette Style", PadPaletteStyle.entries, prefs.padOverlayPaletteStyle, { it.title }) { style -> set { it.padOverlayPaletteStyle = style } }
             LabeledSlider("Control Size", prefs.padControlScale.toFloat(), PadControlScale.range.start.toFloat()..PadControlScale.range.endInclusive.toFloat()) { value ->
                 set { it.padControlScale = PadControlScale.clamped(value.toDouble()) }
             }
-            Toggle("Control Hints (Strip)", prefs.padShowControlHints) { on -> set { it.padShowControlHints = on } }
+            Toggle("Show Control Hints", prefs.padShowControlHints) { on -> set { it.padShowControlHints = on } }
+            Caption("Hints appear on the Strip layout only.")
             Section("Standard Controls")
             PadStandardControl.entries.forEach { control ->
                 Toggle(control.title, prefs.padStandardControls.isVisible(control)) { on -> set { it.padStandardControls.setVisible(on, control) } }
@@ -244,7 +245,7 @@ private fun SettingsPageContent(
             val ws = controller.workspace
             val wsUi = ws?.ui?.collectAsState()?.value
             val mediaUi by media.ui.collectAsState()
-            Section("What This Device Shows")
+            Section("Display Mode")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOfNotNull(DisplayMode.Mirror, DisplayMode.Extend, DisplayMode.Window.takeIf { wsUi?.available == true }).forEach { mode ->
                     val selected = mediaUi.source == mode.wire
@@ -260,12 +261,13 @@ private fun SettingsPageContent(
                 OutlinedButton(onClick = { onDismiss(); ws.openOverview() }) { Text("Choose Windows…") }
                 Caption("Tip: hold three fingers still on the picture to open your windows.")
             }
-            Toggle("Surface Grid When Video Is Off", prefs.showSurfaceGrid) { on -> set { it.showSurfaceGrid = on } }
+            Toggle("Show Surface Grid", prefs.showSurfaceGrid) { on -> set { it.showSurfaceGrid = on } }
+            Caption("Shown while Video is off.")
             OutlinedButton(onClick = { controller.resetViewport() }) { Text("Reset View") }
             Toggle("Picture in Picture", prefs.pictureInPictureEnabled) { on -> set { it.pictureInPictureEnabled = on } }
             Caption(
-                if (onStartPictureInPicture == null) "This device doesn't offer picture-in-picture."
-                else "When you leave MeowDisplay during a session, your Mac stays on screen in a small window. It's view only; to control the Mac, come back to MeowDisplay."
+                if (onStartPictureInPicture == null) "This device doesn't offer Picture in Picture."
+                else "When you leave MeowDisplay during a session, your Mac stays on screen in a small window. It shows your Mac; control stays in MeowDisplay."
             )
             if (onStartPictureInPicture != null && prefs.pictureInPictureEnabled && media.ui.collectAsState().value.admitted) {
                 OutlinedButton(onClick = { onDismiss(); onStartPictureInPicture() }) { Text("Start Picture in Picture") }
@@ -281,11 +283,11 @@ private fun SettingsPageContent(
             }
             Caption(
                 (if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) "Touch and hold the screen edge to see your windows. Tap one to switch."
-                else "A compact strip of windows along one edge.") + " Used in Window mode."
+                else "A compact strip of windows along one edge.") + " Used in Window view."
             )
         }
         SettingsPage.Audio -> {
-            Toggle("Mac Audio", prefs.audioPreferred) { on ->
+            Toggle("Audio", prefs.audioPreferred) { on ->
                 set { it.audioPreferred = on }
                 media.session.requestAudio(on)
             }
@@ -411,9 +413,9 @@ private fun CustomLayoutsSection(controller: ReceiverController) {
 
 private fun inputStatus(state: InputWireState): String = when (state) {
     InputWireState.Allowed -> "Controlling: touches, keys and the controls reach your Mac."
-    InputWireState.Requesting -> "Waiting for your Mac to allow input…"
-    InputWireState.NotAllowed -> "Your Mac declined input for this session."
-    InputWireState.RequestsDisabled -> "This Mac isn't accepting input requests."
+    InputWireState.Requesting -> "Waiting for your Mac to allow control…"
+    InputWireState.NotAllowed -> "Your Mac declined control for this session."
+    InputWireState.RequestsDisabled -> "This Mac isn't accepting control requests."
     InputWireState.Off -> "View Only."
 }
 

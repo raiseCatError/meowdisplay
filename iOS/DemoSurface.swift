@@ -715,7 +715,7 @@ struct DemoSessionBanner: View {
                     .frame(width: 28, height: 28)
                     .background(Circle().fill(Color.white.opacity(demo.inputAllowed ? 0.16 : 0.06)))
             }
-            .accessibilityLabel(Text("Allow Input (Demo)"))
+            .accessibilityLabel(Text("Control (Demo)"))
             .accessibilityValue(demo.inputAllowed ? Text("On") : Text("Off"))
             Menu {
                 Button { onGuide() } label: { Label("What can I try?", systemImage: "lightbulb") }
@@ -770,8 +770,8 @@ enum DemoHint: Equatable {
         case .extend: return String(localized: "Extend. This device adds a second desktop beside the Mac.")
         case .videoOn: return String(localized: "Video on.")
         case .videoOff: return String(localized: "Video off. The surface still works as a trackpad.")
-        case .inputOn: return String(localized: "Input allowed (Demo).")
-        case .inputOff: return String(localized: "Input off (Demo). Controls are hidden; view navigation still works.")
+        case .inputOn: return String(localized: "Control allowed (Demo).")
+        case .inputOff: return String(localized: "View Only (Demo). Controls are hidden; view navigation still works.")
         case .shape(let shape):
             if shape.shape == .automatic {
                 return shape.useFullDisplay
@@ -808,7 +808,7 @@ private struct DemoFeedbackChip: View {
             Image(systemName: symbol).foregroundStyle(.white.opacity(0.75))
             Text(text).font(.footnote.weight(.medium)).lineLimit(2)
             if feedback == .inputOff {
-                Button("Allow Input", action: onAllowInput)
+                Button("Request Control", action: onAllowInput)
                     .font(.footnote.weight(.semibold))
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
@@ -841,7 +841,7 @@ private struct DemoFeedbackChip: View {
         case .local(let text): return text
         case .modifierHeld(let modifier):
             return String(localized: "\(DemoSession.symbols[modifier.rawValue] ?? modifier.rawValue) held. Choose a shortcut.")
-        case .inputOff: return String(localized: "Input is off (Demo).")
+        case .inputOff: return String(localized: "View Only (Demo).")
         case .gestureOff(let reason): return reason
         case .macShortcut(let usage, let modifiers):
             let keys = DemoSession.describe(usage: usage, modifiers: modifiers)

@@ -31,7 +31,7 @@
     "Allow Permanently" : {
 
     },
-    "Allowed for this session" : {
+    "Control Allowed" : {
 
     },
     "Always Allow" : {
@@ -307,9 +307,6 @@
     "If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above." : {
 
     },
-    "Input" : {
-
-    },
     "Install and open MeowDisplay on the Mac whose screen you want to extend." : {
 
     },
@@ -328,7 +325,7 @@
     "Left" : {
 
     },
-    "Logs" : {
+    "Connection Log" : {
 
     },
     "Lower power/bandwidth, up to 60 FPS." : {
@@ -382,13 +379,10 @@
     "Mirror Display" : {
 
     },
-    "Mirror isn’t available" : {
+    "Mirror isn't available" : {
 
     },
     "Mirror needs an active physical display on the other Mac. It stays on Extend." : {
-
-    },
-    "Mode" : {
 
     },
     "Move the pointer relative to your finger." : {
@@ -421,7 +415,7 @@
     "No unpaired Macs nearby" : {
 
     },
-    "Not allowed" : {
+    "Control Declined" : {
 
     },
     "Off" : {
@@ -577,10 +571,10 @@
     "Remove Remote Details" : {
 
     },
-    "Requesting…" : {
+    "Requesting Control…" : {
 
     },
-    "Requests disabled by Mac" : {
+    "Control Not Available" : {
 
     },
     "Reset" : {
@@ -727,7 +721,7 @@
     "This Mac as an extra display for another Mac" : {
 
     },
-    "This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request." : {
+    "Use Request Control in the video window's title bar to control the other Mac with this Mac's keyboard and trackpad." : {
 
     },
     "This device must be updated before pairing" : {

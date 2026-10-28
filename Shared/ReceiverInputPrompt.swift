@@ -1,6 +1,6 @@
 import Foundation
 
-/// The lightweight on-surface "Request Input" affordance: when a touch was
+/// The lightweight on-surface "Request Control" affordance: when a touch was
 /// meant for the Mac but input isn't allowed, offer the existing request
 /// flow right there instead of sending the user to Settings. Ephemeral —
 /// it fades once the user stops trying — and never spams requests. The Mac
@@ -90,7 +90,7 @@ struct ReceiverInputPrompt: Equatable {
         }
     }
 
-    /// The user tapped Request/Enable Input.
+    /// The user tapped Request Control.
     mutating func requestTapped(now: TimeInterval) -> [Effect] {
         guard sessionLive, state != .allowed, state != .requestsDisabled, state != .requesting,
               canRequest(now: now, interval: Self.minimumTappedInterval) else { return [] }
@@ -129,7 +129,7 @@ enum InputAutoRequestPolicy {
     static func shouldAutoRequest(peerOptedIn: Bool) -> Bool { peerOptedIn }
 }
 
-/// The per-Mac "Request Input Automatically" opt-in, keyed by the pinned
+/// The per-Mac "Request Control Automatically" opt-in, keyed by the pinned
 /// peer ID like `IncomingSessionPolicyStore`. Off unless the user turns it
 /// on; forgetting the Mac removes it.
 enum InputAutoRequestStore {

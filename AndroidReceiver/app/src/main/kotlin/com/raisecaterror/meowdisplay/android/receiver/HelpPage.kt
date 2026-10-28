@@ -59,7 +59,7 @@ internal fun HelpPage() {
                 Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        TextButton(onClick = { open(context, ProjectLinks.MAC_APP) }) { Text("Get the Mac App") }
+        TextButton(onClick = { open(context, ProjectLinks.MAC_APP) }) { Text("Get the Mac app") }
 
         Heading("Troubleshooting")
         OutlinedButton(enabled = !sharing, onClick = {

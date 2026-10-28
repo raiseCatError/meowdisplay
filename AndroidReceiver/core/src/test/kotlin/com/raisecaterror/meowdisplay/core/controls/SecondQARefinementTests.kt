@@ -24,7 +24,7 @@ import kotlin.math.sin
 /**
  * Second physical-QA pass: system actions, rail anchoring, software-keyboard
  * chords, the editable Function Tray and its sequences, scroll direction, Wheel
- * and fan geometry, editor/import flows, and Request Input.
+ * and fan geometry, editor/import flows, and Request Control.
  */
 class SecondQARefinementTests {
     private val container = CGRect(0.0, 0.0, 1194.0, 834.0)
@@ -526,7 +526,7 @@ class SecondQARefinementTests {
 
     // endregion
 
-    // region Request Input
+    // region Request Control
 
     @Test
     fun testBlockedTouchOffersRequestInputThenFades() {

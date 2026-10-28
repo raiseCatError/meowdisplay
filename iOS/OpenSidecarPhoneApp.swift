@@ -56,7 +56,7 @@ struct ReceiverScreen: View {
     /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
     /// `nil` means the whole screen.
     @State private var padCanvas: CGRect?
-    /// The on-surface Request Input affordance — see `ReceiverInputPrompt`.
+    /// The on-surface Request Control affordance — see `ReceiverInputPrompt`.
     @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
@@ -190,14 +190,14 @@ struct ReceiverScreen: View {
         if !plain.isEmpty { model.receiver.sendKeyboardText(plain) }
     }
 
-    // MARK: Request Input
+    // MARK: Request Control
 
     /// Relative UI timing only (the prompt's fade); a wall clock is plenty.
     private var uptime: TimeInterval { Date().timeIntervalSinceReferenceDate }
 
     /// A touch meant for the Mac was dropped: show (or refresh) the prompt.
     /// It never changes any input preference. Only a Mac explicitly set to
-    /// Request Input Automatically (Paired Macs) gets the normal request
+    /// Request Control Automatically (Paired Macs) gets the normal request
     /// sent by itself — the connection Always Allow policy doesn't count —
     /// and the Mac still decides.
     private func noteBlockedInputAttempt() {
@@ -315,7 +315,7 @@ struct ReceiverScreen: View {
                         .position(x: canvas.midX, y: canvas.midY)
                         .ignoresSafeArea()
                         // Allow Input OFF: touches still arrive (for Local
-                        // View Navigation and the Request Input prompt), but
+                        // View Navigation and the Request Control prompt), but
                         // `VideoView` routes nothing to the Mac: pointer/
                         // touch/Pencil routing stops at `routeTouches`, the
                         // remote-only recognizers are parked by
@@ -323,7 +323,7 @@ struct ReceiverScreen: View {
                         // follow `TwoFingerRoutingPolicy`, and hover is
                         // dropped (SETTINGS / ALLOW INPUT INVARIANTS).
                         // The surface always takes touches so a blocked one
-                        // can offer Request Input; what they may do is
+                        // can offer Request Control; what they may do is
                         // decided inside `VideoView`.
                     if model.pictureInPicture.isShowingWindow {
                         ReceiverPictureInPicturePlaceholder()
@@ -539,7 +539,7 @@ struct ReceiverScreen: View {
         // the only place the choice can be made. "Use Extend" sends the
         // EXISTING `displayModeRequest`; the Mac remains authoritative for
         // the actual mode change.
-        .alert("Mirror isn’t available",
+        .alert("Mirror isn't available",
                isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
             Button("Cancel", role: .cancel) {
                 model.receiver.declineMirrorUnavailableOffer()
@@ -555,7 +555,7 @@ struct ReceiverScreen: View {
         // already using Extend, so there is nothing to offer, only to
         // explain. Purely informational (one dismiss button, no wire
         // reply) — the Mac already stayed on Extend on its own.
-        .alert("Mirror isn’t available",
+        .alert("Mirror isn't available",
                isPresented: Binding(get: { model.receiver.mirrorRejectedWhileExtending }, set: { _ in })) {
             Button("OK") { model.receiver.dismissMirrorRejection() }
         } message: {
@@ -4441,7 +4441,7 @@ private extension VerticalAlignment {
     static let brandInkCenter = VerticalAlignment(BrandInkCenter.self)
 }
 
-/// The small Request Input / Enable Input affordance on the receiver
+/// The small Request Control affordance on the receiver
 /// surface — see `ReceiverInputPrompt`.
 /// The screen this app's scene is on (foldables, external displays, Stage
 /// Manager) rather than `UIScreen.main`, which only names the built-in panel.
@@ -4506,7 +4506,9 @@ private struct InputPromptButton: View {
                 } else {
                     Image(systemName: symbol)
                 }
-                Text(title).font(.subheadline.weight(.semibold))
+                // The longest title ("This Mac isn't accepting control requests")
+                // fits one line from a 375 pt phone; on a narrower screen it wraps.
+                Text(title).font(.subheadline.weight(.semibold)).multilineTextAlignment(.center)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
@@ -4516,19 +4518,20 @@ private struct InputPromptButton: View {
             .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 8)
         .disabled(!isActionable)
-        .accessibilityHint(isActionable ? Text("Asks your Mac to allow input from this device.") : Text(""))
+        .accessibilityHint(isActionable ? Text("Asks your Mac to let this device control it.") : Text(""))
     }
 
     private var isActionable: Bool { kind == .requestInput || kind == .enableInput }
 
     private var title: String {
         switch kind {
-        case .enableInput: return String(localized: "Enable Input")
-        case .requestInput: return String(localized: "Request Input")
-        case .requesting: return String(localized: "Requesting Input…")
-        case .enabled: return String(localized: "Input Enabled")
-        case .unavailable: return String(localized: "This Mac isn’t accepting input requests")
+        case .enableInput: return String(localized: "Request Control")
+        case .requestInput: return String(localized: "Request Control")
+        case .requesting: return String(localized: "Requesting Control…")
+        case .enabled: return String(localized: "Control Allowed")
+        case .unavailable: return String(localized: "This Mac isn't accepting control requests")
         }
     }
 
@@ -4556,7 +4559,7 @@ struct NaturalTouchHint: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Natural Touch is on")
                     .font(.subheadline.weight(.semibold))
-                Text("Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings & Help > Input.")
+                Text("Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings → Input.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

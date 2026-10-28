@@ -2155,7 +2155,7 @@ struct ControlProfileEditor: View {
 
     var body: some View {
         List {
-            Section("Main Tray") {
+            Section("Control Tray") {
                 ForEach(store.activeProfile.trayItems) { configuration in
                     Toggle(configuration.item.title, isOn: Binding(
                         get: { store.activeProfile.trayItems.first(where: { $0.item == configuration.item })?.isVisible ?? false },

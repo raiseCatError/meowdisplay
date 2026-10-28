@@ -137,9 +137,9 @@ private struct ReceiverOverviewPage: View {
             }
 
             Section {
-                ReceiverCaption("This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request.")
+                ReceiverCaption("Use Request Control in the video window's title bar to control the other Mac with this Mac's keyboard and trackpad.")
             } header: {
-                Text("Input")
+                Text("Control")
             }
         }
     }

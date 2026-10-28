@@ -150,7 +150,7 @@ enum WireProtocol {
     /// version at all. A pre-18 receiver simply sees `allowInputState.
     /// allowed` flip to true later (once/if granted) instead of instantly,
     /// exactly like a slow reply; a pv 18+ receiver can additionally render
-    /// "Requesting…"/"Not allowed"/"Requests disabled by Mac" from `state`.
+    /// "Requesting Control…"/"Control Declined"/"Control Not Available" from `state`.
     static let sessionScopedInputConsentWireVersion = 18
 
     /// Protocol version this build shipped HEVC/H.265 (Main, 8-bit) in, as
@@ -426,10 +426,10 @@ enum SessionInputWireState: String, Equatable {
     var receiverDisplayText: String {
         switch self {
         case .off: return String(localized: "Off")
-        case .requesting: return String(localized: "Requesting…")
-        case .allowed: return String(localized: "Allowed for this session")
-        case .notAllowed: return String(localized: "Not allowed")
-        case .requestsDisabled: return String(localized: "Requests disabled by Mac")
+        case .requesting: return String(localized: "Requesting Control…")
+        case .allowed: return String(localized: "Control Allowed")
+        case .notAllowed: return String(localized: "Control Declined")
+        case .requestsDisabled: return String(localized: "Control Not Available")
         }
     }
 }

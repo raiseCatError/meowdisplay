@@ -560,7 +560,7 @@ class EmulatorSmokeTest {
             assertEquals(90, tiles.first { it.int("window") == 102 }.int("rotation"))
             // Remove Safari's tile: a smaller workspace, never a window action.
             tapDesc("Safari tile options")
-            tap("Remove tile")
+            tap("Remove Tile")
             val afterRemove = session.collectUntil { it.type() == "workspaceRequest" && it["tiles"]!!.jsonArray.size == 1 }
             assertTrue("removing a tile never closes the Mac window", afterRemove.none { it.type() == "windowAction" })
             shot("window-after-remove")

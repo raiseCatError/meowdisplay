@@ -62,7 +62,7 @@
     "%lld controls from a newer MeowDisplay were skipped." : {
 
     },
-    "%lld Function actions aren’t available in this version and won’t appear." : {
+    "%lld Function actions aren't available in this version and won't appear." : {
 
     },
     "%lld ms" : {
@@ -86,10 +86,10 @@
     "A newer version of MeowDisplay is available." : {
 
     },
-    "A second, independent set of one-tap shortcuts (Undo, Redo, …), separate from the Main controls." : {
+    "A second, independent set of one-tap shortcuts (Undo, Redo, …), separate from the control tray." : {
 
     },
-    "A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the Main Tray above. \"Same Side\" groups it with the Main Tray; \"Opposite Side\" puts it on the other edge of the screen." : {
+    "A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the control tray above. \"Same Side\" groups it with the control tray; \"Opposite Side\" puts it on the other edge of the screen." : {
 
     },
     "A share code contains only this layout — positions, sizes, palettes, shortcut buttons and Two-Hand Assist. Never pairing, devices or permissions." : {
@@ -128,7 +128,7 @@
     "Active Layout" : {
 
     },
-    "Active Profile" : {
+    "Control Profile" : {
 
     },
     "Actual size" : {
@@ -161,10 +161,10 @@
     "Allow" : {
 
     },
-    "Allow Input" : {
+    "Request Control (Demo)" : {
 
     },
-    "Allow Input (Demo)" : {
+    "Control (Demo)" : {
 
     },
     "Allow Local View Navigation" : {
@@ -173,7 +173,7 @@
     "Allow Permanently" : {
 
     },
-    "Allowed for this session" : {
+    "Control Allowed" : {
 
     },
     "Always Allow" : {
@@ -203,7 +203,7 @@
     "Arrange your controls" : {
 
     },
-    "Asks your Mac to allow input from this device." : {
+    "Asks your Mac to let this device control it." : {
 
     },
     "Audio" : {
@@ -374,7 +374,7 @@
     "How to Connect" : {
 
     },
-    "Connection log" : {
+    "Connection Log" : {
 
     },
     "Connection Lost" : {
@@ -383,7 +383,7 @@
     "Connection Requests" : {
 
     },
-    "Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired. Request Input Automatically lets a touch on the Mac’s screen ask that Mac for control without tapping Request Input first — the Mac still decides." : {
+    "Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired. Request Control Automatically lets a touch on the Mac's screen ask that Mac for control without tapping Request Control first — the Mac still decides." : {
 
     },
     "Connection timed out" : {
@@ -402,9 +402,6 @@
 
     },
     "Control Layout" : {
-
-    },
-    "Control Profile" : {
 
     },
     "Control Size" : {
@@ -479,7 +476,7 @@
     "Demo: %@ is a sample and isn't saved as a paired Mac. Forget is unavailable for it. Your real paired Macs aren't shown in the demo. Pairing with a real Mac is confirmed on both devices." : {
 
     },
-    "Demo: Allow Input is simulated on this %@. No Mac is asked and nothing is sent. Settings always stays reachable, even with input turned off." : {
+    "Demo: Request Control is simulated on this %@. No Mac is asked and nothing is sent. Settings always stays reachable, even in View Only." : {
 
     },
     "Demo: changes here last only for this demo and don't rename this %@." : {
@@ -554,7 +551,7 @@
     "Dots" : {
 
     },
-    "Dots or grid lines for lining controls up while you edit. They aren’t part of your Mac’s screen and never appear during normal use." : {
+    "Dots or grid lines for lining controls up while you edit. They aren't part of your Mac's screen and never appear during normal use." : {
 
     },
     "Double-click to zoom" : {
@@ -611,7 +608,7 @@
     "Emoji" : {
 
     },
-    "Enable Input" : {
+    "Request Control" : {
 
     },
     "Enforce Maximum FPS" : {
@@ -698,6 +695,9 @@
     "Forget" : {
 
     },
+    "Forget…" : {
+
+    },
     "Forget “%@”?" : {
 
     },
@@ -770,7 +770,7 @@
     "Host (Tailscale IP or MagicDNS name)" : {
 
     },
-    "How a modifier’s shortcuts appear while you hold or latch it. Wheel surrounds it with wedge-shaped segments; Arc fans them along the next ring out; Ring circles it; Row and Column line them up." : {
+    "How a modifier's shortcuts appear while you hold or latch it. Wheel surrounds it with wedge-shaped segments; Arc fans them along the next ring out; Ring circles it; Row and Column line them up." : {
 
     },
     "How Custom Layouts Work" : {
@@ -800,19 +800,16 @@
     "Input" : {
 
     },
-    "Input allowed (Demo)." : {
+    "Control allowed (Demo)." : {
 
     },
-    "Input Enabled" : {
-
-    },
-    "Input is off (Demo)." : {
+    "View Only (Demo)." : {
 
     },
     "Input Mode" : {
 
     },
-    "Input off (Demo). Controls are hidden; view navigation still works." : {
+    "View Only (Demo). Controls are hidden; view navigation still works." : {
 
     },
     "Install the MeowDisplay Mac app on your Mac" : {
@@ -821,10 +818,10 @@
     "Invalid pairing message" : {
 
     },
-    "Invert Horizontal Scrolling" : {
+    "Natural Horizontal Scrolling" : {
 
     },
-    "Invert Vertical Scrolling" : {
+    "Natural Vertical Scrolling" : {
 
     },
     "It will connect using Extend." : {
@@ -839,7 +836,7 @@
     "Keep this app open — streaming starts on its own" : {
 
     },
-    "Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape." : {
+    "Keeps controls clear of the iPhone's notch or Dynamic Island in landscape." : {
 
     },
     "Key" : {
@@ -905,7 +902,7 @@
     "Layout preview" : {
 
     },
-    "Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It’s view-only — control stays in MeowDisplay." : {
+    "Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It shows your Mac; control stays in MeowDisplay." : {
 
     },
     "Left" : {
@@ -938,7 +935,7 @@
     "Main display" : {
 
     },
-    "Main Tray" : {
+    "Control Tray" : {
 
     },
     "Make sure the address is correct and Pair Over Remote is turned on on the Mac." : {
@@ -974,7 +971,7 @@
     "You also need the **MeowDisplay Mac app**, open on your Mac." : {
 
     },
-    "Metal renderer (experimental)" : {
+    "Metal Renderer" : {
 
     },
     "Mirror" : {
@@ -986,7 +983,7 @@
     "Mirror Display" : {
 
     },
-    "Mirror isn’t available" : {
+    "Mirror isn't available" : {
 
     },
     "Mirror requires an active physical display." : {
@@ -1055,7 +1052,7 @@
     "No shortcuts for %@" : {
 
     },
-    "Not allowed" : {
+    "Control Declined" : {
 
     },
     "Not connected" : {
@@ -1091,7 +1088,7 @@
     "On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here." : {
 
     },
-    "On, content moves with your fingers, like a Mac trackpad’s natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn’t affected." : {
+    "On, content moves with your fingers, like a Mac trackpad's natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn't affected." : {
 
     },
     "One more app to go" : {
@@ -1196,10 +1193,10 @@
     "Palette Style" : {
 
     },
-    "Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Move View lets one finger move the picture without clicking or scrolling on the Mac; two-finger scrolling always goes to the Mac." : {
+    "Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even in View Only. Move View lets one finger move the picture without clicking or scrolling on the Mac; two-finger scrolling always goes to the Mac." : {
 
     },
-    "Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even while Allow Input is off. Two-finger scrolling always goes to the Mac." : {
+    "Pan, zoom and rotate your own view of the Mac — until an edge of your Mac reaches the middle of the screen. This never sends anything to the Mac, so it works even in View Only. Two-finger scrolling always goes to the Mac." : {
 
     },
     "Paste" : {
@@ -1214,7 +1211,7 @@
     "Performance" : {
 
     },
-    "Performance overlay" : {
+    "Performance Overlay" : {
 
     },
     "Permissions" : {
@@ -1223,7 +1220,7 @@
     "Picture in Picture" : {
 
     },
-    "Picture in Picture isn’t supported on this device." : {
+    "Picture in Picture isn't supported on this device." : {
 
     },
     "Picture in Picture needs live video from a Mac, so it doesn't start from the demo." : {
@@ -1358,22 +1355,13 @@
     "Replace this orientation with the radial template?" : {
 
     },
-    "Request Control" : {
+    "Request Control Automatically" : {
 
     },
-    "Request Input" : {
+    "Requesting Control…" : {
 
     },
-    "Request Input Automatically" : {
-
-    },
-    "Requesting Input…" : {
-
-    },
-    "Requesting…" : {
-
-    },
-    "Requests disabled by Mac" : {
+    "Control Not Available" : {
 
     },
     "Reset" : {
@@ -1544,7 +1532,7 @@
     "Settings always stays in the layout, so it can never become unreachable." : {
 
     },
-    "Settings always stays reachable, even with input turned off." : {
+    "Settings always stays reachable, even in View Only." : {
 
     },
     "Settings, Display: switch modes and try Extend Shape." : {
@@ -1745,7 +1733,7 @@
     "That doesn't look like a valid host or IP address." : {
 
     },
-    "The canvas shows this modifier’s palette while it’s selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier." : {
+    "The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier." : {
 
     },
     "The editor opens full screen, with separate landscape and portrait arrangements. Preview lets you try the layout without sending anything to your Mac." : {
@@ -1760,7 +1748,7 @@
     "The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging." : {
 
     },
-    "The shaded strips are the system’s areas (status bar and Home indicator). Controls always stay inside the dashed outline." : {
+    "The shaded strips are the system's areas (status bar and Home indicator). Controls always stay inside the dashed outline." : {
 
     },
     "Then wait %lld ms" : {
@@ -1772,7 +1760,7 @@
     "This device must be updated before pairing" : {
 
     },
-    "This isn’t a MeowDisplay layout share code." : {
+    "This isn't a MeowDisplay layout share code." : {
 
     },
     "This layout decides where Function controls go; the Function Tray profile decides what they do. Add them with Add Control → Actions." : {
@@ -1790,7 +1778,7 @@
     "This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings." : {
 
     },
-    "This Mac isn’t accepting input requests" : {
+    "This Mac isn't accepting control requests" : {
 
     },
     "This restores its default Undo/Redo layout. Other receiver settings stay unchanged." : {
@@ -1880,7 +1868,7 @@
     "Turn Off" : {
 
     },
-    "Turn Off Input (Demo)" : {
+    "Turn Off Control (Demo)" : {
 
     },
     "Turn video off to use the surface as a trackpad." : {
@@ -2067,7 +2055,7 @@
     "While you arrange controls, Two-Hand Assist stays still. Turn on Preview Two-Hand Assist to see where its helper keys appear, or use Preview to try it for real." : {
 
     },
-    "While you’re controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren’t taken by editing shortcuts. Some %@ and accessibility gestures always stay with the system, and VoiceOver always takes precedence." : {
+    "While you're controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren't taken by editing shortcuts. Some %@ and accessibility gestures always stay with the system, and VoiceOver always takes precedence." : {
 
     },
     "Wi-Fi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it." : {

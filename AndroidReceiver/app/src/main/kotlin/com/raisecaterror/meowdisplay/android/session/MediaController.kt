@@ -34,7 +34,7 @@ import kotlinx.coroutines.flow.update
  * Connections". App-private and, like pins, never backed up or transferred.
  */
 /**
- * The per-Mac "Request Input Automatically" opt-in (iOS `InputAutoRequestStore`): a blocked touch
+ * The per-Mac "Request Control Automatically" opt-in (iOS `InputAutoRequestStore`): a blocked touch
  * may send the normal input request by itself for these Macs only. Off unless turned on; Forget
  * removes it. The Mac still decides.
  */
@@ -110,7 +110,7 @@ class MediaController(
     private val bonjour: Bonjour,
     private val localName: () -> String,
     private val panel: () -> HelloFields,
-    /** Per-Mac "Request Input Automatically"; null (tests, previews): never. */
+    /** Per-Mac "Request Control Automatically"; null (tests, previews): never. */
     val inputAutoRequest: InputAutoRequestPrefs? = null,
 ) {
     private val state = MutableStateFlow(MediaUiState())

@@ -353,7 +353,7 @@ struct WindowOverviewView: View {
                 }
                 TextField("Search windows and apps", text: $query).textFieldStyle(.roundedBorder)
                 HStack(spacing: 8) {
-                    Text("Whole display:").foregroundStyle(.white.opacity(0.7))
+                    Text("Full Desktop:").foregroundStyle(.white.opacity(0.7))
                     Button("Mirror") { model.closeOverview(); onMirror() }.buttonStyle(.bordered)
                     Button("Extend") { model.closeOverview(); onExtend() }.buttonStyle(.bordered)
                 }

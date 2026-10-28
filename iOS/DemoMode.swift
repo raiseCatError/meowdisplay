@@ -292,7 +292,7 @@ struct DemoSettingsPage: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Picture in Picture", isOn: preferenceBinding(controlStore, \.pictureInPictureEnabled))
-                SettingNote("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It’s view-only — control stays in MeowDisplay.")
+                SettingNote("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It shows your Mac; control stays in MeowDisplay.")
                 SettingNote("Picture in Picture needs live video from a Mac, so it doesn't start from the demo.")
             }
         }
@@ -392,9 +392,9 @@ struct DemoSettingsPage: View {
                 DemoBadge()
             }
             .accessibilityElement(children: .combine)
-            Toggle("Request Input Automatically", isOn: $demo.requestInputAutomatically)
+            Toggle("Request Control Automatically", isOn: $demo.requestInputAutomatically)
                 .font(.subheadline)
-            Button("Forget", role: .destructive) {}
+            Button("Forget…", role: .destructive) {}
                 .disabled(true)
         } footer: {
             Text("Demo: \(DemoSession.macName) is a sample and isn't saved as a paired Mac. Forget is unavailable for it. Your real paired Macs aren't shown in the demo. Pairing with a real Mac is confirmed on both devices.")

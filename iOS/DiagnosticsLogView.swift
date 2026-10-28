@@ -32,7 +32,7 @@ struct DiagnosticsLogView: View {
 
     var body: some View {
         content
-            .navigationTitle("Connection log")
+            .navigationTitle("Connection Log")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if case let .ready(url, text, _) = snapshot {

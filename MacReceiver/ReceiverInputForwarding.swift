@@ -430,7 +430,7 @@ extension ReceiverControlStatus {
         case .declined: return String(localized: "Control Declined")
         case .requestsDisabled: return String(localized: "Control Not Available")
         case .inactive: return String(localized: "Control Allowed")
-        case .paused: return String(localized: "Control Paused")
+        case .paused: return String(localized: "Paused")
         case .controlling: return String(localized: "Controlling")
         }
     }

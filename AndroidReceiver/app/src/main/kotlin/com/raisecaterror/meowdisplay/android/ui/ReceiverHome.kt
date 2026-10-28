@@ -138,12 +138,12 @@ fun ReceiverHome(
                     enabled = mediaUi.listening || live,
                     menu = buildList {
                         if (!live && !connecting) {
-                            add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
                             add("Connect with Mirror" to { media.requestConnect(mac.peerID, DisplayMode.Mirror) })
+                            add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
                         }
                         media.inputAutoRequest?.let { auto ->
                             val on = mac.peerID in autoRequestPeers
-                            add((if (on) "Request Input Automatically: On" else "Request Input Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
+                            add((if (on) "Request Control Automatically: On" else "Request Control Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
                         }
                         add("Forget This Mac" to { media.forget(mac.peerID) })
                     },
@@ -190,7 +190,7 @@ fun ReceiverHome(
                         DisplayMode.Mirror -> "mirror its screen"
                         DisplayMode.Window -> "show its windows"
                         else -> "extend its desktop"
-                    } + " on this device. It can't control anything here, and it can't use your input unless you ask."
+                    } + " on this device. It can't control anything here, and this device can't control it unless you ask."
                 )
             },
             confirmButton = { TextButton(onClick = { media.answer(approval.id, ReceiverApprovalDecision.Allow) }) { Text("Allow") } },
@@ -239,12 +239,12 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Connected to $mac", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
             val source = when (ui.source) {
-                "mirror" -> "Mirroring a display"
-                "extend" -> "Extended desktop"
-                "window" -> "Showing Mac windows"
+                "mirror" -> "Mirror"
+                "extend" -> "Extend"
+                "window" -> "Windows"
                 else -> "Showing the Mac"
             }
-            val control = if (ui.input == InputWireState.Allowed) "you can control the Mac" else "view only"
+            val control = if (ui.input == InputWireState.Allowed) "Controlling" else "View Only"
             Text("$source · $control", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onReturn) { Text("Return to Display") }

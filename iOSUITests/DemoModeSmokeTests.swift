@@ -1,7 +1,7 @@
 import XCTest
 
 /// App Review path: launch, Explore Demo, every release Settings category,
-/// Allow Input off and on, then Exit Demo back to the home screen.
+/// Control off and on, then Exit Demo back to the home screen.
 final class DemoModeSmokeTests: XCTestCase {
     private let categories = ["General", "Display", "Input", "Gestures", "Controls", "Audio",
                               "Connections", "Paired Macs", "Remote Access", "Permissions",
@@ -37,7 +37,7 @@ final class DemoModeSmokeTests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["Demo Mode"].firstMatch.exists)
         snapshot(app, "02-demo-surface")
 
-        let input = app.descendants(matching: .any)["Allow Input (Demo)"].firstMatch
+        let input = app.descendants(matching: .any)["Control (Demo)"].firstMatch
         XCTAssertTrue(input.exists)
         input.tap()
         snapshot(app, "03-input-off")
