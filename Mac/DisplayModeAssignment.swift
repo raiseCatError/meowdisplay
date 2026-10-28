@@ -105,7 +105,7 @@ struct DeviceDisplayAssignment: Equatable {
     /// Two assignments produce the same capture: the mode matches and, in
     /// Mirror only, so does the source. Who chose a value never matters.
     func capturesSame(as other: DeviceDisplayAssignment) -> Bool {
-        mode == other.mode && (mode == .extend || mirrorDisplayUUID == other.mirrorDisplayUUID)
+        mode == other.mode && (mode != .mirror || mirrorDisplayUUID == other.mirrorDisplayUUID)
     }
 }
 
@@ -114,6 +114,7 @@ extension CaptureMode {
         switch self {
         case .mirror: return String(localized: "Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
         case .extend: return String(localized: "Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+        case .window: return String(localized: "Windows", comment: "Display mode: selected Mac windows, chosen on the device.")
         }
     }
 }

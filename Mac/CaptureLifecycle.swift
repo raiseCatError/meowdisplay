@@ -3,13 +3,25 @@ import Foundation
 enum CaptureMode: String {
     case mirror
     case extend
+    /// Selected Mac windows, captured one by one and composited for this
+    /// receiver (WindowWorkspaceEngine). No virtual display.
+    case window
 
     init(_ receiverMode: ReceiverDisplayMode) {
         self = receiverMode == .mirror ? .mirror : .extend
     }
 
+    /// The Mirror/Extend value older wire fields and session invitations
+    /// carry. Window mode shows existing content and creates no display, so
+    /// it reads as Mirror there.
     var receiverMode: ReceiverDisplayMode {
-        self == .mirror ? .mirror : .extend
+        self == .extend ? .extend : .mirror
+    }
+
+    /// `displayModeState.mode` for a receiver; `window` only for receivers
+    /// that announced window workspaces.
+    func wireValue(receiverSupportsWindow: Bool) -> String {
+        self == .window && receiverSupportsWindow ? WindowWorkspaceWire.mode : receiverMode.rawValue
     }
 }
 
@@ -152,6 +164,9 @@ enum CaptureRecoveryPath: Equatable {
     case rebuildMirrorPipeline
     case reattachExtendCapture
     case rebuildExtendPipeline
+    /// Window mode: only the audio/lifecycle carrier restarts; the window
+    /// streams and the workspace keep running.
+    case reattachWindowCarrier
 
     static func resolve(mode: CaptureMode, targetDisplayAvailable: Bool) -> Self {
         switch (mode, targetDisplayAvailable) {
@@ -159,6 +174,7 @@ enum CaptureRecoveryPath: Equatable {
         case (.mirror, false): return .rebuildMirrorPipeline
         case (.extend, true): return .reattachExtendCapture
         case (.extend, false): return .rebuildExtendPipeline
+        case (.window, _): return .reattachWindowCarrier
         }
     }
 }

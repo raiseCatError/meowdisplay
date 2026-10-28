@@ -81,6 +81,26 @@ final class InputInjector {
     private var scrollRemainder = ScrollRemainder()
     private var heldModifiers = HeldModifierTracker()
 
+    // Window mode: maps canvas points to the right Mac window, or to
+    // nothing. Nil for Mirror/Extend, where the canvas is one display.
+    private var targetMapper: InputTargetMapper?
+    // A mapped point for the tablet path, which positions by `screenPoint`.
+    private var mappedOverride: CGPoint?
+
+    /// Install or remove the window-workspace mapper. Held input is released
+    /// first: nothing pressed under one mapping is released under another.
+    func setTargetMapper(_ mapper: InputTargetMapper?) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        cancelActiveInputLocked()
+        targetMapper = mapper
+    }
+
+    /// Window mode keyboard gate: keys only reach the active tile's window.
+    private func keyboardTargetReady() -> Bool {
+        targetMapper?.keyboardTargetReady() ?? true
+    }
+
     init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox) {
         self.displayID = displayID
         self.sessionInputGrant = sessionInputGrant
@@ -172,8 +192,20 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
-        let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
-        let point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        let point: CGPoint
+        if let mapper = targetMapper {
+            let mapPhase: InputMapPhase = phase == "began" ? .down : (phase == "moved" ? (isDown ? .drag : .hover) : .up)
+            if let mapped = mapper.mapPointer(phase: mapPhase, x: x, y: y, dx: 0, dy: 0) {
+                point = mapped
+            } else if mapPhase == .up, isDown {
+                point = currentCursor()   // always release what was pressed
+            } else {
+                return
+            }
+        } else {
+            let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
+            point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        }
 
         let type: CGEventType
         // Click count on the release. A cancel means "a second finger joined,
@@ -220,9 +252,24 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
-        let bounds = CGDisplayBounds(displayID)
-        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
-        let whole = scrollRemainder.take(dxPoints: dx / scale, dyPoints: dy / scale)
+        let whole: (dx: Int32, dy: Int32)
+        if let mapper = targetMapper {
+            // The tile under the workspace pointer, only where its window is
+            // frontmost; the Mac pointer moves onto it first (no focus change).
+            guard let p = mapper.mapPointer(phase: .scroll, x: nil, y: nil, dx: 0, dy: 0) else { return }
+            let here = currentCursor()
+            if pointerHeldButton == nil, !isDown, abs(here.x - p.x) > 1 || abs(here.y - p.y) > 1,
+               let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) {
+                move.flags = heldModifiers.flags
+                move.post(tap: .cghidEventTap)
+            }
+            let v = mapper.scrollVector(dx: dx, dy: dy)
+            whole = scrollRemainder.take(dxPoints: v.dx, dyPoints: v.dy)
+        } else {
+            let bounds = CGDisplayBounds(displayID)
+            let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+            whole = scrollRemainder.take(dxPoints: dx / scale, dyPoints: dy / scale)
+        }
         guard whole.dx != 0 || whole.dy != 0 else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
                                   wheelCount: 2,
@@ -243,6 +290,11 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: x, y: y, dx: 0, dy: 0) else { return }
+            postPointerMotion(to: point)
+            return
+        }
         let bounds = CGDisplayBounds(displayID)
         let point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
         postPointerMotion(to: point)
@@ -255,6 +307,13 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            // The workspace pointer moves freely across tiles; the Mac pointer
+            // follows only where that is safe (see WorkspaceInputTargeting).
+            guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: nil, y: nil, dx: dx, dy: dy) else { return }
+            postPointerMotion(to: point)
+            return
+        }
         let bounds = CGDisplayBounds(displayID)
         let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
         let current = currentCursor()
@@ -292,7 +351,13 @@ final class InputInjector {
         guard pointerHeldButton == nil else { return }
         let cgButton: CGMouseButton = button == .left ? .left : .right
         let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
-        let point = currentCursor()
+        let point: CGPoint
+        if let mapper = targetMapper {
+            guard let mapped = mapper.mapPointer(phase: .down, x: nil, y: nil, dx: 0, dy: 0) else { return }
+            point = mapped
+        } else {
+            point = currentCursor()
+        }
         let clickState = Int64(max(clickCount, 1))
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
@@ -320,7 +385,7 @@ final class InputInjector {
         let cgButton: CGMouseButton = button == .left ? .left : .right
         guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
         let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
-        let point = currentCursor()
+        let point = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0) ?? currentCursor()
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
@@ -333,6 +398,11 @@ final class InputInjector {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            guard let p = mapper.mapPointer(phase: .hover, x: x, y: y, dx: 0, dy: 0) else { return }
+            setProximity(entering: entering, at: p)
+            return
+        }
         setProximity(entering: entering, at: screenPoint(nx: x, ny: y))
     }
 
@@ -345,7 +415,7 @@ final class InputInjector {
     func handleKeyboardText(_ text: String) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), let units = KeyboardTextPlanner.plan(text) else { return }
+        guard inputIsAllowed(), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
         postUnicodeText(units)
     }
 
@@ -354,7 +424,7 @@ final class InputInjector {
     func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(), keyboardTargetReady() else { return }
         let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
         #if DEBUG
         if usage == .deleteOrBackspace {
@@ -375,7 +445,7 @@ final class InputInjector {
         defer { inputLock.unlock() }
         guard inputIsAllowed(), let modifier = ControlModifier(rawValue: name) else { return }
         if down {
-            guard heldModifiers.down(modifier) else { return }
+            guard keyboardTargetReady(), heldModifiers.down(modifier) else { return }
             postKeyEvent(keyCode: modifier.keyCode, keyDown: true, flags: heldModifiers.flags)
         } else {
             guard heldModifiers.up(modifier) else { return }
@@ -390,7 +460,7 @@ final class InputInjector {
     func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(), keyboardTargetReady() else { return }
         let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
         if isRepeat {
             guard heldKeys.allowsRepeat(usage) else { return }
@@ -475,6 +545,23 @@ final class InputInjector {
         // TODO: Wire Apple Pencil Pro barrel roll (UIKit rollAngle) once hardware
         // is available for testing. rotation on the wire is always 0 for now.
         _ = rotation
+        if let mapper = targetMapper {
+            let mapPhase: InputMapPhase
+            switch phase {
+            case "down": mapPhase = .down
+            case "move": mapPhase = penDown ? .drag : .hover
+            case "up": mapPhase = .up
+            default: mapPhase = .hover
+            }
+            if let mapped = mapper.mapPointer(phase: mapPhase, x: x, y: y, dx: 0, dy: 0) {
+                mappedOverride = mapped
+            } else if mapPhase == .up, penDown {
+                mappedOverride = currentCursor()
+            } else {
+                return
+            }
+        }
+        defer { mappedOverride = nil }
         let p = screenPoint(nx: x, ny: y)
         if phase == "down", !inRange {
             setProximity(entering: true, at: p)
@@ -631,6 +718,7 @@ final class InputInjector {
     }
 
     private func screenPoint(nx: Double, ny: Double) -> CGPoint {
+        if let mappedOverride { return mappedOverride }
         let bounds = CGDisplayBounds(displayID)
         return CGPoint(x: bounds.minX + nx * bounds.width,
                        y: bounds.minY + ny * bounds.height)

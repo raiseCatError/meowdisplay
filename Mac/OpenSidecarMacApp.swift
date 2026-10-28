@@ -2680,6 +2680,10 @@ final class SenderController: ObservableObject {
             // This receiver's own Mirror/Extend control: this device only.
             self.requestMode(CaptureMode(requestedMode), for: session)
         }
+        sender.onWindowModeRequest = { [weak self, weak session] in
+            guard let self, let session, self.owns(session) else { return }
+            self.requestMode(.window, for: session)
+        }
         sender.onAllowInputRequest = { [weak self, weak session] generation in
             // A request for control, from the connection with this
             // generation; a release is applied by `MacSender` itself and

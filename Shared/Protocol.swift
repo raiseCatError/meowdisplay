@@ -212,6 +212,16 @@ enum WireProtocol {
 /// Control-message `type` strings introduced with the handshake. The pre-
 /// existing types (`hello`, `ping`, `pong`, `touch`, …) stay inline for now to
 /// keep this change additive and low-risk; unify later if we do a wider pass.
+/// Window workspaces (PROTOCOL.md 6.10): the receiver's hello field `ws`
+/// (its workspace version) and the Mac's welcome feature that turn them on.
+enum WindowWorkspaceWire {
+    static let version = 1
+    static let helloField = "ws"
+    static let welcomeFeature = "window"
+    /// `displayModeRequest` / `displayModeState` value for Window mode.
+    static let mode = "window"
+}
+
 enum WireMessage {
     static let welcome = "welcome"                  // Mac -> phone: Mac's pv + min supported
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
@@ -221,6 +231,17 @@ enum WireMessage {
     static let inputReset = "inputReset"             // Mac -> receiver: clear local modifier state
     static let displayModeRequest = "displayModeRequest" // receiver -> Mac: request Mirror/Extend
     static let displayModeState = "displayModeState" // Mac -> receiver: confirmed actual mode
+    // Window workspaces (PROTOCOL.md 6.10). Additive: only exchanged when the
+    // receiver's hello carries `ws` and the Mac's welcome lists "window".
+    static let windowCatalogRequest = "windowCatalogRequest"   // receiver -> Mac: list shareable windows
+    static let windowCatalog = "windowCatalog"                 // Mac -> receiver: windows + running apps
+    static let windowThumbnailRequest = "windowThumbnailRequest" // receiver -> Mac: stills while the picker is open
+    static let windowThumbnail = "windowThumbnail"             // Mac -> receiver: one window's JPEG still
+    static let appIcon = "appIcon"                             // Mac -> receiver: one app's PNG icon
+    static let workspaceRequest = "workspaceRequest"           // receiver -> Mac: tiles (rect, window, rotation, fit)
+    static let workspaceFocus = "workspaceFocus"               // receiver -> Mac: the tile keyboard input goes to
+    static let workspaceState = "workspaceState"               // Mac -> receiver: accepted tiles, states, focus
+    static let windowAction = "windowAction"                   // receiver -> Mac: activate / launch / close (needs control)
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off

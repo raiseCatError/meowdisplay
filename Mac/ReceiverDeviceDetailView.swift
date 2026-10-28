@@ -187,6 +187,12 @@ struct ReceiverDeviceDetailView: View {
                 Text("Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
                     .tag(DeviceModeChoice.mirror)
                     .disabled(!controller.hasUsablePhysicalDisplay)
+                if preference.mode == .window {
+                    // Chosen on the device, which picks the windows; shown so
+                    // the picker reflects it. Switching away is always allowed.
+                    Text("Windows", comment: "Display mode: selected Mac windows, chosen on the device.")
+                        .tag(DeviceModeChoice.window)
+                }
             }
             if session.displayAssignment.mode == .mirror {
                 DeviceMirrorSourcePicker(
@@ -499,12 +505,14 @@ private enum DeviceModeChoice: Hashable {
     case macDefault
     case extend
     case mirror
+    case window
 
     init(_ mode: CaptureMode?) {
         switch mode {
         case nil: self = .macDefault
         case .extend: self = .extend
         case .mirror: self = .mirror
+        case .window: self = .window
         }
     }
 
@@ -513,6 +521,7 @@ private enum DeviceModeChoice: Hashable {
         case .macDefault: return nil
         case .extend: return .extend
         case .mirror: return .mirror
+        case .window: return .window
         }
     }
 }

@@ -252,6 +252,9 @@ targets:
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
       - Shared/WindowWorkspace.swift
+      - Mac/WindowCatalog.swift
+      - Mac/WindowWorkspaceTargeting.swift
+      - Mac/WindowWorkspaceEngine.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift
