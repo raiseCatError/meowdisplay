@@ -366,7 +366,7 @@ struct DemoSettingsPage: View {
         Section {
             Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
                   systemImage: "cable.connector")
-            Label("WiFi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
+            Label("Wi-Fi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
                   systemImage: "wifi")
             Label("Rotate the \(deviceKind) for a vertical second monitor.",
                   systemImage: "rectangle.portrait.rotate")
@@ -437,7 +437,7 @@ struct DemoSettingsPage: View {
         } header: {
             Text("This \(deviceKind)")
         } footer: {
-            Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it. Face ID or your passcode confirms each new pairing.")
+            Text("Wi-Fi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it. Face ID or your passcode confirms each new pairing.")
         }
         Section {
             Label("Screen Recording: lets the Mac app send its screen to this \(deviceKind).", systemImage: "rectangle.dashed.badge.record")

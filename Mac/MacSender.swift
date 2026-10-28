@@ -55,7 +55,7 @@ enum StreamQuality: String, CaseIterable {
         switch self {
         case .best: return String(localized: "Pixel-perfect at the device's native resolution. Highest bandwidth and latency.")
         case .balanced: return String(localized: "75% capture resolution — noticeably lower latency, slight softness.")
-        case .fast: return String(localized: "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi.")
+        case .fast: return String(localized: "Half resolution — lowest latency and bandwidth, visibly softer. Good for Wi-Fi.")
         }
     }
 

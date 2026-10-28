@@ -264,7 +264,7 @@ private struct GeneralSettingsPage: View {
             } header: {
                 Text("Name")
             } footer: {
-                Text("Shown in the Mac app's WiFi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
+                Text("Shown in the Mac app's Wi-Fi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
             }
             Section {
                 AutoReconnectToggle(receiver: receiver)
@@ -1121,7 +1121,7 @@ private struct ConnectionSettingsPage: View {
             Section {
                 Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
                       systemImage: "cable.connector")
-                Label("WiFi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
+                Label("Wi-Fi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
                       systemImage: "wifi")
                 Label("Rotate the \(deviceKind) for a vertical second monitor.",
                       systemImage: "rectangle.portrait.rotate")
@@ -1239,7 +1239,7 @@ private struct PermissionsSettingsPage: View {
                 }
                 .settingsAnchor("localNetwork")
             } footer: {
-                Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it.")
+                Text("Wi-Fi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it.")
             }
         }
         .navigationTitle(MobileSettingsCategory.permissions.title)
@@ -1346,7 +1346,7 @@ private struct AboutSettingsPage: View {
                     Label("Get the Mac app", systemImage: "arrow.down.circle")
                 }
             } footer: {
-                Text("MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet.")
+                Text("MeowDisplay needs the Mac app running on a Mac on the same cable or Wi-Fi network. Download it here if you haven't yet.")
             }
         }
         .navigationTitle(MobileSettingsCategory.about.title)

@@ -1247,7 +1247,7 @@ struct IdleView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { instructionsExpanded.toggle() }
             } label: {
                 HStack {
-                    Text("Connection Instructions")
+                    Text("How to Connect")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                     Image(systemName: instructionsExpanded ? "chevron.up" : "chevron.down")
@@ -1272,9 +1272,9 @@ struct IdleView: View {
 
     private var instructionsCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            instructionRow("cable.connector", "Plug in the USB cable and start the Mac app")
-            instructionRow("wifi", "Or choose this \(deviceKind) under WiFi in the Mac app")
-            instructionRow("play.circle", "Keep this app open — streaming starts automatically")
+            instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
+            instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
+            instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
         }
         .font(.footnote)
         .padding(20)

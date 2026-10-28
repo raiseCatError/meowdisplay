@@ -371,7 +371,7 @@
     "Connection failed" : {
 
     },
-    "Connection Instructions" : {
+    "How to Connect" : {
 
     },
     "Connection log" : {
@@ -833,7 +833,7 @@
     "It will connect using Mirror." : {
 
     },
-    "Keep this app open — streaming starts automatically" : {
+    "Keep this app open. The picture appears on its own." : {
 
     },
     "Keep this app open — streaming starts on its own" : {
@@ -965,7 +965,7 @@
     "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices." : {
 
     },
-    "MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet." : {
+    "MeowDisplay needs the Mac app running on a Mac on the same cable or Wi-Fi network. Download it here if you haven't yet." : {
 
     },
     "MeowDisplay on GitHub" : {
@@ -1127,7 +1127,7 @@
     "Or choose the keys below. Keys are pressed together, then released." : {
 
     },
-    "Or choose this %@ under WiFi in the Mac app" : {
+    "Or, on the same Wi-Fi, choose this %@ in the Mac app" : {
 
     },
     "Orientation" : {
@@ -1256,7 +1256,7 @@
     "Plays a copy of what the Mac is playing. It keeps playing there too — this never changes the Mac's output device." : {
 
     },
-    "Plug in the USB cable and start the Mac app" : {
+    "Plug in the USB cable and open the Mac app" : {
 
     },
     "Port" : {
@@ -1613,7 +1613,7 @@
     "Shown for reference in the demo. These are granted on the Mac when you set up the Mac app. The demo hasn't checked or changed any permission." : {
 
     },
-    "Shown in the Mac app's WiFi connection menu. iOS hides this %@'s real name from apps, so set it here once." : {
+    "Shown in the Mac app's Wi-Fi connection menu. iOS hides this %@'s real name from apps, so set it here once." : {
 
     },
     "Shown on the Strip and Overlay rail, grouped as system actions, then keys, then view controls. Settings always stays on the rail. Move View also needs Allow Local View Navigation." : {
@@ -2070,13 +2070,13 @@
     "While you’re controlling the Mac, MeowDisplay gets priority for the gestures it supports: the first swipe from a screen edge goes to the Mac, and three-finger swipes aren’t taken by editing shortcuts. Some %@ and accessibility gestures always stay with the system, and VoiceOver always takes precedence." : {
 
     },
-    "WiFi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it." : {
+    "Wi-Fi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it." : {
 
     },
-    "WiFi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it. Face ID or your passcode confirms each new pairing." : {
+    "Wi-Fi mode needs Local Network access. If your Mac can't find this %@, enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it. Face ID or your passcode confirms each new pairing." : {
 
     },
-    "WiFi: both devices on the same network, then pick this %@ in the Mac app's Connection menu." : {
+    "Wi-Fi: both devices on the same network, then pick this %@ in the Mac app's Connection menu." : {
 
     },
     "Window" : {

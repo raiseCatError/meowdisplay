@@ -125,7 +125,7 @@ struct DevicesSettingsView: View {
                 // here.
                 let nearby = controller.deviceEntries.filter { controller.pairedPeerID(for: $0) == nil }
                 if nearby.isEmpty {
-                    Text("No devices found — plug one in via USB, or open the MeowDisplay app on a device on this WiFi network.")
+                    Text("No devices found — plug one in via USB, or open the MeowDisplay app on a device on this Wi-Fi network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

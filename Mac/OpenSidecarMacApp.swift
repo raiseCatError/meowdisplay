@@ -2375,7 +2375,7 @@ final class SenderController: ObservableObject {
             }
             return "iPhone / iPad"
         case .wifi(let result):
-            return serviceName(of: result) ?? "WiFi device"
+            return serviceName(of: result) ?? "Wi-Fi device"
         case .remote(let peerID), .remoteCallback(let peerID, _, _):
             let pinned = TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }
             return pinned?.displayName ?? "Remote device"
@@ -3034,9 +3034,9 @@ final class SenderController: ObservableObject {
 
         var transportLabel: String {
             switch (usbTarget != nil, wifiTarget != nil) {
-            case (true, true): return "USB · WiFi"
+            case (true, true): return "USB · Wi-Fi"
             case (true, false): return "USB"
-            case (false, true): return "WiFi"
+            case (false, true): return "Wi-Fi"
             default: return ""
             }
         }

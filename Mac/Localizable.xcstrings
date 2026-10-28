@@ -510,7 +510,7 @@
     "Granted" : {
 
     },
-    "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi." : {
+    "Half resolution — lowest latency and bandwidth, visibly softer. Good for Wi-Fi." : {
 
     },
     "Haptics" : {
@@ -684,7 +684,7 @@
     "No device is currently connected over Remote." : {
 
     },
-    "No devices found — plug one in via USB, or open the MeowDisplay app on a device on this WiFi network." : {
+    "No devices found — plug one in via USB, or open the MeowDisplay app on a device on this Wi-Fi network." : {
 
     },
     "No known devices" : {
@@ -957,7 +957,7 @@
     "Required for touch input from the device." : {
 
     },
-    "Required for WiFi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there." : {
+    "Required for Wi-Fi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there." : {
 
     },
     "Required to capture the display." : {
