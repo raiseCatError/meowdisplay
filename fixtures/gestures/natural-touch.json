@@ -1,183 +1,1605 @@
 {
-  "about": "Hand-written Natural Touch vectors, replayed by MacTests/NaturalTouchVectorTests.swift and AndroidReceiver core NaturalTouchVectorsTest.kt. Steps: touch {id,phase,t,view:[x,y],norm:[x,y]|null}, {poll:t}, {style:natural|classic}, {inputMode:direct|trackpad}, {reset:true}. Expected commands: 'move x y', 'rel dx dy', 'down left|right n', 'up left|right n', 'scroll dx dy', 'scrollEnd momentum|cancel', 'feedback name'. Engine starts with style natural, input mode direct.",
-  "cases": [
-    {"name": "tap clicks once at the touch-down point, on lift",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.2, 0.3]},
-       {"id": 1, "phase": "ended", "t": 0.08, "view": [103, 101], "norm": [0.21, 0.3]},
-       {"poll": 1.0}],
-     "expect": ["move 0.2 0.3", "down left 1", "up left 1"]},
-    {"name": "double tap sends click count 2 on the second tap",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.2, 0.3]},
-       {"id": 1, "phase": "ended", "t": 0.08, "view": [100, 100], "norm": [0.2, 0.3]},
-       {"id": 2, "phase": "began", "t": 0.25, "view": [106, 102], "norm": [0.21, 0.3]},
-       {"id": 2, "phase": "ended", "t": 0.32, "view": [106, 102], "norm": [0.21, 0.3]}],
-     "expect": ["move 0.2 0.3", "down left 1", "up left 1", "move 0.21 0.3", "down left 2", "up left 2"]},
-    {"name": "triple tap caps at 3, a fourth starts again",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "ended", "t": 0.05, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "began", "t": 0.2, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "ended", "t": 0.25, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 3, "phase": "began", "t": 0.4, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 3, "phase": "ended", "t": 0.45, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 4, "phase": "began", "t": 0.6, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 4, "phase": "ended", "t": 0.65, "view": [100, 100], "norm": [0.5, 0.5]}],
-     "expect": ["move 0.5 0.5", "down left 1", "up left 1", "move 0.5 0.5", "down left 2", "up left 2",
-                "move 0.5 0.5", "down left 3", "up left 3", "move 0.5 0.5", "down left 3", "up left 3"]},
-    {"name": "taps too far apart or too slow are separate single clicks",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.2, 0.2]},
-       {"id": 1, "phase": "ended", "t": 0.05, "view": [100, 100], "norm": [0.2, 0.2]},
-       {"id": 2, "phase": "began", "t": 0.2, "view": [200, 100], "norm": [0.4, 0.2]},
-       {"id": 2, "phase": "ended", "t": 0.25, "view": [200, 100], "norm": [0.4, 0.2]},
-       {"id": 3, "phase": "began", "t": 0.8, "view": [200, 100], "norm": [0.4, 0.2]},
-       {"id": 3, "phase": "ended", "t": 0.85, "view": [200, 100], "norm": [0.4, 0.2]}],
-     "expect": ["move 0.2 0.2", "down left 1", "up left 1", "move 0.4 0.2", "down left 1", "up left 1",
-                "move 0.4 0.2", "down left 1", "up left 1"]},
-    {"name": "slow still press shorter than the long press is still a click",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.3, 0.3]},
-       {"poll": 0.3},
-       {"id": 1, "phase": "ended", "t": 0.45, "view": [104, 100], "norm": [0.31, 0.3]}],
-     "expect": ["move 0.3 0.3", "down left 1", "up left 1"]},
-    {"name": "immediate swipe scrolls from the touch-down point, locked to its axis, with momentum",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.05, "view": [100, 130], "norm": [0.5, 0.55]},
-       {"id": 1, "phase": "moved", "t": 0.07, "view": [102, 150], "norm": [0.5, 0.58]},
-       {"id": 1, "phase": "ended", "t": 0.09, "view": [102, 160], "norm": [0.5, 0.6]},
-       {"poll": 1.0}],
-     "expect": ["move 0.5 0.5", "scroll 0 30", "scroll 0 20", "scrollEnd momentum"]},
-    {"name": "cancelled swipe ends without momentum",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.05, "view": [130, 100], "norm": [0.55, 0.5]},
-       {"id": 1, "phase": "cancelled", "t": 0.07, "view": [130, 100], "norm": [0.55, 0.5]}],
-     "expect": ["move 0.5 0.5", "scroll 30 0", "scrollEnd cancel"]},
-    {"name": "brief press then move drags from the touch-down point",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.1, "view": [103, 100], "norm": [0.505, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.3, "view": [130, 100], "norm": [0.55, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.35, "view": [150, 100], "norm": [0.6, 0.5]},
-       {"poll": 0.7},
-       {"id": 1, "phase": "ended", "t": 0.8, "view": [150, 100], "norm": [0.6, 0.5]}],
-     "expect": ["move 0.5 0.5", "down left 1", "move 0.55 0.5", "move 0.6 0.5", "up left 0"]},
-    {"name": "tap then press-drag is a double-click drag",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "ended", "t": 0.05, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "began", "t": 0.2, "view": [101, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "moved", "t": 0.5, "view": [140, 100], "norm": [0.58, 0.5]},
-       {"id": 2, "phase": "ended", "t": 0.6, "view": [140, 100], "norm": [0.58, 0.5]}],
-     "expect": ["move 0.5 0.5", "down left 1", "up left 1", "move 0.5 0.5", "down left 2", "move 0.58 0.5", "up left 0"]},
-    {"name": "still long press right-clicks once; the rest of that touch does nothing",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"poll": 0.3},
-       {"id": 1, "phase": "moved", "t": 0.4, "view": [105, 100], "norm": [0.41, 0.4]},
-       {"poll": 0.56},
-       {"id": 1, "phase": "moved", "t": 0.7, "view": [200, 100], "norm": [0.6, 0.4]},
-       {"id": 2, "phase": "began", "t": 0.75, "view": [300, 100], "norm": [0.7, 0.4]},
-       {"id": 2, "phase": "ended", "t": 0.8, "view": [300, 100], "norm": [0.7, 0.4]},
-       {"id": 1, "phase": "ended", "t": 0.9, "view": [200, 100], "norm": [0.6, 0.4]},
-       {"poll": 2.0}],
-     "expect": ["move 0.4 0.4", "down right 1", "up right 1", "feedback longPressRightClick"]},
-    {"name": "moving before the long press cancels it (drag instead)",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 1, "phase": "moved", "t": 0.45, "view": [130, 100], "norm": [0.45, 0.4]},
-       {"poll": 0.6},
-       {"id": 1, "phase": "ended", "t": 0.7, "view": [130, 100], "norm": [0.45, 0.4]}],
-     "expect": ["move 0.4 0.4", "down left 1", "move 0.45 0.4", "up left 0"]},
-    {"name": "two-finger tap is still a right click",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 2, "phase": "began", "t": 0.03, "view": [140, 100], "norm": [0.45, 0.4]},
-       {"id": 1, "phase": "ended", "t": 0.1, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 2, "phase": "ended", "t": 0.11, "view": [140, 100], "norm": [0.45, 0.4]},
-       {"poll": 0.5}],
-     "expect": ["down right 1", "up right 1"]},
-    {"name": "a second finger during a scroll is ignored",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.05, "view": [100, 130], "norm": [0.5, 0.55]},
-       {"id": 2, "phase": "began", "t": 0.06, "view": [200, 130], "norm": [0.7, 0.55]},
-       {"id": 2, "phase": "moved", "t": 0.07, "view": [200, 160], "norm": [0.7, 0.6]},
-       {"id": 1, "phase": "ended", "t": 0.08, "view": [100, 130], "norm": [0.5, 0.55]},
-       {"id": 2, "phase": "ended", "t": 0.09, "view": [200, 160], "norm": [0.7, 0.6]},
-       {"poll": 1.0}],
-     "expect": ["move 0.5 0.5", "scroll 0 30", "scrollEnd momentum"]},
-    {"name": "three fresh fingers are left to the system-gesture recognizers",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 2, "phase": "began", "t": 0.01, "view": [140, 100], "norm": [0.45, 0.4]},
-       {"id": 3, "phase": "began", "t": 0.02, "view": [180, 100], "norm": [0.5, 0.4]},
-       {"poll": 1.0},
-       {"id": 1, "phase": "ended", "t": 1.1, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 2, "phase": "ended", "t": 1.1, "view": [140, 100], "norm": [0.45, 0.4]},
-       {"id": 3, "phase": "ended", "t": 1.1, "view": [180, 100], "norm": [0.5, 0.4]},
-       {"poll": 2.0}],
-     "expect": []},
-    {"name": "outside the picture: no tap, scroll, drag or right click",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [5, 5], "norm": null},
-       {"id": 1, "phase": "ended", "t": 0.05, "view": [5, 5], "norm": null},
-       {"id": 2, "phase": "began", "t": 1, "view": [5, 5], "norm": null},
-       {"id": 2, "phase": "moved", "t": 1.05, "view": [5, 40], "norm": null},
-       {"id": 2, "phase": "ended", "t": 1.1, "view": [5, 40], "norm": null},
-       {"id": 3, "phase": "began", "t": 2, "view": [5, 5], "norm": null},
-       {"poll": 3.0},
-       {"id": 3, "phase": "ended", "t": 3.1, "view": [5, 5], "norm": null}],
-     "expect": []},
-    {"name": "a cancelled touch (system takeover) does nothing",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"id": 1, "phase": "cancelled", "t": 0.05, "view": [100, 100], "norm": [0.4, 0.4]},
-       {"poll": 1.0}],
-     "expect": []},
-    {"name": "switching to Classic mid-drag releases the button; Classic then buffers its tap",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.3, "view": [130, 100], "norm": [0.55, 0.5]},
-       {"style": "classic"},
-       {"id": 1, "phase": "moved", "t": 0.35, "view": [150, 100], "norm": [0.6, 0.5]},
-       {"id": 1, "phase": "ended", "t": 0.4, "view": [150, 100], "norm": [0.6, 0.5]},
-       {"id": 2, "phase": "began", "t": 1, "view": [100, 100], "norm": [0.2, 0.2]},
-       {"id": 2, "phase": "ended", "t": 1.05, "view": [100, 100], "norm": [0.2, 0.2]},
-       {"poll": 1.5}],
-     "expect": ["move 0.5 0.5", "down left 1", "move 0.55 0.5", "up left 0", "move 0.2 0.2", "down left 1", "up left 1"]},
-    {"name": "Classic swipe moves the pointer instead of scrolling",
-     "steps": [
-       {"style": "classic"},
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.05, "view": [100, 130], "norm": [0.5, 0.55]},
-       {"id": 1, "phase": "ended", "t": 0.09, "view": [100, 130], "norm": [0.5, 0.55]},
-       {"poll": 1.0}],
-     "expect": ["move 0.5 0.55"]},
-    {"name": "Trackpad mode ignores the touch style",
-     "steps": [
-       {"inputMode": "trackpad"},
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.05, "view": [130, 100], "norm": [0.55, 0.5]},
-       {"id": 1, "phase": "moved", "t": 0.07, "view": [140, 100], "norm": [0.57, 0.5]},
-       {"id": 1, "phase": "ended", "t": 0.09, "view": [140, 100], "norm": [0.57, 0.5]},
-       {"poll": 1.0}],
-     "expect": ["rel 10 0"]},
-    {"name": "reset (disconnect, View Only, revoke) mid-drag releases the button and forgets the click chain",
-     "steps": [
-       {"id": 1, "phase": "began", "t": 0, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 1, "phase": "ended", "t": 0.05, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "began", "t": 0.1, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 2, "phase": "moved", "t": 0.4, "view": [140, 100], "norm": [0.58, 0.5]},
-       {"reset": true},
-       {"id": 2, "phase": "moved", "t": 0.45, "view": [150, 100], "norm": [0.6, 0.5]},
-       {"id": 2, "phase": "ended", "t": 0.5, "view": [150, 100], "norm": [0.6, 0.5]},
-       {"id": 3, "phase": "began", "t": 0.6, "view": [100, 100], "norm": [0.5, 0.5]},
-       {"id": 3, "phase": "ended", "t": 0.65, "view": [100, 100], "norm": [0.5, 0.5]}],
-     "expect": ["move 0.5 0.5", "down left 1", "up left 1", "move 0.5 0.5", "down left 2", "move 0.58 0.5", "up left 0",
-                "move 0.5 0.5", "down left 1", "up left 1"]}
-  ]
+ "about": "Hand-written Natural Touch vectors, replayed by MacTests/NaturalTouchVectorTests.swift and AndroidReceiver core NaturalTouchVectorsTest.kt. Steps: touch {id,phase,t,view:[x,y],norm:[x,y]|null}, {poll:t}, {style:natural|classic}, {inputMode:direct|trackpad}, {reset:true}. Expected commands: 'move x y', 'rel dx dy', 'down left|right n', 'up left|right n', 'scroll dx dy', 'scrollEnd momentum|cancel', 'feedback name'. Thresholds: press 0.25 s, long press 0.5 s, momentum travel 24. Engine starts with style natural, input mode direct.",
+ "cases": [
+  {
+   "name": "tap clicks once at the touch-down point, on lift",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.3
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.08,
+     "view": [
+      103,
+      101
+     ],
+     "norm": [
+      0.21,
+      0.3
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "move 0.2 0.3",
+    "down left 1",
+    "up left 1"
+   ]
+  },
+  {
+   "name": "double tap sends click count 2 on the second tap",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.3
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.08,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.3
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.25,
+     "view": [
+      106,
+      102
+     ],
+     "norm": [
+      0.21,
+      0.3
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.32,
+     "view": [
+      106,
+      102
+     ],
+     "norm": [
+      0.21,
+      0.3
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.2 0.3",
+    "down left 1",
+    "up left 1",
+    "move 0.21 0.3",
+    "down left 2",
+    "up left 2"
+   ]
+  },
+  {
+   "name": "triple tap caps at 3, a fourth starts again",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.2,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.25,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "began",
+     "t": 0.4,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "ended",
+     "t": 0.45,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 4,
+     "phase": "began",
+     "t": 0.6,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 4,
+     "phase": "ended",
+     "t": 0.65,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "down left 1",
+    "up left 1",
+    "move 0.5 0.5",
+    "down left 2",
+    "up left 2",
+    "move 0.5 0.5",
+    "down left 3",
+    "up left 3",
+    "move 0.5 0.5",
+    "down left 3",
+    "up left 3"
+   ]
+  },
+  {
+   "name": "taps too far apart or too slow are separate single clicks",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.2
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.2
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.2,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.2
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.25,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.2
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "began",
+     "t": 0.8,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.2
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "ended",
+     "t": 0.85,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.2
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.2 0.2",
+    "down left 1",
+    "up left 1",
+    "move 0.4 0.2",
+    "down left 1",
+    "up left 1",
+    "move 0.4 0.2",
+    "down left 1",
+    "up left 1"
+   ]
+  },
+  {
+   "name": "slow still press shorter than the long press is still a click",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.3,
+      0.3
+     ]
+    },
+    {
+     "poll": 0.3
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.45,
+     "view": [
+      104,
+      100
+     ],
+     "norm": [
+      0.31,
+      0.3
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.3 0.3",
+    "down left 1",
+    "up left 1"
+   ]
+  },
+  {
+   "name": "immediate swipe scrolls from the touch-down point, locked to its axis, with momentum",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      100,
+      130
+     ],
+     "norm": [
+      0.5,
+      0.55
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.07,
+     "view": [
+      102,
+      150
+     ],
+     "norm": [
+      0.5,
+      0.58
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.09,
+     "view": [
+      102,
+      160
+     ],
+     "norm": [
+      0.5,
+      0.6
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "scroll 0 30",
+    "scroll 0 20",
+    "scrollEnd momentum"
+   ]
+  },
+  {
+   "name": "cancelled swipe ends without momentum",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.55,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "cancelled",
+     "t": 0.07,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.55,
+      0.5
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "scroll 30 0",
+    "scrollEnd cancel"
+   ]
+  },
+  {
+   "name": "a tap that slips just past the slop scrolls 1:1 and stops dead (no momentum)",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.03,
+     "view": [
+      100,
+      113
+     ],
+     "norm": [
+      0.5,
+      0.52
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      100,
+      113
+     ],
+     "norm": [
+      0.5,
+      0.52
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "scroll 0 13",
+    "scrollEnd cancel"
+   ]
+  },
+  {
+   "name": "a short deliberate flick past the momentum travel coasts",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.03,
+     "view": [
+      100,
+      112
+     ],
+     "norm": [
+      0.5,
+      0.52
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      100,
+      126
+     ],
+     "norm": [
+      0.5,
+      0.54
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.06,
+     "view": [
+      100,
+      126
+     ],
+     "norm": [
+      0.5,
+      0.54
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "scroll 0 12",
+    "scroll 0 14",
+    "scrollEnd momentum"
+   ]
+  },
+  {
+   "name": "brief press then move drags from the touch-down point",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.1,
+     "view": [
+      103,
+      100
+     ],
+     "norm": [
+      0.505,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.3,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.55,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.35,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    },
+    {
+     "poll": 0.7
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.8,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "down left 1",
+    "move 0.55 0.5",
+    "move 0.6 0.5",
+    "up left 0"
+   ]
+  },
+  {
+   "name": "tap then press-drag is a double-click drag",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.2,
+     "view": [
+      101,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "moved",
+     "t": 0.5,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.58,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.6,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.58,
+      0.5
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "down left 1",
+    "up left 1",
+    "move 0.5 0.5",
+    "down left 2",
+    "move 0.58 0.5",
+    "up left 0"
+   ]
+  },
+  {
+   "name": "still long press right-clicks once; the rest of that touch does nothing",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "poll": 0.3
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.4,
+     "view": [
+      105,
+      100
+     ],
+     "norm": [
+      0.41,
+      0.4
+     ]
+    },
+    {
+     "poll": 0.56
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.7,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.75,
+     "view": [
+      300,
+      100
+     ],
+     "norm": [
+      0.7,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.8,
+     "view": [
+      300,
+      100
+     ],
+     "norm": [
+      0.7,
+      0.4
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.9,
+     "view": [
+      200,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.4
+     ]
+    },
+    {
+     "poll": 2.0
+    }
+   ],
+   "expect": [
+    "move 0.4 0.4",
+    "down right 1",
+    "up right 1",
+    "feedback longPressRightClick"
+   ]
+  },
+  {
+   "name": "moving before the long press cancels it (drag instead)",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.45,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    },
+    {
+     "poll": 0.6
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.7,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.4 0.4",
+    "down left 1",
+    "move 0.45 0.4",
+    "up left 0"
+   ]
+  },
+  {
+   "name": "two-finger tap is still a right click",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.03,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.1,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.11,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    },
+    {
+     "poll": 0.5
+    }
+   ],
+   "expect": [
+    "down right 1",
+    "up right 1"
+   ]
+  },
+  {
+   "name": "a second finger during a scroll is ignored",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      100,
+      130
+     ],
+     "norm": [
+      0.5,
+      0.55
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.06,
+     "view": [
+      200,
+      130
+     ],
+     "norm": [
+      0.7,
+      0.55
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "moved",
+     "t": 0.07,
+     "view": [
+      200,
+      160
+     ],
+     "norm": [
+      0.7,
+      0.6
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.08,
+     "view": [
+      100,
+      130
+     ],
+     "norm": [
+      0.5,
+      0.55
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.09,
+     "view": [
+      200,
+      160
+     ],
+     "norm": [
+      0.7,
+      0.6
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "scroll 0 30",
+    "scrollEnd momentum"
+   ]
+  },
+  {
+   "name": "three fresh fingers are left to the system-gesture recognizers",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.01,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "began",
+     "t": 0.02,
+     "view": [
+      180,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.4
+     ]
+    },
+    {
+     "poll": 1.0
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 1.1,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 1.1,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.45,
+      0.4
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "ended",
+     "t": 1.1,
+     "view": [
+      180,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.4
+     ]
+    },
+    {
+     "poll": 2.0
+    }
+   ],
+   "expect": []
+  },
+  {
+   "name": "outside the picture: no tap, scroll, drag or right click",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      5,
+      5
+     ],
+     "norm": null
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      5,
+      5
+     ],
+     "norm": null
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 1,
+     "view": [
+      5,
+      5
+     ],
+     "norm": null
+    },
+    {
+     "id": 2,
+     "phase": "moved",
+     "t": 1.05,
+     "view": [
+      5,
+      40
+     ],
+     "norm": null
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 1.1,
+     "view": [
+      5,
+      40
+     ],
+     "norm": null
+    },
+    {
+     "id": 3,
+     "phase": "began",
+     "t": 2,
+     "view": [
+      5,
+      5
+     ],
+     "norm": null
+    },
+    {
+     "poll": 3.0
+    },
+    {
+     "id": 3,
+     "phase": "ended",
+     "t": 3.1,
+     "view": [
+      5,
+      5
+     ],
+     "norm": null
+    }
+   ],
+   "expect": []
+  },
+  {
+   "name": "a cancelled touch (system takeover) does nothing",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "cancelled",
+     "t": 0.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.4,
+      0.4
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": []
+  },
+  {
+   "name": "switching to Classic mid-drag releases the button; Classic then buffers its tap",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.3,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.55,
+      0.5
+     ]
+    },
+    {
+     "style": "classic"
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.35,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.4,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 1,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.2
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 1.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.2,
+      0.2
+     ]
+    },
+    {
+     "poll": 1.5
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "down left 1",
+    "move 0.55 0.5",
+    "up left 0",
+    "move 0.2 0.2",
+    "down left 1",
+    "up left 1"
+   ]
+  },
+  {
+   "name": "Classic swipe moves the pointer instead of scrolling",
+   "steps": [
+    {
+     "style": "classic"
+    },
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      100,
+      130
+     ],
+     "norm": [
+      0.5,
+      0.55
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.09,
+     "view": [
+      100,
+      130
+     ],
+     "norm": [
+      0.5,
+      0.55
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "move 0.5 0.55"
+   ]
+  },
+  {
+   "name": "Trackpad mode ignores the touch style",
+   "steps": [
+    {
+     "inputMode": "trackpad"
+    },
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.05,
+     "view": [
+      130,
+      100
+     ],
+     "norm": [
+      0.55,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "moved",
+     "t": 0.07,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.57,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.09,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.57,
+      0.5
+     ]
+    },
+    {
+     "poll": 1.0
+    }
+   ],
+   "expect": [
+    "rel 10 0"
+   ]
+  },
+  {
+   "name": "reset (disconnect, View Only, revoke) mid-drag releases the button and forgets the click chain",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.05,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "began",
+     "t": 0.1,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "moved",
+     "t": 0.4,
+     "view": [
+      140,
+      100
+     ],
+     "norm": [
+      0.58,
+      0.5
+     ]
+    },
+    {
+     "reset": true
+    },
+    {
+     "id": 2,
+     "phase": "moved",
+     "t": 0.45,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    },
+    {
+     "id": 2,
+     "phase": "ended",
+     "t": 0.5,
+     "view": [
+      150,
+      100
+     ],
+     "norm": [
+      0.6,
+      0.5
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "began",
+     "t": 0.6,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    },
+    {
+     "id": 3,
+     "phase": "ended",
+     "t": 0.65,
+     "view": [
+      100,
+      100
+     ],
+     "norm": [
+      0.5,
+      0.5
+     ]
+    }
+   ],
+   "expect": [
+    "move 0.5 0.5",
+    "down left 1",
+    "up left 1",
+    "move 0.5 0.5",
+    "down left 2",
+    "move 0.58 0.5",
+    "up left 0",
+    "move 0.5 0.5",
+    "down left 1",
+    "up left 1"
+   ]
+  }
+ ]
 }

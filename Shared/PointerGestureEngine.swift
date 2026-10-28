@@ -184,8 +184,15 @@ enum PointerGestureConfig {
     /// "touch and immediate pan" scrolls (TN3212).
     static let naturalPressDelay: TimeInterval = 0.25
     /// Natural Touch: a finger held still (within `dragSlop`) this long from
-    /// touch-down right-clicks at the touch-down point, once.
-    static let naturalLongPressDelay: TimeInterval = 0.55
+    /// touch-down right-clicks at the touch-down point, once. 0.5 s matches
+    /// iOS's long press; Android's own is 0.4 s. Tuned down from 0.55 s on a
+    /// Moto G5S Plus: holds sweep cleanly (one click or one right click).
+    static let naturalLongPressDelay: TimeInterval = 0.5
+    /// Natural Touch: a scroll coasts after lift only once the finger has
+    /// travelled this far from touch-down. A tap that slips just past
+    /// `dragSlop` otherwise coasts several times its own travel (measured on
+    /// the Moto: a 12 pt slip scrolled 211 px), a ghost scroll.
+    static let naturalMomentumMinTravel: CGFloat = 24
     /// Natural Touch sends each tap's click on lift. A tap that lands within
     /// this long of the previous tap's lift, and within
     /// `tapChainMaxDistance`, counts as the next click (double, triple).
@@ -400,6 +407,8 @@ final class PointerGestureEngine {
     private var smartTouchProbe = SmartTouchProbeState.none
     private var nextSmartTouchProbeID = 0
     private var smartScrollLastView: CGPoint?
+    /// Where the current scroll's finger touched down (Natural momentum gate).
+    private var smartScrollStartView: CGPoint?
 
     /// Axes a Smart Touch scroll may move on, fixed at commit — see
     /// `smartScrollAxisLockRatio`.
@@ -1225,7 +1234,12 @@ final class PointerGestureEngine {
 
         case .smartScroll:
             if sample.id == anchorID {
-                out.append(.scrollEnded(momentum: !cancelled))
+                var momentum = !cancelled
+                if touchStyle == .natural, let start = smartScrollStartView {
+                    momentum = momentum && hypot(sample.viewPoint.x - start.x, sample.viewPoint.y - start.y)
+                        >= PointerGestureConfig.naturalMomentumMinTravel
+                }
+                out.append(.scrollEnded(momentum: momentum))
                 resetToIdle()
             }
 
@@ -1352,6 +1366,7 @@ final class PointerGestureEngine {
         anchorViewPoint = viewPoint
         mode = .smartScroll
         smartScrollLastView = viewPoint
+        smartScrollStartView = start?.view
         smartScrollAxis = .free
         var out: [PointerCommand] = []
         if let start {
@@ -1645,6 +1660,7 @@ final class PointerGestureEngine {
         heldMouseButton = nil
         smartTouchProbe = .none
         smartScrollLastView = nil
+        smartScrollStartView = nil
         smartScrollAxis = .free
         titleBarHoldActive = false
         naturalLastClick = nil
