@@ -143,9 +143,12 @@ sealed interface WNode {
     }
 }
 
-enum class WPreset(val slotCount: Int) {
-    Single(1), SideBySide(2), Stacked(2), PrimaryPlusTwo(3), ThreeColumns(3), ThreeRows(3),
-    Grid2x2(4), Grid3x2(6), Grid2x3(6), Grid3x3(9), PrimaryPlusFour(5);
+/** [title]: what a person hears or reads for the layout ("Two side by side"). */
+enum class WPreset(val slotCount: Int, val title: String) {
+    Single(1, "One window"), SideBySide(2, "Two side by side"), Stacked(2, "Two stacked"),
+    PrimaryPlusTwo(3, "One large and two small"), ThreeColumns(3, "Three side by side"), ThreeRows(3, "Three stacked"),
+    Grid2x2(4, "Four in a grid"), Grid3x2(6, "Six, three across"), Grid2x3(6, "Six, two across"),
+    Grid3x3(9, "Nine in a grid"), PrimaryPlusFour(5, "One large and four small");
 
     fun node(tiles: List<String?>): WNode {
         val queue = ArrayDeque(tiles)

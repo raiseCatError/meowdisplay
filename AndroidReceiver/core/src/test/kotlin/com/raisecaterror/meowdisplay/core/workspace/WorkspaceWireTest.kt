@@ -75,4 +75,19 @@ class WorkspaceWireTest {
         assertEquals("workspaceRequest", msg.getValue("type").jsonPrimitive.content)
         assertEquals(1, msg.getValue("tiles").jsonArray.size)
     }
+
+    @Test
+    fun aTileIsMissingOnlyWhileItsWindowIsUnlisted() {
+        fun window(id: Long, bundle: String) = CatalogWindow(id, 1, bundle, bundle, "t", 800, 600, WindowAvailability.Visible, false)
+        val catalog = WindowCatalog("m", listOf(window(10, "dev.zed.Zed"), window(12, "dev.qa.probe")), emptyList(), emptyList(), false)
+        val layout = WLayout.preset(WPreset.ThreeColumns, listOf(
+            WTile("a", WSource("m", 10, bundleID = "dev.zed.Zed")),
+            WTile("b", WSource("m", 11, bundleID = "dev.qa.probe")),   // closed
+            WTile("c", WSource("m", 12, bundleID = "com.apple.Safari")),   // id reused by another app
+        ))
+        assertEquals(setOf("b", "c"), catalog.missingTiles(layout))
+        // Choosing a listed window for a missing tile clears its mark.
+        assertEquals(setOf("c"), catalog.missingTiles(layout.replacingSource("b", WSource("m", 12, bundleID = "dev.qa.probe"))))
+        assertEquals(setOf("b"), catalog.missingTiles(layout.removing("c")))
+    }
 }

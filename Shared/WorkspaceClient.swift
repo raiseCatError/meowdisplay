@@ -369,13 +369,26 @@ final class WorkspaceModel: ObservableObject {
         var updated = next
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
         saved = stacked.isEmpty ? next : updated
+        refreshMissing()
         persist(); publish(); scheduleSend()
     }
 
     func undo() {
         guard let previous = history.undo() else { return }
         saved = previous
+        refreshMissing()
         persist(); publish(); scheduleSend()
+    }
+
+    /// After an edit: a tile is missing only while its window is unlisted, so
+    /// choosing another window for it (or removing it) clears the mark.
+    private func refreshMissing() {
+        guard let c = catalog else { return }
+        missing = Set(saved.tiles.compactMap { id, tile in
+            guard let source = tile.source else { return nil }
+            let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
+            return listed ? nil : id
+        })
     }
 
     func apply(_ preset: WorkspacePreset) {

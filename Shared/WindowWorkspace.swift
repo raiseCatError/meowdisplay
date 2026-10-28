@@ -258,6 +258,23 @@ enum WorkspacePreset: String, Codable, CaseIterable, Sendable {
     case grid3x3
     case primaryPlusFour
 
+    /// What a person hears or reads for the layout ("Two side by side").
+    var title: String {
+        switch self {
+        case .single: return "One window"
+        case .sideBySide: return "Two side by side"
+        case .stacked: return "Two stacked"
+        case .primaryPlusTwo: return "One large and two small"
+        case .threeColumns: return "Three side by side"
+        case .threeRows: return "Three stacked"
+        case .grid2x2: return "Four in a grid"
+        case .grid3x2: return "Six, three across"
+        case .grid2x3: return "Six, two across"
+        case .grid3x3: return "Nine in a grid"
+        case .primaryPlusFour: return "One large and four small"
+        }
+    }
+
     var slotCount: Int {
         switch self {
         case .single: return 1

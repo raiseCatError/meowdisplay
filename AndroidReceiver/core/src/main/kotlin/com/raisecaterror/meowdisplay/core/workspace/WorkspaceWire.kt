@@ -100,6 +100,15 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
         return windows.filter { it.title.contains(q, ignoreCase = true) || it.app.contains(q, ignoreCase = true) }
     }
 
+    /**
+     * Tiles of [layout] whose window isn't listed, or whose id now belongs to another app: kept
+     * and marked on the device, never sent. A tile given a listed window is no longer missing.
+     */
+    fun missingTiles(layout: WLayout): Set<String> = layout.tiles.mapNotNullTo(mutableSetOf()) { (id, tile) ->
+        val source = tile.source ?: return@mapNotNullTo null
+        id.takeUnless { windows.any { it.id == source.windowID && (source.bundleID == null || source.bundleID == it.bundleID) } }
+    }
+
     companion object {
         fun parse(obj: JsonObject): WindowCatalog {
             val windows = obj.arrayOrEmpty("windows").objects().take(WorkspaceWire.MAX_WINDOWS).mapNotNull { w ->

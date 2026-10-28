@@ -148,12 +148,11 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         // keep a saved tile only for the same window id of the same app.
         val byID = catalog.windows.associateBy { it.id }
         var rebased = saved
-        val missing = mutableSetOf<String>()
+        val missing = catalog.missingTiles(saved)
         for ((id, tile) in saved.tiles) {
             val source = tile.source ?: continue
-            val window = byID[source.windowID]
-            if (window == null || (source.bundleID != null && source.bundleID != window.bundleID)) missing += id
-            else if (window.generation != source.generation) rebased = rebased.replacingSource(id, source.copy(generation = window.generation, bundleID = window.bundleID))
+            val window = byID[source.windowID] ?: continue
+            if (id !in missing && window.generation != source.generation) rebased = rebased.replacingSource(id, source.copy(generation = window.generation, bundleID = window.bundleID))
         }
         if (rebased != saved) { saved = rebased; persist() }
         state.update { it.copy(missing = missing) }
@@ -235,14 +234,22 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         var updated = next
         for (id in state.value.stacked) saved.tiles[id]?.let { updated = updated.adding(it, size.width >= size.height) }
         saved = if (state.value.stacked.isEmpty()) next else updated
+        refreshMissing()
         persist()
         publish()
         scheduleSend()
     }
 
+    /** After an edit: a tile is missing only while its window is unlisted, so choosing another window for it (or removing it) clears the mark. */
+    private fun refreshMissing() {
+        val catalog = state.value.catalog ?: return
+        state.update { it.copy(missing = catalog.missingTiles(saved)) }
+    }
+
     fun undo() {
         val previous = history.undo() ?: return
         saved = previous
+        refreshMissing()
         persist(); publish(); scheduleSend()
     }
 

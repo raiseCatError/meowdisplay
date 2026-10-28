@@ -105,7 +105,7 @@ struct WorkspaceChromeView: View {
         case .live: return nil
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
         case .offscreen: return "\(app) is minimized or hidden on the Mac"
-        case .closed: return "This window was closed"
+        case .closed: return "This window was closed. Tap to choose another."
         case .failed: return "Can't show this window right now"
         case .limit: return "Paused: too many windows at once"
         }
@@ -131,7 +131,9 @@ struct WorkspaceChromeView: View {
             if multi || model.arranging { pill(id: id, tile: tile, active: active, rect: rect) }
             if active, model.remote?.hostFocus.isMismatch == true {
                 Button { model.focus(id) } label: {
-                    Text("Typing paused: another app is in front on the Mac. Tap to resume.")
+                    Text(model.remote?.hostFocus == .otherWindowFocused
+                         ? "Typing paused: another window is in front on the Mac. Tap to resume."
+                         : "Typing paused: another app is in front on the Mac. Tap to resume.")
                         .font(.caption).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
                         .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
                 }
@@ -321,6 +323,7 @@ private struct RailCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "window" : window.title)")
+        .accessibilityValue(current ? "Showing" : "")
     }
 }
 
@@ -461,6 +464,7 @@ private struct OverviewCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "untitled window" : window.title)" + (window.minimized ? ", minimized" : ""))
+        .accessibilityValue(current ? "Showing" : "")
     }
 }
 
@@ -487,7 +491,7 @@ struct WorkspacePresetsView: View {
                         .frame(width: 52, height: 34)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Layout: \(preset.slotCount) window\(preset.slotCount == 1 ? "" : "s")")
+                    .accessibilityLabel("Layout: \(preset.title)")
                 }
             }
         }

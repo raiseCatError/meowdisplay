@@ -93,6 +93,28 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(m.missing.count, 1)
     }
 
+    func testChoosingAWindowForAClosedTileShowsAndSendsIt() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-d"))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 1, "dev.qa.probe")]))
+        m.updateSpace(WorkspaceSize(width: 390, height: 844), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        let tile = m.layout.orderedTileIDs[0]
+        // The window closes and the app opens a new one.
+        m.apply(catalog([(12, 1, "dev.qa.probe")]))
+        XCTAssertEqual(m.missing, [tile])
+        m.openOverview(replacing: tile)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        XCTAssertTrue(m.missing.isEmpty, "the tile shows its new window, not \"Choose a window\"")
+        let exp = expectation(description: "debounced send")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+        let request = sent.last { $0["type"] as? String == WireMessage.workspaceRequest }
+        XCTAssertEqual((request?["tiles"] as? [[String: Any]])?.compactMap { $0["window"] as? Int }, [12])
+    }
+
     func testCompactSpaceStacksTilesAndKeepsThem() {
         let m = model { _ in }
         m.apply(.connected(peerID: "mac-c"))

@@ -72,6 +72,7 @@ import com.raisecaterror.meowdisplay.core.controls.CGPoint
 import com.raisecaterror.meowdisplay.core.controls.CGRect
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
 import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
+import com.raisecaterror.meowdisplay.core.workspace.HostFocus
 import com.raisecaterror.meowdisplay.core.workspace.TileStatus
 import com.raisecaterror.meowdisplay.core.workspace.WDropTarget
 import com.raisecaterror.meowdisplay.core.workspace.WFit
@@ -135,7 +136,7 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                     remote == null -> null
                     remote.state == TileStatus.Waiting -> "Waiting for ${remote.app.ifEmpty { "the window" }}…"
                     remote.state == TileStatus.Offscreen -> "${remote.app.ifEmpty { "This window" }} is minimized or hidden on the Mac"
-                    remote.state == TileStatus.Closed -> "This window was closed"
+                    remote.state == TileStatus.Closed -> "This window was closed. Tap to choose another."
                     remote.state == TileStatus.Failed -> "Can't show this window right now"
                     remote.state == TileStatus.Limit -> "Paused: too many windows at once"
                     else -> null
@@ -193,7 +194,8 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                 }
                 if (active && ui.remote?.hostFocus?.isMismatch == true) {
                     Text(
-                        "Typing paused: another app is in front on the Mac. Tap to resume.",
+                        if (ui.remote?.hostFocus == HostFocus.OtherWindowFocused) "Typing paused: another window is in front on the Mac. Tap to resume."
+                        else "Typing paused: another app is in front on the Mac. Tap to resume.",
                         color = Color.White, style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp).background(Chip, RoundedCornerShape(10.dp))
                             .clickable { controller.focus(id) }.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -328,7 +330,10 @@ fun WindowRail(controller: WorkspaceController) {
 private fun RailCard(w: CatalogWindow, thumb: ImageBitmap?, current: Boolean, onPick: () -> Unit, onAdd: (() -> Unit)?) {
     Column(
         Modifier.width(132.dp).clip(RoundedCornerShape(10.dp)).border(if (current) 2.dp else 0.dp, if (current) Accent else Color.Transparent, RoundedCornerShape(10.dp))
-            .clickable(onClick = onPick).semantics { contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" },
+            .clickable(onClick = onPick).semantics {
+                contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}"
+                if (current) stateDescription = "Showing"
+            },
     ) {
         Box(Modifier.fillMaxWidth().height(64.dp).background(Color(0xFF2C2C2E))) {
             thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
@@ -422,7 +427,10 @@ private fun OverviewCard(w: CatalogWindow, thumb: ImageBitmap?, icon: ImageBitma
         Modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF1F1F22))
             .border(if (current) 2.dp else 0.dp, if (current) Accent else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(onClick = onPick)
-            .semantics { contentDescription = "${w.app}: ${w.title.ifEmpty { "untitled window" }}" + if (w.availability == WindowAvailability.Offscreen) ", minimized" else "" },
+            .semantics {
+                contentDescription = "${w.app}: ${w.title.ifEmpty { "untitled window" }}" + if (w.availability == WindowAvailability.Offscreen) ", minimized" else ""
+                if (current) stateDescription = "Showing"
+            },
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color(0xFF2C2C2E))) {
             if (thumb != null) Image(thumb, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
@@ -461,7 +469,7 @@ fun LayoutPresets(capacity: Int, tileCount: Int, onPick: (WPreset) -> Unit) {
             val slots = WGeometry.frames(com.raisecaterror.meowdisplay.core.workspace.WLayout.of(node, (0 until preset.slotCount).associate { "s$it" to com.raisecaterror.meowdisplay.core.workspace.WTile("s$it") }), WSize(160.0, 100.0)).slots
             Canvas(
                 Modifier.size(52.dp, 34.dp).clickable { onPick(preset) }
-                    .semantics { contentDescription = "Layout: ${preset.slotCount} window${if (preset.slotCount == 1) "" else "s"}, ${preset.name}" },
+                    .semantics { contentDescription = "Layout: ${preset.title}" },
             ) {
                 val stroke = Stroke(width = 1.5f * density)
                 for (r in slots) {
