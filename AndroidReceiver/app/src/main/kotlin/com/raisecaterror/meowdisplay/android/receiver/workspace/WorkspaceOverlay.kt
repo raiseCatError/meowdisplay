@@ -62,6 +62,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -268,7 +269,10 @@ fun WindowRail(controller: WorkspaceController) {
             Box(
                 Modifier.align(align).padding(4.dp)
                     .clickable { controller.setRailExpanded(true) }
-                    .semantics { contentDescription = "Show windows" + (current?.let { ", now $it" } ?: "") }
+                    .semantics {
+                        contentDescription = "Show windows"
+                        current?.let { stateDescription = "Now showing $it" }
+                    }
                     .padding(10.dp),
                 contentAlignment = Alignment.Center,
             ) {

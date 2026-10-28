@@ -1,5 +1,6 @@
 package com.raisecaterror.meowdisplay.core
 
+import kotlinx.serialization.json.jsonArray
 import com.raisecaterror.meowdisplay.core.crypto.uint32BE
 import com.raisecaterror.meowdisplay.core.pairing.InMemoryPeerTrustStore
 import com.raisecaterror.meowdisplay.core.pairing.PairingAttempt
@@ -277,7 +278,7 @@ class EmulatorSmokeTest {
         adb("forward", "tcp:$PAIRING", "tcp:9002")
         adb("forward", "tcp:$MEDIA", "tcp:9001")
         adb("shell", "am", "start", "-W", "-n", "$APP/com.raisecaterror.meowdisplay.android.ui.MainActivity")
-        waitFor("home") { it.contains("Paired Macs") }
+        waitFor("home") { it.contains("Your Macs") }
 
         val mac = TestIdentity("smoke-mac")
         val macName = "Smoke Mac " + UUID.randomUUID().toString().take(4)
@@ -451,6 +452,96 @@ class EmulatorSmokeTest {
             "paired ${pending.peerID} sas=$macSas; first keyframe rendered (first GOP only); rotation kept the session and decoded again; HEVC decoded; reconnect re-admitted and decoded; closing; stranger refused\n" +
                 adb("logcat", "-d", "-s", "MeowDecoder"),
         )
+    }
+
+    /**
+     * Window mode end to end against the installed app (PROTOCOL.md 6.10), with this test
+     * playing the Mac: hello carries `ws`, the rail lists the Mac's windows, choosing and
+     * adding windows sends tiles for listed windows only (with their generations), rotate and
+     * remove change only the request, and removing a tile never closes a Mac window.
+     */
+    @Test
+    fun windowModeArrangesMacWindowsAgainstTheInstalledApp() = runBlocking {
+        assumeTrue("set MEOW_EMULATOR_SERIAL to run against an emulator", serial != null)
+        adb("forward", "tcp:$PAIRING", "tcp:9002")
+        adb("forward", "tcp:$MEDIA", "tcp:9001")
+        adb("shell", "am", "start", "-W", "-n", "$APP/com.raisecaterror.meowdisplay.android.ui.MainActivity")
+        waitFor("home") { it.contains("Your Macs") }
+        val mac = TestIdentity("window-mac")
+        val macName = "Window Mac " + UUID.randomUUID().toString().take(4)
+        val macStore = InMemoryPeerTrustStore()
+        val tapper = async(Dispatchers.IO) { tap("Codes Match") }
+        val pending = Socket(InetAddress.getLoopbackAddress(), PAIRING).use { socket ->
+            withTimeout(60_000) {
+                PairingAttempt(SocketPairingTransport(socket), macStore, UUID.randomUUID().toString().uppercase(), macName, mac.spki)
+                    .runInitiator(decide = { true })
+            }
+        }
+        tapper.await()
+        val receiverSPKI = macStore.pin(pending.peerID)!!
+        Mac(mac, receiverSPKI).use { session ->
+            val hello = session.expect("hello")
+            assertEquals("hello announces window workspaces", "1", hello["ws"]?.jsonPrimitive?.content)
+            session.send("{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"features\":[\"window\"]}")
+            session.send("{\"type\":\"sessionInvite\",\"id\":\"win\",\"initiator\":\"sender\",\"intent\":\"automatic\",\"mode\":\"extend\",\"awaitingSender\":false}")
+            session.expect("kf")
+            val ping = session.expect("ping")
+            session.send("{\"type\":\"pong\",\"t\":${ping["t"]!!.jsonPrimitive.content},\"mt\":${System.currentTimeMillis()}}")
+            // The composited canvas, as a real Mac would stream it.
+            stream(session, accessUnits(resource("video/testsrc-320x180.h264"), hevc = false).take(30))
+            waitForLog("output 320x180 (h264)")
+            session.send("{\"type\":\"displayModeState\",\"mode\":\"window\"}")
+            session.expect("windowCatalogRequest")
+            val catalog = "{\"type\":\"windowCatalog\",\"host\":\"${pending.peerID}\",\"windows\":[" +
+                "{\"id\":101,\"gen\":7,\"bundle\":\"dev.zed.Zed\",\"app\":\"Zed\",\"title\":\"main.rs\",\"w\":1200,\"h\":800,\"state\":\"visible\"}," +
+                "{\"id\":102,\"gen\":8,\"bundle\":\"com.apple.Safari\",\"app\":\"Safari\",\"title\":\"News\",\"w\":1000,\"h\":900,\"state\":\"visible\"}," +
+                "{\"id\":103,\"gen\":9,\"bundle\":\"com.mitchellh.ghostty\",\"app\":\"Ghostty\",\"title\":\"zsh\",\"w\":900,\"h\":600,\"state\":\"offscreen\"}]," +
+                "\"apps\":[{\"bundle\":\"dev.zed.Zed\",\"name\":\"Zed\",\"windows\":true}]}"
+            session.send(catalog)
+            // The rail: a handle at the top; open it and pick Zed.
+            tapDesc("Show windows")
+            session.send(catalog)
+            tapDesc("Zed: main.rs")
+            fun lastTiles(): List<JsonObject> {
+                val request = session.collectUntil { it.type() == "workspaceRequest" && it["tiles"]!!.jsonArray.isNotEmpty() }.last { it.type() == "workspaceRequest" }
+                return request["tiles"]!!.jsonArray.map { it.jsonObject }
+            }
+            var tiles = lastTiles()
+            assertEquals(listOf(101), tiles.map { it.int("window") })
+            assertEquals("the listed generation travels with the tile", 7, tiles[0].int("gen"))
+            assertEquals(1.0, tiles[0]["w"]!!.jsonPrimitive.content.toDouble(), 1e-9)
+            shot("window-one-tile")
+            session.send("{\"type\":\"workspaceState\",\"host\":\"${pending.peerID}\",\"tiles\":[{\"id\":\"${tiles[0]["id"]!!.jsonPrimitive.content}\",\"window\":101,\"gen\":7,\"state\":\"live\",\"app\":\"Zed\"}],\"active\":\"${tiles[0]["id"]!!.jsonPrimitive.content}\",\"hostFocus\":\"deliver\"}")
+            // Add Safari as a second tile from the rail.
+            tapDesc("Show windows")
+            session.send(catalog)
+            tapDesc("Add Safari as a new tile")
+            tiles = session.collectUntil { it.type() == "workspaceRequest" && it["tiles"]!!.jsonArray.size == 2 }.last { it.type() == "workspaceRequest" }["tiles"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(setOf(101, 102), tiles.map { it.int("window") }.toSet())
+            val areas = tiles.sumOf { it["w"]!!.jsonPrimitive.content.toDouble() * it["h"]!!.jsonPrimitive.content.toDouble() }
+            assertEquals("two tiles share the canvas", 1.0, areas, 1e-6)
+            val zedID = tiles.first { it.int("window") == 101 }["id"]!!.jsonPrimitive.content
+            val safariID = tiles.first { it.int("window") == 102 }["id"]!!.jsonPrimitive.content
+            session.send("{\"type\":\"workspaceState\",\"host\":\"${pending.peerID}\",\"tiles\":[" +
+                "{\"id\":\"$zedID\",\"window\":101,\"gen\":7,\"state\":\"live\",\"app\":\"Zed\"}," +
+                "{\"id\":\"$safariID\",\"window\":102,\"gen\":8,\"state\":\"waiting\",\"app\":\"Safari\"}],\"active\":\"$zedID\",\"hostFocus\":\"deliver\"}")
+            shot("window-two-tiles")
+            File(shots, "$profile-window-two-tiles.txt").writeText(describe(screen()))
+            // Rotate Safari from its tile menu: only the request changes.
+            tapDesc("Safari tile options")
+            tap("Rotate")
+            tiles = session.collectUntil { it.type() == "workspaceRequest" && it["tiles"]!!.jsonArray.any { t -> t.jsonObject.int("rotation") == 90 } }
+                .last { it.type() == "workspaceRequest" }["tiles"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(90, tiles.first { it.int("window") == 102 }.int("rotation"))
+            // Remove Safari's tile: a smaller workspace, never a window action.
+            tapDesc("Safari tile options")
+            tap("Remove tile")
+            val afterRemove = session.collectUntil { it.type() == "workspaceRequest" && it["tiles"]!!.jsonArray.size == 1 }
+            assertTrue("removing a tile never closes the Mac window", afterRemove.none { it.type() == "windowAction" })
+            shot("window-after-remove")
+            session.send("{\"type\":\"closing\"}")
+        }
+        File(System.getProperty("meow.smoke.out", "build/emulator-smoke.txt")).appendText("window mode: rail pick, add, rotate, remove verified on $profile\n")
     }
 
     private companion object {

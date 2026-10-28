@@ -284,6 +284,7 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         val source = WSource(host, window.id, window.generation, window.bundleID)
         val replacing = state.value.replacingTile
         closeOverview()
+        state.update { it.copy(railExpanded = false) }
         if (!state.value.windowMode) media.session.requestDisplayMode(DisplayMode.Window)
         edit { layout ->
             val target = replacing ?: if (asNewTile) null else (state.value.active ?: layout.orderedTileIDs.singleOrNull())
