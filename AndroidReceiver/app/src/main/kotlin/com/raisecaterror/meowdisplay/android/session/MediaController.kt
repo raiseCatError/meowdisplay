@@ -81,8 +81,11 @@ class MediaController(
     private val state = MutableStateFlow(MediaUiState())
     val ui: StateFlow<MediaUiState> = state.asStateFlow()
 
-    /** The decoders and receiver surface subscribe here: every session event, in order. */
+    /** The decoders subscribe here: every session event, in order, on the thread it happened on. */
     @Volatile var mediaEvents: ((SessionEvent) -> Unit)? = null
+
+    /** The receiver controls subscribe here, after the decoders. */
+    @Volatile var controlEvents: ((SessionEvent) -> Unit)? = null
 
     val session = ReceiverSession(policies, pins::pinnedPeers, panel, ::onEvent)
     private var listener: MediaListener? = null
@@ -131,6 +134,7 @@ class MediaController(
 
     private fun onEvent(event: SessionEvent) {
         mediaEvents?.invoke(event)
+        controlEvents?.invoke(event)
         when (event) {
             is SessionEvent.Phase -> state.update { it.copy(phase = event.phase) }
             is SessionEvent.Connected -> state.update { it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null) }

@@ -7,6 +7,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.raisecaterror.meowdisplay.android.receiver.ReceiverOverlayHost
+import com.raisecaterror.meowdisplay.android.receiver.ReceiverScreen
+import com.raisecaterror.meowdisplay.android.receiver.ReceiverSettings
 import com.raisecaterror.meowdisplay.android.MeowReceiverApplication
 
 class MainActivity : ComponentActivity() {
@@ -21,9 +27,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             MeowTheme {
                 val mediaUi by app.media.ui.collectAsState()
+                var settingsOpen by remember { mutableStateOf(false) }
                 if (mediaUi.admitted) {
-                    ReceiverSurface(app.pipeline)
+                    ReceiverScreen(app.receiver, app.pipeline, overlay = { window, actions, generation ->
+                        ReceiverOverlayHost(app.receiver, window, actions, generation)
+                    }, onOpenSettings = { settingsOpen = true })
+                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
                 } else {
+                    settingsOpen = false
                     ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media)
                 }
             }
@@ -48,6 +59,8 @@ class MainActivity : ComponentActivity() {
         // A rotation recreates the activity: the session and listeners stay.
         if (!isChangingConfigurations) {
             app.pairing.stop()
+            // Nothing stays held on the Mac once this device leaves the foreground.
+            app.receiver.releaseHeldInput()
             // Backgrounded, not quit: the Mac is told to expect this device back.
             app.media.stop(sleeping = !isFinishing)
         }

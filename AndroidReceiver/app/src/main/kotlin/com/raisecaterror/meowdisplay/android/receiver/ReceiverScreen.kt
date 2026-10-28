@@ -1,0 +1,325 @@
+package com.raisecaterror.meowdisplay.android.receiver
+
+import android.app.Activity
+import android.view.HapticFeedbackConstants
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.accessibility.AccessibilityManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.window.layout.FoldingFeature
+import androidx.window.layout.WindowInfoTracker
+import com.raisecaterror.meowdisplay.android.media.MediaPipeline
+import com.raisecaterror.meowdisplay.core.controls.CGRect
+import com.raisecaterror.meowdisplay.core.controls.CGSize
+import com.raisecaterror.meowdisplay.core.controls.ControlReservedRegion
+import com.raisecaterror.meowdisplay.core.controls.ControlSafeInsets
+import com.raisecaterror.meowdisplay.core.controls.LandscapeTraySide
+import com.raisecaterror.meowdisplay.core.controls.ReceiverInputPrompt
+import com.raisecaterror.meowdisplay.core.controls.SmartTouchFeedback
+import kotlin.math.roundToInt
+
+/** Everything the screen learned about the window this frame, in dp. */
+data class ReceiverWindow(
+    val size: CGSize,
+    val safeInsets: ControlSafeInsets,
+    val notchSide: LandscapeTraySide?,
+    val reservedRegions: List<ControlReservedRegion>,
+    val keyboardVisibleRect: CGRect?,
+    val expanded: Boolean,
+) {
+    companion object {
+        /**
+         * The iPad-style presentation needs a tablet-class window: both sides at
+         * least 600 dp. An unfolded foldable or a large split-screen pane
+         * qualifies; a phone, a folded foldable or a narrow pane gets the
+         * iPhone-style tray. Decided from the usable window, never the device.
+         */
+        fun isExpanded(widthDp: Double, heightDp: Double): Boolean = minOf(widthDp, heightDp) >= EXPANDED_MIN_DP
+
+        const val EXPANDED_MIN_DP = 600.0
+    }
+}
+
+/**
+ * The live receiver: the Mac's picture placed by the viewport transform
+ * (letterboxed, zoomed, panned), the streamed cursor, the video-off surface,
+ * the input layer and the controls (iOS ReceiverScreen's layer stack).
+ */
+@Composable
+fun ReceiverScreen(
+    controller: ReceiverController,
+    pipeline: MediaPipeline,
+    overlay: @Composable (ReceiverWindow, OverlayActions, Int) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val state by controller.view.collectAsState()
+    val prefs by controller.store.preferences.collectAsState()
+    val transient by controller.store.transient.collectAsState()
+    val decoded by pipeline.videoSize.collectAsState()
+    val density = LocalDensity.current
+    val context = LocalContext.current
+    val hostView = LocalView.current
+    var canvas by remember { mutableStateOf<CGRect?>(null) }
+    var occupied by remember { mutableStateOf(emptyList<CGRect>()) }
+    val folds = rememberFoldRegions()
+
+    LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
+    LaunchedEffect(Unit) {
+        controller.hapticEvents.collect { haptic -> hostView.performHapticFeedback(hapticConstant(haptic)) }
+    }
+    DisposableEffect(Unit) {
+        val accessibility = context.getSystemService(AccessibilityManager::class.java)
+        val listener = AccessibilityManager.TouchExplorationStateChangeListener { controller.screenReaderRunning = it }
+        controller.screenReaderRunning = accessibility.isTouchExplorationEnabled
+        accessibility.addTouchExplorationStateChangeListener(listener)
+        onDispose { accessibility.removeTouchExplorationStateChangeListener(listener) }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        val widthDp = maxWidth.value.toDouble()
+        val heightDp = maxHeight.value.toDouble()
+        val layoutDirection = LocalLayoutDirection.current
+        val safe = WindowInsets.safeDrawing
+        val cutout = WindowInsets.displayCutout
+        val ime = WindowInsets.ime
+        fun dp(px: Int) = px / density.density.toDouble()
+        val insets = ControlSafeInsets(
+            top = dp(safe.getTop(density)),
+            leading = dp(safe.getLeft(density, layoutDirection)),
+            bottom = dp(safe.getBottom(density) - ime.getBottom(density)).coerceAtLeast(0.0),
+            trailing = dp(safe.getRight(density, layoutDirection)),
+        )
+        val cutoutLeft = cutout.getLeft(density, LayoutDirection.Ltr)
+        val cutoutRight = cutout.getRight(density, LayoutDirection.Ltr)
+        val notchSide = when {
+            widthDp <= heightDp -> null
+            cutoutLeft > 0 -> LandscapeTraySide.Leading
+            cutoutRight > 0 -> LandscapeTraySide.Trailing
+            else -> null
+        }
+        val imeHeight = dp(ime.getBottom(density))
+        val keyboardRect = if (state.keyboardRequested && imeHeight > 0) CGRect(0.0, 0.0, widthDp, (heightDp - imeHeight).coerceAtLeast(0.0)) else null
+        val window = ReceiverWindow(
+            size = CGSize(widthDp, heightDp),
+            safeInsets = insets,
+            notchSide = notchSide,
+            reservedRegions = folds.map { ControlReservedRegion(ControlReservedRegion.Kind.Division, it) },
+            keyboardVisibleRect = keyboardRect,
+            expanded = ReceiverWindow.isExpanded(widthDp, heightDp),
+        )
+        controller.store.isExpanded = window.expanded
+        val windowRect = CGRect(0.0, 0.0, widthDp, heightDp)
+        LaunchedEffect(window, canvas, occupied, decoded, state.videoEnabled, prefs.inputMode) {
+            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied, folds)
+        }
+
+        val transform = state.transform
+        val frame = transform.displayedRect
+        // The picture: a SurfaceView can't rotate, so it is sized and placed to the zoomed frame (Android keeps
+        // viewport rotation off; see the parity notes).
+        if (state.videoEnabled && !frame.isEmpty) {
+            AndroidView(
+                factory = { ctx -> videoSurface(ctx, pipeline) },
+                modifier = Modifier
+                    .offset { IntOffset((frame.minX * density.density).roundToInt(), (frame.minY * density.density).roundToInt()) }
+                    .size(frame.width.dp, frame.height.dp),
+            )
+        }
+        if (!state.videoEnabled && !frame.isEmpty) VideoOffSurface(frame, prefs.showSurfaceGrid)
+
+        // The streamed cursor, at the Mac's position under the current zoom.
+        val cursor = state.cursor
+        val sprite = cursor.sprite
+        if (cursor.visible && sprite != null && transform.isValid) {
+            val image = remember(sprite) { sprite.bitmap.asImageBitmap() }
+            Canvas(Modifier.fillMaxSize()) {
+                val crop = transform.remoteCrop
+                val w = sprite.normalizedWidth * frame.width / crop.width
+                val h = sprite.normalizedHeight * frame.height / crop.height
+                val at = transform.viewPoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(cursor.x, cursor.y))
+                val px = density.density
+                drawImage(
+                    image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset(((at.x - sprite.anchorX * w) * px).roundToInt(), ((at.y - sprite.anchorY * h) * px).roundToInt()),
+                    dstSize = IntSize((w * px).roundToInt().coerceAtLeast(1), (h * px).roundToInt().coerceAtLeast(1)),
+                )
+            }
+        }
+
+        // The input layer over the whole window (touches outside the picture still navigate locally).
+        AndroidView(
+            factory = { ctx ->
+                ReceiverInputView(ctx, controller.surface, controller.keyboard, controller.surfaceSender(), inputAllowed = { controller.view.value.inputAllowed })
+                    .also { controller.inputView = it }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = { if (controller.inputView === it) controller.inputView = null },
+        )
+
+        val actions = remember(controller) { controller.overlayActions(onOpenSettings, onOccupied = { occupied = it }, onCanvas = { canvas = it }) }
+        overlay(window, actions, state.inputResetGeneration)
+
+        InputPromptCapsule(
+            kind = state.prompt,
+            onTap = controller::requestInputTapped,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 - 22).dp),
+        )
+    }
+}
+
+/** The Mac's frames on a SurfaceView; the decoder renders straight into it. */
+private fun videoSurface(context: android.content.Context, pipeline: MediaPipeline): SurfaceView = SurfaceView(context).apply {
+    keepScreenOn = true
+    holder.addCallback(object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) {
+            pipeline.video.setSurface(holder.surface)
+        }
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+            pipeline.video.setSurface(null)
+        }
+    })
+}
+
+/** The mapped surface shown while the Mac's video is off (iOS: rounded rect, hairline, optional dot grid). */
+@Composable
+private fun VideoOffSurface(frame: CGRect, showGrid: Boolean) {
+    Canvas(Modifier.fillMaxSize()) {
+        val px = density
+        val left = frame.minX.toFloat() * px
+        val top = frame.minY.toFloat() * px
+        val width = frame.width.toFloat() * px
+        val height = frame.height.toFloat() * px
+        drawRoundRect(Color(0xFF1C1C1E), Offset(left, top), Size(width, height), androidx.compose.ui.geometry.CornerRadius(12 * px))
+        drawRoundRect(
+            Color(0x4D545458), Offset(left + 0.5f, top + 0.5f), Size(width - 1, height - 1),
+            androidx.compose.ui.geometry.CornerRadius(12 * px), style = androidx.compose.ui.graphics.drawscope.Stroke(1 * px),
+        )
+        if (showGrid) {
+            val spacing = 28 * px
+            var y = top + spacing
+            while (y < top + height - 14 * px) {
+                var x = left + spacing
+                while (x < left + width - 14 * px) {
+                    drawCircle(Color(0x59EBEBF5), radius = 1.1f * px, center = Offset(x, y))
+                    x += spacing
+                }
+                y += spacing
+            }
+        }
+    }
+}
+
+/** The on-surface Request Input affordance (iOS InputPromptButton). */
+@Composable
+private fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Unit, modifier: Modifier = Modifier) {
+    AnimatedVisibility(visible = kind != null, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
+        val title = when (kind) {
+            ReceiverInputPrompt.Kind.EnableInput -> "Enable Input"
+            ReceiverInputPrompt.Kind.RequestInput -> "Request Input"
+            ReceiverInputPrompt.Kind.Requesting -> "Requesting Input…"
+            ReceiverInputPrompt.Kind.Enabled -> "Input Enabled"
+            ReceiverInputPrompt.Kind.Unavailable -> "This Mac isn't accepting input requests"
+            null -> ""
+        }
+        val tappable = kind == ReceiverInputPrompt.Kind.RequestInput || kind == ReceiverInputPrompt.Kind.EnableInput
+        Box(
+            Modifier
+                .background(Color.White.copy(alpha = 0.16f * 0.94f), CircleShape)
+                .background(Color(0xF0222224), CircleShape)
+                .border(0.75.dp, Color.White.copy(alpha = 0.14f), CircleShape)
+                .then(if (tappable) Modifier.clickable(role = Role.Button, onClick = onTap) else Modifier)
+                .semantics { contentDescription = title }
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+        ) {
+            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/** Hinges and folds that split the window (WindowManager FoldingFeature), in dp window coordinates. */
+@Composable
+private fun rememberFoldRegions(): List<CGRect> {
+    val context = LocalContext.current
+    val activity = context as? Activity ?: return emptyList()
+    val density = LocalDensity.current.density.toDouble()
+    val regions by produceState(initialValue = emptyList<CGRect>(), activity) {
+        WindowInfoTracker.getOrCreate(activity).windowLayoutInfo(activity).collect { info ->
+            value = info.displayFeatures.filterIsInstance<FoldingFeature>()
+                .filter { it.isSeparating || it.state == FoldingFeature.State.HALF_OPENED }
+                .map { fold ->
+                    val b = fold.bounds
+                    // A zero-width fold still divides: give it a hairline so it has an area.
+                    CGRect(b.left / density, b.top / density, maxOf(b.width() / density, 1.0), maxOf(b.height() / density, 1.0))
+                }
+        }
+    }
+    return regions
+}
+
+private fun hapticConstant(haptic: ReceiverHaptic): Int = when (haptic) {
+    is ReceiverHaptic.Control -> when (haptic.event) {
+        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Selection -> HapticFeedbackConstants.CLOCK_TICK
+        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Confirmation,
+        com.raisecaterror.meowdisplay.core.controls.ControlHapticEvent.Reset -> HapticFeedbackConstants.CONFIRM
+        else -> HapticFeedbackConstants.KEYBOARD_TAP
+    }
+    is ReceiverHaptic.SmartTouch -> when (haptic.feedback) {
+        SmartTouchFeedback.DirectTouchOverride -> HapticFeedbackConstants.LONG_PRESS
+        SmartTouchFeedback.WindowDragArmed -> HapticFeedbackConstants.CONFIRM
+        // No continuous ramp on Android: the build-up is silent, the arming tick confirms.
+        else -> HapticFeedbackConstants.NO_HAPTICS
+    }
+    ReceiverHaptic.RotationSnap -> HapticFeedbackConstants.CLOCK_TICK
+}

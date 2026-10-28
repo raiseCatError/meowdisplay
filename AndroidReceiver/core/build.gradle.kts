@@ -8,7 +8,8 @@ kotlin {
 
 dependencies {
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.serialization.json)
+    // Public API: control messages reach the app as JsonObject.
+    api(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
