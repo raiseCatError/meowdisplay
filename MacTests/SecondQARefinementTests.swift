@@ -259,7 +259,7 @@ final class SecondQARefinementTests: XCTestCase {
         defaults.set(try JSONSerialization.data(withJSONObject: json), forKey: ReceiverControlPreferencesRepository.defaultsKey)
         let repository = ReceiverControlPreferencesRepository(defaults: defaults)
         var loaded = repository.load()
-        XCTAssertEqual(loaded.version, 18)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
         XCTAssertTrue(loaded.padShowControlHints, "a schema-17 choice survives")
         XCTAssertTrue(loaded.invertVerticalScroll)
         loaded.invertHorizontalScroll = false
