@@ -1261,6 +1261,91 @@ such receivers as before. A receiver facing a pre-21 sender (known from
 from that peer; otherwise it closes the connection, so an older sender
 can never bypass the receiver's approval preference.
 
+### 6.10 Window workspaces (`hello.ws`, `welcome.features`)
+
+Additive and capability-gated: no `pv` bump. A receiver that can arrange
+Mac windows sends `hello.ws` (its workspace version, currently `1`). A Mac
+that offers it lists `"window"` in `welcome.features` (array of strings;
+the Mac's user can turn it off in Displays settings). Neither side sends
+any message below unless both are present; an older peer never sees them.
+Every message here needs an admitted session (`SenderControlAuthority`):
+window titles and stills are screen content.
+
+**Mode.** `displayModeRequest` with `mode: "window"` asks for Window mode
+for this device only; the Mac confirms with `displayModeState`
+`mode: "window"`, sent only to receivers that sent `hello.ws`. Window is
+never sent as `hello.requestedMode` (older Macs read only `mirror` /
+`extend` there). A Mac in Window mode for a receiver without `ws` streams
+Mirror instead. The video stream is unchanged: one H.264/HEVC stream whose
+canvas is the receiver's panel (`hello.pixelsWide`/`pixelsHigh`); the Mac
+composites the chosen windows into it. No virtual display is created and no
+Mac window is moved, resized or put on another Space.
+
+**Catalog.** `windowCatalogRequest` (optional `installed: true`) is answered
+with `windowCatalog`:
+
+* `host` — the Mac's install id;
+* `windows` — at most 120 of `{id, gen, bundle, app, title, w, h, state, active}`;
+  `state` is `visible` or `offscreen` (minimized, hidden or on another
+  Space: such a window has no frames until it is back); `gen` is the
+  window's identity generation in this session (a window id reused by
+  another process is a new `gen`);
+* `apps` — running regular apps `{bundle, name, windows}`;
+* `installed` — only when asked: apps the receiver may ask to open
+  `{bundle, name}`.
+
+MeowDisplay's own windows, system UI (Dock, menu bar, Stage Manager strip,
+password and authentication prompts) and windows that opted out of capture
+are never listed. `error` present: the Mac can't list windows now.
+
+`windowThumbnailRequest {ids, max, icons}` (at most 24 ids, `max` 64–320
+pixels wide, at most 32 bundle ids) is answered with one
+`windowThumbnail {id, gen, jpeg}` per window (`unavailable: true` for a
+minimized one) and one `appIcon {bundle, png}` per app. Receivers bound
+both before decoding (96 KiB base64; refuse images declaring more than 16
+megapixels). Stills are requested only while the receiver's picker is open.
+
+**Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
+workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
+normalized `x y w h` in the canvas (non-overlapping, inside it, at least
+64×48 canvas pixels), `window` and `gen` from this session's catalog,
+`follow` (`window`, or `app` to follow that app's frontmost window),
+`rotation` (0/90/180/270, clockwise, presentation only) and `fit` (`fit`
+letterboxes, `fill` crops evenly; never stretched). At most 9 tiles. Tiles
+naming another `host` are ignored (they belong to that Mac's connection).
+The Mac accepts a tile only for a window it listed to this session with
+the same `gen`; anything else is rejected, never retargeted.
+
+`workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit}`
+reports what the Mac shows: per tile `{id, window, gen, state, app, bundle,
+title, follow, rotation, fit}` with `state` one of `live`, `waiting`,
+`offscreen`, `closed`, `failed`, `limit` (paused by the Mac's capture
+budget; the tile is kept). `active` is the tile keyboard input goes to;
+`hostFocus` is `deliver`, `noActiveTile`, `hostFocusElsewhere` (another
+app is frontmost on the Mac) or `otherWindowFocused`; keys are not
+delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
+`limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`.
+
+`workspaceFocus {tile}` makes a tile active (the Mac raises its window when
+input is granted). `windowAction {action}` needs this session's input
+grant: `activate {window, gen}`, `launch {bundle}` (only an app the Mac
+listed) and `close {window, gen}` (closes the real Mac window; receivers
+send it only from its own explicit, confirmed action — removing a tile is
+just a smaller `workspaceRequest`).
+
+**Input.** Unchanged messages, canvas coordinates. The Mac maps a point to
+the tile under it, through that tile's fit and rotation, to the window. A
+press binds to its tile until release (a drag never crosses into another
+window). Hover moves the Mac pointer only over the active tile; elsewhere
+the receiver's own pointer moves alone. Scroll goes to the window under the
+pointer when that window is frontmost there. A press, scroll or hover where
+another window covers the target sends nothing. A press on a tile that
+isn't active activates its window first, then delivers that same press
+once. Keyboard input goes only to the active tile, and only while the Mac
+really has that window's app in front (`hostFocus`). Changing a tile's
+window releases held buttons and keys. `cursor` positions are in canvas
+coordinates (hidden when the Mac pointer is over no tile's window).
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1422,6 +1507,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
+| 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
 
 ---
 
