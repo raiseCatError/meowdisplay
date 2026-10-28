@@ -106,3 +106,50 @@ final class DemoModeSmokeTests: XCTestCase {
         add(attachment)
     }
 }
+
+// MARK: - Touch Style
+
+extension DemoModeSmokeTests {
+    @MainActor
+    private func openInputSettings(_ app: XCUIApplication) {
+        if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
+        waitForNonExistence(app.buttons["Close"])
+        sleep(1)
+        let settings = app.buttons["Settings & Help"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        let input = app.buttons["Input"].firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap()
+        XCTAssertTrue(app.navigationBars["Input"].waitForExistence(timeout: 5))
+    }
+
+    /// Natural Touch is the default; Classic stays available, shows Smart
+    /// Touch, and is remembered across a relaunch.
+    @MainActor
+    func testTouchStyleDefaultsToNaturalAndClassicPersists() {
+        let app = XCUIApplication()
+        app.launch()
+        openInputSettings(app)
+        let natural = app.buttons["Natural Touch"].firstMatch
+        let classic = app.buttons["Classic"].firstMatch
+        XCTAssertTrue(natural.waitForExistence(timeout: 5))
+        XCTAssertTrue(natural.isSelected, "Natural Touch is the default")
+        XCTAssertFalse(app.staticTexts["Smart Touch"].exists, "Smart Touch belongs to Classic")
+        snapshot(app, "touch-style-natural")
+
+        classic.tap()
+        XCTAssertTrue(classic.isSelected)
+        XCTAssertTrue(app.staticTexts["Smart Touch"].waitForExistence(timeout: 3), "Classic shows Smart Touch")
+        snapshot(app, "touch-style-classic")
+
+        app.terminate()
+        app.launch()
+        openInputSettings(app)
+        XCTAssertTrue(app.buttons["Classic"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Classic"].firstMatch.isSelected, "Classic is remembered")
+
+        app.buttons["Natural Touch"].firstMatch.tap()   // leave the simulator on the default
+        XCTAssertTrue(app.buttons["Natural Touch"].firstMatch.isSelected)
+    }
+}
