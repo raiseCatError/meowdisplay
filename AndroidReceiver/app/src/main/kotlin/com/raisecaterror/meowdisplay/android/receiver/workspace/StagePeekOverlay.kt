@@ -660,7 +660,7 @@ private class StagePeekHost(private val controller: WorkspaceController, private
             is StagePeekEffect.Select -> {
                 controller.setStagePeekOpen(false)
                 if (effect.id == StagePeekMachine.fullDesktopID) onFullDesktop()
-                else windows.firstOrNull { it.id == effect.id }?.let { controller.choose(it, asNewTile = false) }
+                else windows.firstOrNull { it.id == effect.id }?.let { controller.switchTo(it) }
             }
             StagePeekEffect.Dismissed -> controller.setStagePeekOpen(false)
         }
@@ -686,6 +686,15 @@ private fun reduceMotionRequested(context: Context): Boolean =
  */
 @Composable
 fun WindowModePrompt(onYes: () -> Unit, onNo: () -> Unit, modifier: Modifier = Modifier) {
+    // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No) after a few
+    // seconds, counting only while this screen has focus.
+    val focused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    val latestNo by androidx.compose.runtime.rememberUpdatedState(onNo)
+    LaunchedEffect(focused) {
+        if (!focused) return@LaunchedEffect
+        delay(WINDOW_PROMPT_TIMEOUT_MS)
+        latestNo()
+    }
     Row(
         modifier
             .background(Color(0xF0222224), CircleShape)
@@ -705,3 +714,6 @@ fun WindowModePrompt(onYes: () -> Unit, onNo: () -> Unit, modifier: Modifier = M
         )
     }
 }
+
+/** How long the unanswered "Switch to Window view?" prompt stays (iOS: same). */
+private const val WINDOW_PROMPT_TIMEOUT_MS = 8_000L

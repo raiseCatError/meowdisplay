@@ -469,11 +469,24 @@ final class WorkspaceModel: ObservableObject {
 
     func closeOverview() { overviewOpen = false; replacingTile = nil }
 
-    /// The window shown in the tile a switcher would replace: the active
-    /// tile, or the only one.
+    /// The tile a switcher (Stage Peek) replaces: the active tile, the only
+    /// one, else the first tile still waiting for a window, else the last.
+    var switchTarget: String? {
+        let order = layout.orderedTileIDs
+        if let active, layout.tiles[active] != nil { return active }
+        if order.count == 1 { return order.first }
+        return order.first { missing.contains($0) || layout.tiles[$0]?.source == nil } ?? order.last
+    }
+
+    /// The window shown in the tile a switcher would replace.
     var currentWindowID: UInt32? {
-        let tile = active ?? (layout.orderedTileIDs.count == 1 ? layout.orderedTileIDs.first : nil)
-        return tile.flatMap { layout.tiles[$0]?.source?.windowID }
+        switchTarget.flatMap { layout.tiles[$0]?.source?.windowID }
+    }
+
+    /// Stage Peek's tap: shows `w` in `switchTarget`; never adds a tile.
+    func switchTo(_ w: CatalogWindowItem) {
+        replacingTile = switchTarget
+        choose(w, asNewTile: false)
     }
 
     /// Whether another tile can be added (Stage Peek's "Add as Tile").

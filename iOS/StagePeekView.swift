@@ -371,7 +371,7 @@ struct StagePeekOverlay: View {
                 if id == StagePeekMachine.fullDesktopID {
                     onFullDesktop()
                 } else if let w = windows.first(where: { $0.id == id }) {
-                    model.choose(w, asNewTile: false)
+                    model.switchTo(w)
                 }
             case .dismissed:
                 model.stagePeekOpen = false

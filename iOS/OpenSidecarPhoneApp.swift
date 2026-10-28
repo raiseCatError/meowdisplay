@@ -4473,6 +4473,11 @@ private struct WindowModePrompt: View {
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
         .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
+        // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No).
+        .task {
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            if !Task.isCancelled { onNo() }
+        }
     }
 }
 

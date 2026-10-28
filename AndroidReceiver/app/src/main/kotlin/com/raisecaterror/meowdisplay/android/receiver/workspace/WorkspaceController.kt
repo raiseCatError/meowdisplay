@@ -70,7 +70,14 @@ data class WorkspaceUi(
     val active: String? get() = remote?.active
     fun tileState(id: String) = remote?.tiles?.firstOrNull { it.id == id }
     /** The window in the tile a switcher replaces: the active tile, or the only one. */
-    val currentWindowID: Long? get() = (active ?: layout.orderedTileIDs.singleOrNull())?.let { layout.tiles[it]?.source?.windowID }
+    /** The tile a switcher (Stage Peek) replaces: the active tile, the only one, else the first tile still waiting for a window, else the last. */
+    val switchTarget: String? get() {
+        val order = layout.orderedTileIDs
+        active?.takeIf { it in layout.tiles }?.let { return it }
+        if (order.size == 1) return order.first()
+        return order.firstOrNull { it in missing || layout.tiles[it]?.source == null } ?: order.lastOrNull()
+    }
+    val currentWindowID: Long? get() = switchTarget?.let { layout.tiles[it]?.source?.windowID }
     val canAddTile: Boolean get() = layout.tiles.size < capacity
     /** A switcher is showing windows, so the catalog and thumbnails refresh. */
     val wantsCatalog: Boolean get() = overviewOpen || railExpanded || stagePeekOpen
@@ -308,6 +315,13 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         history.record(saved)
         saved = saved.swapping(tile, target)
         persist(); publish(); scheduleSend()
+    }
+
+    /** Stage Peek's tap: shows [window] in [WorkspaceUi.switchTarget]; never adds a tile. */
+    fun switchTo(window: CatalogWindow) {
+        val target = state.value.switchTarget
+        state.update { it.copy(replacingTile = target) }
+        choose(window, asNewTile = false)
     }
 
     /** A window chosen in the overview or rail. */

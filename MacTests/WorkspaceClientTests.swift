@@ -114,10 +114,33 @@ final class WorkspaceClientTests: XCTestCase {
             [WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest].contains($0["type"] as? String)
         }, "browsing sends only catalog and thumbnail requests: \(sent.map { $0["type"] ?? "?" })")
 
-        m.choose(m.catalog!.windows[2], asNewTile: false)
+        m.switchTo(m.catalog!.windows[2])
         XCTAssertEqual(m.layout.orderedTileIDs, ids, "no tile added or removed")
         XCTAssertEqual(m.layout.tiles[ids[0]]?.source?.windowID, 10, "the other tile keeps its window")
         XCTAssertEqual(m.layout.tiles[ids[1]]?.source?.windowID, 12)
+    }
+
+    /// Found on the Moto: with two tiles waiting for windows and none active,
+    /// a Stage Peek tap added a third tile. It fills the first waiting one.
+    func testStagePeekFillsAWaitingTileInsteadOfAddingOne() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 1, "dev.qa.a"), (11, 1, "dev.qa.b"), (12, 1, "dev.qa.c")]))
+        m.updateSpace(WorkspaceSize(width: 390, height: 844), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        let ids = m.layout.orderedTileIDs
+        // Both windows close on the Mac; nothing is active.
+        m.apply(catalog([(12, 1, "dev.qa.c")]))
+        XCTAssertEqual(m.missing, Set(ids))
+        XCTAssertNil(m.active)
+        XCTAssertEqual(m.switchTarget, ids[0])
+        m.switchTo(m.catalog!.windows[0])
+        XCTAssertEqual(m.layout.orderedTileIDs, ids, "no tile added")
+        XCTAssertEqual(m.layout.tiles[ids[0]]?.source?.windowID, 12)
+        XCTAssertEqual(m.layout.tiles[ids[1]]?.source?.windowID, 11)
     }
 
     func testTheSameWindowNumberOnAnotherMacNeverReachesThisMacsTiles() {
