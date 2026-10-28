@@ -77,6 +77,26 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(close?["gen"] as? Int, 5)
     }
 
+    func testTheSameWindowNumberOnAnotherMacNeverReachesThisMacsTiles() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(30, 1, "dev.zed.Zed")]))
+        m.updateSpace(WorkspaceSize(width: 1366, height: 1024), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        XCTAssertEqual(m.layout.tiles.values.compactMap { $0.source?.windowID }, [30])
+        // Another Mac, same window number and even the same app: its own (empty) arrangement.
+        m.apply(.connected(peerID: "mac-other"))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(30, 1, "dev.zed.Zed")]))
+        XCTAssertTrue(m.layout.tiles.values.allSatisfy { $0.source == nil }, "nothing carried over from mac-a")
+        // Back on the first Mac, its tile is still there.
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(30, 1, "dev.zed.Zed")]))
+        XCTAssertEqual(m.layout.tiles.values.compactMap { $0.source?.windowID }, [30])
+    }
+
     func testAReconnectKeepsOnlyTheSameWindowOfTheSameApp() {
         let m = model { _ in }
         m.apply(.connected(peerID: "mac-b"))
