@@ -1,38 +1,35 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Text
+import android.provider.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import com.raisecaterror.meowdisplay.android.receiver.overlay.ReceiverControlOverlay
 
-/** Hosts the control overlay for the live screen. */
+/** The control overlay over the live screen, fed from the window and the session. */
 @Composable
 fun ReceiverOverlayHost(controller: ReceiverController, window: ReceiverWindow, actions: OverlayActions, inputResetGeneration: Int) {
     val view by controller.view.collectAsState()
-    Box(Modifier.fillMaxSize()) {
-        // Temporary until the Compose control overlay lands: the permanent Settings gear.
-        Box(
-            Modifier.align(Alignment.BottomEnd).padding(end = (window.safeInsets.trailing + 12).dp, bottom = (window.safeInsets.bottom + 12).dp)
-                .size(46.dp).background(Color(0x99303033), CircleShape).clickable(role = Role.Button) { actions.openSettings() }
-                .semantics { contentDescription = "Settings" },
-            contentAlignment = Alignment.Center,
-        ) { Text("⚙", color = Color.White, fontSize = 20.sp) }
-    }
-    @Suppress("UNUSED_EXPRESSION") view
-    @Suppress("UNUSED_EXPRESSION") inputResetGeneration
+    val context = LocalContext.current
+    // Android's "Remove animations" is the counterpart of iOS Reduce Motion.
+    val reduceMotion = remember { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
+    val environment = OverlayEnvironment(
+        containerSize = window.size,
+        safeInsets = window.safeInsets,
+        notchSide = window.notchSide,
+        reservedRegions = window.reservedRegions,
+        keyboardVisibleRect = window.keyboardVisibleRect,
+        expanded = window.expanded,
+        senderPV = view.senderPV,
+        keyboardAvailable = view.inputAllowed && view.senderPV >= KEYBOARD_PV,
+        videoEnabled = view.videoEnabled,
+        inputState = view.inputState,
+        screenReaderRunning = controller.screenReaderRunning,
+        reduceMotion = reduceMotion,
+    )
+    ReceiverControlOverlay(controller.store, environment, actions, inputResetGeneration)
 }
+
+private const val KEYBOARD_PV = 4
