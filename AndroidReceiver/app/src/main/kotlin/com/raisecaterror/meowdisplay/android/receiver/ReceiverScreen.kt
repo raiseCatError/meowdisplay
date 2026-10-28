@@ -1,5 +1,8 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
 import com.raisecaterror.meowdisplay.core.workspace.WAxis
 import com.raisecaterror.meowdisplay.core.workspace.WRect
@@ -116,6 +119,8 @@ fun ReceiverScreen(
     workspace: WorkspaceController? = null,
     macName: String = "your Mac",
     onMode: (DisplayMode) -> Unit = {},
+    /** The picture fills the screen; false while Home is shown over it. */
+    immersive: Boolean = true,
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
@@ -132,6 +137,19 @@ fun ReceiverScreen(
     // Back never ends a live session: it goes to Home, with the session and picture kept, so
     // Return to Display is instant. The keyboard, Settings and the window overview take Back first.
     BackHandler { onBack() }
+    // Like iOS, the live picture hides the status and navigation bars (C4 O-03); an edge
+    // swipe shows them for a moment. Home brings them back.
+    LaunchedEffect(immersive) {
+        val window = (context as? Activity)?.window ?: return@LaunchedEffect
+        val bars = WindowCompat.getInsetsController(window, window.decorView)
+        bars.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (immersive) bars.hide(WindowInsetsCompat.Type.systemBars()) else bars.show(WindowInsetsCompat.Type.systemBars())
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            (context as? Activity)?.window?.let { WindowCompat.getInsetsController(it, it.decorView).show(WindowInsetsCompat.Type.systemBars()) }
+        }
+    }
     LaunchedEffect(Unit) {
         controller.hapticEvents.collect { haptic -> hapticConstant(haptic)?.let(hostView::performHapticFeedback) }
     }

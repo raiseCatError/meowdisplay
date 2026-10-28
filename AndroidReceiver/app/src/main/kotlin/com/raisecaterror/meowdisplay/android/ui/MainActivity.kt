@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
                         onBack = { app.receiver.releaseHeldInput(); homeShown = true },
                         workspace = app.workspace, macName = macName,
                         onMode = { app.media.session.requestDisplayMode(it) },
+                        immersive = !homeShown,
                     )
                     if (homeShown) {
                         BackHandler { moveTaskToBack(true) }

@@ -1,5 +1,6 @@
 package com.raisecaterror.meowdisplay.android.receiver.workspace
 
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -106,6 +108,8 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
     var confirmClose by remember { mutableStateOf<String?>(null) }
     val workspaceSize = WSize(transform.displayedRect.width, transform.displayedRect.height)
     val multi = ui.layout.tiles.size > 1
+    // Pills at the top edge stay clear of the cutout and any visible status bar.
+    val topInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getTop(this).toDp().value.toDouble() }
 
     Box(Modifier.fillMaxSize()) {
         for ((id, rect) in frames.tiles) {
@@ -148,6 +152,7 @@ fun WorkspaceChrome(controller: WorkspaceController, transform: RemoteViewportTr
                     val name = remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
                     Row(
                         Modifier
+                            .padding(top = maxOf(0.0, topInset - r.minY).dp)
                             .padding(6.dp)
                             .background(if (active) Accent.copy(alpha = 0.9f) else Chip, RoundedCornerShape(14.dp))
                             .pointerInput(id) {
