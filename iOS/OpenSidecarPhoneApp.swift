@@ -1464,10 +1464,10 @@ struct IdleView: View {
                 // under the name when they don't fit beside it.
                 Text(failed ? "Try Again" : (hasWakeHint ? "Wake & Connect" : "Connect"))
                     .lineLimit(1)
-                    .fixedSize()
                     .frame(minWidth: 72)
             }
             .buttonStyle(.borderedProminent)
+            .fixedSize()   // its own width, so the row stacks instead of squeezing it
             .accessibilityLabel(failed ? Text("Try again with \(mac.name)")
                                        : hasWakeHint ? Text("Wake and connect to \(mac.name)")
                                                      : Text("Connect to \(mac.name)"))
@@ -1476,11 +1476,12 @@ struct IdleView: View {
                 Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
                 Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
             } label: {
-                Text("Connect").frame(minWidth: 72)
+                Text("Connect").lineLimit(1).frame(minWidth: 72)
             } primaryAction: {
                 receiver.requestConnect()
             }
             .buttonStyle(.borderedProminent)
+            .fixedSize()
             .accessibilityLabel(Text("Connect to \(mac.name)"))
         }
     }
@@ -1508,6 +1509,8 @@ struct IdleView: View {
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)   // a plain icon, not a filled bubble
+        .fixedSize()
         .accessibilityLabel(Text("More for \(mac.name)"))
     }
 
