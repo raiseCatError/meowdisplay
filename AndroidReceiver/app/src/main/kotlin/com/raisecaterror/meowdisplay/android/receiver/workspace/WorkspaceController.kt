@@ -173,14 +173,34 @@ class WorkspaceController(context: Context, private val media: MediaController) 
 
     private fun onThumbnail(t: WindowThumbnail) {
         val data = t.jpegBase64 ?: return
-        val bitmap = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } ?: return
+        val bitmap = decodeBounded(data, MAX_THUMB_SIDE) ?: return
         thumbAge[t.windowID] = SystemClock.uptimeMillis()
         thumbs.update { map -> (map + (t.windowID to bitmap.asImageBitmap())).let { if (it.size > MAX_THUMBS) it.entries.drop(it.size - MAX_THUMBS).associate { e -> e.key to e.value } else it } }
     }
 
     private fun onIcon(icon: AppIcon) {
-        val bitmap = runCatching { Base64.decode(icon.pngBase64, Base64.DEFAULT) }.getOrNull()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } ?: return
+        val bitmap = decodeBounded(icon.pngBase64, MAX_ICON_SIDE) ?: return
         iconState.update { if (it.size >= MAX_ICONS) it else it + (icon.bundleID to bitmap.asImageBitmap()) }
+    }
+
+    /**
+     * Images from the Mac are bounded before they are decoded: the header's
+     * size is checked first (a small file can declare a huge image), larger
+     * ones are downsampled, and a failed decode is dropped.
+     */
+    private fun decodeBounded(base64: String, maxSide: Int): android.graphics.Bitmap? {
+        val bytes = runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull() ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val w = bounds.outWidth; val h = bounds.outHeight
+        if (w <= 0 || h <= 0 || w.toLong() * h > MAX_DECODE_PIXELS) return null
+        var sample = 1
+        while (w / sample > maxSide * 2 || h / sample > maxSide * 2) sample *= 2
+        return try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        } catch (_: OutOfMemoryError) {
+            null
+        }
     }
 
     fun requestCatalog() {
@@ -356,5 +376,9 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         const val RAIL_EDGE = "railEdge"
         const val MAX_THUMBS = 48
         const val MAX_ICONS = 64
+        const val MAX_THUMB_SIDE = 320
+        const val MAX_ICON_SIDE = 128
+        /** Refuse anything that would decode to more than 16 MP, whatever its file size. */
+        const val MAX_DECODE_PIXELS = 4096L * 4096L
     }
 }
