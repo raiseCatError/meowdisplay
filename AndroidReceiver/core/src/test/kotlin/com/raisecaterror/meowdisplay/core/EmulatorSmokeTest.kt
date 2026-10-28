@@ -50,6 +50,15 @@ class EmulatorSmokeTest {
         while (true) {
             val xml = screen()
             if (condition(xml)) return xml
+            // Android's one-time "Viewing full screen" notice for an app that hides the system
+            // bars (the live picture is immersive) covers the app until it is acknowledged.
+            if (xml.contains("Viewing full screen")) {
+                Regex("text=\"Got it\"[^>]*bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"").find(xml)?.destructured?.let { (l, t, r, b) ->
+                    adb("shell", "input", "tap", "${(l.toInt() + r.toInt()) / 2}", "${(t.toInt() + b.toInt()) / 2}")
+                    Thread.sleep(500)
+                    continue
+                }
+            }
             if (System.currentTimeMillis() >= deadline) {
                 runCatching { shot("timeout-" + what.filter { it.isLetterOrDigit() }) }
                 error("timed out waiting for $what; on screen: ${describe(xml)}")
