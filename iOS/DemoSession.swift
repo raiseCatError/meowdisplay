@@ -46,18 +46,18 @@ enum ReceiverPresentationRoute: Equatable {
 /// paired right now (trusted pins), not by whether one ever connected:
 /// forgetting the last paired Mac brings the prominent entry back.
 enum ExploreDemoPresentation: Equatable {
-    /// No paired Mac: a card ahead of the connection instructions, visible
-    /// without scrolling in every phone layout.
+    /// No paired Mac: a button inside the Macs card, so the demo is on
+    /// screen without scrolling in every layout.
     case prominent
-    /// At least one paired Mac: a collapsed Demo Mode section after the
-    /// connection sections, so it doesn't compete with them.
+    /// At least one paired Mac: just the Try the Demo link in the footer,
+    /// so it doesn't compete with the Macs.
     case compact
 
     static func resolve(pairedMacCount: Int) -> ExploreDemoPresentation {
         pairedMacCount > 0 ? .compact : .prominent
     }
 
-    /// Whether the entry sits ahead of the connection instructions.
+    /// Whether the entry sits in the Macs card rather than the footer links.
     var leadsConnectionSetup: Bool { self == .prominent }
 }
 

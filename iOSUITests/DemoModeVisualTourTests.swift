@@ -31,7 +31,7 @@ final class DemoModeVisualTourTests: XCTestCase {
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
         waitForNonExistence(app.buttons["Close"])
         sleep(1)
-        let explore = app.buttons["Explore Demo"]
+        let explore = app.buttons["exploreDemo"]
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
         snapshot("\(prefix)-00-home")
         tapWhenSettled(explore, in: app)
@@ -130,7 +130,7 @@ final class DemoModeVisualTourTests: XCTestCase {
         XCTAssertTrue(app.buttons["Exit Demo"].waitForExistence(timeout: 5))
     }
 
-    /// Explore Demo can sit below the fold of the home column in iPhone
+    /// The demo button can sit below the fold of the home column in iPhone
     /// landscape. Scroll it in slowly and let the scroll settle first: a tap
     /// during scroll deceleration only stops the scroll.
     @MainActor

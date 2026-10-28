@@ -98,6 +98,9 @@
     "A solid rail at the edge of the screen holds the controls, and your Mac fits beside it." : {
 
     },
+    "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected." : {
+
+    },
     "A/V Sync" : {
 
     },
@@ -126,6 +129,15 @@
 
     },
     "Active Layout" : {
+
+    },
+    "Can't connect" : {
+
+    },
+    "Connection lost" : {
+
+    },
+    "Connect to %@" : {
 
     },
     "Control Profile" : {
@@ -159,6 +171,36 @@
 
     },
     "Allow" : {
+
+    },
+    "Looking for Macs on this Wi-Fi…" : {
+
+    },
+    "Mac disconnected" : {
+
+    },
+    "Macs" : {
+
+    },
+    "More for %@" : {
+
+    },
+    "Not found" : {
+
+    },
+    "Not paired" : {
+
+    },
+    "Or tap Connect next to a paired Mac" : {
+
+    },
+    "Pair with %@" : {
+
+    },
+    "Paused" : {
+
+    },
+    "Ready to connect" : {
 
     },
     "Request Control (Demo)" : {
@@ -234,9 +276,6 @@
 
     },
     "Automatically reconnect to paired devices after connection interruptions. In the demo this only changes the sample session." : {
-
-    },
-    "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen." : {
 
     },
     "Avoid Notch" : {
@@ -557,9 +596,6 @@
     "Double-click to zoom" : {
 
     },
-    "Double-tap to %@" : {
-
-    },
     "Double-tap with two fingers" : {
 
     },
@@ -639,9 +675,6 @@
 
     },
     "Experimental app command mode" : {
-
-    },
-    "Explore Demo" : {
 
     },
     "Extend" : {
@@ -801,6 +834,27 @@
 
     },
     "Control allowed (Demo)." : {
+
+    },
+    "Set Up Remote Access…" : {
+
+    },
+    "Shake the %@ to open Settings anytime" : {
+
+    },
+    "Switched Out" : {
+
+    },
+    "This Device" : {
+
+    },
+    "Tip" : {
+
+    },
+    "Try again with %@" : {
+
+    },
+    "Try the Demo" : {
 
     },
     "View Only (Demo)." : {
@@ -968,6 +1022,9 @@
     "MeowDisplay on GitHub" : {
 
     },
+    "Wake and connect to %@" : {
+
+    },
     "You also need the **MeowDisplay Mac app**, open on your Mac." : {
 
     },
@@ -1019,9 +1076,6 @@
     "Name" : {
 
     },
-    "Nearby Devices" : {
-
-    },
     "Network" : {
 
     },
@@ -1035,9 +1089,6 @@
 
     },
     "Nice" : {
-
-    },
-    "No devices nearby" : {
 
     },
     "No displays reported." : {
@@ -1116,9 +1167,6 @@
       "comment" : "Keyboard modifier key."
     },
     "Optionally configure Two-Hand Assist" : {
-
-    },
-    "Options for %@" : {
 
     },
     "Or choose the keys below. Keys are pressed together, then released." : {
@@ -1337,13 +1385,7 @@
     "Remote Access" : {
 
     },
-    "Remote Access options" : {
-
-    },
     "Remote Access Settings…" : {
-
-    },
-    "Remote endpoint unavailable" : {
 
     },
     "Remove from Layout" : {
@@ -1799,9 +1841,6 @@
     "Throughput" : {
 
     },
-    "Tip: shake the %@ to open settings anytime" : {
-
-    },
     "Toggle Dock" : {
 
     },
@@ -1848,12 +1887,6 @@
 
     },
     "Try Again" : {
-
-    },
-    "Try MeowDisplay with an interactive sample Mac. No connection required." : {
-
-    },
-    "Try the controls with a sample Mac. No connection required." : {
 
     },
     "Try the layout exactly as it will look. Preview never sends anything to your Mac." : {

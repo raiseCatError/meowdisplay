@@ -386,7 +386,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.ios
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-  # Demo Mode smoke path for App Review (launch, Explore Demo, Settings, exit).
+  # Demo Mode smoke path for App Review (launch, Try the Demo, Settings, exit).
   OpenSidecariOSUITests:
     type: bundle.ui-testing
     platform: iOS

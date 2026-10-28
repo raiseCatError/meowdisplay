@@ -1,6 +1,6 @@
 import XCTest
 
-/// App Review path: launch, Explore Demo, every release Settings category,
+/// App Review path: launch, Try the Demo, every release Settings category,
 /// Control off and on, then Exit Demo back to the home screen.
 final class DemoModeSmokeTests: XCTestCase {
     private let categories = ["General", "Display", "Input", "Gestures", "Controls", "Audio",
@@ -27,7 +27,7 @@ final class DemoModeSmokeTests: XCTestCase {
         waitForNonExistence(app.buttons["Close"])
         sleep(1)
 
-        let explore = app.buttons["Explore Demo"]
+        let explore = app.buttons["exploreDemo"]
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
         snapshot(app, "01-home")
         tapWhenSettled(explore, in: app)
@@ -72,7 +72,7 @@ final class DemoModeSmokeTests: XCTestCase {
         XCTAssertFalse(exit.exists)
     }
 
-    /// Explore Demo can sit below the fold of the home column in iPhone
+    /// The demo button can sit below the fold of the home column in iPhone
     /// landscape. Scroll it in slowly and let the scroll settle first: a tap
     /// during scroll deceleration only stops the scroll.
     @MainActor

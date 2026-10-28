@@ -163,7 +163,7 @@ final class ReceiverControlsTourTests: XCTestCase {
         sleep(1)
         let explore = app.descendants(matching: .any)["exploreDemo"].firstMatch
         XCTAssertTrue(explore.waitForExistence(timeout: 5))
-        // Explore Demo can sit below the fold in iPhone landscape.
+        // The demo button can sit below the fold in iPhone landscape.
         for _ in 0..<4 where !explore.isHittable {
             app.scrollViews.firstMatch.swipeUp(velocity: .slow)
         }

@@ -272,7 +272,7 @@ private struct GeneralSettingsPage: View {
             } header: {
                 Text("Connection")
             } footer: {
-                Text("Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen.")
+                Text("Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected.")
             }
             Section {
                 Toggle("Haptics", isOn: preferenceBinding(controlStore, \.hapticsEnabled))
@@ -1389,6 +1389,11 @@ private struct AboutSettingsPage: View {
                 }
             } footer: {
                 Text("MeowDisplay needs the Mac app running on a Mac on the same cable or Wi-Fi network. Download it here if you haven't yet.")
+            }
+            Section {
+                Label("Shake the \(deviceKind) to open Settings anytime", systemImage: "gearshape")
+            } header: {
+                Text("Tip")
             }
         }
         .navigationTitle(MobileSettingsCategory.about.title)

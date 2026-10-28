@@ -944,6 +944,11 @@ struct OverflowMarqueeText: View {
 
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
+/// The home screen. Three things, top to bottom: who this is and one short
+/// status line; one card listing Macs (paired, then nearby ones to pair);
+/// and a quiet row of links with Settings & Help beneath it. Everything else
+/// (how to connect, this device's name, Remote Access, Forget) sits one tap
+/// away in a sheet or a menu, so nothing is lost and nothing shouts.
 struct IdleView: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var wakeConnect: WakeConnectCoordinator
@@ -951,11 +956,11 @@ struct IdleView: View {
     let onExploreDemo: () -> Void
     @State private var showRemoteAccessSetup = false
     @State private var showRemotePairing = false
-    /// Persisted expand/collapse state of the Connection Instructions section.
-    @AppStorage("home.connectionInstructionsExpanded") private var instructionsExpanded = true
+    @State private var homeSheet: HomeSheet?
     @State private var remoteEditPeerID: String?
     /// Bumped when remote details change so the (non-observable) store is re-read.
     @State private var remoteRefresh = 0
+    @State private var forgetConfirmation = PeerForgetPrompt()
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
     // going through `CatMode.resolveEnabled` — this value is only ever
@@ -967,13 +972,19 @@ struct IdleView: View {
     /// Keychain or network I/O). Re-read whenever pairing can have changed.
     @State private var pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
 
+    /// The two sheets the footer links open.
+    private enum HomeSheet: String, Identifiable {
+        case howToConnect, thisDevice
+        var id: String { rawValue }
+    }
+
     private var demoPresentation: ExploreDemoPresentation {
         .resolve(pairedMacCount: pairedMacCount)
     }
 
-    private var demoEntry: some View {
-        ExploreDemoEntry(presentation: demoPresentation, onExplore: onExploreDemo)
-    }
+    /// With no Mac paired the demo is offered inside the Macs card, where the
+    /// empty state is; once one is paired it is just a footer link.
+    private var demoLivesInCard: Bool { demoPresentation.leadsConnectionSetup }
 
     private func refreshPairedMacCount() {
         pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
@@ -1021,8 +1032,28 @@ struct IdleView: View {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
             }
         }
-        // Pairing can change through a pairing ceremony, Forget (Settings or
-        // Remote Access) or a reset in Settings; re-read after each.
+        .sheet(item: $homeSheet) { sheet in
+            switch sheet {
+            case .howToConnect: HowToConnectSheet()
+            case .thisDevice: ThisDeviceSheet(receiver: receiver)
+            }
+        }
+        .alert("Forget \u{201C}\(forgetConfirmation.candidate?.name ?? "This Mac")\u{201D}?",
+               isPresented: Binding(get: { forgetConfirmation.isPresented },
+                                    set: { if !$0 { forgetConfirmation.cancel() } })) {
+            Button("Forget", role: .destructive) {
+                forgetConfirmation.confirm { peerID in
+                    receiver.forgetPeer(peerID)
+                    receiver.pairingPrompt.cancel()
+                    remoteRefresh += 1
+                }
+            }
+            Button("Cancel", role: .cancel) { forgetConfirmation.cancel() }
+        } message: {
+            Text("You'll need to pair with this Mac again before connecting.")
+        }
+        // Pairing can change through a pairing ceremony, Forget (here, in
+        // Settings or Remote Access) or a reset in Settings; re-read after each.
         .onAppear(perform: refreshPairedMacCount)
         .onChange(of: receiver.pairingSuccessCount) { _ in refreshPairedMacCount() }
         .onChange(of: receiver.lastForgottenPeerID) { _ in refreshPairedMacCount() }
@@ -1030,104 +1061,83 @@ struct IdleView: View {
         .onChange(of: showSettings) { shown in if !shown { refreshPairedMacCount() } }
     }
 
+    // MARK: Layouts
+
     /// Scrolls only when the content is taller than the screen; when it fits,
-    /// `minHeight` keeps the Spacers distributing exactly as before.
+    /// `minHeight` lets the Spacers centre the header and card and keep the
+    /// links and Settings & Help at the bottom.
     private func portraitLayout(minHeight: CGFloat) -> some View {
         ScrollView(showsIndicators: false) {
-            portraitContent
-                .frame(minHeight: minHeight)
+            VStack(spacing: 24) {
+                Spacer(minLength: 0)
+                homeHeader(titleFont: .largeTitle.bold())
+                macsCard.frame(maxWidth: 420)
+                Spacer(minLength: 8)
+                homeFooter
+            }
+            .padding()
+            .frame(minHeight: minHeight)
         }
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private var portraitContent: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            logo(width: 132)
-            titleAndStatus
-            autoReconnectToggle
-            if demoPresentation.leadsConnectionSetup { demoEntry }
-            instructionsSection
-            deviceSections
-            if !demoPresentation.leadsConnectionSetup { demoEntry }
-            Spacer()
-            settingsButton
-            tip.padding(.bottom, 8)
-        }
-        .padding()
-    }
-
-    /// Two columns for landscape. The left one scrolls only when its content
-    /// is taller than the screen (small phones, large text, instructions
-    /// expanded); when it fits, `minHeight` keeps it vertically centered.
-    /// Explore Demo comes before the instructions there, so it is on screen
-    /// without scrolling while no Mac is paired. The right column's device
-    /// sections scroll on their own.
+    /// Two columns for landscape: who this is and the links on the left, the
+    /// Macs card on the right. Each column scrolls on its own when its
+    /// content is taller than the screen (small phones, large text).
     private var landscapeLayout: some View {
         HStack(alignment: .top, spacing: 24) {
-            GeometryReader { column in
-                ScrollView(showsIndicators: false) {
-                    landscapeSetupColumn
-                        .frame(maxWidth: .infinity, minHeight: column.size.height)
-                }
-                .scrollBounceBehavior(.basedOnSize)
+            scrollingColumn {
+                Spacer(minLength: 0)
+                homeHeader(titleFont: .title.bold())
+                Spacer(minLength: 8)
+                homeFooter
             }
-
-            // Right: devices fill the top, Settings & tip sit at the bottom.
-            VStack(spacing: 12) {
-                ScrollView {
-                    deviceSections
-                        .padding(.top, 12)
-                }
-                    .scrollBounceBehavior(.basedOnSize)
-                settingsButton
-                tip
+            scrollingColumn {
+                Spacer(minLength: 0)
+                macsCard
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(.horizontal, 16)
         .padding(.top, 20)
         .padding(.bottom, 12)
     }
 
-    /// Left landscape column: brand, Auto-Reconnect, Explore Demo while no
-    /// Mac is paired, then the instructions (and the compact Demo Mode
-    /// section once one is).
-    private var landscapeSetupColumn: some View {
-        VStack(spacing: 12) {
-            Spacer(minLength: 0)
-            if instructionsExpanded {
-                HStack(spacing: 0) {
-                    brandHeader(logoWidth: 68, titleFont: .title.bold(), titleStyle: .title1)
-                    Spacer(minLength: 0)
-                }
-            } else {
-                // Freed space: larger, centered branding like portrait.
-                VStack(spacing: 8) {
-                    logo(width: 104)
-                    titleAndStatus(font: .title.bold())
-                }
-                .frame(maxWidth: .infinity)
+    private func scrollingColumn<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        let stack = VStack(spacing: 16) { content() }
+        return GeometryReader { column in
+            ScrollView(showsIndicators: false) {
+                stack.frame(maxWidth: .infinity, minHeight: column.size.height)
             }
-            autoReconnectToggle
-            if demoPresentation.leadsConnectionSetup { demoEntry }
-            instructionsSection
-            if !demoPresentation.leadsConnectionSetup { demoEntry }
-            Spacer(minLength: 0)
+            .scrollBounceBehavior(.basedOnSize)
         }
     }
 
-    private func logo(width: CGFloat) -> some View {
-        Image("MeowLogo")
-            .resizable()
-            .scaledToFit()
-            .frame(width: width, height: width)
+    /// iPad: the same page as the phone's, as one centred column on the
+    /// grouped background instead of a phone column stretched across the screen.
+    private func regularLayout(size: CGSize) -> some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                Spacer(minLength: 0)
+                homeHeader(titleFont: .largeTitle.bold())
+                macsCard
+                Spacer(minLength: 8)
+                homeFooter
+            }
+            .frame(maxWidth: 560)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 40)
+            .frame(maxWidth: .infinity, minHeight: size.height)
+        }
+        .scrollBounceBehavior(.basedOnSize)
     }
 
-    /// The artwork's visible squircle spans ~89% of the PNG (a transparent
-    /// margin plus soft glow surround it). Beside text, lay the icon out by
-    /// its visible edge so spacing and centering are measured from what
-    /// the eye sees; the glow still draws, just outside the layout frame.
+    // MARK: Header
+
+    private static let logoWidth: CGFloat = 72
+
+    /// The icon, laid out by its visible edge (the artwork's squircle spans
+    /// ~89% of the PNG; a transparent margin and soft glow surround it).
     private func visibleLogo(width: CGFloat) -> some View {
         Image("MeowLogo")
             .resizable()
@@ -1139,99 +1149,23 @@ struct IdleView: View {
 
     private static let logoArtworkScale: CGFloat = 1254.0 / 1118.0
 
-    /// Icon beside the wordmark and status, optically centered: the icon's
-    /// middle lines up with the middle of the text's ink (title cap height
-    /// down to the status baseline), not with the text's line boxes, whose
-    /// leading makes a bounding-box center sit visibly low.
-    private func brandHeader(logoWidth: CGFloat, titleFont: Font,
-                             titleStyle: UIFont.TextStyle) -> some View {
-        let capHeight = UIFont.preferredFont(forTextStyle: titleStyle).capHeight
-        // The status line's baseline: the last baseline unless a pairing
-        // status follows it, then one callout line below the first.
-        let statusBelowFirstBaseline: CGFloat? = receiver.pairingPrompt.status == nil
-            ? nil : UIFont.preferredFont(forTextStyle: .callout).lineHeight + 4
-        return HStack(alignment: .brandInkCenter, spacing: logoWidth * 0.26) {
-            visibleLogo(width: logoWidth)
-                .alignmentGuide(.brandInkCenter) { $0[VerticalAlignment.center] }
-            VStack(alignment: .leading, spacing: 4) {
-                brandTitle(font: titleFont)
-                statusLine
-                if let pairingStatus = receiver.pairingPrompt.status {
-                    Text(pairingStatus)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .alignmentGuide(.brandInkCenter) { dimensions in
-                let statusBaseline = statusBelowFirstBaseline.map { dimensions[.firstTextBaseline] + $0 }
-                    ?? dimensions[.lastTextBaseline]
-                return (dimensions[.firstTextBaseline] - capHeight + statusBaseline) / 2
+    /// Icon, name and one short status line, centred.
+    private func homeHeader(titleFont: Font) -> some View {
+        VStack(spacing: 8) {
+            visibleLogo(width: Self.logoWidth)
+                .padding(.bottom, 4)
+            brandTitle(font: titleFont)
+                .accessibilityAddTraits(.isHeader)
+            statusLine
+            if let pairingStatus = receiver.pairingPrompt.status {
+                Text(pairingStatus)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-    }
-
-    // MARK: Regular width (iPad)
-
-    /// iPad: a centered, width-limited page — identity and connection on
-    /// one side, devices on the other — instead of a phone column
-    /// stretched across the screen.
-    private func regularLayout(size: CGSize) -> some View {
-        let twoColumns = size.width >= 760
-        return ScrollView {
-            VStack(spacing: 24) {
-                if twoColumns {
-                    HStack(alignment: .top, spacing: 24) {
-                        VStack(spacing: 20) {
-                            statusCard
-                            if demoPresentation.leadsConnectionSetup { demoEntry }
-                            instructionsSection
-                            if !demoPresentation.leadsConnectionSetup { demoEntry }
-                        }
-                        .frame(maxWidth: .infinity)
-                        devicesCard
-                            .frame(maxWidth: .infinity)
-                    }
-                } else {
-                    VStack(spacing: 20) {
-                        statusCard
-                        if demoPresentation.leadsConnectionSetup { demoEntry }
-                        devicesCard
-                        instructionsSection
-                        if !demoPresentation.leadsConnectionSetup { demoEntry }
-                    }
-                    .frame(maxWidth: 560)
-                }
-                VStack(spacing: 10) {
-                    settingsButton
-                    tip
-                }
-                .padding(.top, 4)
-            }
-            .frame(maxWidth: 940)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 40)
-            .frame(maxWidth: .infinity, minHeight: size.height)
-        }
-        .scrollBounceBehavior(.basedOnSize)
-    }
-
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            brandHeader(logoWidth: 72, titleFont: .largeTitle.bold(), titleStyle: .largeTitle)
-            Divider()
-            Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
-                .toggleStyle(.switch)
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-
-    private var devicesCard: some View {
-        deviceSections(maxWidth: .infinity, horizontalPadding: 0)
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(maxWidth: .infinity)
     }
 
     private func brandTitle(font: Font) -> some View {
@@ -1246,84 +1180,441 @@ struct IdleView: View {
         }
     }
 
+    /// One short line. The how-to guidance that used to live in the status
+    /// text is in How to Connect.
+    private var statusText: String {
+        switch receiver.session.phase {
+        case .disconnected:
+            switch receiver.session.lossReason {
+            case .transportLost, .listenerFailed: return String(localized: "Connection lost")
+            default: return String(localized: "Ready to connect")
+            }
+        case .connecting: return String(localized: "Connecting…")
+        case .connected: return String(localized: "Connected")
+        case .paused: return String(localized: "Paused")
+        case .reconnecting: return String(localized: "Reconnecting…")
+        case .reconnectFailed: return String(localized: "Connection lost")
+        case .unrecoverable: return String(localized: "Can't connect")
+        case .peerDisconnected: return String(localized: "Mac disconnected")
+        }
+    }
+
+    private var statusIsHealthy: Bool {
+        switch receiver.session.phase {
+        case .connected: return true
+        case .disconnected:
+            switch receiver.session.lossReason {
+            case .transportLost, .listenerFailed: return false
+            default: return true
+            }
+        default: return false
+        }
+    }
+
     private var statusLine: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(receiver.connected ? Color.green : Color.orange)
+                .fill(statusIsHealthy ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
-            Text(receiver.status)
+                .accessibilityHidden(true)
+            Text(statusText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
     }
 
-    private var titleAndStatus: some View { titleAndStatus(font: .largeTitle.bold()) }
+    // MARK: Macs card
 
-    private func titleAndStatus(font: Font) -> some View {
-        VStack(spacing: 6) {
-            brandTitle(font: font)
-            statusLine
-            if let pairingStatus = receiver.pairingPrompt.status {
-                Text(pairingStatus)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
+    /// One row of the Macs card: a paired Mac (it may be nearby, reachable
+    /// over Remote, or neither) or a nearby Mac that isn't paired yet.
+    private struct HomeMac: Identifiable {
+        let id: String
+        let name: String
+        /// The pin's peer ID; nil for a Mac that is not paired yet.
+        let peerID: String?
+        /// The Bonjour result while the Mac is visible on this network.
+        let nearby: NWBrowser.Result?
+        /// Logged in on the Mac but not in front: it can't share.
+        let switchedOut: Bool
+        let hasRemote: Bool
+        var isPaired: Bool { peerID != nil }
     }
 
-    private var autoReconnectToggle: some View {
-        Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
-            .toggleStyle(.switch)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: 420)
-            .background(Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var instructionsSection: some View {
-        VStack(spacing: 8) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) { instructionsExpanded.toggle() }
-            } label: {
-                HStack {
-                    Text("How to Connect")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Image(systemName: instructionsExpanded ? "chevron.up" : "chevron.down")
-                        .font(.footnote.weight(.semibold))
+    /// Paired Macs first (by name), then nearby ones to pair. One row per
+    /// Mac: a paired Mac that is also nearby or has Remote details is one row.
+    private func homeMacs() -> [HomeMac] {
+        _ = remoteRefresh
+        let remoteIDs = Set(RemoteEndpointStore.allPeerIDs(role: .receiverRole))
+        var nearbyPaired: [String: (result: NWBrowser.Result, switchedOut: Bool, title: String)] = [:]
+        var toPair: [HomeMac] = []
+        for group in receiver.nearbyMacGroups {
+            for session in group.sessions {
+                guard let result = receiver.discoveredMac(session) else { continue }
+                // Several people's sessions on one Mac (opt-in) read "Mac — Alex".
+                let title = group.isMultiSession
+                    ? SenderSessionAdvertisement.displayName(hostName: group.title, sessionLabel: session.rowTitle)
+                    : group.title
+                let switchedOut = session.availability == .switchedOut
+                if receiver.pairingMacIsPaired(result), let id = receiver.pairingMacPeerID(result) {
+                    if nearbyPaired[id] == nil { nearbyPaired[id] = (result, switchedOut, title) }
+                } else {
+                    toPair.append(HomeMac(id: "nearby-" + session.id, name: title, peerID: nil, nearby: result,
+                                          switchedOut: switchedOut, hasRemote: false))
                 }
-                .foregroundStyle(instructionsExpanded ? HierarchicalShapeStyle.primary : .secondary)
-                .padding(.horizontal, 4)
-                .frame(minHeight: 36)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityValue(instructionsExpanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Double-tap to \(instructionsExpanded ? "collapse" : "expand")")
-
-            if instructionsExpanded {
-                instructionsCard
-                    .transition(.opacity)
             }
         }
-        .frame(maxWidth: 420)
+        var paired: [HomeMac] = TrustStore.shared.pinnedPeers().map { peer in
+            let near = nearbyPaired[peer.peerID]
+            return HomeMac(id: "paired-" + peer.peerID, name: peer.displayName, peerID: peer.peerID,
+                           nearby: near?.result, switchedOut: near?.switchedOut ?? false,
+                           hasRemote: remoteIDs.contains(peer.peerID))
+        }
+        // A paired Mac that is visible always gets a row, even if the pin
+        // list and the discovery record briefly disagree.
+        let listed = Set(paired.compactMap(\.peerID))
+        for (id, near) in nearbyPaired where !listed.contains(id) {
+            paired.append(HomeMac(id: "paired-" + id, name: near.title, peerID: id, nearby: near.result,
+                                  switchedOut: near.switchedOut, hasRemote: remoteIDs.contains(id)))
+        }
+        paired.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return paired + toPair
     }
 
-    private var instructionsCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
-            instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
-            instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
+    private var macsCard: some View {
+        let macs = homeMacs()
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Macs")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 8)
+            if macs.isEmpty {
+                Divider()
+                lookingForMacsRow
+            } else {
+                ForEach(macs) { mac in
+                    Divider()
+                    macRow(mac)
+                }
+            }
+            if demoLivesInCard {
+                Divider()
+                Button(action: onExploreDemo) {
+                    Label("Try the Demo", systemImage: "play.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(.vertical, 12)
+                .accessibilityIdentifier("exploreDemo")
+                .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+            }
+            Divider()
+            remoteMenu(hasRemoteMacs: macs.contains { $0.hasRemote })
         }
-        .font(.footnote)
-        .padding(20)
-        .frame(maxWidth: 420, alignment: .leading)
-        // On iPad's grouped page the card needs the grouped card color to
-        // stand apart from the background.
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(horizontalSizeClass == .regular ? Color(.secondarySystemGroupedBackground)
                                                     : Color(.secondarySystemBackground),
-                    in: RoundedRectangle(cornerRadius: 16))
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var lookingForMacsRow: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Looking for Macs on this Wi-Fi…")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Pair over Remote and Remote Access setup: the card's last row.
+    private func remoteMenu(hasRemoteMacs: Bool) -> some View {
+        Menu {
+            Button {
+                showRemotePairing = true
+            } label: {
+                Label("Pair over Remote", systemImage: "network")
+            }
+            Button {
+                presentRemoteSettings(peerID: nil)
+            } label: {
+                Label(hasRemoteMacs ? "Remote Access Settings…" : "Set Up Remote Access", systemImage: "gearshape")
+            }
+        } label: {
+            HStack {
+                Label("Remote Access", systemImage: "network")
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func presentRemoteSettings(peerID: String?) {
+        remoteEditPeerID = peerID
+        showRemoteAccessSetup = true
+    }
+
+    // MARK: Mac rows
+
+    /// Name and subtitle beside the buttons; when the name doesn't fit on
+    /// one line next to them (long names, large text), the buttons go
+    /// under it instead of squeezing it.
+    private func macRow(_ mac: HomeMac) -> some View {
+        let subtitle = macSubtitle(mac)
+        func label(lines: Int?) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: mac.name)
+                    .font(.body)
+                    .lineLimit(lines)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let subtitle {
+                    Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+        func controls() -> some View {
+            HStack(spacing: 4) {
+                macPrimaryControl(mac)
+                if mac.isPaired { macMenu(mac) }
+            }
+        }
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                label(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
+                controls()
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                label(lines: nil).frame(maxWidth: .infinity, alignment: .leading)
+                controls()
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// One word on where the Mac is, or the state of the current attempt.
+    private func macSubtitle(_ mac: HomeMac) -> String? {
+        guard let peerID = mac.peerID else {
+            return mac.switchedOut ? String(localized: "Switched Out") : String(localized: "Not paired")
+        }
+        if receiver.connected { return String(localized: "Connected") }
+        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
+        if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
+        if mac.switchedOut { return String(localized: "Switched Out") }
+        if mac.nearby != nil { return String(localized: "Nearby") }
+        if mac.hasRemote { return String(localized: "Remote") }
+        return String(localized: "Not found")
+    }
+
+    @ViewBuilder
+    private func macPrimaryControl(_ mac: HomeMac) -> some View {
+        if let peerID = mac.peerID {
+            if receiver.connected || mac.switchedOut {
+                // Connected: nothing to do. Switched out: it can't share, so
+                // there is nothing to connect to until it is in front.
+                EmptyView()
+            } else if wakeConnect.isRunning(forPeerID: peerID) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { wakeConnect.cancel() }
+                    .font(.subheadline)
+                    .buttonStyle(.borderless)
+                    .frame(minHeight: 44)
+            } else {
+                connectButton(for: mac, peerID: peerID)
+            }
+        } else if let result = mac.nearby, !mac.switchedOut {
+            Button("Pair") { receiver.pairWithMac(result) }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel(Text("Pair with \(mac.name)"))
+        }
+    }
+
+    /// One-tap Wake & Connect when this specific paired Mac has a usable
+    /// saved LAN wake hint (see `WakeConnectCoordinator`), or when it isn't
+    /// visible on this network (the Mac is asked, and woken if it can be).
+    /// A Mac visible right now without a wake hint keeps the plain Connect
+    /// with Mirror/Extend on a long press — it asks the Mac, which is always
+    /// the dialer, to start a session (`requestConnect`).
+    @ViewBuilder
+    private func connectButton(for mac: HomeMac, peerID: String) -> some View {
+        let hasWakeHint = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole)?.broadcastAddress != nil
+        if hasWakeHint || mac.nearby == nil {
+            let failed = wakeConnect.failed(forPeerID: peerID)
+            Button {
+                wakeConnect.begin(peerID: peerID)
+            } label: {
+                OverflowMarqueeText(failed ? "Try Again" : (hasWakeHint ? "Wake & Connect" : "Connect"))
+                    .frame(minWidth: 88, maxWidth: 150)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel(failed ? Text("Try again with \(mac.name)")
+                                       : hasWakeHint ? Text("Wake and connect to \(mac.name)")
+                                                     : Text("Connect to \(mac.name)"))
+        } else {
+            Menu {
+                Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
+                Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
+            } label: {
+                Text("Connect").frame(minWidth: 72)
+            } primaryAction: {
+                receiver.requestConnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel(Text("Connect to \(mac.name)"))
+        }
+    }
+
+    /// Everything else you can do with a paired Mac.
+    private func macMenu(_ mac: HomeMac) -> some View {
+        Menu {
+            if let peerID = mac.peerID {
+                if mac.hasRemote {
+                    Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Remove Remote Details", role: .destructive) {
+                        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
+                        remoteRefresh += 1
+                    }
+                } else {
+                    Button("Set Up Remote Access…") { presentRemoteSettings(peerID: peerID) }
+                }
+                Button("Forget…", role: .destructive) {
+                    forgetConfirmation.request(peerID: peerID, name: mac.name)
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.title3)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Text("More for \(mac.name)"))
+    }
+
+    private func remoteStatusText(peerID: String) -> String {
+        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
+            switch reason {
+            case "timedOut": return String(localized: "Connection timed out")
+            case "cancelled": return String(localized: "Cancelled")
+            case "protocolIncompatible": return String(localized: "Mac requires app update")
+            case "peerForgotten": return String(localized: "Mac pairing removed")
+            default: return String(localized: "Connection failed")
+            }
+        }
+        return String(localized: "Not connected")
+    }
+
+    // MARK: Footer
+
+    private var homeFooter: some View {
+        VStack(spacing: 8) {
+            footerLinks
+            settingsButton
+        }
+    }
+
+    /// How to Connect · Try the Demo · This Device. Wraps to a column when
+    /// the three don't fit on one line (small screens, large text).
+    private var footerLinks: some View {
+        let demoInFooter = !demoLivesInCard
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 2) {
+                howToConnectLink
+                if demoInFooter { footerDot; demoLink }
+                footerDot
+                thisDeviceLink
+            }
+            VStack(spacing: 0) {
+                howToConnectLink
+                if demoInFooter { demoLink }
+                thisDeviceLink
+            }
+        }
+        .font(.subheadline)
+    }
+
+    private var footerDot: some View {
+        Text(verbatim: "·")
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
+    }
+
+    private func footerLink(_ title: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private var howToConnectLink: some View {
+        footerLink("How to Connect") { homeSheet = .howToConnect }
+    }
+
+    private var demoLink: some View {
+        footerLink("Try the Demo", action: onExploreDemo)
+            .accessibilityIdentifier("exploreDemo")
+            .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+    }
+
+    private var thisDeviceLink: some View {
+        footerLink("This Device") { homeSheet = .thisDevice }
+    }
+
+    private var settingsButton: some View {
+        Button {
+            showSettings = true
+        } label: {
+            Label("Settings & Help", systemImage: "gearshape")
+        }
+        .buttonStyle(.bordered)
+    }
+}
+
+/// The steps for getting connected, one tap from the home screen's links.
+private struct HowToConnectSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
+                    instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
+                    instructionRow("hand.tap", "Or tap Connect next to a paired Mac")
+                    instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("How to Connect")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     /// Fixed-width icon column so every row's text starts at the same x.
@@ -1338,256 +1629,35 @@ struct IdleView: View {
         }
         .accessibilityElement(children: .combine)
     }
+}
 
-    // MARK: Device sections (shared by portrait and landscape)
+/// This device's name, as Macs list it, one tap from the home screen's links.
+private struct ThisDeviceSheet: View {
+    let receiver: StreamReceiver
+    @Environment(\.dismiss) private var dismiss
 
-    private var deviceSections: some View { deviceSections(maxWidth: 420, horizontalPadding: 16) }
-
-    private func deviceSections(maxWidth: CGFloat, horizontalPadding: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            nearbyDevices
-                .padding(.horizontal, horizontalPadding)
-            Button {
-                showRemotePairing = true
-            } label: {
-                Label("Pair over Remote", systemImage: "network")
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    // The same field Settings uses; it owns its focus and does
+                    // not observe the receiver, so it can't lose it mid-edit.
+                    DeviceNameField { receiver.setServiceName($0) }
+                } header: {
+                    Text("Name")
+                } footer: {
+                    Text("Shown in the Mac app's Wi-Fi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
+                }
             }
-            .buttonStyle(.bordered)
-            .padding(.horizontal, horizontalPadding)
-            if horizontalPadding == 0 { Divider() }
-            remoteAccess
-                .padding(.horizontal, horizontalPadding)
-        }
-        .frame(maxWidth: maxWidth, alignment: .leading)
-    }
-
-    private var nearbyDevices: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Nearby Devices").font(.headline)
-            if receiver.discoveredMacs.isEmpty {
-                Text("No devices nearby")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                // Several people's sessions on one Mac (opt-in) are listed
-                // under that Mac; every other Mac is one row, as before.
-                ForEach(receiver.nearbyMacGroups) { group in
-                    if group.isMultiSession {
-                        Text(verbatim: group.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .accessibilityAddTraits(.isHeader)
-                    }
-                    ForEach(group.sessions) { session in
-                        if let result = receiver.discoveredMac(session) {
-                            nearbyMacRow(result, title: group.isMultiSession ? session.rowTitle : group.title,
-                                         availability: session.availability)
-                                .padding(.leading, group.isMultiSession ? 12 : 0)
-                        }
-                    }
+            .navigationTitle("This Device")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
                 }
             }
         }
-    }
-
-    private func nearbyMacRow(_ result: NWBrowser.Result, title: String,
-                              availability: MacLoginSessionAvailability) -> some View {
-        let isPaired = receiver.pairingMacIsPaired(result)
-        return HStack {
-            Text(verbatim: title).lineLimit(1)
-            Spacer()
-            if availability == .switchedOut {
-                // Logged in but not in front: it can't share, and a pairing
-                // code would appear on a screen nobody is looking at.
-                Text("Switched Out").foregroundStyle(.secondary)
-            } else if isPaired {
-                if receiver.connected {
-                    Text("Connected").foregroundStyle(.secondary)
-                } else {
-                    // Trust and connectivity are different: a
-                    // paired-but-not-currently-connected Mac
-                    // that is visible right now must offer a
-                    // way back in rather than a dead-end
-                    // "Paired" label. A disconnected Mac is
-                    // never dialing out on its own, so this
-                    // can't just rearm our own listener
-                    // (reconnectNow) — it asks the Mac,
-                    // which is always the dialer, to
-                    // actually start a session for us.
-                    connectControl(for: result)
-                }
-            } else {
-                Button("Pair") { receiver.pairWithMac(result) }
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-    }
-
-    /// Paired Macs that have a saved Remote endpoint, with display names.
-    private var remoteMacs: [(peerID: String, displayName: String)] {
-        _ = remoteRefresh
-        let configured = Set(RemoteEndpointStore.allPeerIDs(role: .receiverRole))
-        return TrustStore.shared.pinnedPeers().filter { configured.contains($0.peerID) }
-    }
-
-    private var remoteAccess: some View {
-        let macs = remoteMacs
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Remote Access").font(.headline)
-                Spacer()
-                if !macs.isEmpty {
-                    // Section-level actions only; per-remote actions live on
-                    // each row's own menu.
-                    Menu {
-                        Button("Remote Access Settings…") { presentRemoteSettings(peerID: nil) }
-                    } label: {
-                        Image(systemName: "ellipsis.circle").font(.title3)
-                    }
-                    .accessibilityLabel("Remote Access options")
-                }
-            }
-            if macs.isEmpty {
-                Button {
-                    presentRemoteSettings(peerID: nil)
-                } label: {
-                    Label("Set Up Remote Access", systemImage: "network")
-                }
-                .buttonStyle(.bordered)
-            } else {
-                ForEach(macs, id: \.peerID) { mac in
-                    remoteRow(peerID: mac.peerID, name: mac.displayName)
-                }
-            }
-        }
-    }
-
-    private func presentRemoteSettings(peerID: String?) {
-        remoteEditPeerID = peerID
-        showRemoteAccessSetup = true
-    }
-
-    /// One configured remote: name, its Wake & Connect action, and its own
-    /// menu, all on the same row. Label follows P6: "Wake & Connect" only
-    /// when a local LAN wake hint exists (never claims remote WoL);
-    /// otherwise plain "Connect", which — via `connectPrimary(peerID:)` —
-    /// rearms the local listener/Bonjour `cr` and knocks this one Mac only.
-    @ViewBuilder
-    private func remoteRow(peerID: String, name: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 10) {
-            Text(name)
-                .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 8)
-            if receiver.connected {
-                Text("Connected").foregroundStyle(.secondary)
-            } else if wakeConnect.isRunning(forPeerID: peerID) {
-                ProgressView().controlSize(.small)
-                Button("Cancel") { wakeConnect.cancel() }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else {
-                Button {
-                    wakeConnect.begin(peerID: peerID)
-                } label: {
-                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Connect")
-                        .frame(minWidth: 88)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            Menu {
-                Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
-                Button("Remove Remote Details", role: .destructive) {
-                    RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
-                    remoteRefresh += 1
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle").font(.title3)
-            }
-            .accessibilityLabel("Options for \(name)")
-        }
-        if !receiver.connected {
-            Text(wakeConnect.isRunning(forPeerID: peerID) ? wakeConnect.statusLabel : remoteStatusText(peerID: peerID))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        }
-    }
-
-    private var settingsButton: some View {
-        Button {
-            showSettings = true
-        } label: {
-            Label("Settings & Help", systemImage: "gearshape")
-        }
-        .buttonStyle(.bordered)
-    }
-
-    private var tip: some View {
-        Text("Tip: shake the \(deviceKind) to open settings anytime")
-            .font(.footnote)
-            .foregroundStyle(.tertiary)
-            .multilineTextAlignment(.center)
-    }
-
-    private func remoteStatusText(peerID: String) -> String {
-        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
-            switch reason {
-            case "timedOut": return String(localized: "Connection timed out")
-            case "cancelled": return String(localized: "Cancelled")
-            case "protocolIncompatible": return String(localized: "Mac requires app update")
-            case "peerForgotten": return String(localized: "Mac pairing removed")
-            default: return String(localized: "Connection failed")
-            }
-        }
-        switch receiver.session.phase {
-        case .connecting, .reconnecting: return String(localized: "Connecting…")
-        case .connected: return String(localized: "Connected")
-        case .reconnectFailed, .disconnected: return String(localized: "Not connected")
-        default: return String(localized: "Remote endpoint unavailable")
-        }
-    }
-
-    /// One-tap Wake & Connect when this specific paired Mac has a usable
-    /// saved LAN wake hint (see `WakeConnectCoordinator`); a plain Connect
-    /// otherwise, unchanged.
-    @ViewBuilder
-    private func connectControl(for result: NWBrowser.Result) -> some View {
-        if let peerID = receiver.pairingMacPeerID(result) {
-            if wakeConnect.isRunning(forPeerID: peerID) {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(wakeConnect.statusLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Cancel") { wakeConnect.cancel() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                }
-            } else if WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole)?.broadcastAddress != nil {
-                Button {
-                    wakeConnect.begin(peerID: peerID)
-                } label: {
-                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect")
-                        .frame(minWidth: 88)
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Menu {
-                    Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
-                    Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
-                } label: {
-                    Text("Connect")
-                } primaryAction: {
-                    receiver.requestConnect()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        } else {
-            Button("Connect") { receiver.requestConnect() }
-                .buttonStyle(.borderedProminent)
-        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -4429,16 +4499,6 @@ final class InputCaptureEngine: NSObject {
                             pressure: Double, azimuth: Double, altitude: Double) {
         onPencil?(phase, x, y, pressure, azimuth, altitude)
     }
-}
-
-private extension VerticalAlignment {
-    /// The middle of the MeowDisplay wordmark/status ink — see
-    /// `IdleView.brandHeader`.
-    enum BrandInkCenter: AlignmentID {
-        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[VerticalAlignment.center] }
-    }
-
-    static let brandInkCenter = VerticalAlignment(BrandInkCenter.self)
 }
 
 /// The small Request Control affordance on the receiver
