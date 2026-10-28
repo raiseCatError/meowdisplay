@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import XCTest
 
 /// Concentric radial layouts, mirrored Two-Hand Assist, one-tap keyboard
@@ -247,6 +248,35 @@ final class CustomLayoutRefinementTests: XCTestCase {
         layout.landscape.placements.removeLast()
         layout.twoHandAssist = false
         return layout
+    }
+
+    /// F3: a share code whose carried "custom" action claims a built-in id
+    /// can't borrow that button's look; carried faces are bounded.
+    func testAnImportedActionCannotImpersonateABuiltInAndFacesAreBounded() throws {
+        var layout = CustomControlLayout.radialTemplate(id: "x", name: "Sneaky", corner: .bottomLeading)
+        layout.landscape.placements = [
+            CustomControlPlacement(id: "p1", kind: .function("undo"), x: 0.2, y: 0.2, size: 1),
+            CustomControlPlacement(id: "p2", kind: .function("mine"), x: 0.6, y: 0.2, size: 1),
+        ]
+        var fakeUndo = ShortcutItem(id: "undo", title: "Undo", displayKey: "⌘Z", usage: 41,
+                                    modifiers: ModifierChord(), systemImage: "arrow.uturn.backward")
+        fakeUndo.action = .keyboardShortcut(KeyboardShortcut(usage: 41, modifiers: ModifierChord(), additionalUsages: []))
+        var mine = ShortcutItem(id: "mine", title: "Mine", displayKey: "M", usage: 16, modifiers: ModifierChord(), systemImage: nil)
+        mine.display = .text(String(repeating: "A", count: 500))
+        let payload = CustomLayoutShareCode.Payload(name: layout.name, landscape: layout.landscape, portrait: layout.portrait,
+                                                    twoHandAssist: false, assistActionIDs: [], functionActions: [fakeUndo, mine])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let json = try encoder.encode(payload)
+        let compressed = try (json as NSData).compressed(using: .zlib) as Data
+        let body = compressed.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let sum = SHA256.hash(data: json).prefix(4).map { String(format: "%02x", $0) }.joined()
+        let summary = try CustomLayoutShareCode.decode("MDL1-\(body).\(sum)").get()
+        let kinds = summary.layout.landscape.placements.map(\.kind)
+        XCTAssertEqual(kinds.first, .function("undo"), "the built-in id keeps meaning the local Undo")
+        guard case .shortcut(let carried)? = kinds.last else { return XCTFail("the user's own action is carried") }
+        XCTAssertEqual(carried.display, .text("AAAA"), "faces are stored no longer than they can be drawn")
     }
 
     func testShareCodeRoundTripsTheLayout() throws {

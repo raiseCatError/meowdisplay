@@ -103,6 +103,10 @@ enum CustomLayoutShareCode {
         // fresh ids — never merged into, or overwriting, local profiles.
         var definitions: [String: ShortcutItem] = [:]
         for action in (payload.functionActions ?? []).prefix(maximumPlacements) where action.action.isValid {
+            // A carried "custom" action claiming a built-in id (Undo, Return, …)
+            // could borrow that button's look while sending other keys: dropped,
+            // so the id keeps meaning the local built-in (F3; Android 0839cc0).
+            guard !FunctionTrayProfile.isBuiltIn(action.id), action.id.count <= 64 else { continue }
             var item = action
             item.id = UUID().uuidString
             definitions[action.id] = item
@@ -152,6 +156,13 @@ enum CustomLayoutShareCode {
                 item.title = String(item.title.prefix(maximumNameLength))
                 item.displayKey = String(item.displayKey.prefix(24))
                 item.systemImage = item.systemImage.map { String($0.prefix(60)) }
+                // A face is stored no longer than it can ever be drawn.
+                switch item.display {
+                case .symbol(let name)?: item.display = .symbol(String(name.prefix(60)))
+                case .text(let text)?: item.display = .text(String(text.prefix(ShortcutButtonDisplay.maximumTextLength)))
+                case .emoji(let emoji)?: item.display = .emoji(String(emoji.prefix(2)))
+                default: break
+                }
                 kind = .shortcut(item)
             }
             var palette = placement.palette
