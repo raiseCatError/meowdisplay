@@ -481,7 +481,7 @@ class SmartTouchTests {
                                             norm = CGPoint(0.2, 0.2), t = 0.15)))
         val drag = engine.handle(sample(2, Phase.Moved, view = CGPoint(100.0, 130.0),
                                         norm = CGPoint(0.2, 0.3), t = 0.2))
-        assertEquals(listOf(PointerCommand.MoveAbsolute(0.2, 0.3), PointerCommand.MouseDown(PointerButton.Left, 1)), drag)
+        assertEquals(listOf(PointerCommand.MoveAbsolute(0.2, 0.2), PointerCommand.MouseDown(PointerButton.Left, 1), PointerCommand.MoveAbsolute(0.2, 0.3)), drag)
         assertEquals(PointerEngineMode.LeftDragHeld, engine.mode)
     }
 

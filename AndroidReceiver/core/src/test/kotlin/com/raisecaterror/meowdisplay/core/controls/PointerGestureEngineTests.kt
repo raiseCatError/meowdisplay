@@ -174,7 +174,11 @@ class PointerGestureEngineTests {
         val moved = engine.handle(sample(2, Phase.Moved, view = CGPoint(40.0, 9.0), norm = CGPoint(0.5, 0.3), t = 0.15))
         assertTrue(moved.contains(PointerCommand.MouseDown(PointerButton.Left, 1)))
         assertEquals(PointerEngineMode.LeftDragHeld, engine.mode)
-        assertTrue(moved.any { isMoveAbsolute(it) })
+        // Pressed where the finger came down, then dragged to where it is now.
+        assertEquals(
+            listOf(PointerCommand.MoveAbsolute(0.3, 0.3), PointerCommand.MouseDown(PointerButton.Left, 1), PointerCommand.MoveAbsolute(0.5, 0.3)),
+            moved,
+        )
 
         val dragged = engine.handle(sample(2, Phase.Moved, view = CGPoint(60.0, 9.0), norm = CGPoint(0.6, 0.3), t = 0.2))
         assertFalse(dragged.any { isMouseDown(it) })

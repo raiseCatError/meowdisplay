@@ -443,7 +443,7 @@ final class SmartTouchTests: XCTestCase {
                                             norm: CGPoint(x: 0.2, y: 0.2), t: 0.15)), [])
         let drag = engine.handle(sample(2, .moved, view: CGPoint(x: 100, y: 130),
                                         norm: CGPoint(x: 0.2, y: 0.3), t: 0.2))
-        XCTAssertEqual(drag, [.moveAbsolute(x: 0.2, y: 0.3), .mouseDown(button: .left, clickCount: 1)])
+        XCTAssertEqual(drag, [.moveAbsolute(x: 0.2, y: 0.2), .mouseDown(button: .left, clickCount: 1), .moveAbsolute(x: 0.2, y: 0.3)])
         XCTAssertEqual(engine.mode, .leftDragHeld)
     }
 

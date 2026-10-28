@@ -430,7 +430,7 @@ final class PointerGestureEngine {
 
     // The single touch tracked while `.firstTouchPending`.
     private var pendingID: AnyHashable?
-    private var pendingStart: (point: CGPoint, view: CGPoint, time: TimeInterval)?
+    private var pendingStart: (point: CGPoint, view: CGPoint, time: TimeInterval, normalized: CGPoint?)?
     // Refreshed on every `moved()` sample while still `.firstTouchPending`
     // so a time-based commit (arbitration window expiry, or a held tap
     // chain's hold-commit delay) has a current position to work with even
@@ -503,7 +503,7 @@ final class PointerGestureEngine {
                 if now - start.time >= PointerGestureConfig.holdCommitDelay {
                     out += inputMode == .trackpad
                         ? beginTrackpadDrag(id: pid, at: pendingLastView ?? start.view, time: now)
-                        : beginLeftDrag(id: pid, normalized: pendingLastNormalized)
+                        : beginLeftDrag(id: pid, pressAt: start.normalized, current: pendingLastNormalized)
                 }
             } else if let target = smartTouchDeferredTarget {
                 switch target {
@@ -680,7 +680,7 @@ final class PointerGestureEngine {
             // or convert it). Neither emits anything yet — see
             // `.firstTouchPending`'s doc.
             pendingID = sample.id
-            pendingStart = (sample.normalized ?? .zero, sample.viewPoint, sample.time)
+            pendingStart = (sample.normalized ?? .zero, sample.viewPoint, sample.time, sample.normalized)
             pendingLastNormalized = sample.normalized
             pendingLastView = sample.viewPoint
             mode = .firstTouchPending
@@ -888,7 +888,7 @@ final class PointerGestureEngine {
             if tapChain != nil {
                 return inputMode == .trackpad
                     ? beginTrackpadDrag(id: sample.id, at: sample.viewPoint, time: sample.time)
-                    : beginLeftDrag(id: sample.id, normalized: sample.normalized)
+                    : beginLeftDrag(id: sample.id, pressAt: start.normalized, current: sample.normalized)
             }
             if smartTouchIsActive {
                 switch smartTouchProbe {
@@ -1383,7 +1383,10 @@ final class PointerGestureEngine {
     /// at the drag touch's current position (`normalized`) so the drag —
     /// and the cursor — begin exactly where the finger already is, not
     /// wherever the cursor last happened to be.
-    private func beginLeftDrag(id: AnyHashable, normalized: CGPoint?) -> [PointerCommand] {
+    /// Presses where the finger came down (`pressAt`), then drags to where it
+    /// is now: pressing at the point the drag was recognised would start
+    /// every drag a slop's distance off its target.
+    private func beginLeftDrag(id: AnyHashable, pressAt: CGPoint?, current: CGPoint?) -> [PointerCommand] {
         let clickCount = tapChain?.count ?? 0
         tapChain = nil
         pendingID = nil
@@ -1394,10 +1397,13 @@ final class PointerGestureEngine {
         mode = .leftDragHeld
         heldMouseButton = .left
         var out: [PointerCommand] = []
-        if let n = normalized {
+        if let n = pressAt ?? current {
             out.append(.moveAbsolute(x: Double(n.x), y: Double(n.y)))
         }
         out.append(.mouseDown(button: .left, clickCount: max(clickCount, 1)))
+        if pressAt != nil, let c = current, c != pressAt {
+            out.append(.moveAbsolute(x: Double(c.x), y: Double(c.y)))
+        }
         return out
     }
 

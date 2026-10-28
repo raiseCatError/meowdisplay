@@ -164,7 +164,8 @@ final class PointerGestureEngineTests: XCTestCase {
         let moved = engine.handle(sample(2, .moved, view: CGPoint(x: 40, y: 9), norm: CGPoint(x: 0.5, y: 0.3), t: 0.15))
         XCTAssertTrue(moved.contains(.mouseDown(button: .left, clickCount: 1)))
         XCTAssertEqual(engine.mode, .leftDragHeld)
-        XCTAssertTrue(moved.contains(where: isMoveAbsolute))
+        // Pressed where the finger came down, then dragged to where it is now.
+        XCTAssertEqual(moved, [.moveAbsolute(x: 0.3, y: 0.3), .mouseDown(button: .left, clickCount: 1), .moveAbsolute(x: 0.5, y: 0.3)])
 
         let dragged = engine.handle(sample(2, .moved, view: CGPoint(x: 60, y: 9), norm: CGPoint(x: 0.6, y: 0.3), t: 0.2))
         XCTAssertFalse(dragged.contains(where: isMouseDown))

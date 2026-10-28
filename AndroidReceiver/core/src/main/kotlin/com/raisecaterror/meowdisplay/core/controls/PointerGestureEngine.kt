@@ -409,7 +409,7 @@ class PointerGestureEngine {
     private var chordIsContinuation = false
 
     // The single touch tracked while FirstTouchPending.
-    private data class PendingStart(val point: CGPoint, val view: CGPoint, val time: TimeInterval)
+    private data class PendingStart(val point: CGPoint, val view: CGPoint, val time: TimeInterval, val normalized: CGPoint? = null)
 
     private var pendingID: Any? = null
     private var pendingStart: PendingStart? = null
@@ -469,7 +469,7 @@ class PointerGestureEngine {
                     out += if (inputMode == PointerInputMode.Trackpad) {
                         beginTrackpadDrag(pid, pendingLastView ?: pStart.view, now)
                     } else {
-                        beginLeftDrag(pid, pendingLastNormalized)
+                        beginLeftDrag(pid, pStart.normalized, pendingLastNormalized)
                     }
                 }
             } else if (smartTouchDeferredTarget != null) {
@@ -664,7 +664,7 @@ class PointerGestureEngine {
                 // (tap-then-hold-drag / multi-tap chain path: tapChain still reflects its count).
                 // Neither emits anything yet.
                 pendingID = sample.id
-                pendingStart = PendingStart(sample.normalized ?: CGPoint.zero, sample.viewPoint, sample.time)
+                pendingStart = PendingStart(sample.normalized ?: CGPoint.zero, sample.viewPoint, sample.time, sample.normalized)
                 pendingLastNormalized = sample.normalized
                 pendingLastView = sample.viewPoint
                 mode = PointerEngineMode.FirstTouchPending
@@ -862,7 +862,7 @@ class PointerGestureEngine {
                     return if (inputMode == PointerInputMode.Trackpad) {
                         beginTrackpadDrag(sample.id, sample.viewPoint, sample.time)
                     } else {
-                        beginLeftDrag(sample.id, sample.normalized)
+                        beginLeftDrag(sample.id, start.normalized, sample.normalized)
                     }
                 }
                 if (smartTouchIsActive) {
@@ -1369,7 +1369,11 @@ class PointerGestureEngine {
      * current position (`normalized`) so the drag - and the cursor - begin exactly where the
      * finger already is.
      */
-    private fun beginLeftDrag(id: Any, normalized: CGPoint?): List<PointerCommand> {
+    /**
+     * Presses where the finger came down ([pressAt]), then drags to where it is now: pressing
+     * at the point the drag was recognised would start every drag a slop's distance off target.
+     */
+    private fun beginLeftDrag(id: Any, pressAt: CGPoint?, current: CGPoint?): List<PointerCommand> {
         val clickCount = tapChain?.count ?: 0
         tapChain = null
         pendingID = null
@@ -1380,10 +1384,11 @@ class PointerGestureEngine {
         mode = PointerEngineMode.LeftDragHeld
         heldMouseButton = PointerButton.Left
         val out = ArrayList<PointerCommand>()
-        if (normalized != null) {
-            out.add(PointerCommand.MoveAbsolute(normalized.x, normalized.y))
-        }
+        (pressAt ?: current)?.let { out.add(PointerCommand.MoveAbsolute(it.x, it.y)) }
         out.add(PointerCommand.MouseDown(PointerButton.Left, max(clickCount, 1)))
+        if (pressAt != null && current != null && current != pressAt) {
+            out.add(PointerCommand.MoveAbsolute(current.x, current.y))
+        }
         return out
     }
 
