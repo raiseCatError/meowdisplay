@@ -1,5 +1,15 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
+import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
+import com.raisecaterror.meowdisplay.core.workspace.WAxis
+import com.raisecaterror.meowdisplay.core.workspace.WRect
+import com.raisecaterror.meowdisplay.core.workspace.WHinge
+import com.raisecaterror.meowdisplay.core.workspace.WSize
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowOverview
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowRail
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceChrome
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController
 import android.app.Activity
 import android.os.Build
 import android.view.HapticFeedbackConstants
@@ -102,6 +112,10 @@ fun ReceiverScreen(
     pipeline: MediaPipeline,
     overlay: @Composable (ReceiverWindow, OverlayActions, Int) -> Unit,
     onOpenSettings: () -> Unit,
+    onBack: () -> Unit = {},
+    workspace: WorkspaceController? = null,
+    macName: String = "your Mac",
+    onMode: (DisplayMode) -> Unit = {},
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
@@ -115,9 +129,9 @@ fun ReceiverScreen(
     val folds = rememberFoldRegions()
 
     LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
-    // Back never ends a live session by accident: like leaving the app on iOS, it only backgrounds
-    // MeowDisplay (the Mac is told to expect this device back). The keyboard and Settings take Back first.
-    BackHandler { (context as? Activity)?.moveTaskToBack(true) }
+    // Back never ends a live session: it goes to Home, with the session and picture kept, so
+    // Return to Display is instant. The keyboard, Settings and the window overview take Back first.
+    BackHandler { onBack() }
     LaunchedEffect(Unit) {
         controller.hapticEvents.collect { haptic -> hapticConstant(haptic)?.let(hostView::performHapticFeedback) }
     }
@@ -190,7 +204,9 @@ fun ReceiverScreen(
         // The streamed cursor, at the Mac's position under the current zoom.
         val cursor = state.cursor
         val sprite = cursor.sprite
-        if (cursor.visible && sprite != null && transform.isValid) {
+        // In Window mode the workspace pointer is the local one; the Mac's cursor isn't drawn twice.
+        val windowMode = workspace?.ui?.collectAsState()?.value?.windowMode == true
+        if (cursor.visible && sprite != null && transform.isValid && !windowMode) {
             val image = remember(sprite) { sprite.bitmap.asImageBitmap() }
             Canvas(Modifier.fillMaxSize()) {
                 val crop = transform.remoteCrop
@@ -211,12 +227,27 @@ fun ReceiverScreen(
         // The input layer over the whole window (touches outside the picture still navigate locally).
         AndroidView(
             factory = { ctx ->
-                ReceiverInputView(ctx, controller.surface, controller.keyboard, controller.surfaceSender(), inputAllowed = { controller.view.value.inputAllowed })
-                    .also { controller.inputView = it }
+                ReceiverInputView(
+                    ctx, controller.surface, controller.keyboard, controller.surfaceSender(),
+                    inputAllowed = { controller.view.value.inputAllowed },
+                    hideSystemPointer = { controller.view.value.inputAllowed && workspace?.ui?.value?.windowMode != true },
+                ).also { view ->
+                    controller.inputView = view
+                    view.onHardwarePointer = { p -> workspace?.hover(p?.x, p?.y) }
+                }
             },
             modifier = Modifier.fillMaxSize(),
             onRelease = { if (controller.inputView === it) controller.inputView = null },
         )
+
+        if (workspace != null) {
+            val wsUi by workspace.ui.collectAsState()
+            LaunchedEffect(frame, folds, transform) {
+                if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
+            }
+            WorkspaceChrome(workspace, transform, state.inputAllowed)
+            if (wsUi.available) WindowRail(workspace)
+        }
 
         val actions = remember(controller) { controller.overlayActions(onOpenSettings, onOccupied = { occupied = it }, onCanvas = { canvas = it }) }
         overlay(window, actions, state.inputResetGeneration)
@@ -226,7 +257,23 @@ fun ReceiverScreen(
             onTap = controller::requestInputTapped,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 - 22).dp),
         )
+        workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
     }
+}
+
+/** A separating fold as a hinge in canvas coordinates (nothing is placed inside it). */
+private fun hingeFor(folds: List<CGRect>, t: RemoteViewportTransform): WHinge? {
+    val f = folds.firstOrNull() ?: return null
+    if (!t.isValid) return null
+    val a = t.remotePoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(f.minX, f.minY)) ?: return null
+    val b = t.remotePoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(f.maxX, f.maxY)) ?: return null
+    val x0 = minOf(a.x, b.x).coerceIn(0.0, 1.0); val x1 = maxOf(a.x, b.x).coerceIn(0.0, 1.0)
+    val y0 = minOf(a.y, b.y).coerceIn(0.0, 1.0); val y1 = maxOf(a.y, b.y).coerceIn(0.0, 1.0)
+    val vertical = f.height >= f.width
+    if (vertical && (x1 <= 0.05 || x0 >= 0.95)) return null
+    if (!vertical && (y1 <= 0.05 || y0 >= 0.95)) return null
+    return if (vertical) WHinge(WRect(x0, 0.0, maxOf(x1 - x0, 0.0), 1.0), WAxis.Vertical)
+    else WHinge(WRect(0.0, y0, 1.0, maxOf(y1 - y0, 0.0)), WAxis.Horizontal)
 }
 
 /** The Mac's frames on a SurfaceView; the decoder renders straight into it. */

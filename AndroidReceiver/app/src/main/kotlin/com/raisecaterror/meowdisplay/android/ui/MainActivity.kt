@@ -10,6 +10,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.activity.compose.BackHandler
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverOverlayHost
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverScreen
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverSettings
@@ -30,14 +32,30 @@ class MainActivity : ComponentActivity() {
         setContent {
             MeowTheme {
                 val mediaUi by app.media.ui.collectAsState()
+                val paired by app.pins.paired.collectAsState()
                 var settingsOpen by remember { mutableStateOf(false) }
+                // Home while connected: shown over the live picture, so the session, the Mac's
+                // display and the decoder are untouched and Return to Display is instant (R-01).
+                var homeShown by rememberSaveable { mutableStateOf(false) }
                 if (mediaUi.admitted) {
-                    ReceiverScreen(app.receiver, app.pipeline, overlay = { window, actions, generation ->
-                        ReceiverOverlayHost(app.receiver, window, actions, generation)
-                    }, onOpenSettings = { settingsOpen = true })
+                    val macName = paired.firstOrNull { it.peerID == mediaUi.peerID }?.name ?: "your Mac"
+                    ReceiverScreen(
+                        app.receiver, app.pipeline,
+                        overlay = { window, actions, generation -> ReceiverOverlayHost(app.receiver, window, actions, generation) },
+                        onOpenSettings = { settingsOpen = true },
+                        onBack = { app.receiver.releaseHeldInput(); homeShown = true },
+                        workspace = app.workspace, macName = macName,
+                        onMode = { app.media.session.requestDisplayMode(it) },
+                    )
+                    if (homeShown) {
+                        BackHandler { moveTaskToBack(true) }
+                        ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media,
+                            onReturnToDisplay = { homeShown = false }, onOpenSettings = { settingsOpen = true })
+                    }
                     if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
                 } else {
                     settingsOpen = false
+                    homeShown = false
                     ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media)
                 }
             }

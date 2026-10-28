@@ -212,6 +212,7 @@ class MediaController(
             is SessionEvent.ApprovalRequested -> state.update { it.copy(approval = event.approval) }
             is SessionEvent.ApprovalDismissed -> state.update { if (it.approval?.id == event.id) it.copy(approval = null) else it }
             is SessionEvent.InputState -> state.update { it.copy(input = event.state) }
+            is SessionEvent.DisplayModeConfirmed -> state.update { it.copy(source = event.mode.wire) }
             is SessionEvent.UpdateRequired -> state.update {
                 it.copy(updateMessage = event.message ?: "Update MeowDisplay to keep using your second display.", updateLink = event.storeUrl)
             }

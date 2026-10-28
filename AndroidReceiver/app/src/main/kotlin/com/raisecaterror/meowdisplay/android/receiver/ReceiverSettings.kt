@@ -1,5 +1,7 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
+import androidx.compose.material3.FilterChip
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.background
@@ -212,6 +214,25 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
             CustomLayoutsSection(controller)
         }
         SettingsPage.Display -> {
+            val ws = controller.workspace
+            val wsUi = ws?.ui?.collectAsState()?.value
+            val mediaUi by media.ui.collectAsState()
+            Section("What This Device Shows")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOfNotNull(DisplayMode.Mirror, DisplayMode.Extend, DisplayMode.Window.takeIf { wsUi?.available == true }).forEach { mode ->
+                    val selected = mediaUi.source == mode.wire
+                    FilterChip(selected = selected, onClick = { media.session.requestDisplayMode(mode) },
+                        label = { Text(when (mode) { DisplayMode.Mirror -> "Mirror"; DisplayMode.Extend -> "Extend"; DisplayMode.Window -> "Windows" }) })
+                }
+            }
+            Caption(
+                if (wsUi?.available == true) "Mirror shows a Mac display. Extend adds a separate desktop. Windows shows Mac windows you pick, side by side. Only this device changes."
+                else "Mirror shows a Mac display. Extend adds a separate desktop. Only this device changes."
+            )
+            if (wsUi?.available == true) {
+                OutlinedButton(onClick = { onDismiss(); ws.openOverview() }) { Text("Choose Windows…") }
+                Caption("Tip: hold three fingers still on the picture to open your windows.")
+            }
             Toggle("Surface Grid When Video Is Off", prefs.showSurfaceGrid) { on -> set { it.showSurfaceGrid = on } }
             OutlinedButton(onClick = { controller.resetViewport() }) { Text("Reset View") }
         }

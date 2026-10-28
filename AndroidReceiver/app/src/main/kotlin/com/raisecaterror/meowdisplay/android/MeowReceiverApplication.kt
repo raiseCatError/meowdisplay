@@ -8,6 +8,8 @@ import com.raisecaterror.meowdisplay.android.controls.ReceiverControlStore
 import com.raisecaterror.meowdisplay.android.controls.SharedPreferenceBlobStore
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverController
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.media.MediaPipeline
 import com.raisecaterror.meowdisplay.android.pairing.PairingController
@@ -36,8 +38,14 @@ class MeowReceiverApplication : Application() {
 
     /** Input, viewport and control wiring for the live receiver surface. */
     val receiver: ReceiverController by lazy {
-        ReceiverController(media, controls, pipeline.videoSize).also { media.session.audioPreferred = controls.current.audioPreferred }
+        ReceiverController(media, controls, pipeline.videoSize).also {
+            media.session.audioPreferred = controls.current.audioPreferred
+            it.workspace = workspace
+        }
     }
+
+    /** Window mode: the arrangement of Mac windows on this device (per Mac). */
+    val workspace: WorkspaceController by lazy { WorkspaceController(this, media) }
 
     /**
      * The panel: the whole current display in its current orientation, never
@@ -59,6 +67,7 @@ class MeowReceiverApplication : Application() {
             pixelsWide = wide, pixelsHigh = high, scale = resources.displayMetrics.density.toDouble(),
             installID = identity.installID, maxFPS = refresh.roundToInt().takeIf { it > 0 },
             trayEnabled = controls.current.trayEnabled, keyboardButtonEnabled = controls.current.keyboardButtonEnabled,
+            windowWorkspace = WorkspaceWire.VERSION,
         )
     }
 }

@@ -61,6 +61,15 @@ object HidKeyMap {
         if (metaState and KeyEvent.META_CAPS_LOCK_ON != 0) add("capsLock")
     }
 
+    /** A modifier key pressed on its own, by its wire name; null for every other key. */
+    fun modifierKeyName(keyCode: Int): String? = when (keyCode) {
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> "shift"
+        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT -> "control"
+        KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> "option"
+        KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> "command"
+        else -> null
+    }
+
     /** Command or Control with a key means a shortcut for the Mac; Option alone still types its character. */
     fun isShortcut(metaState: Int): Boolean = metaState and (KeyEvent.META_META_ON or KeyEvent.META_CTRL_ON) != 0
 }

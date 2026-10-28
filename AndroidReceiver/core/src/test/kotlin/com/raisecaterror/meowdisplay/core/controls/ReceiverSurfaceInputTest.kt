@@ -27,6 +27,8 @@ class ReceiverSurfaceInputTest {
     }
 
     private class Effects : ReceiverSurfaceEffects {
+        val holdArmed = mutableListOf<Double>()
+        override fun threeFingerHoldArmed(delaySeconds: Double) { holdArmed += delaySeconds }
         val blocked = mutableListOf<Int>()
         val viewports = mutableListOf<ManualViewportState>()
         override fun blockedAttempt(maximumTouchCount: Int) {
@@ -208,5 +210,55 @@ class ReceiverSurfaceInputTest {
         assertTrue(presses.all { it["action"]!!.jsonPrimitive.content == "press" && it["usage"]!!.jsonPrimitive.content == "46" })
         assertTrue(link.sent.none { it["type"]!!.jsonPrimitive.content == "nativeAppGesture" })
         assertTrue(surface.manualZoom.isIdentity)
+    }
+
+    // MARK: Window mode three-finger hold
+
+    private fun three(phase: SurfaceTouchPhase, t: Double, dx: Double = 0.0) =
+        surface.touches(phase, listOf(finger(1, 400.0 + dx, 300.0), finger(2, 460.0 + dx, 300.0), finger(3, 520.0 + dx, 300.0)), t)
+
+    @Test
+    fun stationaryThreeFingerHoldOpensTheOverviewAndSendsNothingToTheMac() {
+        surface.threeFingerHoldEnabled = true
+        link.sent.clear()
+        three(SurfaceTouchPhase.Began, 0.0)
+        assertEquals(listOf(ReceiverSurfaceInput.THREE_FINGER_HOLD_SECONDS), effects.holdArmed)
+        three(SurfaceTouchPhase.Moved, 0.2, dx = 3.0)
+        assertFalse("not yet", surface.threeFingerHoldDue(0.3))
+        assertTrue(surface.threeFingerHoldDue(0.5))
+        assertFalse("fires once", surface.threeFingerHoldDue(0.6))
+        three(SurfaceTouchPhase.Ended, 0.7, dx = 3.0)
+        assertEquals("no three-finger tap, no pointer input", emptyList<Pair<String, String?>>(), inputTypes())
+    }
+
+    @Test
+    fun aQuickThreeFingerTapAndASwipeStillReachTheMac() {
+        surface.threeFingerHoldEnabled = true
+        link.sent.clear()
+        three(SurfaceTouchPhase.Began, 0.0)
+        three(SurfaceTouchPhase.Ended, 0.1)
+        assertFalse(surface.threeFingerHoldDue(0.5))
+        assertTrue("the tap went through", inputTypes().any { it.first == "gesture" })
+        link.sent.clear()
+        three(SurfaceTouchPhase.Began, 1.0)
+        for (i in 1..8) three(SurfaceTouchPhase.Moved, 1.0 + i * 0.016, dx = i * 30.0)
+        assertFalse("moved: no overview", surface.threeFingerHoldDue(1.6))
+        three(SurfaceTouchPhase.Ended, 1.2, dx = 240.0)
+        assertTrue("the swipe went through", inputTypes().any { it.first == "gesture" })
+    }
+
+    @Test
+    fun holdWorksViewOnlyAndIsOffOutsideWindowMode() {
+        surface.updateConfig(SurfaceInputConfig(allowsInput = false, senderPV = 22, smartTouchEnabled = false))
+        surface.threeFingerHoldEnabled = true
+        three(SurfaceTouchPhase.Began, 0.0)
+        assertTrue("picking windows needs no control", surface.threeFingerHoldDue(0.5))
+        three(SurfaceTouchPhase.Ended, 0.6)
+        surface.threeFingerHoldEnabled = false
+        effects.holdArmed.clear()
+        three(SurfaceTouchPhase.Began, 1.0)
+        assertTrue(effects.holdArmed.isEmpty())
+        assertFalse(surface.threeFingerHoldDue(1.6))
+        three(SurfaceTouchPhase.Ended, 1.7)
     }
 }

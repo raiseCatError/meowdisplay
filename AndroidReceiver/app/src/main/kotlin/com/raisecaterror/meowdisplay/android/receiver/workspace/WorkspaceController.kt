@@ -1,0 +1,360 @@
+package com.raisecaterror.meowdisplay.android.receiver.workspace
+
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Base64
+import android.util.Log
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.content.edit
+import com.raisecaterror.meowdisplay.android.session.MediaController
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.core.session.SessionEvent
+import com.raisecaterror.meowdisplay.core.workspace.AppIcon
+import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
+import com.raisecaterror.meowdisplay.core.workspace.WAdaptation
+import com.raisecaterror.meowdisplay.core.workspace.WDivider
+import com.raisecaterror.meowdisplay.core.workspace.WDropTarget
+import com.raisecaterror.meowdisplay.core.workspace.WFit
+import com.raisecaterror.meowdisplay.core.workspace.WFrames
+import com.raisecaterror.meowdisplay.core.workspace.WGeometry
+import com.raisecaterror.meowdisplay.core.workspace.WHinge
+import com.raisecaterror.meowdisplay.core.workspace.WHistory
+import com.raisecaterror.meowdisplay.core.workspace.WLayout
+import com.raisecaterror.meowdisplay.core.workspace.WLayoutRecord
+import com.raisecaterror.meowdisplay.core.workspace.WPreset
+import com.raisecaterror.meowdisplay.core.workspace.WSize
+import com.raisecaterror.meowdisplay.core.workspace.WSource
+import com.raisecaterror.meowdisplay.core.workspace.WTile
+import com.raisecaterror.meowdisplay.core.workspace.WindowCatalog
+import com.raisecaterror.meowdisplay.core.workspace.WindowThumbnail
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceState
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+
+/** Where the collapsible window rail sits. Top by default. */
+enum class RailEdge { Top, Bottom, Left, Right }
+
+data class WorkspaceUi(
+    /** The connected Mac offers Window mode. */
+    val available: Boolean = false,
+    /** The Mac confirmed Window mode for this device. */
+    val windowMode: Boolean = false,
+    /** What's shown: the saved arrangement adapted to the space now. */
+    val layout: WLayout = WLayout.of(),
+    /** Tiles kept but not shown (smaller screen than they were arranged for). */
+    val stacked: List<String> = emptyList(),
+    val capacity: Int = 1,
+    val remote: WorkspaceState? = null,
+    val catalog: WindowCatalog? = null,
+    val overviewOpen: Boolean = false,
+    /** The overview is choosing a window for this tile. */
+    val replacingTile: String? = null,
+    val railExpanded: Boolean = false,
+    val railEdge: RailEdge = RailEdge.Top,
+    /** Tile handles and dividers shown for moving and resizing. */
+    val arranging: Boolean = false,
+    val hovered: String? = null,
+    val canUndo: Boolean = false,
+    /** Tiles whose saved window is no longer on the Mac. */
+    val missing: Set<String> = emptySet(),
+) {
+    val active: String? get() = remote?.active
+    fun tileState(id: String) = remote?.tiles?.firstOrNull { it.id == id }
+}
+
+/**
+ * The receiver's window workspace (Android). The Mac is authoritative for
+ * what's captured, accepted and focused; this keeps the user's arrangement
+ * per Mac, adapts it to the space available (fold, rotation, split screen)
+ * without ever dropping tiles, and sends only this Mac's tiles to it.
+ * Main thread only.
+ */
+class WorkspaceController(context: Context, private val media: MediaController) {
+    private val prefs = context.getSharedPreferences("workspace", Context.MODE_PRIVATE)
+    private val main = Handler(Looper.getMainLooper())
+    private val state = MutableStateFlow(WorkspaceUi(railEdge = runCatching { RailEdge.valueOf(prefs.getString(RAIL_EDGE, null) ?: "") }.getOrDefault(RailEdge.Top)))
+    val ui: StateFlow<WorkspaceUi> = state.asStateFlow()
+
+    private val thumbs = MutableStateFlow<Map<Long, ImageBitmap>>(emptyMap())
+    val thumbnails: StateFlow<Map<Long, ImageBitmap>> = thumbs.asStateFlow()
+    private val iconState = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+    val icons: StateFlow<Map<String, ImageBitmap>> = iconState.asStateFlow()
+    private val thumbAge = HashMap<Long, Long>()
+
+    private var saved: WLayout = WLayout.of()
+    private var host: String? = null
+    private var size = WSize(400.0, 800.0)
+    private var hinge: WHinge? = null
+    private var history = WHistory()
+    private var nextTile = 1
+    private var catalogAwaitingSend = false
+    private val sendRunnable = Runnable { sendNow() }
+    private val refreshRunnable = object : Runnable {
+        override fun run() {
+            val s = state.value
+            if (!s.overviewOpen && !s.railExpanded) return
+            requestCatalog()
+            main.postDelayed(this, if (s.overviewOpen) 3_000 else 5_000)
+        }
+    }
+
+    /** Workspace frames in the canvas, as sent to the Mac. */
+    fun frames(): WFrames = WGeometry.frames(state.value.layout, size, hinge)
+
+    // MARK: Session
+
+    fun onSessionEvent(event: SessionEvent) {
+        when (event) {
+            is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
+            is SessionEvent.MacFeatures -> state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
+            is SessionEvent.DisplayModeConfirmed -> {
+                val window = event.mode == DisplayMode.Window
+                state.update { it.copy(windowMode = window, remote = if (window) it.remote else null) }
+                if (window) { catalogAwaitingSend = true; requestCatalog() }
+            }
+            is SessionEvent.Disconnected, SessionEvent.AdmissionWithdrawn -> {
+                main.removeCallbacks(sendRunnable)
+                state.update { it.copy(windowMode = false, remote = null, available = false, arranging = false) }
+            }
+            is SessionEvent.Control -> when (event.type) {
+                WorkspaceWire.CATALOG -> onCatalog(WindowCatalog.parse(event.body))
+                WorkspaceWire.WORKSPACE_STATE -> state.update { it.copy(remote = WorkspaceState.parse(event.body)) }
+                WorkspaceWire.THUMBNAIL -> WindowThumbnail.parse(event.body)?.let(::onThumbnail)
+                WorkspaceWire.APP_ICON -> AppIcon.parse(event.body)?.let(::onIcon)
+            }
+            else -> Unit
+        }
+    }
+
+    private fun loadFor(peerID: String) {
+        host = peerID
+        saved = prefs.getString(LAYOUT + peerID, null)?.let(WLayoutRecord::decode) ?: WLayout.of()
+        nextTile = (saved.tiles.keys.mapNotNull { it.removePrefix("w").toIntOrNull() }.maxOrNull() ?: 0) + 1
+        history = WHistory()
+        thumbs.value = emptyMap(); thumbAge.clear(); iconState.value = emptyMap()
+        publish()
+    }
+
+    private fun onCatalog(catalog: WindowCatalog) {
+        state.update { it.copy(catalog = catalog) }
+        // A reconnect starts a new Mac session with new window generations:
+        // keep a saved tile only for the same window id of the same app.
+        val byID = catalog.windows.associateBy { it.id }
+        var rebased = saved
+        val missing = mutableSetOf<String>()
+        for ((id, tile) in saved.tiles) {
+            val source = tile.source ?: continue
+            val window = byID[source.windowID]
+            if (window == null || (source.bundleID != null && source.bundleID != window.bundleID)) missing += id
+            else if (window.generation != source.generation) rebased = rebased.replacingSource(id, source.copy(generation = window.generation, bundleID = window.bundleID))
+        }
+        if (rebased != saved) { saved = rebased; persist() }
+        state.update { it.copy(missing = missing) }
+        publish()
+        if (catalogAwaitingSend) { catalogAwaitingSend = false; scheduleSend(0) }
+        requestThumbnails(catalog)
+    }
+
+    private fun requestThumbnails(catalog: WindowCatalog) {
+        val s = state.value
+        if (!s.overviewOpen && !s.railExpanded) return
+        val now = SystemClock.uptimeMillis()
+        val ids = catalog.windows.filter { now - (thumbAge[it.id] ?: 0) > 8_000 }.map { it.id }.take(24)
+        val icons = catalog.apps.map { it.bundleID }.filter { it !in iconState.value }.take(32)
+        if (ids.isNotEmpty() || icons.isNotEmpty()) media.session.sendWorkspace(WorkspaceWire.thumbnailRequest(ids, 240, icons))
+    }
+
+    private fun onThumbnail(t: WindowThumbnail) {
+        val data = t.jpegBase64 ?: return
+        val bitmap = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } ?: return
+        thumbAge[t.windowID] = SystemClock.uptimeMillis()
+        thumbs.update { map -> (map + (t.windowID to bitmap.asImageBitmap())).let { if (it.size > MAX_THUMBS) it.entries.drop(it.size - MAX_THUMBS).associate { e -> e.key to e.value } else it } }
+    }
+
+    private fun onIcon(icon: AppIcon) {
+        val bitmap = runCatching { Base64.decode(icon.pngBase64, Base64.DEFAULT) }.getOrNull()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } ?: return
+        iconState.update { if (it.size >= MAX_ICONS) it else it + (icon.bundleID to bitmap.asImageBitmap()) }
+    }
+
+    fun requestCatalog() {
+        media.session.sendWorkspace(WorkspaceWire.catalogRequest(installed = media.ui.value.input == com.raisecaterror.meowdisplay.core.session.InputWireState.Allowed))
+    }
+
+    // MARK: Space
+
+    /** The usable workspace in dp and the fold (normalized to the canvas), from the screen. */
+    fun updateSpace(newSize: WSize, newHinge: WHinge?) {
+        if (newSize == size && newHinge == hinge) return
+        size = newSize
+        hinge = newHinge
+        publish()
+        scheduleSend()
+    }
+
+    private fun publish() {
+        val active = state.value.remote?.active
+        val adapted = WAdaptation.adapt(saved, size, hinge, active)
+        state.update { it.copy(layout = adapted.visible, stacked = adapted.stacked, capacity = WGeometry.capacity(size, hinge), canUndo = history.canUndo) }
+    }
+
+    // MARK: Editing (every change: undoable, saved per Mac, sent to the Mac)
+
+    private fun edit(change: (WLayout) -> WLayout) {
+        val visible = state.value.layout
+        val next = change(visible)
+        if (next == visible) return
+        history.record(saved)
+        // Tiles stacked away on this smaller screen are kept: re-add them behind the visible ones.
+        var updated = next
+        for (id in state.value.stacked) saved.tiles[id]?.let { updated = updated.adding(it, size.width >= size.height) }
+        saved = if (state.value.stacked.isEmpty()) next else updated
+        persist()
+        publish()
+        scheduleSend()
+    }
+
+    fun undo() {
+        val previous = history.undo() ?: return
+        saved = previous
+        persist(); publish(); scheduleSend()
+    }
+
+    fun applyPreset(preset: WPreset) = edit { layout ->
+        val ordered = layout.orderedTileIDs.mapNotNull { layout.tiles[it] }
+        if (ordered.size > preset.slotCount) layout.applying(preset).first else WLayout.preset(preset, ordered)
+    }
+
+    fun swap(a: String, b: String) = edit { it.swapping(a, b) }
+    fun move(tile: String, target: WDropTarget) = edit { it.materializing(hinge).moving(tile, target) }
+    fun resize(divider: WDivider, delta: Double) = edit { WGeometry.resizing(it, divider, delta, size) }
+    fun rotate(tile: String) = edit { it.rotating(tile) }
+    fun toggleFit(tile: String) = edit { l -> l.settingFit(if (l.tiles[tile]?.fit == WFit.Fill) WFit.Fit else WFit.Fill, tile) }
+    fun toggleMaximize(tile: String) = edit { l -> if (l.maximized == tile) l.restoringMaximized() else l.maximizing(tile) }
+
+    /** Removes the tile only; the Mac window stays open. */
+    fun removeTile(tile: String) = edit { it.removing(tile) }
+
+    /** Closes the real Mac window, from its own explicit confirm. Needs control. */
+    fun closeRemoteWindow(tile: String) {
+        val source = state.value.layout.tiles[tile]?.source ?: return
+        val gen = source.generation ?: return
+        media.session.sendWorkspace(WorkspaceWire.closeRemoteWindow(source.windowID, gen))
+    }
+
+    /** Bring a stacked tile back into view (replaces the active, or last, tile's slot). */
+    fun bringBack(tile: String) {
+        if (tile !in saved.tiles) return
+        val visible = state.value.layout
+        val target = state.value.active?.takeIf { it in visible.tiles } ?: visible.orderedTileIDs.lastOrNull() ?: return
+        history.record(saved)
+        saved = saved.swapping(tile, target)
+        persist(); publish(); scheduleSend()
+    }
+
+    /** A window chosen in the overview or rail. */
+    fun choose(window: CatalogWindow, asNewTile: Boolean) {
+        val host = host ?: return
+        val source = WSource(host, window.id, window.generation, window.bundleID)
+        val replacing = state.value.replacingTile
+        closeOverview()
+        if (!state.value.windowMode) media.session.requestDisplayMode(DisplayMode.Window)
+        edit { layout ->
+            val target = replacing ?: if (asNewTile) null else (state.value.active ?: layout.orderedTileIDs.singleOrNull())
+            when {
+                target != null && target in layout.tiles -> layout.replacingSource(target, source)
+                layout.tiles.size < state.value.capacity -> {
+                    val tile = WTile("w${nextTile++}", source)
+                    if (layout.tiles.isEmpty()) WLayout.preset(WPreset.Single, listOf(tile)) else layout.adding(tile, size.width >= size.height)
+                        .let { added -> WLayout.preset(WPreset.natural(added.tiles.size, size.width >= size.height), added.orderedTileIDs.mapNotNull { added.tiles[it] }) }
+                }
+                else -> layout.orderedTileIDs.lastOrNull()?.let { layout.replacingSource(it, source) } ?: layout
+            }
+        }
+    }
+
+    fun launch(bundleID: String) {
+        media.session.sendWorkspace(WorkspaceWire.launch(bundleID))
+    }
+
+    fun focus(tile: String) {
+        media.session.sendWorkspace(WorkspaceWire.focus(tile))
+    }
+
+    /** The hardware pointer at a normalized canvas point: hover only, never focus. */
+    fun hover(x: Double?, y: Double?) {
+        val id = if (x == null || y == null) null else frames().tiles.entries.firstOrNull { it.value.contains(com.raisecaterror.meowdisplay.core.workspace.WPoint(x, y)) }?.key
+        setHovered(id)
+    }
+
+    fun setHovered(tile: String?) {
+        if (state.value.hovered != tile) state.update { it.copy(hovered = tile) }
+    }
+
+    // MARK: Overview, rail, arrange
+
+    fun openOverview(replacing: String? = null) {
+        state.update { it.copy(overviewOpen = true, replacingTile = replacing) }
+        startRefreshing()
+    }
+
+    fun closeOverview() {
+        state.update { it.copy(overviewOpen = false, replacingTile = null) }
+    }
+
+    fun setRailExpanded(expanded: Boolean) {
+        state.update { it.copy(railExpanded = expanded) }
+        if (expanded) startRefreshing()
+    }
+
+    fun setRailEdge(edge: RailEdge) {
+        prefs.edit { putString(RAIL_EDGE, edge.name) }
+        state.update { it.copy(railEdge = edge) }
+    }
+
+    fun setArranging(on: Boolean) = state.update { it.copy(arranging = on) }
+
+    private fun startRefreshing() {
+        main.removeCallbacks(refreshRunnable)
+        requestCatalog()
+        main.postDelayed(refreshRunnable, 3_000)
+    }
+
+    // MARK: Sending
+
+    private fun scheduleSend(delayMs: Long = 60) {
+        main.removeCallbacks(sendRunnable)
+        main.postDelayed(sendRunnable, delayMs)
+    }
+
+    private fun sendNow() {
+        val host = host ?: return
+        val s = state.value
+        if (!s.windowMode) return
+        if (s.catalog == null) { catalogAwaitingSend = true; requestCatalog(); return }
+        // A tile whose window is gone is kept (and marked) but not sent.
+        val sendable = s.missing.fold(s.layout) { l, id -> l.replacingSource(id, null) }
+        val frames = WGeometry.frames(sendable, size, hinge)
+        val ok = media.session.sendWorkspace(WorkspaceWire.workspaceRequest(sendable, frames, host, s.active))
+        if (!ok) Log.i(TAG, "workspace request not sent (not admitted or no Window mode)")
+    }
+
+    private fun persist() {
+        val host = host ?: return
+        prefs.edit { putString(LAYOUT + host, WLayoutRecord.encode(saved).toString()) }
+    }
+
+    private companion object {
+        const val TAG = "MeowWorkspace"
+        const val LAYOUT = "layout."
+        const val RAIL_EDGE = "railEdge"
+        const val MAX_THUMBS = 48
+        const val MAX_ICONS = 64
+    }
+}

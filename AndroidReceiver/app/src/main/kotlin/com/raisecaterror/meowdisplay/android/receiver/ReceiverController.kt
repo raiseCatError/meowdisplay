@@ -104,6 +104,15 @@ class ReceiverController(
     /** Set by the screen: the input view whose timers the dispatcher drives. */
     var inputView: ReceiverInputView? = null
 
+    /** Window mode's workspace; gets every session event after the controls. */
+    var workspace: com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController? = null
+    private val holdCheck = Runnable {
+        if (surface.threeFingerHoldDue(now())) {
+            workspace?.openOverview()
+            if (store.current.hapticsEnabled) haptics.tryEmit(ReceiverHaptic.RotationSnap)
+        }
+    }
+
     val surface: ReceiverSurfaceInput = ReceiverSurfaceInput(session.input, object : ReceiverSurfaceEffects {
         override fun viewportChanged(state: ManualViewportState, animated: Boolean) {
             publishTransform()
@@ -117,6 +126,10 @@ class ReceiverController(
         override fun smartTouchFeedback(feedback: SmartTouchFeedback) {
             val p = store.current
             if (p.hapticsEnabled && SmartTouchHapticPolicy.isEnabled(p.hapticsEnabled, p.smartTouchLongPressHapticEnabled)) haptics.tryEmit(ReceiverHaptic.SmartTouch(feedback))
+        }
+        override fun threeFingerHoldArmed(delaySeconds: Double) {
+            main.removeCallbacks(holdCheck)
+            main.postDelayed(holdCheck, (delaySeconds * 1000).toLong() + 10)
         }
         override fun rotationSnapped() {
             if (store.current.hapticsEnabled) haptics.tryEmit(ReceiverHaptic.RotationSnap)
@@ -144,6 +157,7 @@ class ReceiverController(
                 prompt.inputStateChanged(event.state, now())
                 if (!event.allowed) {
                     keyboard.releaseHeldKeys()
+                    inputView?.releaseHardwareInput()
                     setKeyboardRequested(false)
                 }
                 update { it.copy(inputState = event.state) }
@@ -183,6 +197,10 @@ class ReceiverController(
             is SessionEvent.Cursor -> update { it.copy(cursor = it.cursor.copy(x = event.x, y = event.y, visible = event.visible)) }
             is SessionEvent.Control -> onControl(event)
             else -> Unit
+        }
+        workspace?.onSessionEvent(event)
+        if (event is SessionEvent.MacFeatures || event is SessionEvent.Disconnected) {
+            surface.threeFingerHoldEnabled = event is SessionEvent.MacFeatures && "window" in event.features && !screenReaderRunning
         }
     }
 
@@ -360,6 +378,7 @@ class ReceiverController(
         runnerGeneration++
         surface.cancelAll()
         keyboard.releaseHeldKeys()
+        inputView?.releaseHardwareInput()
         session.input.releaseAll()
         update { it.copy(inputResetGeneration = it.inputResetGeneration + 1) }
         refreshConfig()

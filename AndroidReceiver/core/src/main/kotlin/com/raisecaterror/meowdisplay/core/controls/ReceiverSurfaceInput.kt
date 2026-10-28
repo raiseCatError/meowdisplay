@@ -41,6 +41,9 @@ interface ReceiverSurfaceEffects {
 
     /** A touch sequence meant for the Mac was dropped because input isn't allowed. */
     fun blockedAttempt(maximumTouchCount: Int) {}
+
+    /** Three fingers came down: call [ReceiverSurfaceInput.threeFingerHoldDue] after [delaySeconds]. */
+    fun threeFingerHoldArmed(delaySeconds: Double) {}
 }
 
 /** Everything the dispatcher reads from preferences and the session, refreshed by the host. */
@@ -111,6 +114,35 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     private val threeFingerOrigins = mutableMapOf<Int, CGPoint>()
     private var threeFingerMaxMovement = 0.0
     private var threeFingerTapPossible = false
+    private var threeFingerHoldArmedAt: Double? = null
+    private val holdOrigins = mutableMapOf<Int, CGPoint>()
+    private var holdMaxMovement = 0.0
+
+    /** Window mode: a stationary three-finger hold opens the window overview instead of reaching the Mac. */
+    var threeFingerHoldEnabled = false
+
+    /**
+     * True once three fingers have been held still for [THREE_FINGER_HOLD_SECONDS]: the sequence is
+     * claimed (no three-finger tap or swipe follows), anything the pointer engine held is released,
+     * and the fingers stay local until they lift. The host opens the window overview.
+     */
+    fun threeFingerHoldDue(now: Double): Boolean {
+        val armed = threeFingerHoldArmedAt ?: return false
+        if (!threeFingerHoldEnabled || fingers.size != 3 || emission.hasEmitted ||
+            holdMaxMovement > ReceiverGesture.threeFingerTapMaximumMovement
+        ) {
+            threeFingerHoldArmedAt = null
+            return false
+        }
+        if (now - armed < THREE_FINGER_HOLD_SECONDS - 1e-6) return false
+        threeFingerHoldArmedAt = null
+        if (!emission.claim()) return false
+        cancelPointerState()
+        fingers.keys.forEach(ownedBySystemGesture::add)
+        threeFingerTapPossible = false
+        threeFingerStart = null
+        return true
+    }
     private val spread = ReceiverGestureSpreadSession()
     private val emission = GestureEmissionGate()
 
@@ -248,6 +280,9 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     }
 
     /** Stylus hover (no contact): `pencil hover` plus proximity enter/leave. */
+    /** A view point (dp) on the Mac's picture, normalized; null outside it. */
+    fun remotePoint(view: CGPoint): CGPoint? = currentTransform.remotePoint(view)?.takeIf { it.x in 0.0..1.0 && it.y in 0.0..1.0 }
+
     fun hover(entering: Boolean?, point: CGPoint) {
         if (!config.allowsInput || config.senderPV < PENCIL_PV) return
         val norm = currentTransform.remotePoint(point) ?: return
@@ -355,6 +390,8 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         val systemOwned = ownedBySystemGesture.isNotEmpty()
         recognizeTwoFinger(phase, changed, count, systemOwned, time)
         recognizeTwoFingerDoubleTap(phase, changed, count, systemOwned, time)
+        // Local, so it works View Only too; resolved before any three-finger gesture can reach the Mac.
+        trackThreeFingerHold(phase, changed, count, time)
         if (!config.allowsInput) return
         recognizeThreeFinger(phase, changed, count)
         recognizeSpread(phase, count)
@@ -589,6 +626,21 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         setZoom(result.current, animated = true)
     }
 
+    private fun trackThreeFingerHold(phase: SurfaceTouchPhase, changed: List<SurfaceTouch>, count: Int, time: Double) {
+        if (!threeFingerHoldEnabled) return
+        if (phase == SurfaceTouchPhase.Began) {
+            if (fingers.size == changed.size) { holdOrigins.clear(); holdMaxMovement = 0.0 }
+            changed.forEach { holdOrigins[it.id] = it.point }
+            threeFingerHoldArmedAt = if (count == 3 && !emission.hasEmitted) {
+                effects.threeFingerHoldArmed(THREE_FINGER_HOLD_SECONDS)
+                time
+            } else null
+            return
+        }
+        for (touch in changed) holdOrigins[touch.id]?.let { holdMaxMovement = max(holdMaxMovement, distance(it, touch.point)) }
+        if (phase.isEnd || count != 3 || holdMaxMovement > ReceiverGesture.threeFingerTapMaximumMovement) threeFingerHoldArmedAt = null
+    }
+
     private fun recognizeThreeFinger(phase: SurfaceTouchPhase, changed: List<SurfaceTouch>, count: Int) {
         if (phase == SurfaceTouchPhase.Began) {
             if (fingers.size == changed.size) {
@@ -678,6 +730,8 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     private val SurfaceTouchPhase.isEnd get() = this == SurfaceTouchPhase.Ended || this == SurfaceTouchPhase.Cancelled
 
     companion object {
+        /** Stationary three-finger hold that opens the window overview (tuned against swipes and taps). */
+        const val THREE_FINGER_HOLD_SECONDS = 0.5
         const val SMART_TOUCH_PV = 20
         const val PENCIL_PV = 3
         const val TAP_MAX_MOVEMENT = 10.0
