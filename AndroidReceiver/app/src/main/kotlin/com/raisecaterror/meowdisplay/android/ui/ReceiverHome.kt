@@ -300,7 +300,7 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
     )
 }
 
-private fun sessionStatus(ui: MediaUiState, mac: String): String = when (ui.phase) {
+internal fun sessionStatus(ui: MediaUiState, mac: String): String = when (ui.phase) {
     SessionPhase.Connected -> if (ui.admitted) "Showing $mac." else "Connecting to $mac…"
     SessionPhase.Connecting -> "Connecting to $mac…"
     SessionPhase.Paused -> "$mac paused the picture."

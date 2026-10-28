@@ -110,6 +110,9 @@ class ReceiverSession(
     /** This receiver's own audio preference, reasserted on every `welcome`. */
     @Volatile var audioPreferred = false
 
+    /** Off: a lost connection is not retried by itself (the Mac can still connect again). */
+    @Volatile var autoReconnectEnabled = true
+
     val phase: SessionPhase @Synchronized get() = lifecycle.phase
     val peerID: String? @Synchronized get() = link?.peerID
     val isAdmitted: Boolean @Synchronized get() = link != null && admission.admitted
@@ -661,7 +664,7 @@ class ReceiverSession(
         heldState.clear()
         dismissApprovals(answer = null)
         val effective = if (incompatible && reason.automaticallyRecoverable) SessionLossReason.ProtocolIncompatible else reason
-        lifecycle.connectionLost(effective)
+        lifecycle.connectionLost(effective, autoReconnectEnabled)
         reconnectDeadlineMs = null
         emit(SessionEvent.InputState(InputWireState.Off, false))
         emit(SessionEvent.Disconnected(closing.peerID, effective))

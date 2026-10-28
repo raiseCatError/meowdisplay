@@ -254,6 +254,22 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
             Caption("Use it when sound arrives before the picture. Applies from the next audio buffer.")
         }
         SettingsPage.Session -> {
+            val mediaUi by media.ui.collectAsState()
+            val view by controller.view.collectAsState()
+            val mac = media.macName(mediaUi.peerID)
+            Section("Status")
+            LabeledRow("Connection", com.raisecaterror.meowdisplay.android.ui.sessionStatus(mediaUi, mac))
+            if (view.videoSize.width > 0) {
+                LabeledRow("Stream", "${view.videoSize.width.roundToInt()}×${view.videoSize.height.roundToInt()}" +
+                    (when (mediaUi.source) { "mirror" -> " · Mirror"; "extend" -> " · Extend"; "window" -> " · Windows"; else -> "" }))
+            }
+            Section("Reconnecting")
+            Toggle("Auto-Reconnect", prefs.autoReconnectEnabled) { on ->
+                set { it.autoReconnectEnabled = on }
+                media.session.autoReconnectEnabled = on
+            }
+            Caption("Reconnects by itself after a dropped connection. Off, tap Connect on the home screen, or connect from the Mac.")
+            Section("Session")
             Button(onClick = { media.session.disconnect(); onDismiss() }) { Text("Disconnect") }
             Caption("Ends this session. The Mac can connect again.")
         }
@@ -342,6 +358,14 @@ private fun inputStatus(state: InputWireState): String = when (state) {
     InputWireState.NotAllowed -> "Your Mac declined input for this session."
     InputWireState.RequestsDisabled -> "This Mac isn't accepting input requests."
     InputWireState.Off -> "View Only."
+}
+
+@Composable
+private fun LabeledRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+    }
 }
 
 @Composable

@@ -40,6 +40,7 @@ class MeowReceiverApplication : Application() {
     val receiver: ReceiverController by lazy {
         ReceiverController(media, controls, pipeline.videoSize).also {
             media.session.audioPreferred = controls.current.audioPreferred
+            media.session.autoReconnectEnabled = controls.current.autoReconnectEnabled
             it.workspace = workspace
         }
     }

@@ -426,6 +426,17 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun withAutoReconnectOffALostConnectionIsNotRetried() {
+        session.autoReconnectEnabled = false
+        val a = connect(MAC_A)
+        session.say(a, invite("s1"))
+        clock += 5_001
+        session.tick()
+        assertTrue(a.closed)
+        assertFalse("no recovery run", session.phase == SessionPhase.Reconnecting)
+    }
+
+    @Test
     fun bytesWithinAFrameKeepTheConnectionAlive() {
         val a = connect(MAC_A)
         repeat(4) { clock += 4_000; session.onBytes(a); session.tick() }

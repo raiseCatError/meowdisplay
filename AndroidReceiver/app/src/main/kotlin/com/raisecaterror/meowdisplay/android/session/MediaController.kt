@@ -98,6 +98,9 @@ class MediaController(
     /** The receiver controls subscribe here, after the decoders. */
     @Volatile var controlEvents: ((SessionEvent) -> Unit)? = null
 
+    /** A paired Mac's name for the UI ("your Mac" when unknown). */
+    fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
+
     val session = ReceiverSession(policies, pins::pinnedPeers, ::hello, ::onEvent)
     private var listener: MediaListener? = null
     private val connectRequests = ConnectRequestState()
