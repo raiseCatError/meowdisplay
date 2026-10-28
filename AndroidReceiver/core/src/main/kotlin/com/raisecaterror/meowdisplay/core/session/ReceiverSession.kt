@@ -81,6 +81,9 @@ class ReceiverSession(
     private var reconnectDeadlineMs: Long? = null
     private var reportedPhase = lifecycle.phase
 
+    /** The panel last announced on the current connection; an unchanged one is never re-sent. */
+    private var announcedPanel: HelloFields? = null
+
     /**
      * App-facing state the Mac sent before this connection was admitted:
      * the latest per kind, delivered at admission. An unadmitted Mac never
@@ -149,7 +152,7 @@ class ReceiverSession(
         reportPhase()
         emit(SessionEvent.Connected(newLink.peerID))
         emit(SessionEvent.InputState(InputWireState.Off, false))
-        send(ReceiverMessages.hello(helloFields()))
+        announce(force = true)
         return true
     }
 
@@ -247,10 +250,22 @@ class ReceiverSession(
 
     // MARK: - Outgoing
 
-    /** Re-announces the panel (rotation, preference change) on the live connection. */
+    /**
+     * Re-announces the panel on the live connection when it changed (rotation,
+     * fold/unfold, a hello preference). The Mac rebuilds its display for a new
+     * panel, so a local change that leaves the panel as it was — a resized or
+     * split-screen window, a keyboard attached — sends nothing.
+     */
     @Synchronized
     fun resendHello() {
-        if (link != null) send(ReceiverMessages.hello(helloFields()))
+        if (link != null) announce(force = false)
+    }
+
+    private fun announce(force: Boolean) {
+        val fields = helloFields()
+        if (!force && fields == announcedPanel) return
+        announcedPanel = fields
+        send(ReceiverMessages.hello(fields))
     }
 
     /** Sends one input message when [inputAllowed] and the Mac speaks [minimumPV]; false when withheld. */

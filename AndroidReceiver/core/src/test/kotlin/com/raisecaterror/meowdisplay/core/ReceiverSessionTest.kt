@@ -46,7 +46,8 @@ class ReceiverSessionTest {
     private val pins = mutableMapOf(MAC_A to byteArrayOf(1), MAC_B to byteArrayOf(2))
     private val policies = InMemorySessionPolicyStore()
     private val events = mutableListOf<SessionEvent>()
-    private val session = ReceiverSession(policies, { pins.toMap() }, { HelloFields(1080, 2400, 3.0, "receiver-id") }, { events += it }, { clock })
+    private var panel = HelloFields(1080, 2400, 3.0, "receiver-id")
+    private val session = ReceiverSession(policies, { pins.toMap() }, { panel }, { events += it }, { clock })
 
     private fun frame(json: String) = json.toByteArray()
     private fun ReceiverSession.say(link: MediaLink, json: String) = onFrame(link, frame(json))
@@ -66,6 +67,19 @@ class ReceiverSessionTest {
         session.adopt(link)
         assertEquals("hello", link.types().first())
         assertEquals("receiver-id", link.sent.first()["id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun onlyAChangedPanelIsReannouncedAndEveryConnectionAnnouncesIt() {
+        val link = connect(MAC_A)
+        session.resendHello()
+        assertEquals("an unchanged panel (a resized window) sends nothing", 1, link.types().count { it == "hello" })
+        panel = HelloFields(2400, 1080, 3.0, "receiver-id")
+        session.resendHello()
+        assertEquals(2, link.types().count { it == "hello" })
+        assertEquals(2400, link.sent.last { it["type"]!!.jsonPrimitive.content == "hello" }["pixelsWide"]!!.jsonPrimitive.content.toInt())
+        val next = connect(MAC_A)
+        assertEquals("a new connection always hears the panel", "hello", next.types().first())
     }
 
     @Test

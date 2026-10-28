@@ -1,6 +1,8 @@
 package com.raisecaterror.meowdisplay.android
 
 import android.app.Application
+import android.os.Build
+import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
@@ -26,13 +28,24 @@ class MeowReceiverApplication : Application() {
 
     val pipeline: MediaPipeline by lazy { MediaPipeline(media) }
 
-    /** The panel in its current orientation; the receiver surface refines this once it is on screen. */
+    /**
+     * The panel: the whole current display in its current orientation, never
+     * the app's window. Rotation and fold/unfold change it (and re-announce
+     * it to the Mac); split-screen, freeform resizing and on-screen controls
+     * don't, so local layout changes never rebuild the Mac's display.
+     */
     private fun panel(): HelloFields {
-        val metrics = resources.displayMetrics
+        val windows = getSystemService(WINDOW_SERVICE) as WindowManager
+        val (wide, high) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            windows.maximumWindowMetrics.bounds.let { it.width() to it.height() }
+        } else {
+            @Suppress("DEPRECATION")
+            DisplayMetrics().also { windows.defaultDisplay.getRealMetrics(it) }.let { it.widthPixels to it.heightPixels }
+        }
         @Suppress("DEPRECATION")
-        val refresh = (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.refreshRate
+        val refresh = windows.defaultDisplay.refreshRate
         return HelloFields(
-            pixelsWide = metrics.widthPixels, pixelsHigh = metrics.heightPixels, scale = metrics.density.toDouble(),
+            pixelsWide = wide, pixelsHigh = high, scale = resources.displayMetrics.density.toDouble(),
             installID = identity.installID, maxFPS = refresh.roundToInt().takeIf { it > 0 },
         )
     }
