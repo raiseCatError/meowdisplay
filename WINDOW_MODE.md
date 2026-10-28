@@ -20,7 +20,7 @@ removed, and the arrangement comes back when the space returns.
 | --- | --- | --- | --- |
 | Open the window overview | Hold three fingers still on the picture, or Settings → Display → Show Mac Windows… | Hold three fingers still, the rail, or Settings → Display → Choose Windows… | Windows in the title bar, or ⌃⌥W |
 | Quick switch | The window rail (a thin handle at the top by default; Move Rail to put it at another edge) | Same | Overview |
-| Tile options | Tap a tile's name: Type Here, Change Window, Rotate, Fill Tile / Show Whole Window, Maximize / Restore, Arrange Tiles, Remove Tile, Close Window on Mac… | Same | Same, while Arrange is on |
+| Tile options | Tap a tile's name: Type Here, Change Window, Rotate, Fill Tile / Show Whole Window, Maximize / Restore, Arrange Tiles, Remove Tile, Close Window on Mac…. With one tile, open the rail and tap Arrange first (the name at the top is the rail) | Same | Same, while Arrange is on |
 | Move a tile | Press and hold its name, then drag: a highlighted area shows where it lands (middle swaps, an edge splits) | Same | Same, while Arrange is on |
 | Resize | Arrange Tiles, then drag the grips between tiles | Same | Same |
 
@@ -46,6 +46,11 @@ nothing is typed until you tap to resume.
 
 Input still needs the Mac's permission for each session (Request Input). View
 Only sessions can arrange tiles and pick windows but send nothing to the Mac.
+
+A press into a tile brings its window to the front first when another window
+covers it on the Mac, then lands in it. On Android, hardware keyboards can't
+send ⌘ shortcuts (Android keeps the Meta key's combinations for itself): use
+the on-screen ⌘ key, or turn on Settings → Input → **Control Key Types ⌘**.
 
 ## How it works (sender)
 
