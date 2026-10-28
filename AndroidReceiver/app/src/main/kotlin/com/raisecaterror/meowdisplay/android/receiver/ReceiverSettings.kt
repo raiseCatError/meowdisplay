@@ -157,6 +157,9 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
             Toggle("Smart Touch (Experimental)", prefs.smartTouchEnabled) { on -> set { it.smartTouchEnabled = on } }
             Caption("A one-finger swipe scrolls when the Mac says the element under it scrolls; hold on a title bar to drag the window.")
             Toggle("Smart Touch Haptics", prefs.smartTouchLongPressHapticEnabled) { on -> set { it.smartTouchLongPressHapticEnabled = on } }
+            Section("Hardware Keyboard")
+            Toggle("Control Key Types ⌘", prefs.controlKeyAsCommand) { on -> set { it.controlKeyAsCommand = on } }
+            Caption("Android keeps the ⌘ (Meta) key's shortcuts for itself, so turn this on to press Control-C for ⌘C on your Mac. The on-screen ^ key still sends Control.")
             Section("Scrolling")
             Toggle("Natural Vertical Scrolling", prefs.invertVerticalScroll) { on -> set { it.invertVerticalScroll = on } }
             Toggle("Natural Horizontal Scrolling", prefs.invertHorizontalScroll) { on -> set { it.invertHorizontalScroll = on } }

@@ -20,6 +20,7 @@ class ControlPreferencesJsonTest {
     fun freshPreferencesRoundTripExactly() {
         val preferences = ReceiverControlPreferences()
         preferences.activeControlProfile = ControlProfileSlot.Profile2
+        preferences.controlKeyAsCommand = true
         preferences.functionTrayProfiles = preferences.functionTrayProfiles.map { profile ->
             profile.copy().also { it.setDisplay("undo", ShortcutButtonDisplay.Emoji("↩️")) }
         }

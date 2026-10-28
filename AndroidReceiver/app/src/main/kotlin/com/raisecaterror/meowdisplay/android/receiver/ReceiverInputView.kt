@@ -44,6 +44,8 @@ class ReceiverInputView(
     private val inputAllowed: () -> Boolean,
     /** Hide Android's pointer over the picture (the Mac's cursor is drawn). Off in Window mode: one workspace pointer. */
     private val hideSystemPointer: () -> Boolean = inputAllowed,
+    /** Hardware Control sends ⌘ (Settings → Input → Control Key Types ⌘). */
+    private val controlAsCommand: () -> Boolean = { false },
 ) : View(context) {
     private val density get() = resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
@@ -288,12 +290,13 @@ class ReceiverInputView(
     private fun handleKeyDown(event: KeyEvent): Boolean {
         if (!inputAllowed()) return false
         // Modifier keys on their own (Shift-click, Option to reveal, ⌘ held while clicking): named modifiers.
-        HidKeyMap.modifierKeyName(event.keyCode)?.let { name ->
+        val swap = controlAsCommand()
+        HidKeyMap.modifierKeyName(event.keyCode, swap)?.let { name ->
             if (event.repeatCount == 0 && heldModifierKeys.add(name)) sender.modifier(name, true)
             return true
         }
         val usage = HidKeyMap.usage(event.keyCode) ?: return false
-        val modifiers = HidKeyMap.modifierNames(event.metaState)
+        val modifiers = HidKeyMap.modifierNames(event.metaState, swap)
         if (keyboard.keyDown(usage, modifiers)) return true
         if (event.repeatCount > 0 && usage != RemoteKeyboardBridge.BACKSPACE) return true
         when {
@@ -310,12 +313,15 @@ class ReceiverInputView(
     }
 
     private fun handleKeyUp(event: KeyEvent): Boolean {
-        HidKeyMap.modifierKeyName(event.keyCode)?.let { name ->
-            if (heldModifierKeys.remove(name)) sender.modifier(name, false)
+        // Either name: the setting may have changed while the key was held.
+        if (HidKeyMap.modifierKeyName(event.keyCode) != null) {
+            for (name in setOfNotNull(HidKeyMap.modifierKeyName(event.keyCode, false), HidKeyMap.modifierKeyName(event.keyCode, true))) {
+                if (heldModifierKeys.remove(name)) sender.modifier(name, false)
+            }
             return true
         }
         val usage = HidKeyMap.usage(event.keyCode) ?: return false
-        return keyboard.keyUp(usage, HidKeyMap.modifierNames(event.metaState)) || inputAllowed()
+        return keyboard.keyUp(usage, HidKeyMap.modifierNames(event.metaState, controlAsCommand())) || inputAllowed()
     }
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {

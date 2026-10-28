@@ -249,6 +249,7 @@ fun ReceiverScreen(
                     ctx, controller.surface, controller.keyboard, controller.surfaceSender(),
                     inputAllowed = { controller.view.value.inputAllowed },
                     hideSystemPointer = { controller.view.value.inputAllowed && workspace?.ui?.value?.windowMode != true },
+                    controlAsCommand = { controller.store.current.controlKeyAsCommand },
                 ).also { view ->
                     controller.inputView = view
                     view.onHardwarePointer = { p -> workspace?.hover(p?.x, p?.y) }

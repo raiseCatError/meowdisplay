@@ -52,19 +52,24 @@ object HidKeyMap {
 
     fun usage(keyCode: Int): Int? = usages[keyCode]
 
-    /** Named protocol modifiers held with a key, in the iOS hardware order. Meta (⌘/Windows key) is Command, Alt is Option. */
-    fun modifierNames(metaState: Int): List<String> = buildList {
+    /**
+     * Named protocol modifiers held with a key, in the iOS hardware order. Meta (⌘/Windows key) is
+     * Command, Alt is Option; with [controlAsCommand], Control is Command too (Android never
+     * delivers Meta combinations to apps).
+     */
+    fun modifierNames(metaState: Int, controlAsCommand: Boolean = false): List<String> = buildList {
+        val control = metaState and KeyEvent.META_CTRL_ON != 0
         if (metaState and KeyEvent.META_SHIFT_ON != 0) add("shift")
-        if (metaState and KeyEvent.META_CTRL_ON != 0) add("control")
+        if (control && !controlAsCommand) add("control")
         if (metaState and KeyEvent.META_ALT_ON != 0) add("option")
-        if (metaState and KeyEvent.META_META_ON != 0) add("command")
+        if (metaState and KeyEvent.META_META_ON != 0 || (control && controlAsCommand)) add("command")
         if (metaState and KeyEvent.META_CAPS_LOCK_ON != 0) add("capsLock")
     }
 
     /** A modifier key pressed on its own, by its wire name; null for every other key. */
-    fun modifierKeyName(keyCode: Int): String? = when (keyCode) {
+    fun modifierKeyName(keyCode: Int, controlAsCommand: Boolean = false): String? = when (keyCode) {
         KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT -> "shift"
-        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT -> "control"
+        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT -> if (controlAsCommand) "command" else "control"
         KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> "option"
         KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> "command"
         else -> null

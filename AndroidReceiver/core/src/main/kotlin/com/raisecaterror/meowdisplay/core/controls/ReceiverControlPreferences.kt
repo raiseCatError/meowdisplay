@@ -58,6 +58,12 @@ data class ReceiverControlPreferences(
     var smartTouchEnabled: Boolean = true,
     /** Smart Touch hold haptics; also silenced while [hapticsEnabled] is off. Original persisted name kept. */
     var smartTouchLongPressHapticEnabled: Boolean = true,
+    /**
+     * Hardware keyboards: Control sends ⌘. Android keeps Meta-key (⌘) combinations for its own
+     * shortcuts and never passes them to apps, so this is the only way to type ⌘ shortcuts from a
+     * physical keyboard. Off by default; the on-screen ^ key still sends Control.
+     */
+    var controlKeyAsCommand: Boolean = false,
     var profiles: List<ControlProfile> = ControlProfileSlot.entries.map { ControlProfile.canonical(it) },
     var functionTrayEnabled: Boolean = true,
     var activeFunctionTrayProfile: ControlProfileSlot = ControlProfileSlot.Default,
@@ -145,6 +151,7 @@ data class ReceiverControlPreferences(
         put("trackpadSensitivity", jsonOf(trackpadSensitivity))
         put("smartTouchEnabled", jsonOf(smartTouchEnabled))
         put("smartTouchLongPressHapticEnabled", jsonOf(smartTouchLongPressHapticEnabled))
+        put("controlKeyAsCommand", jsonOf(controlKeyAsCommand))
         put("profiles", jsonArrayOf(profiles.map { it.toJson() }))
         put("functionTrayEnabled", jsonOf(functionTrayEnabled))
         put("activeFunctionTrayProfile", jsonOf(activeFunctionTrayProfile.raw))
@@ -225,6 +232,7 @@ data class ReceiverControlPreferences(
                 p.smartTouchEnabled = value("smartTouchEnabled", fallback.smartTouchEnabled) { it.bool() }
                 p.smartTouchLongPressHapticEnabled =
                     value("smartTouchLongPressHapticEnabled", fallback.smartTouchLongPressHapticEnabled) { it.bool() }
+                p.controlKeyAsCommand = value("controlKeyAsCommand", fallback.controlKeyAsCommand) { it.bool() }
                 p.pictureInPictureEnabled = value("pictureInPictureEnabled", fallback.pictureInPictureEnabled) { it.bool() }
                 p.preferMeowDisplayGestures = value("preferMeowDisplayGestures", fallback.preferMeowDisplayGestures) { it.bool() }
                 p.padControlLayout = value("padControlLayout", fallback.padControlLayout) { PadControlLayoutMode.of(it.str()) }
