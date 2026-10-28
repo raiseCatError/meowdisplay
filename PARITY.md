@@ -1,7 +1,7 @@
 # Receiver feature parity
 
 What each receiving app can do today: iPhone/iPad (iOS), Android, and Mac Receiver.
-Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.md](TERMINOLOGY.md).
+Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and where each setting lives: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
 
 **Yes** works · **Partial** works with a gap noted · **No** not built yet · **—** not applicable.
 "Verified" says where it was last seen working: physical device, simulator/emulator, or unit tests only.
@@ -39,7 +39,7 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Video on/off, Streaming Profile, Maximum FPS, Resync | Yes | No | Yes | |
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |
 | Picture in Picture | Yes | Yes | — | Android verified physically |
-| Performance overlay | Yes | Yes | — | Android shows fps, bitrate, decode, latency, rtt, drops |
+| Performance overlay | Yes | Yes | Yes | Android shows fps, bitrate, decode, latency, rtt, drops. Mac Receiver: System → Performance Overlay |
 
 ## Audio
 

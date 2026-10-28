@@ -43,8 +43,8 @@ later). Both are free.
 
 | | |
 |---|---|
-| **Display** | Mirror an existing Mac display · Extend with a separate virtual workspace · clamshell and headless workflows |
-| **Control** | Direct Touch · Trackpad · Precise Control in both modes · Smart Touch (Experimental) · keyboard · Apple Pencil · Mac gestures |
+| **Display** | Mirror an existing Mac display · Extend with a separate virtual workspace · Windows: Mac windows you pick, side by side (Window mode) · clamshell and headless workflows |
+| **Control** | Direct Touch (Natural Touch or Classic) · Trackpad · Precise Control in Classic and Trackpad · Smart Touch (Experimental, Classic) · keyboard · Apple Pencil · Mac gestures |
 | **Devices & permissions** | Active Display · Known Devices · Nearby pairing · connection policies · Allow Input and per-session control requests |
 | **Picture in Picture** | Keep a view-only window of the live Mac on screen while you use other apps (iPhone and iPad) |
 | **Shortcuts** | Main Control Tray · Function Tray · Chords and modifier palettes · customizable actions · profiles · Auto-hide |
@@ -94,6 +94,32 @@ the Mac confirms the change. Extend also supports clamshell and headless
 workflows without a dummy display adapter. Keep a closed MacBook connected
 to power; headless compatibility is still being tested across Mac models.
 
+## Window mode
+
+Besides **Mirror** and **Extend**, a device can choose **Windows**: Mac windows
+you pick, shown side by side as tiles on that device. Each device chooses on
+its own; nothing changes for the others.
+
+- **Tiles.** One window is the default. iPhone shows up to 3, iPad and large
+  Mac Receiver windows up to 9, following the space the app really has.
+- **Choose windows.** Hold three fingers still on the picture, or use
+  Settings → Display → **Show Mac Windows…**. On the Mac Receiver, use
+  **Windows** in the title bar or ⌃⌥W.
+- **Switch quickly.** **Stage Peek** (the default): hold the left or right
+  edge, slide to browse, tap a window. **Rail** is optional, under Settings →
+  Controls → **Window Switcher**. **Full Desktop** returns to the whole Mac
+  screen; from the whole screen, **Switch to Window view?** offers the way
+  back once per launch.
+- **Typing.** One pointer works across the tiles; keys go to the tile you
+  selected, and only while its app is in front on the Mac. Control needs the
+  same session permission as always, and a View Only session can arrange tiles
+  but sends nothing.
+- **Safe by default.** Removing a tile never closes the Mac window. **Close
+  Window on Mac…** is separate and asks first. A Mac can turn Window mode off
+  under Settings → Displays → Windows.
+
+More in [WINDOW_MODE.md](WINDOW_MODE.md).
+
 ## Input & gestures
 
 Remote control requires **Allow Input** on the Mac, Accessibility permission,
@@ -101,6 +127,10 @@ and permission for the current session. Pausing the stream also pauses input.
 Choose an input mode in the receiver's Settings:
 
 - **Direct Touch** — a touch maps to the matching position on the Mac screen.
+  Choose a **Touch Style**: **Natural Touch** (the default) taps to click,
+  swipes to scroll, presses then moves to drag and touches and holds to
+  right-click; **Classic** keeps the finger as the pointer (tap, then hold
+  and move, to drag) and is where Smart Touch applies.
 - **Trackpad** — the pointer moves relatively, like a MacBook trackpad.
   Touching doesn't jump the cursor to that spot. **Trackpad Sensitivity** is
   adjustable, and multi-finger gestures keep working.
@@ -141,11 +171,12 @@ Mac at all.
 
 ### Precise Control
 
-**Precise Control works in Direct Touch and Trackpad.** Keep one finger down
-and use another to fine-tune and click at the pointer. There's nothing to
-turn on.
+**Precise Control works in Classic Direct Touch and Trackpad.** Keep one
+finger down and use another to fine-tune and click at the pointer. There's
+nothing to turn on. In Natural Touch a second finger during a swipe or drag is
+ignored.
 
-- **In Direct Touch**, the first touch places the pointer at that position.
+- **In Classic Direct Touch**, the first touch places the pointer at that position.
   Keep it down for a moment, then add another finger: movement becomes
   relative for the rest of that touch sequence. Move either finger to
   fine-tune; the pointer never snaps back under it. Lift every finger and
@@ -163,8 +194,8 @@ for the full gesture details.
 
 ### Smart Touch
 
-**Smart Touch (Experimental)** is an optional addition to Direct Touch, on
-by default and easy to turn off in the receiver's Settings. It uses the Mac's Accessibility information to recognize supported
+**Smart Touch (Experimental)** is an optional addition to Classic Direct Touch
+(Touch Style: Classic), on by default and easy to turn off in the receiver's Settings. It uses the Mac's Accessibility information to recognize supported
 scrollable areas and window title bars:
 
 - Swipe a scrollable area with one finger, with momentum in either axis.
@@ -175,11 +206,14 @@ scrollable areas and window title bars:
 
 It works best with standard macOS accessibility information and falls back
 to Direct Touch when it cannot identify the target. It has no effect in
-Trackpad mode. Reliability and stability are still being improved; it does
+Natural Touch or Trackpad mode. Reliability and stability are still being improved; it does
 not understand every interface. More on
 [Smart Touch](https://meowdisplay.app/features.html#smart-touch).
 
 ### Pointer & viewport gestures
+
+The one-finger rows describe Classic and Trackpad. In Natural Touch, a swipe
+scrolls, press then move drags, and touch and hold right-clicks.
 
 | Gesture | On your Mac |
 |---|---|
@@ -433,6 +467,10 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
   protocol and versioning
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how the apps fit together and where
   to start in the code
+- [WINDOW_MODE.md](WINDOW_MODE.md) — Window mode: tiles, switching, limits
+- [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) and [PARITY.md](PARITY.md) —
+  what each receiver can do and where its settings live
+- [TERMINOLOGY.md](TERMINOLOGY.md) — names and copy rules
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — virtual displays, sleep and
   wake, and other internals
 

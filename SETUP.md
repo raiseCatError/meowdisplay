@@ -168,6 +168,16 @@ Switch modes at any time from that picker; when Mirror is selected, a second
 **Mirror** section lets you pick which physical display to stream if you
 have more than one.
 
+### Window mode
+
+A receiving device can also choose **Windows** instead of a whole display:
+Mac windows you pick, shown side by side on that device. It uses the same
+Screen Recording permission as Mirror and Extend and needs no virtual display.
+To turn it off for every device, clear **Let devices show individual windows**
+under Settings → Displays → Windows on the Mac. How it works, how to switch
+between Window view and the whole screen, and its limits are in
+[WINDOW_MODE.md](WINDOW_MODE.md).
+
 ### Audio
 
 Audio is off by default and started from the receiving device: turn on

@@ -389,4 +389,7 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
 - [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
 - [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, and its physical test checklist
+- [WINDOW_MODE.md](WINDOW_MODE.md) — Window mode: tiles, switching, how the sender builds it
+- [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) / [PARITY.md](PARITY.md) — what each receiver can do, and where its settings live
+- [TERMINOLOGY.md](TERMINOLOGY.md) — names and copy rules for the apps and docs
 - [UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md) — one Mac app for both roles: design, migration and its physical test checklist
