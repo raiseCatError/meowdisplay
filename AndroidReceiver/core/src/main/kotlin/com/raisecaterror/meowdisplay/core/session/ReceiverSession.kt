@@ -43,6 +43,8 @@ sealed interface SessionEvent {
     /** What the Mac offers beyond its protocol version (welcome `features`), e.g. "window". */
     data class MacFeatures(val features: Set<String>) : SessionEvent
     data class Cursor(val x: Double, val y: Double, val visible: Boolean) : SessionEvent
+    /** The Mac's focused text caret, normalized to the streamed display (`visible` false: none). */
+    data class TextCaret(val x: Double, val y: Double, val width: Double, val height: Double, val visible: Boolean) : SessionEvent
     data class UpdateRequired(val message: String?, val storeUrl: String?) : SessionEvent
     data object UpdateMac : SessionEvent
     data class Control(val type: String, val body: JsonObject) : SessionEvent
@@ -94,6 +96,7 @@ class ReceiverSession(
     private var lastPingMs = 0L
     private var lastKeyframeRequestMs: Long? = null
     private var lastCursorSequence = 0L
+    private var lastTextCaretSequence = 0L
     private var reconnectDeadlineMs: Long? = null
     private var reportedPhase = lifecycle.phase
 
@@ -212,6 +215,7 @@ class ReceiverSession(
         macFeatures = emptySet()
         video.reset(StreamCodec.H264)
         lastCursorSequence = 0
+        lastTextCaretSequence = 0
         lastKeyframeRequestMs = null
         reconnectDeadlineMs = null
         heldState.clear()
@@ -522,6 +526,16 @@ class ReceiverSession(
                     lastCursorSequence = sequence
                 }
                 emit(SessionEvent.Cursor(message.x, message.y, message.visible))
+            }
+            is SenderMessage.TextCaret -> {
+                // Like the cursor: nothing before admission, and a reordered frame is dropped.
+                if (!admission.admitted) return
+                val sequence = message.sequence
+                if (sequence != null) {
+                    if (sequence <= lastTextCaretSequence) return
+                    lastTextCaretSequence = sequence
+                }
+                emit(SessionEvent.TextCaret(message.x, message.y, message.width, message.height, message.visible))
             }
             SenderMessage.InputReset -> if (admission.admitted) {
                 input.forget()

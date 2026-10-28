@@ -27,6 +27,7 @@ import com.raisecaterror.meowdisplay.core.controls.ReceiverSurfaceEffects
 import com.raisecaterror.meowdisplay.core.controls.ReceiverSurfaceInput
 import com.raisecaterror.meowdisplay.core.controls.ReceiverUIPreferenceUpdate
 import com.raisecaterror.meowdisplay.core.controls.RemoteKeyboardBridge
+import com.raisecaterror.meowdisplay.core.controls.TypedTextEcho
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportCalculator
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
 import com.raisecaterror.meowdisplay.core.controls.ShortcutItem
@@ -62,6 +63,8 @@ data class ReceiverViewState(
     val prompt: ReceiverInputPrompt.Kind? = null,
     val keyboardRequested: Boolean = false,
     val inputResetGeneration: Int = 0,
+    /** The last placement change came from following the Mac's text caret: the picture eases to it. */
+    val transformAnimated: Boolean = false,
 )
 
 data class CursorState(val x: Double = 0.5, val y: Double = 0.5, val visible: Boolean = false, val sprite: CursorSprite? = null)
@@ -146,8 +149,35 @@ class ReceiverController(
 
     val keyboard = RemoteKeyboardBridge(session.input) { chord }
 
+    private val echoState = MutableStateFlow(TypedTextEcho.EMPTY)
+
+    /** The typing strip's text: this keyboard session's typing as the Mac received it. */
+    val typedEcho: StateFlow<TypedTextEcho> = echoState.asStateFlow()
+
+    /** The Mac's focused text caret, normalized to the streamed display; steers Zoom While Typing while the keyboard is up. */
+    private var caret: CGRect? = null
+
+    /** The last caret-following placement, so the picture moves only once the caret leaves the comfort region. */
+    private var lastCaretDisplayed: CGRect? = null
+
+    private class LayoutArgs(
+        val window: CGRect,
+        val canvas: CGRect,
+        val keyboardVisibleRect: CGRect?,
+        val safeInsets: ControlSafeInsets,
+        val occupiedControlFrames: List<CGRect>,
+        val divisions: List<CGRect>,
+    )
+
+    private var lastLayout: LayoutArgs? = null
+
+    /** The Mac was told the keyboard is open (`keyboardState`), so it must be told when it closes. */
+    private var keyboardStateReported = false
+    private var keyboardShown = false
+
     init {
         media.controlEvents = { event -> main.post { onSessionEvent(event) } }
+        keyboard.onEchoChanged = { echoState.value = it }
         store.onInputResetRequested = { releaseHeldInput() }
         refreshConfig()
     }
@@ -181,6 +211,9 @@ class ReceiverController(
                 keyboard.releaseHeldKeys()
                 store.setMoveViewActive(false)
                 retainedVideo = null
+                caret = null
+                lastCaretDisplayed = null
+                keyboardStateReported = false
                 setKeyboardRequested(false)
                 update { it.copy(cursor = CursorState(), prompt = null, inputResetGeneration = it.inputResetGeneration + 1) }
                 refreshConfig()
@@ -200,6 +233,7 @@ class ReceiverController(
                 refreshConfig()
             }
             is SessionEvent.Cursor -> update { it.copy(cursor = it.cursor.copy(x = event.x, y = event.y, visible = event.visible)) }
+            is SessionEvent.TextCaret -> followCaret(if (event.visible) CGRect(event.x, event.y, event.width, event.height) else null)
             is SessionEvent.Control -> onControl(event)
             else -> Unit
         }
@@ -298,25 +332,67 @@ class ReceiverController(
         occupiedControlFrames: List<CGRect>,
         divisions: List<CGRect>,
     ) {
+        lastLayout = LayoutArgs(window, canvas, keyboardVisibleRect, safeInsets, occupiedControlFrames, divisions)
+        applyLayout(animated = false)
+    }
+
+    private fun applyLayout(animated: Boolean) {
+        val args = lastLayout ?: return
         val video = videoSize()
         val base = when {
-            video.width <= 0 || canvas.isEmpty -> RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), CGRect.zero)
+            video.width <= 0 || args.canvas.isEmpty -> RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), CGRect.zero)
             !state.value.videoEnabled -> RemoteViewportTransform(
                 CGRect(0.0, 0.0, 1.0, 1.0),
                 VideoOffSurfaceGeometry.interactionRect(
-                    window, safeInsets, occupiedControlFrames, window.height > window.width, store.current.inputMode, video, divisions,
+                    args.window, args.safeInsets, args.occupiedControlFrames, args.window.height > args.window.width, store.current.inputMode, video, args.divisions,
                 ),
             )
-            keyboardVisibleRect != null -> RemoteViewportCalculator.keyboardOpen(canvas, video, keyboardVisibleRect, null, zoomEnabled = true)
-            else -> RemoteViewportCalculator.normal(canvas, video)
+            args.keyboardVisibleRect != null -> {
+                // The Mac's text caret (both axes) steers the view; the touch anchor is not tracked on Android.
+                val placed = RemoteViewportCalculator.keyboardOpen(
+                    args.canvas, video, args.keyboardVisibleRect, null, zoomEnabled = true,
+                    caret = caret, previous = lastCaretDisplayed,
+                )
+                lastCaretDisplayed = if (caret == null) null else placed.displayedRect
+                placed
+            }
+            else -> RemoteViewportCalculator.normal(args.canvas, video)
         }
+        if (args.keyboardVisibleRect == null) lastCaretDisplayed = null
         surface.updateBase(base, video)
-        publishTransform()
+        publishTransform(animated)
+    }
+
+    /** The Mac reported its text caret (null: none known): the open keyboard's view follows it. */
+    private fun followCaret(next: CGRect?) {
+        if (next == caret) return
+        caret = next
+        if (lastLayout?.keyboardVisibleRect != null) applyLayout(animated = true)
+    }
+
+    /**
+     * The soft keyboard is really up (or gone). The strip starts over, the Mac is told so it follows
+     * its text caret only while it is (if it can), and a closed keyboard forgets the caret so the
+     * next one starts from the Mac's first reading.
+     */
+    fun keyboardVisibilityChanged(visible: Boolean) {
+        if (visible == keyboardShown) return
+        keyboardShown = visible
+        keyboard.resetEcho()
+        if (visible) {
+            if ("textCaret" in session.macFeatures) keyboardStateReported = session.input.keyboardState(true)
+        } else {
+            caret = null
+            lastCaretDisplayed = null
+            if (keyboardStateReported) session.input.keyboardState(false)
+            keyboardStateReported = false
+        }
     }
 
     private fun videoSize(): CGSize = decodedSize.value?.let { CGSize(it.first.toDouble(), it.second.toDouble()) } ?: retainedVideo ?: CGSize.zero
 
-    private fun publishTransform(): Unit = update { it.copy(transform = surface.currentTransform, videoSize = surface.videoSize) }
+    private fun publishTransform(animated: Boolean = false): Unit =
+        update { it.copy(transform = surface.currentTransform, videoSize = surface.videoSize, transformAnimated = animated) }
 
     // MARK: - Controls
 

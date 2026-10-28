@@ -77,6 +77,44 @@ class SessionProtocolTest {
     }
 
     @Test
+    fun textCaretParsesAsARectangleOrNone() {
+        assertEquals(
+            SenderMessage.TextCaret(0.41234, 0.5, 0.002, 0.018, visible = true, sequence = 12),
+            SenderMessage.parse("""{"type":"textCaret","v":1,"x":0.41234,"y":0.5,"w":0.002,"h":0.018,"s":12}"""),
+        )
+        assertEquals(
+            "no caret carries no geometry",
+            SenderMessage.TextCaret(0.0, 0.0, 0.0, 0.0, visible = false, sequence = 3),
+            SenderMessage.parse("""{"type":"textCaret","v":0,"s":3}"""),
+        )
+        assertEquals(
+            "an unsequenced frame with a bare position still parses, size zero",
+            SenderMessage.TextCaret(0.5, 0.25, 0.0, 0.0, visible = true, sequence = null),
+            SenderMessage.parse("""{"type":"textCaret","v":1,"x":0.5,"y":0.25}"""),
+        )
+        assertEquals(
+            "the size is clamped to the display",
+            SenderMessage.TextCaret(0.5, 0.5, 0.0, 1.0, visible = true, sequence = null),
+            SenderMessage.parse("""{"type":"textCaret","v":1,"x":0.5,"y":0.5,"w":-4,"h":9}"""),
+        )
+        // The edge of the display is a position, not a boolean.
+        assertEquals(
+            SenderMessage.TextCaret(0.0, 1.0, 0.0, 0.0, visible = true, sequence = null),
+            SenderMessage.parse("""{"type":"textCaret","v":1,"x":0,"y":1}"""),
+        )
+    }
+
+    @Test
+    fun malformedTextCaretsAreIgnored() {
+        for (text in listOf(
+            """{"type":"textCaret","v":1}""",
+            """{"type":"textCaret","v":1,"x":"0.1","y":0.2}""",
+            """{"type":"textCaret","v":1,"x":0.1,"y":null}""",
+            """{"type":"textCaret","v":1,"x":true,"y":0.2}""",
+        )) assertNull(text, SenderMessage.parse(text))
+    }
+
+    @Test
     fun incomingPolicyMatchesProtocolTable() {
         val cases = listOf(
             Triple(PeerSessionPolicy.Blocked, true, IncomingDecision.Block),

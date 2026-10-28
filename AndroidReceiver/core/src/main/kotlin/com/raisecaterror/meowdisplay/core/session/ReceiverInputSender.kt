@@ -70,6 +70,8 @@ class ReceiverInputSender(
     fun pencil(phase: String, x: Double, y: Double, pressure: Double, azimuth: Double, altitude: Double): Boolean = locked { pencilLocked(phase, x, y, pressure, azimuth, altitude) }
     fun proximity(entering: Boolean, x: Double, y: Double): Boolean = locked { proximityLocked(entering, x, y) }
     fun keyboardText(text: String): Boolean = locked { keyboardTextLocked(text) }
+    /** The on-screen keyboard opened or closed, so the Mac can follow its text caret (PROTOCOL.md 6.11). */
+    fun keyboardState(open: Boolean): Boolean = locked { keyboardStateLocked(open) }
     fun keyboardPress(usage: Int, modifiers: List<String> = emptyList()): Boolean = locked { keyboardPressLocked(usage, modifiers) }
     fun keyboardDown(usage: Int, modifiers: List<String>, isRepeat: Boolean = false): Boolean = locked { keyboardDownLocked(usage, modifiers, isRepeat) }
     fun keyboardUp(usage: Int, modifiers: List<String>): Boolean = locked { keyboardUpLocked(usage, modifiers) }
@@ -197,6 +199,11 @@ class ReceiverInputSender(
     // MARK: - Keyboard (pv 4; modifiers and cancel pv 6)
 
     /** Committed text only — never marked/IME-intermediate text. */
+    private fun keyboardStateLocked(open: Boolean): Boolean = send(buildJsonObject {
+        put("type", "keyboardState")
+        put("open", open)
+    }, WireProtocol.KEYBOARD)
+
     private fun keyboardTextLocked(text: String): Boolean {
         if (text.isEmpty()) return false
         return send(buildJsonObject {

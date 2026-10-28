@@ -35,4 +35,8 @@ tasks.test {
     val stagePeekFixtures = rootProject.layout.projectDirectory.dir("../fixtures/stage-peek")
     inputs.dir(stagePeekFixtures)
     systemProperty("meow.stagePeekFixtures", stagePeekFixtures.asFile.absolutePath)
+    // Zoom While Typing caret-follow vectors shared with the Swift calculator (fixtures/viewport).
+    val viewportFixtures = rootProject.layout.projectDirectory.dir("../fixtures/viewport")
+    inputs.dir(viewportFixtures)
+    systemProperty("meow.viewportFixtures", viewportFixtures.asFile.absolutePath)
 }

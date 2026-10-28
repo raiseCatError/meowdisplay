@@ -65,6 +65,7 @@ class ReceiverInputView(
             if (field == value) return
             field = value
             val imm = context.getSystemService(InputMethodManager::class.java)
+            keyboard.resetEcho()
             if (value) {
                 requestFocus()
                 imm.restartInput(this)
@@ -244,7 +245,11 @@ class ReceiverInputView(
             return true
         }
 
-        override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean = super.setComposingText(text, newCursorPosition)
+        override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
+            // The word being composed shows in the typing strip, but never reaches the Mac.
+            keyboard.setComposing(text.toString())
+            return super.setComposingText(text, newCursorPosition)
+        }
 
         override fun finishComposingText(): Boolean {
             val composing = editable?.let { e ->
@@ -255,6 +260,7 @@ class ReceiverInputView(
             super.finishComposingText()
             editable?.clear()
             composing?.let(keyboard::commitText)
+            keyboard.setComposing("")
             return true
         }
 

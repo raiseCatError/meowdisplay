@@ -109,4 +109,65 @@ class RemoteKeyboardBridgeTest {
         assertEquals(listOf("a", "👩‍👩‍👧", "🇫🇷", "é"), RemoteKeyboardBridge.graphemes("a👩‍👩‍👧🇫🇷é").let { it.take(3) + it.drop(3).map { s -> java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFC) } })
         assertEquals("👍🏽!", "👍🏽!x".prefixCharacters(2))
     }
+
+    // MARK: - The typing strip's echo
+
+    @Test
+    fun theStripMirrorsWhatWasSentIncludingDeletesAndTheComposingWord() {
+        keyboard.commitText("teh")
+        keyboard.setComposing("wor")
+        assertEquals("tehwor", keyboard.echo.text)
+        keyboard.backspace(3)
+        assertEquals("", keyboard.echo.committed)
+        assertEquals("the composing word is the keyboard's, not the Mac's", "wor", keyboard.echo.composing)
+        keyboard.commitText("the ")
+        assertEquals("the ", keyboard.echo.text)
+        keyboard.commitText("\n")
+        assertTrue("Return starts a fresh line", keyboard.echo.isEmpty)
+    }
+
+    @Test
+    fun theStripClearsWhenTheCaretMovesOrAShortcutRuns() {
+        keyboard.commitText("hello")
+        keyboard.keyDown(RemoteKeyboardBridge.LEFT, emptyList())
+        assertTrue(keyboard.echo.isEmpty)
+        keyboard.commitText("again")
+        keyboard.shortcut(6, listOf("command"))
+        assertTrue(keyboard.echo.isEmpty)
+        keyboard.commitText("x")
+        chord = setOf(ControlModifier.Command)
+        keyboard.backspace()
+        assertTrue("a modified Backspace deletes more than a character", keyboard.echo.isEmpty)
+        keyboard.commitText("c")
+        assertTrue("a chorded key is a shortcut, not text", keyboard.echo.isEmpty)
+    }
+
+    @Test
+    fun trayKeysFollowTheStripToo() {
+        keyboard.commitText("ab")
+        keyboard.press(RemoteKeyboardBridge.BACKSPACE)
+        assertEquals("a", keyboard.echo.text)
+        keyboard.press(RemoteKeyboardBridge.ESCAPE)
+        assertTrue(keyboard.echo.isEmpty)
+    }
+
+    @Test
+    fun textThatWasNotSentIsNotEchoed() {
+        session.onFrame(link, """{"type":"allowInputState","allowed":false,"state":"off"}""".toByteArray())
+        keyboard.commitText("secret")
+        assertTrue("input is off: nothing left the phone, so nothing is echoed", keyboard.echo.isEmpty)
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun theListenerHearsEachChangeAndOnlyChanges() {
+        val heard = mutableListOf<String>()
+        keyboard.onEchoChanged = { heard += it.text }
+        keyboard.commitText("a")
+        keyboard.setComposing("b")
+        keyboard.setComposing("b")
+        keyboard.resetEcho()
+        keyboard.resetEcho()
+        assertEquals(listOf("a", "ab", ""), heard)
+    }
 }

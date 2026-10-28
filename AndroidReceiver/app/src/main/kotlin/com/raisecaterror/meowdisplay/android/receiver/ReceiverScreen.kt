@@ -35,6 +35,10 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -203,7 +207,9 @@ fun ReceiverScreen(
             else -> null
         }
         val imeHeight = dp(ime.getBottom(density))
-        val keyboardRect = if (state.keyboardRequested && imeHeight > 0) CGRect(0.0, 0.0, widthDp, (heightDp - imeHeight).coerceAtLeast(0.0)) else null
+        // The typing strip sits on the keyboard's top edge, so the picture treats it as part of the keyboard.
+        val keyboardShown = state.keyboardRequested && imeHeight > 0
+        val keyboardRect = if (keyboardShown) CGRect(0.0, 0.0, widthDp, (heightDp - imeHeight - TypingStripHeight.value).coerceAtLeast(0.0)) else null
         val window = ReceiverWindow(
             size = CGSize(widthDp, heightDp),
             safeInsets = insets,
@@ -213,6 +219,8 @@ fun ReceiverScreen(
             expanded = ReceiverWindow.isExpanded(widthDp, heightDp),
         )
         controller.store.isExpanded = window.expanded
+        // The Mac follows its text caret only while the keyboard is really up.
+        LaunchedEffect(keyboardShown) { controller.keyboardVisibilityChanged(keyboardShown) }
         val windowRect = CGRect(0.0, 0.0, widthDp, heightDp)
         LaunchedEffect(window, canvas, occupied, hintFrame, stripFrame, promptFrame, decoded, state.videoEnabled, prefs.inputMode) {
             controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame, stripFrame, promptFrame), folds)
@@ -220,14 +228,23 @@ fun ReceiverScreen(
 
         val transform = state.transform
         val frame = transform.displayedRect
+        // Following the Mac's text caret eases the picture to its new place (iOS animates the same
+        // change over 0.25 s); a pinch, a pan or the keyboard sliding in moves it instantly.
+        val easing = if (state.transformAnimated && !frame.isEmpty) tween<Float>(220) else snap()
+        val shownX by animateFloatAsState(frame.minX.toFloat(), easing, label = "pictureX")
+        val shownY by animateFloatAsState(frame.minY.toFloat(), easing, label = "pictureY")
+        val shownWidth by animateFloatAsState(frame.width.toFloat(), easing, label = "pictureWidth")
+        val shownHeight by animateFloatAsState(frame.height.toFloat(), easing, label = "pictureHeight")
+        val shownFrame = if (frame.isEmpty) frame else CGRect(shownX.toDouble(), shownY.toDouble(), shownWidth.toDouble(), shownHeight.toDouble())
+        val shown = if (shownFrame == frame) transform else RemoteViewportTransform(transform.remoteCrop, shownFrame, transform.rotationRadians)
         // The picture. The SurfaceView is always composed: the decoder needs its surface to produce the
         // first frame that sizes it, and recreating it mid-session is avoided. Until a size is known it
         // fills the window. It can't rotate, so it is sized and placed to the zoomed frame (viewport
         // rotation is off on Android; see the parity notes).
         val videoModifier = if (!frame.isEmpty) {
             Modifier
-                .offset { IntOffset((frame.minX * density.density).roundToInt(), (frame.minY * density.density).roundToInt()) }
-                .size(frame.width.dp, frame.height.dp)
+                .offset { IntOffset((shownFrame.minX * density.density).roundToInt(), (shownFrame.minY * density.density).roundToInt()) }
+                .size(shownFrame.width.dp, shownFrame.height.dp)
         } else {
             Modifier.fillMaxSize()
         }
@@ -246,10 +263,10 @@ fun ReceiverScreen(
         if (cursor.visible && sprite != null && transform.isValid && !windowMode) {
             val image = remember(sprite) { sprite.bitmap.asImageBitmap() }
             Canvas(Modifier.fillMaxSize()) {
-                val crop = transform.remoteCrop
-                val w = sprite.normalizedWidth * frame.width / crop.width
-                val h = sprite.normalizedHeight * frame.height / crop.height
-                val at = transform.viewPoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(cursor.x, cursor.y))
+                val crop = shown.remoteCrop
+                val w = sprite.normalizedWidth * shownFrame.width / crop.width
+                val h = sprite.normalizedHeight * shownFrame.height / crop.height
+                val at = shown.viewPoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(cursor.x, cursor.y))
                 val px = density.density
                 drawImage(
                     image,
@@ -290,6 +307,18 @@ fun ReceiverScreen(
 
         val actions = remember(controller) { controller.overlayActions(onOpenSettings, onOccupied = { occupied = it }, onCanvas = { canvas = it }) }
         overlay(window, actions, state.inputResetGeneration)
+
+        // The typing strip, pinned to the keyboard's top edge while it is up. It sits above the input
+        // layer and takes its own touches, so nothing tapped on it reaches the Mac.
+        if (keyboardShown) {
+            val echo by controller.typedEcho.collectAsState()
+            TypingStrip(
+                echo = echo,
+                macName = macName,
+                onDone = { controller.setKeyboardRequested(false) },
+                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.ime),
+            )
+        }
 
         // Stage Peek: Window mode only (in Mirror/Extend the edge belongs to the Mac), above the controls.
         // Only its edge strip takes touches until it opens; the picture underneath never moves.

@@ -76,8 +76,9 @@ other means, or a documented platform difference. **Gap** = not on Android yet.
 | App Gesture Commands | Adapted | Shown and reset in Settings; per-key editor not built |
 | Keyboard: committed text, IME composition never sent, chord typing (⌘ then C = ⌘C), Backspace/Return presses, held Esc/Tab/Delete-Forward/arrows, release on focus loss | Ported | Emulator-verified (typing, arrow) |
 | Keyboard accessory bar | Ported | |
+| Typing strip (tail of what was typed, Done) | Ported | Compose strip on the IME's top edge; unit-tested model, needs device QA |
 | Hardware keyboard | Adapted | Same forwarding rules; Android also forwards ⌘/Ctrl shortcuts as one press (iOS lets UIKit swallow them) |
-| Zoom While Typing | Adapted | Keyboard-open viewport is used; the typing-focus anchor is not tracked yet |
+| Zoom While Typing | Adapted | Always on, no setting. Follows the Mac's text caret on both axes (the touch anchor is not tracked); needs Accessibility on the Mac |
 | Direct Touch, Trackpad (sensitivity), clicks, double/triple, drag, right-click chord, two-finger scroll, momentum, per-axis direction | Ported | Emulator-verified click; rest unit-tested |
 | Smart Touch (probe, scroll, title-bar window drag) | Ported | Title-bar build-up haptic is a single tick (no Core Haptics ramp) |
 | Three-finger swipe/tap, four/five-finger pinch/spread | Ported | Unit-tested; multi-touch needs physical QA |

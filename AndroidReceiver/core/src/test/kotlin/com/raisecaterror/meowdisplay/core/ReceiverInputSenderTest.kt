@@ -116,6 +116,23 @@ class ReceiverInputSenderTest {
     }
 
     @Test
+    fun keyboardStateIsAnInputMessageSentOnlyWithAGrant() {
+        val link = admitted()
+        assertFalse("no grant, nothing leaves", input.keyboardState(true))
+        grant(link)
+        assertTrue(input.keyboardState(true))
+        assertTrue(input.keyboardState(false))
+        assertEquals(
+            listOf(
+                """{"type":"keyboardState","open":true}""",
+                """{"type":"keyboardState","open":false}""",
+            ),
+            link.inputSent(),
+        )
+        assertFalse("it holds nothing on the Mac", input.holdsInput)
+    }
+
+    @Test
     fun touchAndPencilCarryTheSendersClockOnceKnown() {
         val link = admitted()
         grant(link)
@@ -226,7 +243,7 @@ class ReceiverInputSenderTest {
 
     private companion object {
         const val MAC_A = "mac-a"
-        val INPUT_TYPES = setOf("touch", "scroll", "gesture", "pencil", "proximity", "keyboard", "pointer", "nativeAppGesture", "smartTouchProbe")
+        val INPUT_TYPES = setOf("touch", "scroll", "gesture", "pencil", "proximity", "keyboard", "pointer", "nativeAppGesture", "smartTouchProbe", "keyboardState")
 
         fun JsonObject.type() = this["type"]!!.jsonPrimitive.content
     }

@@ -136,6 +136,21 @@ sealed interface SenderMessage {
     data class DisplayPaused(val paused: Boolean) : SenderMessage
     data class DisplayModeState(val mode: DisplayMode) : SenderMessage
     data class Cursor(val x: Double, val y: Double, val visible: Boolean, val sequence: Long?) : SenderMessage
+
+    /**
+     * The Mac's focused text caret as a rectangle normalized to the streamed display, top-left
+     * origin (`visible` false: none known). Optional and additive (PROTOCOL.md 6.11): only ever a
+     * rectangle, never text.
+     */
+    data class TextCaret(
+        val x: Double,
+        val y: Double,
+        val width: Double,
+        val height: Double,
+        val visible: Boolean,
+        val sequence: Long?,
+    ) : SenderMessage
+
     data object InputReset : SenderMessage
     data object Closing : SenderMessage
 
@@ -193,6 +208,22 @@ sealed interface SenderMessage {
                     visible = obj.int("v") == 1,
                     sequence = obj.long("s")?.takeIf { it >= 0 },
                 )
+                "textCaret" -> {
+                    val sequence = obj.long("s")?.takeIf { it >= 0 }
+                    if (obj.int("v") != 1) {
+                        TextCaret(0.0, 0.0, 0.0, 0.0, visible = false, sequence = sequence)
+                    } else {
+                        // A visible caret needs a finite x and y; the size defaults to zero.
+                        val x = obj.number("x") ?: return null
+                        val y = obj.number("y") ?: return null
+                        TextCaret(
+                            x, y,
+                            (obj.number("w") ?: 0.0).coerceIn(0.0, 1.0),
+                            (obj.number("h") ?: 0.0).coerceIn(0.0, 1.0),
+                            visible = true, sequence = sequence,
+                        )
+                    }
+                }
                 "inputReset" -> InputReset
                 "closing" -> Closing
                 else -> Other(type, obj)

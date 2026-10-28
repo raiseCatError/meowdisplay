@@ -467,6 +467,28 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun textCaretsReachTheAppOnlyAfterAdmissionAndNeverGoBackwards() {
+        policies.automaticallyAllow = false
+        val a = connect(MAC_A)
+        session.say(a, invite("s1", intent = "manual"))
+        events.clear()
+        session.say(a, """{"type":"textCaret","v":1,"x":0.5,"y":0.5,"w":0.002,"h":0.02,"s":1}""")
+        assertEquals("no caret before admission", emptyList<SessionEvent>(), events)
+        session.answerInvitation("s1", ReceiverApprovalDecision.Allow)
+        events.clear()
+        session.say(a, """{"type":"textCaret","v":1,"x":0.1,"y":0.2,"w":0.002,"h":0.02,"s":5}""")
+        session.say(a, """{"type":"textCaret","v":1,"x":0.9,"y":0.9,"w":0.002,"h":0.02,"s":4}""")
+        session.say(a, """{"type":"textCaret","v":0,"s":6}""")
+        assertEquals(
+            listOf(
+                SessionEvent.TextCaret(0.1, 0.2, 0.002, 0.02, visible = true),
+                SessionEvent.TextCaret(0.0, 0.0, 0.0, 0.0, visible = false),
+            ),
+            events.filterIsInstance<SessionEvent.TextCaret>(),
+        )
+    }
+
+    @Test
     fun aCancelledInvitationWithdrawsAdmissionAndInput() {
         val a = connect(MAC_A)
         session.say(a, invite("s1"))

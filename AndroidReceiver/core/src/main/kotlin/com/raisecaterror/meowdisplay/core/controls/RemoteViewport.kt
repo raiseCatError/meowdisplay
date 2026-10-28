@@ -192,6 +192,14 @@ object RemoteViewportCalculator {
     /** Fraction of the keyboard-free viewport's vertical edge kept clear as a comfort margin. */
     val comfortMarginFraction: CGFloat = 0.12
 
+    /**
+     * While following a text caret, the fraction of the keyboard-free viewport kept clear on every
+     * side as the inner region: the view stays put while the caret is inside it, and re-centers on
+     * the caret (on the axis that left) once it crosses out. Wider than [comfortMarginFraction] so
+     * ordinary typing never pans per character.
+     */
+    val caretInnerMarginFraction: CGFloat = 0.25
+
     /** The ordinary, keyboard-hidden presentation: the whole remote display aspect-fit into `viewBounds`. */
     fun normal(viewBounds: CGRect, remoteAspectSize: CGSize): RemoteViewportTransform =
         fitFull(viewBounds, remoteAspectSize)
@@ -204,8 +212,16 @@ object RemoteViewportCalculator {
      * @param visibleRect the sub-rect of `viewBounds` not covered by the keyboard.
      * @param anchor the last meaningful touch, in normalized remote-space. Only
      *   its `y` is ever used; `null`, or an anchor with no usable `y`, defaults
-     *   to the remote display's vertical center (ordinary behavior, not a fallback).
+     *   to the remote display's vertical center (ordinary behavior, not a
+     *   fallback). Used only when there is no usable [caret].
      * @param zoomEnabled the "Zoom While Typing" preference.
+     * @param caret the Mac's text caret, a normalized remote-space rect (the `textCaret` wire
+     *   message), when the Mac knows one. A usable caret replaces [anchor]: both its x and y steer
+     *   the view ([caretTransform]), at the same scale the touch anchor would use. `null`, or one
+     *   off the display or not finite, changes nothing: the touch anchor applies exactly as before.
+     * @param previous the `displayedRect` this function returned for the caret last time, so the
+     *   view only moves once the caret leaves the comfortable inner region of [visibleRect] rather
+     *   than on every character. Ignored without a [caret], and when it was for a different scale.
      */
     fun keyboardOpen(
         viewBounds: CGRect,
@@ -214,6 +230,8 @@ object RemoteViewportCalculator {
         anchor: CGPoint?,
         zoomEnabled: Boolean,
         maxZoom: CGFloat = defaultMaxZoom,
+        caret: CGRect? = null,
+        previous: CGRect? = null,
     ): RemoteViewportTransform {
         if (!(viewBounds.width > 0 && viewBounds.height > 0 &&
                 remoteAspectSize.width > 0 && remoteAspectSize.height > 0 &&
@@ -225,7 +243,10 @@ object RemoteViewportCalculator {
         if (!(visibleRect.height >= minimumUsableViewportHeight)) {
             return fitFull(visibleRect, remoteAspectSize)
         }
-        val anchorY: CGFloat = if (anchor != null && anchor.y.isFinite() && anchor.y in 0.0..1.0) {
+        val caretPoint = usableCaretPoint(caret)
+        val anchorY: CGFloat = if (caretPoint != null) {
+            caretPoint.y
+        } else if (anchor != null && anchor.y.isFinite() && anchor.y in 0.0..1.0) {
             anchor.y
         } else {
             // No usable recent interaction: default to vertical center. This is
@@ -245,6 +266,10 @@ object RemoteViewportCalculator {
             requiredScale * magnification(viewBounds, visibleRect, maxZoom)
         } else {
             requiredScale
+        }
+        if (caretPoint != null) {
+            return caretTransform(base.displayedRect, visibleRect, caretPoint, scaleFactor, previous)
+                ?: fitFull(visibleRect, remoteAspectSize)
         }
         return verticalTransform(base.displayedRect, visibleRect, anchorY, scaleFactor)
             ?: fitFull(visibleRect, remoteAspectSize)
@@ -366,6 +391,94 @@ object RemoteViewportCalculator {
         val lowerBound = min(alignNear, alignFar)
         val upperBound = max(alignNear, alignFar)
         return min(max(pan, lowerBound), upperBound)
+    }
+
+    /**
+     * The centre of a normalized caret rect when it is a usable steering point: finite and on the
+     * display. Everything else answers `null` so the caller falls back to the touch anchor.
+     */
+    private fun usableCaretPoint(caret: CGRect?): CGPoint? {
+        if (caret == null || caret.isNull || caret.isInfinite) return null
+        val x = caret.midX
+        val y = caret.midY
+        if (!(x.isFinite() && y.isFinite() && x in 0.0..1.0 && y in 0.0..1.0)) return null
+        return CGPoint(x, y)
+    }
+
+    /**
+     * The caret-following presentation: `base` scaled by `scaleFactor` around its own center (the
+     * same size [verticalTransform] would use), then panned on both axes so the caret sits in the
+     * keyboard-free area. Unlike the touch anchor it moves horizontally too, but only when the scaled
+     * picture is wider than the visible area; an unmagnified picture already fits across, so its
+     * horizontal center never moves.
+     *
+     * Each axis keeps `previous`'s pan while the caret stays inside the inner region
+     * ([caretInnerMarginFraction]), and re-centers on the caret once it leaves: a pan of a few points
+     * per character would read as the picture shaking. Both are clamped so no blank space opens up
+     * beyond the picture's own edges.
+     */
+    private fun caretTransform(
+        base: CGRect,
+        visibleRect: CGRect,
+        caret: CGPoint,
+        scaleFactor: CGFloat,
+        previous: CGRect?,
+    ): RemoteViewportTransform? {
+        if (!(scaleFactor.isFinite() && scaleFactor > 0)) return null
+        val width = base.width * scaleFactor
+        val height = base.height * scaleFactor
+        if (!(width.isFinite() && height.isFinite() && width > 0 && height > 0)) return null
+        val unpanned = CGRect(base.midX - width / 2, base.midY - height / 2, width, height)
+        // The previous pan counts only for the same size: a changed scale (keyboard resized,
+        // rotation) starts over from the caret.
+        var previousPanX: CGFloat? = null
+        var previousPanY: CGFloat? = null
+        if (previous != null && abs(previous.width - width) < 0.5 && abs(previous.height - height) < 0.5) {
+            previousPanX = previous.minX - unpanned.minX
+            previousPanY = previous.minY - unpanned.minY
+        }
+        val panX = caretPan(
+            unpanned.minX + caret.x * width, unpanned.minX, unpanned.maxX, visibleRect.minX, visibleRect.maxX,
+            previousPanX, pansOnlyWhenWider = true,
+        )
+        val panY = caretPan(
+            unpanned.minY + caret.y * height, unpanned.minY, unpanned.maxY, visibleRect.minY, visibleRect.maxY,
+            previousPanY, pansOnlyWhenWider = false,
+        )
+        val rect = unpanned.offsetBy(panX, panY)
+        if (!(rect.width > 0 && rect.height > 0)) return null
+        return RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), rect)
+    }
+
+    /**
+     * One axis of [caretTransform]. The valid range is the one [clampedPan] uses (content edges
+     * against visible edges); inside it, `previous` stands while the caret stays in the inner region,
+     * and otherwise the caret is centered in the visible span.
+     */
+    private fun caretPan(
+        point: CGFloat,
+        contentMin: CGFloat,
+        contentMax: CGFloat,
+        visibleMin: CGFloat,
+        visibleMax: CGFloat,
+        previous: CGFloat?,
+        pansOnlyWhenWider: Boolean,
+    ): CGFloat {
+        val visibleSize = visibleMax - visibleMin
+        if (!(visibleSize > 0)) return 0.0
+        if (pansOnlyWhenWider && contentMax - contentMin <= visibleSize + 0.5) return 0.0
+        val alignNear = visibleMin - contentMin
+        val alignFar = visibleMax - contentMax
+        val lowerBound = min(alignNear, alignFar)
+        val upperBound = max(alignNear, alignFar)
+        fun clamped(pan: CGFloat): CGFloat = min(max(pan, lowerBound), upperBound)
+        if (previous != null) {
+            val kept = clamped(previous)
+            val inner = visibleSize * caretInnerMarginFraction
+            val at = point + kept
+            if (at >= visibleMin + inner && at <= visibleMax - inner) return kept
+        }
+        return clamped(visibleMin + visibleSize / 2 - point)
     }
 
     // MARK: - Shared geometry primitives

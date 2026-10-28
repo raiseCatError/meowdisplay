@@ -15,12 +15,36 @@ class RemoteKeyboardBridge(
 ) {
     private val heldUsages = LinkedHashSet<Int>()
 
+    /**
+     * What the typing strip shows (iOS `TypingStripView`): this keyboard session's typing as the Mac
+     * received it. Changed only by what was actually sent, so deletes and a keyboard's word
+     * replacements read the same here as they land on the Mac.
+     */
+    var echo: TypedTextEcho = TypedTextEcho.EMPTY
+        private set
+
+    /** Called with each new [echo]. */
+    var onEchoChanged: ((TypedTextEcho) -> Unit)? = null
+
+    private fun edit(edit: TypedTextEcho.Edit) {
+        val next = echo.apply(edit)
+        if (next == echo) return
+        echo = next
+        onEchoChanged?.invoke(next)
+    }
+
+    /** The word the keyboard is composing (marked text): shown in the strip, never sent. */
+    fun setComposing(text: String) = edit(TypedTextEcho.Edit.Composing(text))
+
+    /** The keyboard opened or closed: the strip starts over. */
+    fun resetEcho() = edit(TypedTextEcho.Edit.Reset)
+
     /** Finished text from the software or hardware keyboard — never composing (marked) text. */
     fun commitText(text: String) {
         if (text.isEmpty()) return
         val modifiers = chord()
         if (modifiers.isEmpty()) {
-            if (text == "\n") returnKey() else input.keyboardText(text)
+            if (text == "\n") returnKey() else sendText(text)
             return
         }
         // Under a chord each character with a key becomes that chord (⌘ latched, C → ⌘C); the rest stays text.
@@ -30,11 +54,16 @@ class RemoteKeyboardBridge(
             if (press == null) {
                 plain.append(character)
             } else {
-                if (plain.isNotEmpty()) input.keyboardText(plain.toString()).also { plain.clear() }
-                input.keyboardPress(press.first, press.second)
+                if (plain.isNotEmpty()) sendText(plain.toString()).also { plain.clear() }
+                // A shortcut, not typing: the strip cannot follow what it did.
+                if (input.keyboardPress(press.first, press.second)) edit(TypedTextEcho.Edit.Reset)
             }
         }
-        if (plain.isNotEmpty()) input.keyboardText(plain.toString())
+        if (plain.isNotEmpty()) sendText(plain.toString())
+    }
+
+    private fun sendText(text: String) {
+        if (input.keyboardText(text)) edit(TypedTextEcho.Edit.Commit(text))
     }
 
     fun backspace(times: Int = 1) = repeat(times) { special(BACKSPACE) }
@@ -48,7 +77,7 @@ class RemoteKeyboardBridge(
 
     /** A modified hardware shortcut (⌘C from a physical keyboard): one atomic press. */
     fun shortcut(usage: Int, modifierNames: List<String>) {
-        input.keyboardPress(usage, SoftwareKeyboardChordPolicy.modifiers(modifierNames, chord()))
+        if (input.keyboardPress(usage, SoftwareKeyboardChordPolicy.modifiers(modifierNames, chord()))) edit(TypedTextEcho.Edit.Reset)
     }
 
     /** A physical key going down. Only [HELD_USAGES] have a lifecycle; false means "type it instead". */
@@ -56,7 +85,11 @@ class RemoteKeyboardBridge(
         if (usage !in HELD_USAGES) return false
         // One down per physical press: the Mac runs its own key repeat, like iOS.
         if (usage in heldUsages) return true
-        if (input.keyboardDown(usage, SoftwareKeyboardChordPolicy.modifiers(modifierNames, chord()))) heldUsages += usage
+        if (input.keyboardDown(usage, SoftwareKeyboardChordPolicy.modifiers(modifierNames, chord()))) {
+            heldUsages += usage
+            // Arrows, Tab, Escape, Forward Delete: the caret moves or leaves the field.
+            edit(TypedTextEcho.Edit.Reset)
+        }
         return true
     }
 
@@ -75,7 +108,15 @@ class RemoteKeyboardBridge(
     val holdsKeys: Boolean get() = heldUsages.isNotEmpty()
 
     private fun special(usage: Int) {
-        input.keyboardPress(usage, SoftwareKeyboardChordPolicy.modifiers(emptyList(), chord()))
+        val modifiers = SoftwareKeyboardChordPolicy.modifiers(emptyList(), chord())
+        if (!input.keyboardPress(usage, modifiers)) return
+        when {
+            // ⌘⌫, ⌥⌫ and the like delete more than a character: the strip cannot follow.
+            modifiers.isNotEmpty() -> edit(TypedTextEcho.Edit.Reset)
+            usage == BACKSPACE -> edit(TypedTextEcho.Edit.Delete(1))
+            usage == RETURN -> edit(TypedTextEcho.Edit.Newline)
+            else -> edit(TypedTextEcho.Edit.Reset)
+        }
     }
 
     companion object {
