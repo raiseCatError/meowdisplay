@@ -139,7 +139,7 @@ internal fun AddRemoteMacDialog(
                     if (!choosing) {
                         Text("Pair New Mac", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "On your Mac: MeowDisplay → Pair over Remote, then confirm the code on both.",
+                            "On your Mac: Settings → Devices → Open Pair over Remote, then confirm the code on both.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Button(
