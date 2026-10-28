@@ -35,6 +35,11 @@ class MeowReceiverApplication : Application() {
 
     val pipeline: MediaPipeline by lazy { MediaPipeline(media, avSyncOffsetMs = { controls.current.avSyncOffsetMs }) }
 
+    /** Device-local diagnostics switches (the performance overlay). */
+    val diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs by lazy {
+        com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs(this)
+    }
+
     /** The receiver controls' preferences (iOS JSON format) and their transient state. */
     val controls: ReceiverControlStore by lazy { ReceiverControlStore(SharedPreferenceBlobStore(this)) }
 

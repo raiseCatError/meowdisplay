@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
                 val paired by app.pins.paired.collectAsState()
                 val prefs by app.receiver.store.preferences.collectAsState()
                 val pip by inPictureInPicture
+                val perf by app.diagnostics.performanceOverlay.collectAsState()
                 // Android 12+: leaving the app during a session slides the picture into a small window.
                 LaunchedEffect(mediaUi.admitted, prefs.pictureInPictureEnabled) { updatePictureInPicture() }
                 if (pip) {
@@ -67,18 +68,19 @@ class MainActivity : ComponentActivity() {
                         workspace = app.workspace, macName = macName,
                         onMode = { app.media.session.requestDisplayMode(it) },
                         immersive = !homeShown,
+                        showPerformance = perf, rttMs = { app.media.session.rttMs },
                     )
                     if (homeShown) {
                         BackHandler { moveTaskToBack(true) }
                         ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media,
                             onReturnToDisplay = { homeShown = false }, onOpenSettings = { settingsOpen = true })
                     }
-                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false },
+                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false }, diagnostics = app.diagnostics,
                         onStartPictureInPicture = if (supportsPictureInPicture) ({ enterPictureInPicture() }) else null)
                 } else {
                     homeShown = false
                     ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, onOpenSettings = { settingsOpen = true })
-                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
+                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false }, diagnostics = app.diagnostics)
                 }
             }
         }

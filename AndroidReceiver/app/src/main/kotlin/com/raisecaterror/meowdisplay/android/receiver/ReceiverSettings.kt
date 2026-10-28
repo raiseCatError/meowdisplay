@@ -84,7 +84,10 @@ enum class SettingsPage(val title: String) {
  * a change makes it stale.
  */
 @Composable
-fun ReceiverSettings(controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null) {
+fun ReceiverSettings(
+    controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null,
+    diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs? = null,
+) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             BoxWithConstraints(Modifier.safeDrawingPadding()) {
@@ -119,7 +122,7 @@ fun ReceiverSettings(controller: ReceiverController, media: MediaController, onD
                         }
                         page?.let { current ->
                             Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                SettingsPageContent(current, controller, media, onDismiss, onStartPictureInPicture)
+                                SettingsPageContent(current, controller, media, onDismiss, onStartPictureInPicture, diagnostics)
                             }
                         }
                     }
@@ -130,7 +133,10 @@ fun ReceiverSettings(controller: ReceiverController, media: MediaController, onD
 }
 
 @Composable
-private fun SettingsPageContent(page: SettingsPage, controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?) {
+private fun SettingsPageContent(
+    page: SettingsPage, controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?,
+    diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs?,
+) {
     val store = controller.store
     val prefs by store.preferences.collectAsState()
     val view by controller.view.collectAsState()
@@ -270,6 +276,11 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
             if (view.videoSize.width > 0) {
                 LabeledRow("Stream", "${view.videoSize.width.roundToInt()}×${view.videoSize.height.roundToInt()}" +
                     (when (mediaUi.source) { "mirror" -> " · Mirror"; "extend" -> " · Extend"; "window" -> " · Windows"; else -> "" }))
+            }
+            diagnostics?.let { d ->
+                val overlay by d.performanceOverlay.collectAsState()
+                Toggle("Performance Overlay", overlay) { d.setPerformanceOverlay(it) }
+                Caption("Shows frame rate, bitrate, decode time and latency over the picture.")
             }
             Section("Reconnecting")
             Toggle("Auto-Reconnect", prefs.autoReconnectEnabled) { on ->

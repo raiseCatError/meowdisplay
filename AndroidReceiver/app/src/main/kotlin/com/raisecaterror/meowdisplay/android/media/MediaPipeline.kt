@@ -2,6 +2,7 @@ package com.raisecaterror.meowdisplay.android.media
 
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
+import com.raisecaterror.meowdisplay.core.video.StreamStats
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,7 +14,15 @@ class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
     /** The decoded picture's size, for letterboxing; null until a frame decodes. */
     val videoSize: StateFlow<Pair<Int, Int>?> = size.asStateFlow()
 
-    val video = VideoDecoder(requestKeyframe = { media.session.requestKeyframe() }, onVideoSize = { w, h -> size.value = w to h })
+    /** Last second's numbers for the performance overlay. */
+    val stats = StreamStats()
+
+    val video = VideoDecoder(
+        requestKeyframe = { media.session.requestKeyframe() },
+        onVideoSize = { w, h -> size.value = w to h },
+        stats = stats,
+        captureToLocalMs = { capture -> media.session.clockOffsetMs?.let { capture - it } },
+    )
     private val audio = AudioPlayer(avSyncOffsetMs)
 
     init {
@@ -37,6 +46,7 @@ class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
     }
 
     private fun clearVideo() {
+        stats.reset()
         video.reset()
         size.value = null
     }

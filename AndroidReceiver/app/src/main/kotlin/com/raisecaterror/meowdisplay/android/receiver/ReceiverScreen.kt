@@ -123,6 +123,9 @@ fun ReceiverScreen(
     immersive: Boolean = true,
     /** In picture-in-picture only the picture shows; the workspace keeps its full-screen size. */
     pictureInPicture: Boolean = false,
+    /** Settings > Session > Performance Overlay. */
+    showPerformance: Boolean = false,
+    rttMs: () -> Double? = { null },
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
@@ -279,6 +282,12 @@ fun ReceiverScreen(
             onTap = controller::requestInputTapped,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 - 22).dp),
         )
+        if (showPerformance) {
+            com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(
+                pipeline.stats, rttMs,
+                Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 + 34).dp),
+            )
+        }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
     }
 }
