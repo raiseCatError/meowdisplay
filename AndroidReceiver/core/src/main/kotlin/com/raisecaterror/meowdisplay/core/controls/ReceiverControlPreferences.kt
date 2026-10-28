@@ -321,3 +321,13 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
         const val DEFAULTS_KEY = "receiverControlPreferences.v1"
     }
 }
+
+/**
+ * The preferences a new app process starts from. `allowInput` mirrors the
+ * Mac's grant for the current session (iOS overwrites it from the Mac's
+ * state on every session); a new process has no session, so it starts View
+ * Only until the Mac says otherwise. Without this a grant stored by the last
+ * process showed the full Control Tray in a View Only session (C4 F-05).
+ */
+fun ReceiverControlPreferences.atProcessStart(): ReceiverControlPreferences = copy(allowInput = false)
+

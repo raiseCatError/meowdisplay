@@ -21,6 +21,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         app.pipeline // subscribes the decoders before any session starts
+        // And the controls, so the first session's Admitted and input state
+        // reach them (C4 F-01: no Request Input prompt in the first session).
+        app.receiver
         // Recreated for a rotation: same session, new panel dimensions (PROTOCOL.md 6.1).
         if (savedInstanceState != null) app.media.session.resendHello()
         enableEdgeToEdge()

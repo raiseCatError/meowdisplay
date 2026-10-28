@@ -318,6 +318,25 @@ class ReceiverControlsTests {
         assertEquals("New", profile.actions(chord).firstOrNull()?.title)
     }
 
+    /** C4 F-05: a grant stored by the previous process never shows controls in a new process. */
+    @Test
+    fun testANewProcessStartsViewOnlyWhateverWasStored() {
+        val store = MapStore()
+        val repository = ReceiverControlPreferencesRepository(store)
+        val granted = ReceiverControlPreferences()
+        granted.allowInput = true
+        granted.trayEnabled = true
+        granted.inputMode = PointerInputMode.Trackpad
+        repository.save(granted)
+
+        val started = repository.load().atProcessStart()
+        assertFalse(started.allowInput)
+        assertFalse("no Control Tray until the Mac grants input", started.trayCanBeShown)
+        assertFalse(started.functionTrayCanBeShown)
+        assertEquals("other preferences are kept", PointerInputMode.Trackpad, started.inputMode)
+        assertTrue(started.trayEnabled)
+    }
+
     @Test
     fun testPreferencesSerializationSlotsPersistenceAndReset() {
         val repository = ReceiverControlPreferencesRepository(MapStore())

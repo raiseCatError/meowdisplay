@@ -14,6 +14,7 @@ import com.raisecaterror.meowdisplay.core.controls.ReceiverControlPreferences
 import com.raisecaterror.meowdisplay.core.controls.ReceiverControlPreferencesRepository
 import com.raisecaterror.meowdisplay.core.controls.ReceiverUIPreferenceUpdate
 import com.raisecaterror.meowdisplay.core.controls.activeCustomLayout
+import com.raisecaterror.meowdisplay.core.controls.atProcessStart
 import com.raisecaterror.meowdisplay.core.controls.initial
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,7 +46,7 @@ class SharedPreferenceBlobStore(context: Context) : PreferenceBlobStore {
 class ReceiverControlStore(blobs: PreferenceBlobStore) {
     private val repository = ReceiverControlPreferencesRepository(blobs)
     private val handler = Handler(Looper.getMainLooper())
-    private val prefsState = MutableStateFlow(repository.load(ReceiverControlPreferences.initial(isPad = true)))
+    private val prefsState = MutableStateFlow(repository.load(ReceiverControlPreferences.initial(isPad = true)).atProcessStart())
     private val transientState = MutableStateFlow(Transient())
 
     val preferences: StateFlow<ReceiverControlPreferences> = prefsState.asStateFlow()
