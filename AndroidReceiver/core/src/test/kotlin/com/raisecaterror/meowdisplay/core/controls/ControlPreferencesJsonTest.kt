@@ -113,7 +113,7 @@ class TouchStylePreferenceTest {
     fun newInstallIsNatural() {
         assertEquals(DirectTouchStyle.Natural, ReceiverControlPreferences().touchStyle)
         assertFalse(ReceiverControlPreferences().naturalTouchHintShown)
-        assertEquals(19, ReceiverControlPreferences.SCHEMA_VERSION)
+        assertEquals(20, ReceiverControlPreferences.SCHEMA_VERSION)
     }
 
     @Test
@@ -149,5 +149,62 @@ class TouchStylePreferenceTest {
         val reloaded = ReceiverControlPreferencesRepository(store).load()
         assertEquals(DirectTouchStyle.Classic, reloaded.touchStyle)
         assertTrue(reloaded.naturalTouchHintShown)
+    }
+}
+
+/** Window Switcher preference (schema 20): Stage Peek from the left edge unless Rail or the right edge was chosen; nothing else in a saved blob changes. */
+class WindowSwitcherPreferenceTest {
+    private class MapStore : PreferenceBlobStore {
+        val values = mutableMapOf<String, String>()
+        override fun read(key: String) = values[key]
+        override fun write(key: String, value: String) {
+            values[key] = value
+        }
+    }
+
+    @Test
+    fun newInstallIsStagePeekFromTheLeft() {
+        assertEquals(WindowSwitcherStyle.StagePeek, ReceiverControlPreferences().windowSwitcher)
+        assertEquals(StagePeekEdge.Left, ReceiverControlPreferences().stagePeekEdge)
+        assertEquals("stagePeek", WindowSwitcherStyle.StagePeek.raw)
+        assertEquals("rail", WindowSwitcherStyle.Rail.raw)
+        assertEquals("left", StagePeekEdge.Left.raw)
+        assertEquals("right", StagePeekEdge.Right.raw)
+    }
+
+    @Test
+    fun blobWithoutTheKeysDecodesToStagePeekLeftAndKeepsEverythingElse() {
+        val old = ReceiverControlPreferences()
+        old.touchStyle = DirectTouchStyle.Classic
+        old.inputMode = PointerInputMode.Trackpad
+        old.trayEnabled = false
+        val json = kotlinx.serialization.json.JsonObject(
+            old.toJson().filterKeys { it != "windowSwitcher" && it != "stagePeekEdge" } +
+                ("version" to kotlinx.serialization.json.JsonPrimitive(19)),
+        )
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = json.toString()
+        val loaded = ReceiverControlPreferencesRepository(store).load()
+        assertEquals(WindowSwitcherStyle.StagePeek, loaded.windowSwitcher)
+        assertEquals(StagePeekEdge.Left, loaded.stagePeekEdge)
+        assertEquals("the switcher default never touches Touch Style", DirectTouchStyle.Classic, loaded.touchStyle)
+        assertEquals(ReceiverControlPreferences.SCHEMA_VERSION, loaded.version)
+        val expected = old.deepCopy()
+        expected.version = ReceiverControlPreferences.SCHEMA_VERSION
+        assertEquals(expected, loaded)
+    }
+
+    @Test
+    fun explicitChoicesPersist() {
+        val store = MapStore()
+        val p = ReceiverControlPreferences()
+        p.windowSwitcher = WindowSwitcherStyle.Rail
+        p.stagePeekEdge = StagePeekEdge.Right
+        ReceiverControlPreferencesRepository(store).save(p)
+        val reloaded = ReceiverControlPreferencesRepository(store).load()
+        assertEquals(WindowSwitcherStyle.Rail, reloaded.windowSwitcher)
+        assertEquals(StagePeekEdge.Right, reloaded.stagePeekEdge)
+        assertEquals(p.toJson()["windowSwitcher"]?.toString(), "\"rail\"")
+        assertEquals(p.toJson()["stagePeekEdge"]?.toString(), "\"right\"")
     }
 }

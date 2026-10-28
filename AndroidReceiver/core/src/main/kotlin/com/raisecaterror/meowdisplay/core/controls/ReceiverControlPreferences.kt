@@ -65,6 +65,10 @@ data class ReceiverControlPreferences(
     var touchStyle: DirectTouchStyle = DirectTouchStyle.Natural,
     /** Whether the one-time "Natural Touch is on" hint has been shown. */
     var naturalTouchHintShown: Boolean = false,
+    /** Window mode's switcher (schema 20): Stage Peek unless one was chosen; Rail keeps its own settings. */
+    var windowSwitcher: WindowSwitcherStyle = WindowSwitcherStyle.StagePeek,
+    /** The edge Stage Peek opens from. */
+    var stagePeekEdge: StagePeekEdge = StagePeekEdge.Left,
     /**
      * Hardware keyboards: Control sends ⌘. Android keeps Meta-key (⌘) combinations for its own
      * shortcuts and never passes them to apps, so this is the only way to type ⌘ shortcuts from a
@@ -162,6 +166,8 @@ data class ReceiverControlPreferences(
         put("smartTouchLongPressHapticEnabled", jsonOf(smartTouchLongPressHapticEnabled))
         put("touchStyle", jsonOf(touchStyle.raw))
         put("naturalTouchHintShown", jsonOf(naturalTouchHintShown))
+        put("windowSwitcher", jsonOf(windowSwitcher.raw))
+        put("stagePeekEdge", jsonOf(stagePeekEdge.raw))
         put("controlKeyAsCommand", jsonOf(controlKeyAsCommand))
         put("autoReconnectEnabled", jsonOf(autoReconnectEnabled))
         put("profiles", jsonArrayOf(profiles.map { it.toJson() }))
@@ -194,7 +200,7 @@ data class ReceiverControlPreferences(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 19
+        const val SCHEMA_VERSION = 20
 
         /**
          * The hand-written Swift `init(from:)`: a key added by a later schema
@@ -246,6 +252,9 @@ data class ReceiverControlPreferences(
                     value("smartTouchLongPressHapticEnabled", fallback.smartTouchLongPressHapticEnabled) { it.bool() }
                 p.touchStyle = value("touchStyle", fallback.touchStyle) { DirectTouchStyle.of(it.str()) }
                 p.naturalTouchHintShown = value("naturalTouchHintShown", fallback.naturalTouchHintShown) { it.bool() }
+                // Absent (schema < 20): Stage Peek from the left edge.
+                p.windowSwitcher = value("windowSwitcher", fallback.windowSwitcher) { WindowSwitcherStyle.of(it.str()) }
+                p.stagePeekEdge = value("stagePeekEdge", fallback.stagePeekEdge) { StagePeekEdge.of(it.str()) }
                 p.controlKeyAsCommand = value("controlKeyAsCommand", fallback.controlKeyAsCommand) { it.bool() }
                 p.autoReconnectEnabled = value("autoReconnectEnabled", fallback.autoReconnectEnabled) { it.bool() }
                 p.pictureInPictureEnabled = value("pictureInPictureEnabled", fallback.pictureInPictureEnabled) { it.bool() }
@@ -333,6 +342,8 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
         if (value.version < 18) value.version = 18
         // Schema 18 predates Touch Style; the decoder already defaulted it to Natural.
         if (value.version < 19) value.version = 19
+        // Schema 19 predates the window switcher choice; the decoder already defaulted it.
+        if (value.version < 20) value.version = 20
         // Resolve current canonical Function Tray metadata by ID without rewriting the user's choices.
         value.functionTrayProfiles = value.functionTrayProfiles.map { it.resolvingCanonicalMetadata() }
         return value

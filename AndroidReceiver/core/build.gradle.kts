@@ -31,4 +31,8 @@ tasks.test {
     val gestureFixtures = rootProject.layout.projectDirectory.dir("../fixtures/gestures")
     inputs.dir(gestureFixtures)
     systemProperty("meow.gestureFixtures", gestureFixtures.asFile.absolutePath)
+    // Stage Peek machine and layout vectors shared with the Swift engine (fixtures/stage-peek).
+    val stagePeekFixtures = rootProject.layout.projectDirectory.dir("../fixtures/stage-peek")
+    inputs.dir(stagePeekFixtures)
+    systemProperty("meow.stagePeekFixtures", stagePeekFixtures.asFile.absolutePath)
 }
