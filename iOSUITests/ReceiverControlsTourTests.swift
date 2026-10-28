@@ -69,6 +69,30 @@ final class ReceiverControlsTourTests: XCTestCase {
     /// Return reaches the (sample) Mac from the Function Tray with the
     /// keyboard closed, and from the keyboard bar with it open.
     @MainActor
+    /// The strip on top of the keyboard shows what was typed, wherever the
+    /// picture is (demo: nothing reaches a Mac).
+    func testTypingStripEchoesWhatIsTyped() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let keyboard = element("Keyboard")
+        guard keyboard.waitForExistence(timeout: 3) else { return XCTFail("no Keyboard control") }
+        revealControls(keyboard)
+        keyboard.tap()
+        sleep(2)
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); sleep(1) }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "software keyboard is up")
+        snapshot("typing-strip-empty")
+        app.typeText("hello mac")
+        let echo = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'hello mac' OR value CONTAINS 'hello mac'")).firstMatch
+        XCTAssertTrue(echo.waitForExistence(timeout: 3), "the strip shows what was typed")
+        snapshot("typing-strip-hello")
+        let hide = element("Hide Keyboard")
+        if hide.waitForExistence(timeout: 3) { hide.tap() }
+        app.buttons["Exit Demo"].tap()
+    }
+
+    @MainActor
     func testReturnSendsAPressWithKeyboardClosedAndOpen() {
         XCUIDevice.shared.orientation = .portrait
         enterDemo()

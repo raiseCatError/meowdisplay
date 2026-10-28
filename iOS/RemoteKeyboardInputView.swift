@@ -320,18 +320,23 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
 /// trailing edge. The word still being composed is underlined, as marked text
 /// is. Empty, it reads "Typing to <Mac name>".
 ///
-/// Backed by `UIInputView` in the keyboard style so it takes the keyboard's
-/// own backdrop in light and dark. The font follows Dynamic Type up to a
+/// Backed by `UIInputView` in the keyboard style. The content sits on its own
+/// rounded material pill, because the floating keyboard of recent iOS
+/// versions draws no backdrop behind an accessory, and without one the echo
+/// would blend into the Mac picture. The font follows Dynamic Type up to a
 /// ceiling (the strip is height-bounded: it sits between the picture and the
 /// keys), and the label is an updating static text for VoiceOver.
 final class TypingStripView: UIInputView {
     var onDone: (() -> Void)?
 
     private static let minimumHeight: CGFloat = 44
+    /// Space around the pill, so it reads as a separate bar above the keys.
+    private static let pillInset: CGFloat = 4
     /// Dynamic Type stops growing the echo here.
     private static let maximumFontSize: CGFloat = 24
     private static let maxEchoCharacters = 80
 
+    private let pill = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
     private let echoLabel = UILabel()
     private let doneButton = UIButton(type: .system)
     private var typingTarget: String?
@@ -362,7 +367,7 @@ final class TypingStripView: UIInputView {
 
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric,
-               height: max(Self.minimumHeight, ceil(Self.echoFont.lineHeight) + 24))
+               height: max(Self.minimumHeight, ceil(Self.echoFont.lineHeight) + 24) + Self.pillInset * 2)
     }
 
     @objc private func contentSizeCategoryChanged() {
@@ -377,12 +382,18 @@ final class TypingStripView: UIInputView {
     }
 
     private func setUp() {
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.layer.cornerRadius = 14
+        pill.layer.cornerCurve = .continuous
+        pill.clipsToBounds = true
+        addSubview(pill)
+
         echoLabel.translatesAutoresizingMaskIntoConstraints = false
         echoLabel.numberOfLines = 1
         echoLabel.adjustsFontForContentSizeCategory = false   // `render()` re-scales with a ceiling
         echoLabel.isAccessibilityElement = true
         echoLabel.accessibilityTraits = [.staticText, .updatesFrequently]
-        addSubview(echoLabel)
+        pill.contentView.addSubview(echoLabel)
 
         var configuration = UIButton.Configuration.plain()
         configuration.title = String(localized: "Done")
@@ -398,20 +409,25 @@ final class TypingStripView: UIInputView {
         doneButton.setContentHuggingPriority(.required, for: .horizontal)
         doneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         doneButton.addAction(UIAction { [weak self] _ in self?.onDone?() }, for: .primaryActionTriggered)
-        addSubview(doneButton)
+        pill.contentView.addSubview(doneButton)
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(contentSizeCategoryChanged),
             name: UIContentSizeCategory.didChangeNotification, object: nil)
 
         let guide = safeAreaLayoutGuide
+        let inset = Self.pillInset
         NSLayoutConstraint.activate([
-            doneButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -6),
-            doneButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            pill.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: inset * 2),
+            pill.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -inset * 2),
+            pill.topAnchor.constraint(equalTo: topAnchor, constant: inset),
+            pill.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
+            doneButton.trailingAnchor.constraint(equalTo: pill.contentView.trailingAnchor, constant: -4),
+            doneButton.centerYAnchor.constraint(equalTo: pill.contentView.centerYAnchor),
             doneButton.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumHeight),
-            echoLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
-            echoLabel.trailingAnchor.constraint(equalTo: doneButton.leadingAnchor, constant: -8),
-            echoLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            echoLabel.leadingAnchor.constraint(equalTo: pill.contentView.leadingAnchor, constant: 14),
+            echoLabel.trailingAnchor.constraint(equalTo: doneButton.leadingAnchor, constant: -6),
+            echoLabel.centerYAnchor.constraint(equalTo: pill.contentView.centerYAnchor),
         ])
         render()
     }
