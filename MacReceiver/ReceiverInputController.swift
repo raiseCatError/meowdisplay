@@ -172,8 +172,19 @@ final class ReceiverInputController: ObservableObject {
 
     /// `false` lets AppKit handle the event here; `true` once it was sent to
     /// the other Mac (or consumed, like the pause shortcut).
+    /// Window mode: the overview or Arrange is open, so keys stay in MeowDisplay.
+    var localOverlayActive: () -> Bool = { false }
+    /// ⌃⌥W: open the window overview (a local shortcut, never sent to the Mac).
+    var onOpenWindowOverview: (() -> Void)?
+
     private func consumeKeyEvent(_ event: NSEvent) -> Bool {
         guard let window, event.window === window else { return false }
+        if event.type == .keyDown, event.keyCode == 13, let open = onOpenWindowOverview,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.control, .option] {
+            open()
+            return true
+        }
+        if localOverlayActive() { return false }
         let modifiers = ReceiverModifierState(rawFlags: event.modifierFlags.rawValue)
         let commands: [ReceiverInputCommand]?
         switch event.type {

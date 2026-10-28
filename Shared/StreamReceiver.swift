@@ -905,6 +905,21 @@ final class StreamReceiver: ObservableObject {
     /// instead of capturing `self` — see `ReceiverUISink`'s file header.
     /// `target` is wired weakly in `init` below.
     private let uiSink = ReceiverUISink()
+    /// Window workspaces (PROTOCOL.md 6.10): parsed here, delivered on the main actor.
+    let workspaceEvents = WorkspaceEventSink()
+    /// The connected Mac offers Window mode / has confirmed it for this device.
+    @MainActor @Published private(set) var macOffersWindows = false
+    @MainActor @Published private(set) var windowModeActive = false
+
+    @MainActor
+    func noteWorkspaceEvent(_ event: WorkspaceEvent) {
+        switch event {
+        case .features(let features): macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
+        case .mode(let window): windowModeActive = window
+        case .disconnected: macOffersWindows = false; windowModeActive = false
+        default: break
+        }
+    }
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
@@ -2694,6 +2709,7 @@ final class StreamReceiver: ObservableObject {
             if state == .paused { resetAudioPlayback() }
             publishDisplayState(state)
         case WireMessage.displayModeState:
+            if let raw = obj["mode"] as? String { workspaceEvents.emit(.mode(window: raw == WindowWorkspaceWire.mode)) }
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
             DispatchQueue.main.async { uiSink.publishConfirmedDisplayMode(mode) }
@@ -2725,6 +2741,7 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
+            workspaceEvents.emit(.features(Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })))
             if macPV < WireProtocol.sessionInvitationWireVersion {
                 admitLegacySenderOrClose()
             }
@@ -2841,7 +2858,7 @@ final class StreamReceiver: ObservableObject {
             Log.info("effective codec: \(update.codec.wireValue) reason: \(update.reason)")
             DispatchQueue.main.async { uiSink.publishActiveStreamCodec(update.codec) }
         default:
-            break
+            if let event = WorkspaceEvent.parse(type: type, obj) { workspaceEvents.emit(event) }
         }
     }
 
@@ -2946,6 +2963,8 @@ final class StreamReceiver: ObservableObject {
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
+            // This receiver can arrange Mac windows (PROTOCOL.md 6.10); older Macs ignore it.
+            WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
         ]
         // Sent only inside the authenticated session, never in Bonjour TXT:
         // the mode this device asked for with its own Connect (pv 21). The
@@ -3555,6 +3574,26 @@ final class StreamReceiver: ObservableObject {
     /// input/request surface (touch, pointer, keyboard, modifiers, gestures,
     /// and the `request*` preference methods). Reads `sendTargetBox`
     /// synchronously — always instantaneously current, no publication lag.
+    /// A window-workspace message on the current connection (the Mac acts only for an admitted session).
+    @MainActor
+    @discardableResult
+    func sendWorkspace(_ message: [String: Any]) -> Bool {
+        guard connected else { return false }
+        sendUIControl(message)
+        return true
+    }
+
+    /// Ask the Mac for Window mode for this device only; it confirms with displayModeState "window".
+    @MainActor
+    @discardableResult
+    func requestWindowMode() -> Bool {
+        guard connected, macProtocolVersion >= WireProtocol.displayModeWireVersion else { return false }
+        controlResetGeneration &+= 1
+        sendCancelActiveInput()
+        sendUIControl(["type": WireMessage.displayModeRequest, "mode": WindowWorkspaceWire.mode])
+        return true
+    }
+
     @MainActor
     private func sendUIControl(_ message: [String: Any]) {
         sendControl(message, on: sendTargetBox.current()?.connection)
@@ -4493,6 +4532,7 @@ final class StreamReceiver: ObservableObject {
         mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         guard !wasAdmitted else { return }
         sendControl(["type": "kf"])
+        workspaceEvents.emit(.connected(peerID: peerID))
         // This device's own request, if it covered this Mac, is answered by
         // the session now admitted: its "asked for exactly this" window and
         // requested mode must not outlive it into a later reconnect.

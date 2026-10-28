@@ -360,6 +360,14 @@ private struct DisplaySettingsPage: View {
 
     @ViewBuilder
     private var displayModeRows: some View {
+        if receiver.macOffersWindows {
+            Button(receiver.windowModeActive ? "Choose Windows…" : "Show Mac Windows…") {
+                NotificationCenter.default.post(name: .meowOpenWindowOverview, object: nil)
+            }
+            Text("Shows Mac windows you pick, side by side, instead of a whole display. Only this device changes. Tip: hold three fingers still on the picture.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
         if let confirmedMode = receiver.confirmedDisplayMode {
             Picker("Display Mode", selection: Binding(
                 get: { receiver.pendingDisplayMode ?? confirmedMode },

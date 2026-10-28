@@ -20,6 +20,9 @@ import SwiftUI
 final class ReceiverController: ObservableObject {
     static let shared = ReceiverController()
 
+    /// Window mode: this Mac's arrangement of the sending Mac's windows.
+    let workspace = WorkspaceModel()
+
     // A fresh StreamReceiver per activation: stop() tears the old one down
     // and drops it, so listener/decoder state can't leak across mode flips.
     // Nil whenever receiver mode is off.
@@ -159,6 +162,24 @@ final class ReceiverController: ObservableObject {
         self.receiver = receiver
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         input = ReceiverInputController(receiver: receiver)
+        let windowWorkspace = self.workspace
+        receiver.workspaceEvents.set { [weak receiver] event in
+            windowWorkspace.apply(event)
+            receiver?.noteWorkspaceEvent(event)
+        }
+        windowWorkspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
+        windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
+        windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        input?.localOverlayActive = { windowWorkspace.overviewOpen || windowWorkspace.arranging }
+        input?.onOpenWindowOverview = { if windowWorkspace.available { windowWorkspace.openOverview() } }
+        receiver.$connected
+            .removeDuplicates()
+            .filter { !$0 }
+            .sink { [weak receiver] _ in
+                windowWorkspace.apply(.disconnected)
+                receiver?.noteWorkspaceEvent(.disconnected)
+            }
+            .store(in: &cancellables)
         receiver.start()
 
         receiver.$connected
@@ -404,7 +425,7 @@ final class ReceiverController: ObservableObject {
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
             w.title = "MeowDisplay"
-            let videoView = ReceiverVideoView(receiver: receiver, input: input)
+            let videoView = ReceiverVideoView(receiver: receiver, input: input, workspace: workspace)
             w.contentView = videoView
             w.initialFirstResponder = videoView
             w.isReleasedWhenClosed = false
@@ -416,6 +437,12 @@ final class ReceiverController: ObservableObject {
             indicator.view = indicatorView
             indicator.layoutAttribute = .trailing
             w.addTitlebarAccessoryViewController(indicator)
+            let windows = NSTitlebarAccessoryViewController()
+            let windowsView = NSHostingView(rootView: MacWorkspaceTitlebar(model: workspace))
+            windowsView.frame = NSRect(x: 0, y: 0, width: 190, height: 28)
+            windows.view = windowsView
+            windows.layoutAttribute = .trailing
+            w.addTitlebarAccessoryViewController(windows)
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.center()
             window = w
@@ -558,9 +585,13 @@ final class ReceiverVideoView: NSView {
     private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
     private var cursorVisible = false
 
-    init(receiver: StreamReceiver, input: ReceiverInputController) {
+    private let workspace: WorkspaceModel
+    private var workspaceObserver: AnyCancellable?
+
+    init(receiver: StreamReceiver, input: ReceiverInputController, workspace: WorkspaceModel) {
         self.receiver = receiver
         self.input = input
+        self.workspace = workspace
         self.displayLayer = receiver.displayLayer
         super.init(frame: .zero)
         wantsLayer = true
@@ -608,12 +639,26 @@ final class ReceiverVideoView: NSView {
         overlay.frame = bounds
         overlay.autoresizingMask = [.width, .height]
         addSubview(overlay)
+        // Window mode: tile borders and states over the picture; it takes clicks
+        // only while the overview or Arrange is open (nothing reaches the Mac then).
+        let workspaceView = WorkspaceHostingView(rootView: MacWorkspaceOverlay(model: workspace, receiver: receiver))
+        workspaceView.interactive = { [weak workspace] in workspace.map { $0.overviewOpen || $0.arranging } ?? false }
+        workspaceView.frame = bounds
+        workspaceView.autoresizingMask = [.width, .height]
+        addSubview(workspaceView)
+        // One pointer: in Window mode it's this Mac's own (hover over another
+        // tile stays local), so the streamed cursor isn't drawn as well.
+        workspaceObserver = workspace.$windowMode.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] on in
+            guard let self else { return }
+            self.cursorLayer.isHidden = on
+            self.window?.invalidateCursorRects(for: self)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: blankCursor)
+        addCursorRect(bounds, cursor: workspace.windowMode ? .arrow : blankCursor)
     }
 
     // MARK: Input (issue #12)
@@ -662,6 +707,13 @@ final class ReceiverVideoView: NSView {
 
     private func pointerMoved(_ event: NSEvent) {
         input.mouseMoved(event, geometry: geometry, in: self)
+        if workspace.windowMode {
+            let p = convert(event.locationInWindow, from: nil)
+            let picture = MacWorkspaceOverlay.picture(in: bounds.size, video: receiver?.videoSize ?? .zero)
+            let n = CGPoint(x: (p.x - picture.minX) / max(picture.width, 1), y: 1 - (p.y - picture.minY) / max(picture.height, 1))
+            workspace.hover(at: (0...1).contains(n.x) && (0...1).contains(n.y) ? n : nil)
+            return
+        }
         echoCursor(event)
     }
 
@@ -788,3 +840,66 @@ private final class OverlayHostingView: NSHostingView<ReceiverPerfOverlay> {
         addCursorRect(bounds, cursor: blankCursor)
     }
 }
+
+// MARK: - Window mode
+
+/// Window mode over the Mac Receiver's picture: tile chrome and the overview.
+struct MacWorkspaceOverlay: View {
+    @ObservedObject var model: WorkspaceModel
+    @ObservedObject var receiver: StreamReceiver
+
+    static func picture(in size: CGSize, video: CGSize) -> CGRect {
+        guard video.width > 0, video.height > 0, size.width > 0, size.height > 0 else { return CGRect(origin: .zero, size: size) }
+        let s = min(size.width / video.width, size.height / video.height)
+        let w = video.width * s, h = video.height * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                WorkspaceChromeView(model: model, picture: Self.picture(in: geo.size, video: receiver.videoSize),
+                                    inputAllowed: receiver.session.allowsLiveInput)
+                WindowOverviewView(model: model, macName: model.hostName, inputAllowed: receiver.session.allowsLiveInput,
+                                   onMirror: { receiver.requestDisplayMode(.mirror) },
+                                   onExtend: { receiver.requestDisplayMode(.extend) })
+            }
+        }
+    }
+}
+
+/// Titlebar: Windows (the overview, ⌃⌥W) and Arrange, when the sending Mac offers Window mode.
+struct MacWorkspaceTitlebar: View {
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if model.available {
+                Button("Windows") { model.openOverview() }
+                    .help("Choose Mac windows to show here (⌃⌥W)")
+                if model.windowMode {
+                    Toggle("Arrange", isOn: $model.arranging).toggleStyle(.button)
+                        .help("Move and resize tiles. Clicks stay on this Mac while arranging.")
+                }
+            }
+        }
+        .controlSize(.small)
+        .padding(.trailing, 6)
+    }
+}
+
+private final class WorkspaceHostingView: NSHostingView<MacWorkspaceOverlay> {
+    var interactive: () -> Bool = { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { interactive() ? super.hitTest(point) : nil }
+
+    required init(rootView: MacWorkspaceOverlay) {
+        super.init(rootView: rootView)
+    }
+
+    @MainActor required dynamic init?(coder: NSCoder) {
+        fatalError("not used")
+    }
+}
+

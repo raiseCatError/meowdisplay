@@ -269,6 +269,7 @@ targets:
       # closure `ReceiverUISinkTests` needs to construct a real one
       # (StreamReceiver.init touches all of these).
       - Shared/StreamReceiver.swift
+      - Shared/WorkspaceClient.swift
       - Shared/ReceiverVideoTelemetry.swift
       - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift
@@ -361,6 +362,8 @@ targets:
         # means supporting arbitrary window sizes, which is its own change.
         # TODO: remove once the receiver surface handles resizable windows.
         UIRequiresFullScreen: true
+        # Mouse and trackpad clicks arrive as pointer touches (hover, right click, scroll): HID-B.
+        UIApplicationSupportsIndirectInputEvents: true
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
         # Export compliance, as declared in App Store Connect: the app uses

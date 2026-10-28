@@ -303,7 +303,10 @@ struct ReceiverScreen: View {
                                    allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
-                                   onBlockedInputAttempt: { noteBlockedInputAttempt() })
+                                   onBlockedInputAttempt: { noteBlockedInputAttempt() },
+                                   threeFingerHoldEnabled: model.workspace.available,
+                                   onThreeFingerHold: { model.workspace.openOverview() },
+                                   onHardwarePointer: { model.workspace.hover(at: $0) })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
@@ -358,6 +361,16 @@ struct ReceiverScreen: View {
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    // Window mode: tile chrome and the window rail over the picture,
+                    // under the MeowDisplay controls (which stay on top).
+                    let picture = RemoteViewportCalculator.normal(
+                        viewBounds: CGRect(origin: .zero, size: canvas.size),
+                        remoteAspectSize: model.receiver.videoSize).displayedRect
+                        .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                    WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
+                                        divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                    WindowRailView(model: model.workspace)
+                        .padding(.top, effectiveSafeInsets.top)
                     ReceiverControlOverlay(
                         store: controlStore,
                         receiver: model.receiver,
@@ -380,6 +393,10 @@ struct ReceiverScreen: View {
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                    WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
+                                       inputAllowed: inputReachesMac,
+                                       onMirror: { model.receiver.requestDisplayMode(.mirror) },
+                                       onExtend: { model.receiver.requestDisplayMode(.extend) })
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
                                        keyboardActive: $keyboardActive,
@@ -401,6 +418,10 @@ struct ReceiverScreen: View {
         .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
         .statusBarHidden(fullScreenSurface)
         .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
+        .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
+            showSettings = false
+            model.workspace.openOverview()
+        }
         // A real session always wins: a Mac connecting ends the demo.
         .onChange(of: showsReceiverSurface) { shown in
             if shown { exitDemo() }
@@ -1619,6 +1640,8 @@ enum iOSDecodeCeiling {
 @MainActor
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
+    /// Window mode: this device's arrangement of Mac windows (PROTOCOL.md 6.10).
+    let workspace = WorkspaceModel()
     let wakeConnect: WakeConnectCoordinator
     let pictureInPicture: ReceiverPictureInPictureController
     private var started = false
@@ -1648,6 +1671,26 @@ final class ReceiverModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         pictureInPicture.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        let workspace = self.workspace
+        receiver.workspaceEvents.set { [weak receiver] event in
+            workspace.apply(event)
+            receiver?.noteWorkspaceEvent(event)
+        }
+        workspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
+        workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
+        workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        receiver.$connected
+            .removeDuplicates()
+            .filter { !$0 }
+            .sink { [weak receiver] _ in
+                workspace.apply(.disconnected)
+                receiver?.noteWorkspaceEvent(.disconnected)
+            }
+            .store(in: &cancellables)
+        workspace.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -1860,12 +1903,20 @@ struct VideoLayerView: UIViewRepresentable {
     var invertHorizontalScroll = true
     /// See `VideoView.onBlockedInputAttempt`.
     var onBlockedInputAttempt: @MainActor () -> Void = {}
+    /// Window mode: three fingers held still open the window overview.
+    var threeFingerHoldEnabled = false
+    var onThreeFingerHold: () -> Void = {}
+    /// The hardware pointer over the picture (normalized), for tile hover.
+    var onHardwarePointer: (CGPoint?) -> Void = { _ in }
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.threeFingerHoldEnabled = threeFingerHoldEnabled
+        view.onThreeFingerHold = onThreeFingerHold
+        view.onHardwarePointer = onHardwarePointer
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
         view.setInputMode(inputMode)
@@ -2017,6 +2068,9 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.preferMeowDisplayGestures = preferMeowDisplayGestures
         uiView.onBlockedInputAttempt = onBlockedInputAttempt
         uiView.setScrollDirection(invertVertical: invertVerticalScroll, invertHorizontal: invertHorizontalScroll)
+        uiView.threeFingerHoldEnabled = threeFingerHoldEnabled
+        uiView.onThreeFingerHold = onThreeFingerHold
+        uiView.onHardwarePointer = onHardwarePointer
         uiView.setMoveViewActive(moveViewActive)
         uiView.setViewportResetGeneration(viewportResetGeneration)
         // videoSize arrives after the format description — re-fit the layers.
@@ -2038,6 +2092,105 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+
+        // MARK: Window mode and hardware pointer/keyboard (HID-B)
+
+        /// Window mode: a stationary three-finger hold opens the window overview.
+        var onThreeFingerHold: (() -> Void)?
+        /// The hardware pointer, normalized to the picture (nil outside it): the workspace's hover.
+        var onHardwarePointer: ((CGPoint?) -> Void)?
+        var threeFingerHoldEnabled = false {
+            didSet { threeFingerHoldRecognizer.isEnabled = threeFingerHoldEnabled && !UIAccessibility.isVoiceOverRunning }
+        }
+        private lazy var threeFingerHoldRecognizer: UILongPressGestureRecognizer = {
+            let r = UILongPressGestureRecognizer(target: self, action: #selector(threeFingerHeld(_:)))
+            r.numberOfTouchesRequired = 3
+            r.minimumPressDuration = 0.5
+            r.allowableMovement = 12
+            // The held touches are cancelled, so they never become a Mac gesture.
+            r.cancelsTouchesInView = true
+            r.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            r.isEnabled = false
+            return r
+        }()
+        private lazy var pointerHoverRecognizer: UIHoverGestureRecognizer = {
+            let r = UIHoverGestureRecognizer(target: self, action: #selector(pointerHovered(_:)))
+            r.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+            return r
+        }()
+        private lazy var pointerScrollRecognizer: UIPanGestureRecognizer = {
+            let r = UIPanGestureRecognizer(target: self, action: #selector(pointerScrolled(_:)))
+            r.allowedScrollTypesMask = .all
+            r.allowedTouchTypes = []   // wheel and trackpad scrolls only, never touches
+            return r
+        }()
+        private var heldPointerButtons: [ObjectIdentifier: PointerButton] = [:]
+        private var lastPointerScroll = CGPoint.zero
+        let hardwareKeyboard = HardwareKeyboardForwarder()
+
+        private func normalizedPicturePoint(_ p: CGPoint) -> CGPoint? {
+            guard let n = currentTransform.remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
+            return n
+        }
+
+        @objc private func threeFingerHeld(_ r: UILongPressGestureRecognizer) {
+            guard r.state == .began else { return }
+            clearInputStateForPause()
+            onThreeFingerHold?()
+        }
+
+        @objc private func pointerHovered(_ r: UIHoverGestureRecognizer) {
+            let n = (r.state == .ended || r.state == .cancelled) ? nil : normalizedPicturePoint(r.location(in: self))
+            onHardwarePointer?(n)
+            guard allowsInput, let n else { return }
+            receiver?.sendPointerMove(x: n.x, y: n.y)
+        }
+
+        @objc private func pointerScrolled(_ r: UIPanGestureRecognizer) {
+            guard allowsInput, let video = receiver?.videoSize, let scale = pointsPerRemotePixel(video: video), scale > 0 else { return }
+            if r.state == .began {
+                lastPointerScroll = .zero
+                if let n = normalizedPicturePoint(r.location(in: self)) { receiver?.sendPointerMove(x: n.x, y: n.y) }
+            }
+            let t = r.translation(in: self)
+            let d = CGPoint(x: t.x - lastPointerScroll.x, y: t.y - lastPointerScroll.y)
+            lastPointerScroll = t
+            if d != .zero { sendRemoteScroll(dx: d.x / scale, dy: d.y / scale) }
+        }
+
+        /// Mouse/trackpad clicks (UIApplicationSupportsIndirectInputEvents): real
+        /// pointer presses at the pointer, right button from the button mask,
+        /// the platform's click count; a drag stays a drag. Never the touch pipeline.
+        private func handlePointerTouches(_ touches: Set<UITouch>, _ event: UIEvent?) {
+            guard let receiver else { return }
+            for t in touches {
+                let key = ObjectIdentifier(t)
+                let location = t.location(in: self)
+                switch t.phase {
+                case .began:
+                    let n = normalizedPicturePoint(location)
+                    onHardwarePointer?(n)
+                    guard allowsInput, let n else { continue }
+                    let button: PointerButton = event?.buttonMask.contains(.secondary) == true ? .right : .left
+                    receiver.sendPointerMove(x: n.x, y: n.y)
+                    receiver.sendPointerDown(button: button, clickCount: max(t.tapCount, 1))
+                    heldPointerButtons[key] = button
+                case .moved:
+                    guard heldPointerButtons[key] != nil, let n = currentTransform.remotePoint(forView: location) else { continue }
+                    receiver.sendPointerMove(x: min(max(n.x, 0), 1), y: min(max(n.y, 0), 1))
+                default:
+                    if let button = heldPointerButtons.removeValue(forKey: key) {
+                        receiver.sendPointerUp(button: button, clickCount: max(t.tapCount, 1))
+                    }
+                }
+            }
+        }
+
+        private func releaseHardwareInput() {
+            for button in heldPointerButtons.values { receiver?.sendPointerUp(button: button, clickCount: 1) }
+            heldPointerButtons.removeAll()
+            hardwareKeyboard.releaseAll()
+        }
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
         fileprivate var twoFingerRecognizer: TwoFingerViewportGestureRecognizer?
@@ -2193,6 +2346,15 @@ struct VideoLayerView: UIViewRepresentable {
             surfaceGridLayer.isHidden = true
             layer.insertSublayer(surfaceLayer, at: 0)
             layer.insertSublayer(surfaceGridLayer, above: surfaceLayer)
+            addGestureRecognizer(threeFingerHoldRecognizer)
+            addGestureRecognizer(pointerHoverRecognizer)
+            addGestureRecognizer(pointerScrollRecognizer)
+            hardwareKeyboard.receiver = { [weak self] in self?.receiver }
+            hardwareKeyboard.isActive = { [weak self] in
+                guard let self else { return false }
+                return self.allowsInput && !self.keyboardRequested && self.window != nil
+                    && UIApplication.shared.applicationState == .active
+            }
         }
 
         @available(*, unavailable)
@@ -2564,6 +2726,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         func clearInputStateForPause() {
+            releaseHardwareInput()
             twoFingerActive = false
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
@@ -3715,6 +3878,10 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: true, ended: false)
             if moveViewActive {
                 onActivityBegan?()
@@ -3734,6 +3901,10 @@ struct VideoLayerView: UIViewRepresentable {
             routeTouches("began", touches, event, ended: false)
         }
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: false)
                 return
@@ -3741,6 +3912,10 @@ struct VideoLayerView: UIViewRepresentable {
             routeTouches("moved", touches, event, ended: false)
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: true)
@@ -3754,6 +3929,10 @@ struct VideoLayerView: UIViewRepresentable {
             if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: true)
