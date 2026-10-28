@@ -22,7 +22,7 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Request Control Automatically (per Mac) | Yes | Yes | No | |
 | Another Mac waits until its invitation is accepted (F2) | Yes | Yes | Yes | unit-tested both; two-Mac physical test blocked (one Mac) |
 | Switched Out (same-Mac account switch) | Yes | No | Yes | |
-| Explore Demo | Yes | No | No | |
+| Try the Demo | Yes | No | No | |
 | Update Required screen | Yes | Partial | Yes | Android shows a text notice with the link |
 
 ## Display

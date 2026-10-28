@@ -35,7 +35,7 @@ and tablet differences are in the note.
 | Choose windows | Display: **Show Mac Windows…** (**Choose Windows…** in Window view) | Display: **Choose Windows…** | **Windows** button in the title bar, ⌃⌥W |
 | Display Mode | Display | Display | Displays |
 | Audio, A/V Sync | Audio | Audio | **Streaming** |
-| Auto-Reconnect | **General** (also Home) | **Session** | **System** (also Overview) |
+| Auto-Reconnect | **General** | **Session** | **System** (also Overview) |
 | Request Control | Input: **Request Control** button | Input: **Request Control** button | Title bar: **Request Control** |
 | Request Control Automatically | Paired Macs | **Home**, in a Mac's ••• menu | No |
 | Performance Overlay | Diagnostics | Session | System |

@@ -61,7 +61,7 @@ group (`SameMacSessionTests.testACopiedDigestUnderAnotherNameIsItsOwnRow`).
   - new pairings use the same name, so a receiver's paired list tells the sessions apart (existing pairings keep the name they were made with);
   - switching out republishes `ss`.
 - **Receivers** (`Shared/MacSessionDiscovery.swift`, pure and shared):
-  - **iPhone/iPad:** Nearby Devices lists one Mac with its sessions under it; a switched-out session shows **Switched Out** instead of Pair/Connect.
+  - **iPhone/iPad:** the Macs card on Home lists each session as its own row ("Family MacBook — Alex"); a switched-out session shows **Switched Out** instead of Pair/Connect.
   - **Mac receiver:** the row reads "Family MacBook — Alex"; Pair is disabled while that session is switched out.
   - **Android:** uses the same rules (port of `NearbyMacDirectory`).
 - **Malformed hints** (bad digest, missing name or label, oversize label, no install id) drop all four fields: that sender is listed as an ordinary Mac. The same install seen twice is one row; duplicate labels get a suffix; same-named Macs with different host names are never merged.

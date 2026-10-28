@@ -30,7 +30,8 @@ sentences where one is shown. Where an app differs today, the
 | **Wi-Fi**, **USB**, **Remote** (another network, e.g. Tailscale) | how devices connect | WiFi, wireless, LAN (in UI), tunnel |
 | **Auto-Reconnect** | reconnect by itself after a lost connection | Automatic Reconnection |
 | **Settings & Help** | the settings entry on a home screen. Inside a session the same screen is titled **Settings** | Preferences, Options |
-| **Demo** (Explore Demo) | a sample session with no Mac | tutorial, preview mode |
+| **Macs** · **How to Connect** · **This Device** | the home screen: one **Macs** card, then the links **How to Connect** · **Try the Demo** (iPhone/iPad) · **This Device**. This Device shows the name Macs list (and, on Android, the security key) | Your Macs, Nearby Devices, Device Details |
+| **Demo** (**Try the Demo** on iPhone/iPad Home) | a sample session with no Mac | tutorial, preview mode |
 | **paused** | the Mac paused the picture | frozen, suspended |
 
 ### Display and Window mode
