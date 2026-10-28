@@ -2,6 +2,9 @@ package com.raisecaterror.meowdisplay.android.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
+import com.raisecaterror.meowdisplay.android.receiver.overlay.GlyphIcon
+import com.raisecaterror.meowdisplay.android.receiver.overlay.OverlayGlyph
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import com.raisecaterror.meowdisplay.android.R
@@ -87,26 +90,27 @@ fun ReceiverHome(
     val toPair = nearby.filter { it.serviceName !in pairedNames }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
+      // Same arrangement as the iPhone: centred logo and name on top, the list, then
+      // Settings & Help at the bottom centre, always in reach.
+      Column(Modifier.fillMaxSize().safeDrawingPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 20.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 24.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Image(painterResource(R.drawable.meow_logo), contentDescription = null, modifier = Modifier.size(56.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onBackground,
-                            modifier = Modifier.weight(1f).semantics { heading() })
-                        onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings & Help") } }
-                    }
+                Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 28.dp, bottom = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Image(painterResource(R.drawable.meow_logo), contentDescription = null, modifier = Modifier.size(104.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("MeowDisplay", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.semantics { heading() })
                 }
             }
             if (onReturnToDisplay != null && mediaUi.admitted) {
                 item { ConnectedCard(macName(mediaUi.peerID), mediaUi, onReturnToDisplay, onOpenSettings) { media.session.disconnect() } }
             } else {
-                item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID))) }
+                item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID)), centered = true) }   // under the name, as on iPhone
             }
             mediaUi.updateMessage?.let { message -> item { Hint(listOfNotNull(message, mediaUi.updateLink).joinToString("\n")) } }
             ui.message?.let { message -> item { Notice(message, onDismiss = pairing::dismissMessage) } }
@@ -176,6 +180,14 @@ fun ReceiverHome(
                 }
             }
         }
+        onOpenSettings?.let { open ->
+            OutlinedButton(onClick = open, modifier = Modifier.padding(top = 8.dp, bottom = 16.dp)) {
+                GlyphIcon(OverlayGlyph.Gear, 18.dp, MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Settings & Help")
+            }
+        }
+      }
     }
 
     if (showDetails) DeviceDetails(identity.fingerprint) { showDetails = false }
@@ -331,8 +343,9 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun Hint(text: String) {
-    Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth())
+private fun Hint(text: String, centered: Boolean = false) {
+    Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+        textAlign = if (centered) androidx.compose.ui.text.style.TextAlign.Center else null)
 }
 
 @Composable
