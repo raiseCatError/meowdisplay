@@ -147,6 +147,41 @@ extension DemoModeSmokeTests {
         waitForExpectations(timeout: 3)
     }
 
+    /// Physical iPhone + a live Mac that offers Window mode (skipped otherwise).
+    /// Run with the Mac in View Only for this device: nothing here moves the
+    /// Mac's pointer or focuses a Mac window.
+    @MainActor
+    func testStagePeekOnALiveMac() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let yes = app.buttons["windowModePromptYes"]
+        let strip = app.descendants(matching: .any)["stagePeekStrip"]
+        if yes.waitForExistence(timeout: 30) {
+            snapshot(app, "device-switch-to-window-prompt")
+            yes.tap()
+        }
+        guard strip.waitForExistence(timeout: 30) else { throw XCTSkip("no live Mac in Window mode") }
+        sleep(2)
+        snapshot(app, "device-window-mode")
+
+        strip.press(forDuration: 0.7)
+        let close = app.buttons["stagePeekClose"]
+        XCTAssertTrue(close.waitForExistence(timeout: 3), "Stage Peek stays open after the hold")
+        XCTAssertTrue(app.descendants(matching: .any)["Full Desktop"].exists, "Full Desktop is a card")
+        snapshot(app, "device-stage-peek-open")
+
+        app.buttons["stagePeekExpand"].tap()
+        sleep(1)
+        snapshot(app, "device-stage-peek-expanded")
+        app.buttons["stagePeekExpand"].tap()   // Compact
+        sleep(1)
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.12)).tap()   // outside the stack
+        waitForNonExistence(close)
+        XCTAssertFalse(close.exists, "a tap outside closes Stage Peek")
+        snapshot(app, "device-stage-peek-dismissed")
+    }
+
     private func openControlsSettings(_ app: XCUIApplication) {
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
         waitForNonExistence(app.buttons["Close"])

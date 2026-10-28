@@ -179,6 +179,7 @@ struct StagePeekOverlay: View {
                 Text(window?.app ?? String(localized: "Full Desktop")).font(.footnote.weight(.semibold)).lineLimit(1)
                 if window == nil {
                     Text("Show the whole Mac screen").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .fixedSize()
                 }
                 if let t = window?.title, !t.isEmpty, t != window?.app {
                     Text(t).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -232,8 +233,22 @@ struct StagePeekOverlay: View {
         .tint(.white)
         .environment(\.colorScheme, .dark)
         .fixedSize()
-        .position(x: min(max(column, safe.minX + 130), safe.maxX - 130), y: safe.maxY - 30)
+        .position(x: toolbarX(column), y: toolbarY(column))
         .zIndex(11)
+    }
+
+    private func toolbarX(_ column: CGFloat) -> CGFloat { min(max(column, safe.minX + 130), safe.maxX - 130) }
+
+    /// Bottom of the stack's column, lifted above any control under it (the
+    /// settings button, a tray): found on iPhone, where they collided.
+    private func toolbarY(_ column: CGFloat) -> CGFloat {
+        let x = toolbarX(column)
+        var y = safe.maxY - 30
+        for r in avoiding.sorted(by: { $0.minY > $1.minY })
+        where r.maxX > x - 140 && r.minX < x + 140 && r.maxY > y - 22 && r.minY < y + 22 {
+            y = r.minY - 30
+        }
+        return max(y, safe.minY + 30)
     }
 
     private func stripView(_ strip: CGRect, cards: [StagePeekCard]) -> some View {
