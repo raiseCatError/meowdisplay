@@ -1721,6 +1721,7 @@ final class StreamReceiver: ObservableObject {
         let selfBox = self.selfBox
         queue.async {
             if let receiver = selfBox.currentOnQueue() {
+                if receiver.preApprovedInvitation?.peerID == peerID { receiver.preApprovedInvitation = nil }
                 receiver.revokeSessionNegotiation(peerID: peerID, answering: trustRemoved ? .declined : .blocked)
                 receiver.withdrawOutgoingSessionRequest(covering: peerID, requestWithdrawn: withdrawnRequestID != nil)
             }
@@ -2515,6 +2516,7 @@ final class StreamReceiver: ObservableObject {
     /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
         resetSessionNegotiation()
+        if let pre = preApprovedInvitation, pre.conn !== conn { preApprovedInvitation = nil }
         // F2: a Mac still waiting for its answer keeps its prompt across another
         // connection's adoption; once it is the session itself, its replayed
         // invitation is judged on the normal path.
@@ -4416,8 +4418,9 @@ final class StreamReceiver: ObservableObject {
     private var heldNewcomerApproval: (conn: NWConnection, approval: PendingSessionApproval)?
     /// An invitation this device already accepted while its Mac waited: when
     /// that Mac's connection replaces the session, its replayed invitation is
-    /// admitted without asking again.
-    private var preApprovedInvitation: (id: String, peerID: String)?
+    /// admitted without asking again. Bound to that one connection and short
+    /// lived: any other adoption, a drop or the deadline clears it.
+    private var preApprovedInvitation: (id: String, peerID: String, conn: NWConnection, until: Date)?
 
     /// The waiting Mac's invitation, by the same rules as one on the session
     /// itself (minus continuation: it is another Mac). Only `accept` lets it
@@ -4466,6 +4469,7 @@ final class StreamReceiver: ObservableObject {
 
     /// The waiting Mac went away undecided: its prompt goes with it.
     private func heldNewcomerDropped(_ conn: NWConnection) {
+        if let pre = preApprovedInvitation, pre.conn === conn { preApprovedInvitation = nil }
         guard let held = heldNewcomerApproval, held.conn === conn else { return }
         heldNewcomerApproval = nil
         if incomingSessionApprovals.resolve(id: held.approval.id) != nil { publishSessionNegotiation(awaitingSenderName: nil) }
@@ -4491,7 +4495,7 @@ final class StreamReceiver: ObservableObject {
         }
         if plan.accept {
             // Answered on that Mac's connection once it is the session (the replayed invitation).
-            preApprovedInvitation = (approval.id, approval.peerID)
+            preApprovedInvitation = (approval.id, approval.peerID, conn, Date().addingTimeInterval(10))
             Task { await pipeline.resolveHeldNewcomer(conn, accept: true) }
         } else {
             sendControl(SessionInvitationResponse(id: approval.id, result: plan.result).message, on: conn) {
@@ -4522,7 +4526,7 @@ final class StreamReceiver: ObservableObject {
         } else if sessionAdmission.isContinuation(of: invitation, peerID: peerID) {
             // Same session after a reconnect or pipeline rebuild.
             decision = .accept
-        } else if let pre = preApprovedInvitation, pre.id == invitation.id, pre.peerID == peerID {
+        } else if let pre = preApprovedInvitation, pre.id == invitation.id, pre.peerID == peerID, Date() < pre.until {
             // Accepted while this Mac waited for the session it replaced (F2).
             decision = .accept
             preApprovedInvitation = nil
