@@ -295,18 +295,11 @@ sealed interface ShortcutButtonFace {
     data class Text(val text: String) : ShortcutButtonFace
 }
 
-/** Swift `String.prefix(n)` counts Characters (grapheme clusters), not UTF-16 units. */
+/** Swift `String.prefix(n)` counts Characters (grapheme clusters, ZWJ emoji included), not UTF-16 units. */
 internal fun String.prefixCharacters(count: Int): String {
     if (count <= 0) return ""
-    val iterator = java.text.BreakIterator.getCharacterInstance()
-    iterator.setText(this)
-    var end = 0
-    repeat(count) {
-        val next = iterator.next()
-        if (next == java.text.BreakIterator.DONE) return this
-        end = next
-    }
-    return substring(0, end)
+    val starts = GraphemeSegmenter.boundaries(this)
+    return if (starts.size <= count) this else substring(0, starts[count])
 }
 
 data class ShortcutItem(
