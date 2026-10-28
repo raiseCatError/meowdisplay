@@ -99,7 +99,7 @@ fun ReceiverHome(
                         Spacer(Modifier.width(12.dp))
                         Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.weight(1f).semantics { heading() })
-                        onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings") } }
+                        onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings & Help") } }
                     }
                 }
             }
@@ -162,7 +162,7 @@ fun ReceiverHome(
 
             item {
                 Column(Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
-                    TextButton(onClick = { showSteps = !showSteps }) { Text(if (showSteps) "Hide connection steps" else "How to connect") }
+                    TextButton(onClick = { showSteps = !showSteps }) { Text(if (showSteps) "Hide How to Connect" else "How to Connect") }
                     if (showSteps) Steps()
                 }
             }
@@ -266,17 +266,13 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
 
 @Composable
 private fun Steps() {
-    val steps = listOf(
-        "Install MeowDisplay on your Mac and open it.",
-        "Keep this device and the Mac on the same Wi-Fi. MeowDisplay finds the Mac by itself.",
-        "Pair once: tap Pair, then check that both screens show the same code.",
-        "Next time, tap Connect, or choose this device in MeowDisplay on the Mac.",
-        "To control the Mac, tap the picture and choose Request Input. The Mac decides.",
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(horizontal = 12.dp)) {
-        steps.forEachIndexed { i, s -> Text("${i + 1}. $s", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        Text("Can't find the Mac? Check that MeowDisplay is open there and that the Wi-Fi isn't a guest network that keeps devices apart.",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 12.dp)) {
+        com.raisecaterror.meowdisplay.android.receiver.connectionHelp.forEach { (title, body) ->
+            Column {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 

@@ -75,7 +75,7 @@ import kotlin.math.roundToInt
 /** The receiver categories of the iOS Settings (MobileSettingsCategory), plus the session actions. */
 enum class SettingsPage(val title: String) {
     Input("Input"), Gestures("Gestures"), Controls("Controls"), TabletLayout("Tablet Layout"),
-    Display("Display"), Audio("Audio"), Session("Session"),
+    Display("Display"), Audio("Audio"), Session("Session"), Help("Help & About"),
 }
 
 /**
@@ -274,6 +274,7 @@ private fun SettingsPageContent(
             )
             Caption("Adjust if sound plays slightly before or after the picture. Right delays the sound; left delays the picture.")
         }
+        SettingsPage.Help -> HelpPage()
         SettingsPage.Session -> {
             val mediaUi by media.ui.collectAsState()
             val view by controller.view.collectAsState()
