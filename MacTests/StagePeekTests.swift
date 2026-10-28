@@ -347,6 +347,21 @@ final class StagePeekTests: XCTestCase {
         XCTAssertEqual(m.phase, .closed)
     }
 
+    func testFullDesktopIsTheFirstCardAndNeverTheStartingOne() {
+        var m = StagePeekMachine()
+        m.setItems([StagePeekMachine.fullDesktopID] + ids, current: 103)
+        XCTAssertEqual(opened(&m), [.opened, .haptic(.activate)])
+        XCTAssertEqual(m.highlightedID, 103, "opens on the window shown now, not on Full Desktop")
+        _ = m.touchEnded(id: 1, at: CGPoint(x: 8, y: 430), time: 0.5, cardAt: { _ in nil })
+        XCTAssertEqual(m.step(-10), [.haptic(.tick)])
+        XCTAssertEqual(m.highlightedID, StagePeekMachine.fullDesktopID, "Full Desktop is at the top")
+        XCTAssertEqual(m.selectHighlighted(), [.haptic(.select), .select(StagePeekMachine.fullDesktopID)])
+        var fresh = StagePeekMachine()
+        fresh.setItems([StagePeekMachine.fullDesktopID] + ids, current: nil)
+        XCTAssertEqual(fresh.openDirectly(), [.opened, .haptic(.activate)])
+        XCTAssertEqual(fresh.highlightedID, StagePeekMachine.fullDesktopID, "no tile yet: starts at the top")
+    }
+
     // MARK: Preferences
 
     func testStagePeekIsTheDefaultSwitcherAndOldBlobsKeepEverythingElse() throws {

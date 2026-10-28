@@ -90,6 +90,10 @@ enum StagePeekEffect: Equatable {
 struct StagePeekMachine: Equatable {
     enum Phase: String, Equatable { case closed, arming, scrubbing, open }
 
+    /// The first card in Window mode: back to the whole Mac screen. Never a
+    /// window ID (CGWindowIDs start at 1).
+    static let fullDesktopID: UInt32 = 0
+
     private(set) var phase = Phase.closed
     private(set) var ids: [UInt32] = []
     /// Fractional index the stack is centred on; follows the finger.

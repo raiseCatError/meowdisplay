@@ -68,6 +68,8 @@ struct ReceiverScreen: View {
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     // M4: the native keyboard responder is focused only while this is true.
     @State private var keyboardActive = false
+    /// "Switch to Window view?" answered (either way) for this launch.
+    @State private var windowPromptAnswered = false
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
     // Demo Mode (see DemoMode.swift): a sample session with its own
@@ -419,7 +421,17 @@ struct ReceiverScreen: View {
                             avoiding: (occupiedControlFrames
                                        + ControlReservedRegion.frames(of: .division, in: reservedRegions))
                                 .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
-                            hapticsEnabled: controlStore.preferences.hapticsEnabled)
+                            hapticsEnabled: controlStore.preferences.hapticsEnabled,
+                            onFullDesktop: { _ = model.receiver.requestDisplayMode(model.receiver.confirmedDisplayMode ?? .extend) })
+                    }
+                    if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
+                       !showSettings, !model.workspace.overviewOpen {
+                        // Full-desktop view: offer Window mode once per launch, never forced.
+                        WindowModePrompt(
+                            onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
+                            onNo: { windowPromptAnswered = true })
+                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
                                        inputAllowed: inputReachesMac,
@@ -4431,6 +4443,39 @@ private extension VerticalAlignment {
 
 /// The small Request Input / Enable Input affordance on the receiver
 /// surface — see `ReceiverInputPrompt`.
+/// Full-desktop view: a small yes/no offer to switch to Window view.
+private struct WindowModePrompt: View {
+    let onYes: () -> Void
+    let onNo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.split.2x1")
+            Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+            Button("Yes", action: onYes)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .accessibilityIdentifier("windowModePromptYes")
+            Button("No", action: onNo)
+                .font(.subheadline)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .tint(.white)
+                .accessibilityIdentifier("windowModePromptNo")
+        }
+        .foregroundStyle(.white)
+        .padding(.leading, 16).padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+        .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
+    }
+}
+
 private struct InputPromptButton: View {
     let kind: ReceiverInputPrompt.Kind
     let action: () -> Void

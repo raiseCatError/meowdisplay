@@ -22,6 +22,8 @@ struct StagePeekOverlay: View {
     /// Controls and hinges the strip must stay clear of, in overlay coordinates.
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
+    /// The Full Desktop card: leave Window mode for the whole Mac screen.
+    let onFullDesktop: () -> Void
 
     @State private var machine = StagePeekMachine()
     @State private var stripDown = false
@@ -81,6 +83,7 @@ struct StagePeekOverlay: View {
 
     private func layout() -> [StagePeekCard] {
         let aspects = machine.ids.map { id -> Double in
+            if id == StagePeekMachine.fullDesktopID { return 1.6 }
             guard let w = windows.first(where: { $0.id == id }), w.width > 0, w.height > 0 else { return 1.5 }
             return Double(w.width) / Double(w.height)
         }
@@ -124,9 +127,16 @@ struct StagePeekOverlay: View {
         let thumbnail = window.flatMap { model.thumbnails[$0.id] }
         let icon = window.flatMap { model.icons[$0.bundleID] }
         let shape = RoundedRectangle(cornerRadius: isPad ? 14 : 11, style: .continuous)
+        let fullDesktop = machine.ids.indices.contains(card.index) && machine.ids[card.index] == StagePeekMachine.fullDesktopID
         return ZStack {
             shape.fill(Color(white: 0.17))
-            if let thumbnail {
+            if fullDesktop {
+                VStack(spacing: 6) {
+                    Image(systemName: "display").font(.title)
+                    Text("Full Desktop").font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+            } else if let thumbnail {
                 Image(decorative: thumbnail, scale: 1).resizable().scaledToFill()
             } else if let icon {
                 Image(decorative: icon, scale: 1).resizable().frame(width: 44, height: 44)
@@ -153,7 +163,8 @@ struct StagePeekOverlay: View {
         .zIndex(card.z)
         .allowsHitTesting(false)   // the backdrop hit-tests cards itself, tilt-aware
         .accessibilityElement()
-        .accessibilityLabel(window.map { w in w.title.isEmpty ? w.app : "\(w.app), \(w.title)" } ?? "")
+        .accessibilityLabel(fullDesktop ? String(localized: "Full Desktop")
+                            : window.map { w in w.title.isEmpty ? w.app : "\(w.app), \(w.title)" } ?? "")
         .accessibilityAddTraits(card.highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { finish(machine.select(index: card.index)) }
     }
@@ -165,7 +176,10 @@ struct StagePeekOverlay: View {
         return HStack(spacing: 8) {
             if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
             VStack(alignment: .leading, spacing: 1) {
-                Text(window?.app ?? "").font(.footnote.weight(.semibold)).lineLimit(1)
+                Text(window?.app ?? String(localized: "Full Desktop")).font(.footnote.weight(.semibold)).lineLimit(1)
+                if window == nil {
+                    Text("Show the whole Mac screen").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
                 if let t = window?.title, !t.isEmpty, t != window?.app {
                     Text(t).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
@@ -354,7 +368,11 @@ struct StagePeekOverlay: View {
                 haptics.play(h, enabled: hapticsEnabled)
             case .select(let id):
                 model.stagePeekOpen = false
-                if let w = windows.first(where: { $0.id == id }) { model.choose(w, asNewTile: false) }
+                if id == StagePeekMachine.fullDesktopID {
+                    onFullDesktop()
+                } else if let w = windows.first(where: { $0.id == id }) {
+                    model.choose(w, asNewTile: false)
+                }
             case .dismissed:
                 model.stagePeekOpen = false
             }
@@ -368,7 +386,9 @@ struct StagePeekOverlay: View {
     }
 
     private func syncItems() {
-        machine.setItems(windows.map(\.id), current: model.currentWindowID)
+        // Full Desktop first (top of the stack), then the Mac's windows.
+        let ids = windows.map(\.id)
+        machine.setItems(ids.isEmpty ? [] : [StagePeekMachine.fullDesktopID] + ids, current: model.currentWindowID)
     }
 
     private func cancelAll() {
