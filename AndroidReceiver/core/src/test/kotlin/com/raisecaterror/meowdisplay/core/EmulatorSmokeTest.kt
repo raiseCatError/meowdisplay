@@ -527,6 +527,22 @@ class EmulatorSmokeTest {
                 "{\"id\":\"$safariID\",\"window\":102,\"gen\":8,\"state\":\"waiting\",\"app\":\"Safari\"}],\"active\":\"$zedID\",\"hostFocus\":\"deliver\"}")
             shot("window-two-tiles")
             File(shots, "$profile-window-two-tiles.txt").writeText(describe(screen()))
+            if (profile == "fold") {
+                // Book posture: the hinge separates the halves; no tile may cross it, so a gap
+                // opens between the two tiles at the fold, and closes again when reopened.
+                fun gap(m: JsonObject): Double? {
+                    if (m.type() != "workspaceRequest") return null
+                    val t = m["tiles"]!!.jsonArray.map { it.jsonObject }.sortedBy { it["x"]!!.jsonPrimitive.content.toDouble() }
+                    if (t.size != 2) return null
+                    return t[1]["x"]!!.jsonPrimitive.content.toDouble() - (t[0]["x"]!!.jsonPrimitive.content.toDouble() + t[0]["w"]!!.jsonPrimitive.content.toDouble())
+                }
+                adb("emu", "posture", "2")
+                val split = session.collectUntil(20_000) { (gap(it) ?: 0.0) > 1e-4 }.last { gap(it) != null }
+                File(shots, "fold-hinge-tiles.txt").writeText(split.toString())
+                shot("window-half-open")
+                adb("emu", "posture", "3")
+                session.collectUntil(20_000) { gap(it)?.let { g -> kotlin.math.abs(g) < 1e-9 } == true }
+            }
             // Rotate Safari from its tile menu: only the request changes.
             tapDesc("Safari tile options")
             tap("Rotate")
