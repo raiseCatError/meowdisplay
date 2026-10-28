@@ -7,14 +7,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Admitted media from the session to the decoders. The session already dropped anything unadmitted. */
-class MediaPipeline(media: MediaController) {
+class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
     private val size = MutableStateFlow<Pair<Int, Int>?>(null)
 
     /** The decoded picture's size, for letterboxing; null until a frame decodes. */
     val videoSize: StateFlow<Pair<Int, Int>?> = size.asStateFlow()
 
     val video = VideoDecoder(requestKeyframe = { media.session.requestKeyframe() }, onVideoSize = { w, h -> size.value = w to h })
-    private val audio = AudioPlayer()
+    private val audio = AudioPlayer(avSyncOffsetMs)
 
     init {
         media.mediaEvents = ::onEvent

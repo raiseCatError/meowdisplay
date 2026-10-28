@@ -9,14 +9,19 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import com.raisecaterror.meowdisplay.core.wire.AudioMediaFrame
+import com.raisecaterror.meowdisplay.core.wire.AudioPlaybackPlanner
 import java.nio.ByteBuffer
 
 /**
  * The Mac's system audio (PROTOCOL.md 5A): AAC-LC built from the config
- * frame's AudioSpecificConfig, or raw 16-bit PCM, played as it arrives.
- * Malformed or out-of-order input is dropped, never fatal.
+ * frame's AudioSpecificConfig, or raw 16-bit PCM. Timing follows the iOS
+ * receiver's continuous scheduling ([AudioPlaybackPlanner]): the first
+ * buffer waits a preroll plus the A/V offset, the rest chain in the
+ * streaming AudioTrack, a real discontinuity re-anchors, and a backlog
+ * drops the newest packet. Malformed or out-of-order input is dropped,
+ * never fatal.
  */
-class AudioPlayer {
+class AudioPlayer(avSyncOffsetMs: () -> Int = { 0 }) {
     private val thread = HandlerThread("meow-audio").apply { start() }
     private val handler = Handler(thread.looper)
     private val info = MediaCodec.BufferInfo()
@@ -25,14 +30,21 @@ class AudioPlayer {
     private var decoder: MediaCodec? = null
     private var track: AudioTrack? = null
     private var pcm = false
+    private val planner = AudioPlaybackPlanner(avSyncOffsetMs)
+    private var sampleRate = 48_000
+    private var channels = 2
+    private var framesWritten = 0L
+    private var headBaseline = 0L
 
     fun submit(frame: AudioMediaFrame) = handler.post {
         try {
             when (frame) {
                 is AudioMediaFrame.Config -> configureAac(frame)
                 is AudioMediaFrame.PcmConfig -> configurePcm(frame)
-                is AudioMediaFrame.Packet -> decodeAac(frame.payload.value)
-                is AudioMediaFrame.PcmPacket -> if (pcm) track?.write(frame.payload.value, 0, frame.payload.value.size, AudioTrack.WRITE_NON_BLOCKING)
+                is AudioMediaFrame.Packet -> if (!pcm && admit(frame.sequence, frame.capturedAtMs, AAC_FRAMES_PER_PACKET)) decodeAac(frame.payload.value)
+                is AudioMediaFrame.PcmPacket -> if (pcm && admit(frame.sequence, frame.capturedAtMs, frame.frameCount.toInt())) {
+                    writePcm(frame.payload.value, 0, frame.payload.value.size)
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "audio reset: $e")
@@ -61,6 +73,7 @@ class AudioPlayer {
         }
         track = newTrack(rate, channels)
         pcm = false
+        startGeneration(rate, channels)
     }
 
     private fun configurePcm(config: AudioMediaFrame.PcmConfig) {
@@ -69,6 +82,45 @@ class AudioPlayer {
         val channels = config.channelCount.takeIf { it in 1..2 } ?: return
         track = newTrack(rate, channels)
         pcm = true
+        startGeneration(rate, channels)
+    }
+
+    private fun startGeneration(rate: Int, channelCount: Int) {
+        sampleRate = rate
+        channels = channelCount
+        framesWritten = 0
+        headBaseline = 0
+        planner.reset()
+    }
+
+    /** The planner's verdict for one packet; writes the anchor's silence (after a flush) when it asks. */
+    private fun admit(sequence: Long, capturedAtMs: Long, packetFrames: Int): Boolean {
+        val active = track ?: return false
+        val frames = packetFrames.coerceAtLeast(1)
+        val played = (active.playbackHeadPosition.toLong() and 0xFFFF_FFFFL) - headBaseline
+        val pending = ((framesWritten - played).coerceAtLeast(0) / frames).toInt()
+        return when (val decision = planner.packet(sequence, capturedAtMs, frames * 1000.0 / sampleRate, sampleRate, pending)) {
+            is AudioPlaybackPlanner.Decision.Drop -> false
+            is AudioPlaybackPlanner.Decision.Play -> {
+                if (decision.flush) {
+                    active.pause()
+                    active.flush()
+                    active.play()
+                    framesWritten = 0
+                    headBaseline = active.playbackHeadPosition.toLong() and 0xFFFF_FFFFL
+                }
+                if (decision.leadingSilenceFrames > 0) {
+                    val silence = ByteArray(decision.leadingSilenceFrames * channels * BYTES_PER_SAMPLE)
+                    writePcm(silence, 0, silence.size)
+                }
+                true
+            }
+        }
+    }
+
+    private fun writePcm(bytes: ByteArray, offset: Int, size: Int) {
+        val written = track?.write(bytes, offset, size, AudioTrack.WRITE_NON_BLOCKING) ?: return
+        if (written > 0) framesWritten += written / (channels * BYTES_PER_SAMPLE)
     }
 
     private fun decodeAac(payload: ByteArray) {
@@ -91,7 +143,8 @@ class AudioPlayer {
             if (buffer != null && info.size > 0) {
                 buffer.position(info.offset)
                 buffer.limit(info.offset + info.size)
-                track?.write(buffer, info.size, AudioTrack.WRITE_NON_BLOCKING)
+                val written = track?.write(buffer, info.size, AudioTrack.WRITE_NON_BLOCKING) ?: 0
+                if (written > 0) framesWritten += written / (channels * BYTES_PER_SAMPLE)
             }
             active.releaseOutputBuffer(out, false)
         }
@@ -121,5 +174,7 @@ class AudioPlayer {
     private companion object {
         const val TAG = "MeowAudio"
         const val INPUT_TIMEOUT_US = 10_000L
+        const val AAC_FRAMES_PER_PACKET = 1024
+        const val BYTES_PER_SAMPLE = 2
     }
 }

@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.raisecaterror.meowdisplay.android.session.MediaController
+import com.raisecaterror.meowdisplay.core.controls.AVSyncOffset
 import com.raisecaterror.meowdisplay.core.controls.ControlEdge
 import com.raisecaterror.meowdisplay.core.controls.ControlProfileSlot
 import com.raisecaterror.meowdisplay.core.controls.CustomLayoutShareCode
@@ -66,6 +67,7 @@ import com.raisecaterror.meowdisplay.core.controls.createCustomLayout
 import com.raisecaterror.meowdisplay.core.controls.deleteCustomLayout
 import com.raisecaterror.meowdisplay.core.controls.importCustomLayout
 import com.raisecaterror.meowdisplay.core.session.InputWireState
+import kotlin.math.roundToInt
 
 /** The receiver categories of the iOS Settings (MobileSettingsCategory), plus the session actions. */
 enum class SettingsPage(val title: String) {
@@ -219,6 +221,13 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
                 media.session.requestAudio(on)
             }
             Caption("Plays your Mac's sound on this device. Your Mac confirms it; the choice is kept for every connection.")
+            val delay = prefs.avSyncOffsetMs.coerceAtLeast(0)
+            Row { Text("Delay Audio", Modifier.weight(1f)); Text("$delay ms") }
+            Slider(
+                value = delay.toFloat(), valueRange = 0f..AVSyncOffset.range.last.toFloat(), steps = AVSyncOffset.range.last / AVSyncOffset.STEP_MS - 1,
+                onValueChange = { value -> set { it.avSyncOffsetMs = AVSyncOffset.clamped((value / AVSyncOffset.STEP_MS).roundToInt() * AVSyncOffset.STEP_MS) } },
+            )
+            Caption("Use it when sound arrives before the picture. Applies from the next audio buffer.")
         }
         SettingsPage.Session -> {
             Button(onClick = { media.session.disconnect(); onDismiss() }) { Text("Disconnect") }

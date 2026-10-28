@@ -29,7 +29,7 @@ class MeowReceiverApplication : Application() {
         MediaController(identity, pins, SessionPolicyPrefs(this), bonjour, localName = { DeviceIdentity.displayName(this) }, panel = ::panel)
     }
 
-    val pipeline: MediaPipeline by lazy { MediaPipeline(media) }
+    val pipeline: MediaPipeline by lazy { MediaPipeline(media, avSyncOffsetMs = { controls.current.avSyncOffsetMs }) }
 
     /** The receiver controls' preferences (iOS JSON format) and their transient state. */
     val controls: ReceiverControlStore by lazy { ReceiverControlStore(SharedPreferenceBlobStore(this)) }
