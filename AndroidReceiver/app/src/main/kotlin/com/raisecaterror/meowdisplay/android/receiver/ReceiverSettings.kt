@@ -84,7 +84,7 @@ enum class SettingsPage(val title: String) {
  * a change makes it stale.
  */
 @Composable
-fun ReceiverSettings(controller: ReceiverController, media: MediaController, onDismiss: () -> Unit) {
+fun ReceiverSettings(controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             BoxWithConstraints(Modifier.safeDrawingPadding()) {
@@ -119,7 +119,7 @@ fun ReceiverSettings(controller: ReceiverController, media: MediaController, onD
                         }
                         page?.let { current ->
                             Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                SettingsPageContent(current, controller, media, onDismiss)
+                                SettingsPageContent(current, controller, media, onDismiss, onStartPictureInPicture)
                             }
                         }
                     }
@@ -130,7 +130,7 @@ fun ReceiverSettings(controller: ReceiverController, media: MediaController, onD
 }
 
 @Composable
-private fun SettingsPageContent(page: SettingsPage, controller: ReceiverController, media: MediaController, onDismiss: () -> Unit) {
+private fun SettingsPageContent(page: SettingsPage, controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?) {
     val store = controller.store
     val prefs by store.preferences.collectAsState()
     val view by controller.view.collectAsState()
@@ -238,6 +238,14 @@ private fun SettingsPageContent(page: SettingsPage, controller: ReceiverControll
             }
             Toggle("Surface Grid When Video Is Off", prefs.showSurfaceGrid) { on -> set { it.showSurfaceGrid = on } }
             OutlinedButton(onClick = { controller.resetViewport() }) { Text("Reset View") }
+            Toggle("Picture in Picture", prefs.pictureInPictureEnabled) { on -> set { it.pictureInPictureEnabled = on } }
+            Caption(
+                if (onStartPictureInPicture == null) "This device doesn't offer picture-in-picture."
+                else "When you leave MeowDisplay during a session, your Mac stays on screen in a small window. It's view only; to control the Mac, come back to MeowDisplay."
+            )
+            if (onStartPictureInPicture != null && prefs.pictureInPictureEnabled && media.ui.collectAsState().value.admitted) {
+                OutlinedButton(onClick = { onDismiss(); onStartPictureInPicture() }) { Text("Start Picture in Picture") }
+            }
         }
         SettingsPage.Audio -> {
             Toggle("Mac Audio", prefs.audioPreferred) { on ->

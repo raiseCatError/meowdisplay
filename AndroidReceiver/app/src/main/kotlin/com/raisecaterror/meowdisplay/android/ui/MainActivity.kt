@@ -1,7 +1,12 @@
 package com.raisecaterror.meowdisplay.android.ui
 
+import android.app.PictureInPictureParams
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
+import android.util.Rational
+import androidx.compose.runtime.LaunchedEffect
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -12,6 +17,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverOverlayHost
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverScreen
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverSettings
@@ -19,6 +26,9 @@ import com.raisecaterror.meowdisplay.android.MeowReceiverApplication
 
 class MainActivity : ComponentActivity() {
     private val app get() = application as MeowReceiverApplication
+    /** In picture-in-picture: only the picture shows, view only. */
+    private val inPictureInPicture = mutableStateOf(false)
+    private val supportsPictureInPicture by lazy { packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,6 +43,16 @@ class MainActivity : ComponentActivity() {
             MeowTheme {
                 val mediaUi by app.media.ui.collectAsState()
                 val paired by app.pins.paired.collectAsState()
+                val prefs by app.receiver.store.preferences.collectAsState()
+                val pip by inPictureInPicture
+                // Android 12+: leaving the app during a session slides the picture into a small window.
+                LaunchedEffect(mediaUi.admitted, prefs.pictureInPictureEnabled) { updatePictureInPicture() }
+                if (pip) {
+                    if (mediaUi.admitted) ReceiverScreen(app.receiver, app.pipeline, overlay = { _, _, _ -> }, onOpenSettings = {},
+                        workspace = app.workspace, pictureInPicture = true)
+                    else PictureInPictureEnded()
+                    return@MeowTheme
+                }
                 var settingsOpen by remember { mutableStateOf(false) }
                 // Home while connected: shown over the live picture, so the session, the Mac's
                 // display and the decoder are untouched and Return to Display is instant (R-01).
@@ -53,7 +73,8 @@ class MainActivity : ComponentActivity() {
                         ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media,
                             onReturnToDisplay = { homeShown = false }, onOpenSettings = { settingsOpen = true })
                     }
-                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
+                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false },
+                        onStartPictureInPicture = if (supportsPictureInPicture) ({ enterPictureInPicture() }) else null)
                 } else {
                     homeShown = false
                     ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, onOpenSettings = { settingsOpen = true })
@@ -69,6 +90,47 @@ class MainActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         app.media.session.resendHello()
+        updatePictureInPicture()
+    }
+
+    private fun pictureInPictureAllowed(): Boolean =
+        supportsPictureInPicture && app.media.ui.value.admitted && app.receiver.store.preferences.value.pictureInPictureEnabled
+
+    private fun pictureInPictureParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+        val w = window.decorView.width
+        val h = window.decorView.height
+        // The Mac streams this screen's shape; Android accepts 1:2.39 to 2.39:1.
+        if (w > 0 && h > 0) builder.setAspectRatio(Rational(w, h).let { r ->
+            when {
+                r.toFloat() > 2.39f -> Rational(239, 100)
+                r.toFloat() < 1 / 2.39f -> Rational(100, 239)
+                else -> r
+            }
+        })
+        if (Build.VERSION.SDK_INT >= 31) builder.setAutoEnterEnabled(pictureInPictureAllowed())
+        return builder.build()
+    }
+
+    private fun updatePictureInPicture() {
+        if (supportsPictureInPicture) runCatching { setPictureInPictureParams(pictureInPictureParams()) }
+    }
+
+    private fun enterPictureInPicture() {
+        if (supportsPictureInPicture && app.media.ui.value.admitted) runCatching { enterPictureInPictureMode(pictureInPictureParams()) }
+    }
+
+    // Before Android 12 there is no auto-enter: going Home starts it here.
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT < 31 && pictureInPictureAllowed()) enterPictureInPicture()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPictureInPicture.value = isInPictureInPictureMode
+        // View only while small: nothing stays pressed on the Mac.
+        if (isInPictureInPictureMode) app.receiver.releaseHeldInput()
     }
 
     override fun onStart() {
@@ -87,5 +149,16 @@ class MainActivity : ComponentActivity() {
             app.media.stop(sleeping = !isFinishing)
         }
         super.onStop()
+    }
+}
+
+/** The session ended while the picture was small. */
+@androidx.compose.runtime.Composable
+private fun PictureInPictureEnded() {
+    androidx.compose.foundation.layout.Box(
+        androidx.compose.ui.Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black),
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        androidx.compose.material3.Text("Disconnected", color = androidx.compose.ui.graphics.Color.White)
     }
 }

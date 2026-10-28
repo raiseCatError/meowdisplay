@@ -121,6 +121,8 @@ fun ReceiverScreen(
     onMode: (DisplayMode) -> Unit = {},
     /** The picture fills the screen; false while Home is shown over it. */
     immersive: Boolean = true,
+    /** In picture-in-picture only the picture shows; the workspace keeps its full-screen size. */
+    pictureInPicture: Boolean = false,
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
@@ -259,6 +261,7 @@ fun ReceiverScreen(
             onRelease = { if (controller.inputView === it) controller.inputView = null },
         )
 
+        if (pictureInPicture) return@BoxWithConstraints
         if (workspace != null) {
             val wsUi by workspace.ui.collectAsState()
             LaunchedEffect(frame, folds, transform) {
