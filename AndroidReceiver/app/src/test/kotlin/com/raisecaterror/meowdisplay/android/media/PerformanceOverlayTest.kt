@@ -12,4 +12,13 @@ class PerformanceOverlayTest {
             describe(StreamStats.Snapshot(60, 12.5, 4.0, 38.0, 52.0, 2), 6.0),
         )
     }
+
+    @Test fun `a remote session says so first and the numbers stay exactly as measured`() {
+        val remote = StreamStats.Snapshot(30, 6.5, 5.0, 112.0, 180.0, 0)
+        assertEquals(
+            "Remote (Tailscale) · 30 fps · 6.5 Mbit/s · decode 5.0 ms · latency 112 ms (p95 180) · rtt 48 ms",
+            describe(remote, 48.0, "Remote (Tailscale)"),
+        )
+        assertEquals("a local session adds nothing", describe(remote, 48.0, null), describe(remote, 48.0))
+    }
 }

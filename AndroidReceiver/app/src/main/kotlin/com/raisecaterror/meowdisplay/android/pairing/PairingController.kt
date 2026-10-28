@@ -13,6 +13,12 @@ import com.raisecaterror.meowdisplay.core.pairing.PairingException
 import com.raisecaterror.meowdisplay.core.pairing.PairingProtocol
 import com.raisecaterror.meowdisplay.core.pairing.PendingPairing
 import com.raisecaterror.meowdisplay.core.pairing.SocketPairingTransport
+import com.raisecaterror.meowdisplay.core.remote.IpLiteral
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpoint
+import com.raisecaterror.meowdisplay.core.remote.RemotePairingFailureKind
+import com.raisecaterror.meowdisplay.core.remote.RemotePairingOutcome
+import com.raisecaterror.meowdisplay.core.remote.RemotePairingRunner
+import com.raisecaterror.meowdisplay.core.remote.RemotePorts
 import com.raisecaterror.meowdisplay.core.session.WireProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -33,6 +39,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import android.util.Log
 
 /** The code on screen, waiting for the user. */
 data class SasPrompt(
@@ -43,10 +50,24 @@ data class SasPrompt(
     internal val attempt: PairingAttempt,
 )
 
+/** Where Pair over Remote stands, for the Add Remote Mac sheet. */
+sealed interface RemotePairingState {
+    data object Idle : RemotePairingState
+
+    /** Connecting to the typed address, or comparing and confirming the code. */
+    data object Connecting : RemotePairingState
+
+    data class Failed(val kind: RemotePairingFailureKind) : RemotePairingState
+
+    /** Paired and the address saved; the sheet closes. */
+    data class Done(val macName: String) : RemotePairingState
+}
+
 data class PairingUiState(
     val prompt: SasPrompt? = null,
     val pairingWith: String? = null,
     val message: String? = null,
+    val remote: RemotePairingState = RemotePairingState.Idle,
 )
 
 /**
@@ -66,6 +87,8 @@ class PairingController(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val throttle = PairingCommitThrottle()
+    private var remoteJob: Job? = null
+    private var lastRemote: RemoteEndpoint? = null
     private val state = MutableStateFlow(PairingUiState())
     private var listenerJob: Job? = null
     @Volatile private var server: ServerSocket? = null
@@ -90,6 +113,8 @@ class PairingController(
         bonjour.withdraw(ServiceTypes.PAIRING)
         bonjour.stopBrowsing()
         state.value.prompt?.let { cancel() }
+        // Like every pairing, Pair over Remote runs only while the app is in front.
+        if (remoteJob?.isActive == true) cancelRemote()
     }
 
     /** The user compared the codes: true when they match. */
@@ -130,6 +155,70 @@ class PairingController(
             state.update { it.copy(pairingWith = null, prompt = null, message = outcome) }
         }
     }
+
+    /**
+     * Pair over Remote: the same initiator as "nearby Mac -> Pair", dialing a typed address (the Mac's
+     * port 9004 by default). The address is a routing hint only; the code must be confirmed on BOTH
+     * devices, and an existing pin is never replaced by a different key. On success, and only then,
+     * [onPaired] gets the confirmed Mac's peer ID and the address to remember for its connect requests.
+     */
+    fun pairRemote(endpoint: RemoteEndpoint, onPaired: (peerID: String, saved: RemoteEndpoint) -> Unit) {
+        if (state.value.pairingWith != null || state.value.prompt != null || remoteJob?.isActive == true) return
+        lastRemote = endpoint
+        state.update { it.copy(pairingWith = REMOTE_PAIRING, message = null, remote = RemotePairingState.Connecting) }
+        Log.i("MeowPairing", "remote pairing: host=${IpLiteral.logKind(endpoint.host)}")
+        remoteJob = scope.launch {
+            val outcome = try {
+                RemotePairingRunner(attemptTimeoutMs = ATTEMPT_TIMEOUT_MS).pair(
+                    endpoint,
+                    attemptFor = { attempt(it) },
+                    decide = { pending, attempt -> ask(pending, attempt) },
+                )
+            } catch (e: CancellationException) {
+                state.update { it.copy(pairingWith = null, prompt = null, remote = RemotePairingState.Idle) }
+                throw e
+            }
+            val next: RemotePairingState = when (outcome) {
+                is RemotePairingOutcome.Paired -> {
+                    // The pin is already stored (by the pairing core). Only now is the address remembered, for that Mac.
+                    onPaired(outcome.pairing.peerID, RemoteEndpoint(endpoint.host, RemotePorts.CONNECT_REQUEST))
+                    RemotePairingState.Done(outcome.pairing.peerName)
+                }
+                is RemotePairingOutcome.Failed -> RemotePairingState.Failed(outcome.kind)
+                RemotePairingOutcome.Cancelled -> RemotePairingState.Idle
+            }
+            Log.i("MeowPairing", "remote pairing: " + when (next) {
+                is RemotePairingState.Done -> "paired"
+                is RemotePairingState.Failed -> "failed (${next.kind})"
+                else -> "cancelled"
+            })
+            state.update {
+                it.copy(
+                    pairingWith = null, prompt = null, remote = next,
+                    message = if (next is RemotePairingState.Done) "Paired with ${next.macName}" else it.message,
+                )
+            }
+        }
+    }
+
+    /** Try Again after a failure that can be retried: the same address, a fresh attempt. */
+    fun retryRemote(onPaired: (peerID: String, saved: RemoteEndpoint) -> Unit) {
+        val failed = (state.value.remote as? RemotePairingState.Failed)?.kind ?: return
+        val endpoint = lastRemote ?: return
+        if (!failed.retryable) return
+        pairRemote(endpoint, onPaired)
+    }
+
+    /** Cancel on the progress view (also takes down the code if it is showing). */
+    fun cancelRemote() {
+        state.value.prompt?.let { cancel() }
+        remoteJob?.cancel()
+        remoteJob = null
+        state.update { it.copy(pairingWith = null, prompt = null, remote = RemotePairingState.Idle) }
+    }
+
+    /** The sheet looked at the result: back to the form. */
+    fun acknowledgeRemote() = state.update { if (it.remote is RemotePairingState.Connecting) it else it.copy(remote = RemotePairingState.Idle) }
 
     private suspend fun listen() {
         while (scope.isActive) {
@@ -203,6 +292,7 @@ class PairingController(
     }
 
     private companion object {
+        const val REMOTE_PAIRING = "remote"
         const val PROMPT_TIMEOUT_MS = 60_000L
         // Slightly later than the prompt, so the prompt's own timeout rejection goes out first.
         const val ATTEMPT_TIMEOUT_MS = 65_000L

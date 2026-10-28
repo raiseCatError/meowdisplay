@@ -48,4 +48,18 @@ class ConnectRequestTest {
         s.clear()
         assertNull(s.requestedMode("mac-a", 1))
     }
+
+    @Test
+    fun aRemoteConnectIsPendingLikeALocalOneButAdvertisesNothing() {
+        val s = ConnectRequestState()
+        val r = s.requestRemote("mac-a", DisplayMode.Extend, now = 1_000)
+        assertEquals("", r.token)
+        assertNull("nothing is published on this network", s.token(1_000))
+        assertEquals("the hello still offers the requested mode, to that Mac only", DisplayMode.Extend, s.requestedMode("mac-a", 2_000))
+        assertNull(s.requestedMode("mac-b", 2_000))
+        assertTrue(s.isPending("mac-a", 29_999))
+        assertFalse("and for the same 30 s", s.isPending("mac-a", 1_000 + ConnectRequestState.REQUEST_MS))
+        s.clear("mac-a")
+        assertFalse(s.isPending("mac-a", 2_000))
+    }
 }

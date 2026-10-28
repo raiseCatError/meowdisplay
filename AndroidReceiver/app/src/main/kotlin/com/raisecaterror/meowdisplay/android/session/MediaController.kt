@@ -22,6 +22,7 @@ import com.raisecaterror.meowdisplay.core.session.ReceiverSession
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import com.raisecaterror.meowdisplay.core.session.SessionPhase
 import com.raisecaterror.meowdisplay.core.session.SessionPolicyStore
+import com.raisecaterror.meowdisplay.core.remote.RouteInfo
 import com.raisecaterror.meowdisplay.core.session.WireProtocol
 import com.raisecaterror.meowdisplay.core.tls.PinnedTls
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,6 +97,10 @@ data class MediaUiState(
     val connectFailedFor: String? = null,
     /** The Mac's confirmed source for this session: "mirror", "extend" or "window". */
     val source: String? = null,
+    /** How the current connection reached this device (Local, or Remote over Tailscale/VPN/...), when known. */
+    val route: RouteInfo? = null,
+    /** Our own Connect was accepted here, but the Mac's user has not approved it yet. */
+    val awaitingMacApproval: Boolean = false,
 )
 
 /**
@@ -121,6 +126,12 @@ class MediaController(
 
     /** The receiver controls subscribe here, after the decoders. */
     @Volatile var controlEvents: ((SessionEvent) -> Unit)? = null
+
+    /** Remote Access follows admissions and losses from here, after the UI state is updated. */
+    @Volatile var remoteEvents: ((SessionEvent) -> Unit)? = null
+
+    /** Names the path of a new connection: (peer address, our address, peer ID) to a route. Set by Remote Access. */
+    @Volatile var routeOf: ((java.net.InetAddress, java.net.InetAddress?, String) -> RouteInfo?)? = null
 
     /** A paired Mac's name for the UI ("your Mac" when unknown). */
     fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
@@ -159,6 +170,23 @@ class MediaController(
             }
         }, ConnectRequestState.REQUEST_MS + 50)
         Log.i("MeowMedia", "connect request for ${peerID.take(8)} token=${request.token.take(4)}…")
+    }
+
+    /**
+     * A Connect that travels as a Remote Access knock: the existing Connect request is marked pending
+     * for [peerID] (so `hello.requestedMode` is offered for the same 30 s) but nothing is advertised
+     * on this network; the knock itself is what asks the Mac.
+     */
+    @Synchronized
+    fun markRemoteConnect(peerID: String, mode: DisplayMode?) {
+        if (listener == null || pins.paired.value.none { it.peerID == peerID }) return
+        connectRequests.requestRemote(peerID, mode, SystemClock.elapsedRealtime())
+        state.update { it.copy(connectFailedFor = null) }
+    }
+
+    @Synchronized
+    fun clearRemoteConnect(peerID: String) {
+        connectRequests.clear(peerID)
     }
 
     @Synchronized
@@ -226,8 +254,14 @@ class MediaController(
         controlEvents?.invoke(event)
         when (event) {
             is SessionEvent.Phase -> state.update { it.copy(phase = event.phase) }
-            is SessionEvent.Connected -> state.update { it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null) }
-            is SessionEvent.Disconnected -> state.update { it.copy(admitted = false, approval = null, source = null) }
+            is SessionEvent.Connected -> {
+                val route = event.remoteAddress?.let { routeOf?.invoke(it, event.localAddress, event.peerID) }
+                state.update {
+                    it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null, route = route, awaitingMacApproval = false)
+                }
+            }
+            is SessionEvent.Disconnected -> state.update { it.copy(admitted = false, approval = null, source = null, route = null, awaitingMacApproval = false) }
+            is SessionEvent.SenderApproval -> state.update { it.copy(awaitingMacApproval = event.pending) }
             is SessionEvent.Admitted -> {
                 // The Connect was answered: withdraw the token and stop offering the mode.
                 if (connectRequests.isPending(event.peerID, SystemClock.elapsedRealtime())) {
@@ -247,5 +281,6 @@ class MediaController(
             SessionEvent.UpdateMac -> state.update { it.copy(updateMessage = "Update MeowDisplay on your Mac to reconnect.") }
             else -> Unit
         }
+        remoteEvents?.invoke(event)
     }
 }

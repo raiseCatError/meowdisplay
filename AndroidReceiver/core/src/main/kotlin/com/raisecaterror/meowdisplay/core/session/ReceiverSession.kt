@@ -291,6 +291,17 @@ class ReceiverSession(
     }
 
     /**
+     * The user cancels their own Connect while the Mac's user has not decided: the Mac is told the
+     * request was withdrawn (its prompt goes), then the session ends.
+     */
+    @Synchronized
+    fun cancelOwnRequest() {
+        val id = currentInvitationID
+        if (id != null && senderApprovalPending) send(ReceiverMessages.invitationResponse(id, InvitationResult.Cancelled))
+        disconnect()
+    }
+
+    /**
      * Forget or Block of [peerID], after the trust or policy store changed.
      * Its prompts end, its remembered admission goes, and its live connection
      * closes: a session never outlives the trust it was admitted under.

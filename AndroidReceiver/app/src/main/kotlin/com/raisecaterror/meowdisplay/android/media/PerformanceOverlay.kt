@@ -39,11 +39,11 @@ class DiagnosticsPrefs(context: Context) {
 
 /** One line of stream numbers, refreshed every second. Never takes touches. */
 @Composable
-fun PerformanceOverlay(stats: StreamStats, rttMs: () -> Double?, modifier: Modifier = Modifier) {
+fun PerformanceOverlay(stats: StreamStats, rttMs: () -> Double?, modifier: Modifier = Modifier, route: String? = null) {
     var line by remember { mutableStateOf("") }
-    LaunchedEffect(stats) {
+    LaunchedEffect(stats, route) {
         while (true) {
-            line = describe(stats.snapshot(System.currentTimeMillis().toDouble()), rttMs())
+            line = describe(stats.snapshot(System.currentTimeMillis().toDouble()), rttMs(), route)
             delay(1000)
         }
     }
@@ -55,7 +55,9 @@ fun PerformanceOverlay(stats: StreamStats, rttMs: () -> Double?, modifier: Modif
     )
 }
 
-internal fun describe(s: StreamStats.Snapshot, rtt: Double?): String = buildList {
+/** The measured numbers as they are. [route] (`Remote (Tailscale)`) only says how the session got here; the latency is never rounded to look local. */
+internal fun describe(s: StreamStats.Snapshot, rtt: Double?, route: String? = null): String = buildList {
+    route?.let { add(it) }
     add("${s.fps} fps")
     add("%.1f Mbit/s".format(s.mbps))
     s.decodeP50Ms?.let { add("decode %.1f ms".format(it)) }

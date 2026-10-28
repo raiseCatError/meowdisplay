@@ -139,6 +139,8 @@ fun ReceiverScreen(
     /** Settings > Session > Performance Overlay. */
     showPerformance: Boolean = false,
     rttMs: () -> Double? = { null },
+    /** `Remote (Tailscale)` and the like when the session came over Remote Access; null for a local one. */
+    routeLabel: String? = null,
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
@@ -383,6 +385,7 @@ fun ReceiverScreen(
             com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(
                 pipeline.stats, rttMs,
                 Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 + 34).dp),
+                route = routeLabel,
             )
         }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }

@@ -613,6 +613,17 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun cancellingWhileTheMacsUserHasNotDecidedWithdrawsTheRequestFirst() {
+        val a = connect(MAC_A)
+        session.say(a, inviteAwaiting("r1"))
+        session.cancelOwnRequest()
+        assertEquals("the Mac is told the request was withdrawn, then the session ends", listOf("r1" to "accepted", "r1" to "cancelled"), a.responses())
+        assertEquals("sessionInviteResponse", a.types().let { it[it.indexOfLast { t -> t == "sessionInviteResponse" }] })
+        assertTrue(a.closed)
+        assertFalse(session.isAdmitted)
+    }
+
+    @Test
     fun anInvitationTheMacStartedNeverShowsAsWaitingForTheMac() {
         val a = connect(MAC_A)
         session.say(a, "{\"type\":\"sessionInvite\",\"id\":\"s1\",\"initiator\":\"sender\",\"intent\":\"manual\",\"mode\":\"extend\",\"awaitingSender\":true}")

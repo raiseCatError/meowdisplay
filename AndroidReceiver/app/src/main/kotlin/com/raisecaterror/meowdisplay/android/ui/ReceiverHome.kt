@@ -61,6 +61,12 @@ import androidx.compose.ui.unit.sp
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.pairing.PairingController
+import com.raisecaterror.meowdisplay.android.remote.RemoteAccess
+import com.raisecaterror.meowdisplay.core.remote.HomeRows
+import com.raisecaterror.meowdisplay.core.remote.MacFacts
+import com.raisecaterror.meowdisplay.core.remote.MacStatus
+import com.raisecaterror.meowdisplay.core.remote.MacStatusReducer
+import com.raisecaterror.meowdisplay.core.remote.RowAction
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.android.session.MediaUiState
 import com.raisecaterror.meowdisplay.android.trust.PinStore
@@ -82,6 +88,7 @@ fun ReceiverHome(
     bonjour: Bonjour,
     pairing: PairingController,
     media: MediaController,
+    remote: RemoteAccess,
     onReturnToDisplay: (() -> Unit)? = null,
     onOpenSettings: (() -> Unit)? = null,
 ) {
@@ -91,15 +98,21 @@ fun ReceiverHome(
     val paired by pins.paired.collectAsState()
     val autoRequestFlow = remember(media) { media.inputAutoRequest?.enabledPeers ?: kotlinx.coroutines.flow.MutableStateFlow(emptySet<String>()) }
     val autoRequestPeers by autoRequestFlow.collectAsState()
+    val remoteMacs by remote.store.macs.collectAsState()
+    val attempts by remote.coordinator.attempts.collectAsState()
     val macName = { peerID: String? -> paired.firstOrNull { it.peerID == peerID }?.name ?: "your Mac" }
     var showDetails by remember { mutableStateOf(false) }
+    var showAddRemote by rememberSaveable { mutableStateOf(false) }
+    var editAddressFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var securityFor by rememberSaveable { mutableStateOf<String?>(null) }
     var showSteps by rememberSaveable { mutableStateOf(false) }
     // Short phones (landscape) keep the links in the scrolling list so the Macs keep their room.
     val windowHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
     val compactHeight = windowHeight < 500.dp
-    val pairedNames = paired.map { it.name }.toSet()
-    // Bonjour names only: a nearby Mac with a paired Mac's name is shown once, with the paired Macs in the Macs card.
-    val toPair = nearby.filter { it.serviceName !in pairedNames }
+    // One row per Mac, however it was found: a paired Mac that is nearby, saved remotely or both is a single
+    // row in the Macs card. Bonjour names only: a nearby Mac with a paired Mac's name is not offered to pair again.
+    val rows = HomeRows.build(paired.map { HomeRows.Paired(it.peerID, it.name) }, nearby.map { it.serviceName })
+    val toPair = nearby.filter { it.serviceName in rows.toPair }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
       // Same arrangement as the iPhone: centred logo, name and one status line on top, the Macs
@@ -119,7 +132,7 @@ fun ReceiverHome(
                         modifier = Modifier.semantics { heading() })
                 }
             }
-            if (onReturnToDisplay != null && mediaUi.admitted) {
+            if (onReturnToDisplay != null && mediaUi.admitted && !mediaUi.awaitingMacApproval) {
                 item { ConnectedCard(macName(mediaUi.peerID), mediaUi, onReturnToDisplay, onOpenSettings) { media.session.disconnect() } }
             } else {
                 item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID)), centered = true) }   // under the name, as on iPhone
@@ -148,35 +161,44 @@ fun ReceiverHome(
                         }
                     }
                     paired.forEach { mac ->
-                        val live = mediaUi.peerID == mac.peerID && mediaUi.admitted
-                        val connecting = mediaUi.connectingTo == mac.peerID
-                        val isNearby = nearby.any { it.serviceName == mac.name }
+                        val awaiting = mediaUi.peerID == mac.peerID && mediaUi.awaitingMacApproval
+                        val live = mediaUi.peerID == mac.peerID && mediaUi.admitted && !awaiting
+                        val isNearby = remote.nearby(mac.peerID)
+                        val saved = remoteMacs[mac.peerID]?.endpoint
+                        val status = MacStatusReducer.reduce(
+                            MacFacts(
+                                peerID = mac.peerID, name = mac.name, nearby = isNearby, remote = saved, connected = live,
+                                route = mediaUi.route.takeIf { live }, awaitingMacApproval = awaiting,
+                                localConnectPending = mediaUi.connectingTo == mac.peerID, attempt = attempts[mac.peerID],
+                            ),
+                        ) { id -> paired.firstOrNull { it.peerID == id }?.name }
+                        val busy = status is MacStatus.Connecting || status is MacStatus.NeedsMacApproval
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
                         MacRow(
                             title = mac.name,
-                            subtitle = when {
-                                live -> "Connected"
-                                connecting -> "Asking it to connect…"
-                                isNearby -> "Nearby"
-                                else -> "Not found"
+                            subtitle = status.text,
+                            detail = status.hint,
+                            primary = when (status.action) {
+                                RowAction.Show -> onReturnToDisplay?.let { "Show" to it }
+                                RowAction.Cancel -> "Cancel" to { remote.cancel(mac.peerID) }
+                                RowAction.Retry -> "Retry" to { remote.connect(mac.peerID) }
+                                RowAction.Connect -> "Connect" to { remote.connect(mac.peerID) }
                             },
-                            primary = when {
-                                live && onReturnToDisplay != null -> "Show" to onReturnToDisplay
-                                live -> null
-                                connecting -> "Cancel" to media::cancelConnect
-                                else -> "Connect" to { media.requestConnect(mac.peerID) }
-                            },
-                            enabled = mediaUi.listening || live,
+                            enabled = mediaUi.listening || live || busy,
                             menu = buildList {
-                                if (!live && !connecting) {
-                                    add("Connect with Mirror" to { media.requestConnect(mac.peerID, DisplayMode.Mirror) })
-                                    add("Connect with Extend" to { media.requestConnect(mac.peerID, DisplayMode.Extend) })
+                                if (!live && !busy) {
+                                    add("Connect with Mirror" to { remote.connect(mac.peerID, DisplayMode.Mirror) })
+                                    add("Connect with Extend" to { remote.connect(mac.peerID, DisplayMode.Extend) })
+                                    if (isNearby && saved != null) add("Connect over Remote" to { remote.connectRemotely(mac.peerID) })
                                 }
                                 media.inputAutoRequest?.let { auto ->
                                     val on = mac.peerID in autoRequestPeers
                                     add((if (on) "Request Control Automatically: On" else "Request Control Automatically: Off") to { auto.setEnabled(mac.peerID, !on) })
                                 }
-                                add("Forget This Mac" to { media.forget(mac.peerID) })
+                                add((if (saved != null) "Edit Address" else "Add Address") to { editAddressFor = mac.peerID })
+                                if (saved != null) add("Remove Address" to { remote.store.remove(mac.peerID); remote.coordinator.cancel(mac.peerID) })
+                                add("Security Details" to { securityFor = mac.peerID })
+                                add("Forget This Mac" to { remote.forget(mac.peerID) })
                             },
                         )
                     }
@@ -188,6 +210,11 @@ fun ReceiverHome(
                             enabled = ui.pairingWith == null, menu = emptyList(),
                         )
                     }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                    TextButton(
+                        onClick = { showAddRemote = true },
+                        modifier = Modifier.semantics { contentDescription = "Add Remote Mac" },
+                    ) { Text("+ Add Remote Mac") }
                 }
             }
 
@@ -214,6 +241,29 @@ fun ReceiverHome(
     }
 
     if (showDetails) DeviceDetails(identity.fingerprint) { showDetails = false }
+
+    if (showAddRemote) AddRemoteMacDialog(pairing, ui, paired, remote) { showAddRemote = false }
+
+    editAddressFor?.let { peerID ->
+        val mac = paired.firstOrNull { it.peerID == peerID }
+        if (mac == null) editAddressFor = null else EditAddressDialog(
+            macName = mac.name, current = remoteMacs[peerID]?.endpoint,
+            sharedWith = { endpoint ->
+                remoteMacs.values.filter { it.peerID != peerID && it.endpoint.host.equals(endpoint.host, ignoreCase = true) && it.endpoint.port == endpoint.port }
+                    .mapNotNull { other -> paired.firstOrNull { it.peerID == other.peerID }?.name }
+            },
+            onSave = { endpoint -> remote.store.save(peerID, endpoint).also { saved -> if (saved) remote.coordinator.cancel(peerID) } },
+            onDismiss = { editAddressFor = null },
+        )
+    }
+
+    securityFor?.let { peerID ->
+        val mac = paired.firstOrNull { it.peerID == peerID }
+        if (mac == null) securityFor = null else SecurityDetailsDialog(
+            mac, remoteMacs[peerID]?.endpoint,
+            remote.store.sharedWith(peerID).mapNotNull { other -> paired.firstOrNull { it.peerID == other }?.name },
+        ) { securityFor = null }
+    }
 
     mediaUi.approval?.let { approval ->
         AlertDialog(
@@ -280,7 +330,10 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
                 else -> "Showing the Mac"
             }
             val control = if (ui.input == InputWireState.Allowed) "Controlling" else "View Only"
-            Text("$source · $control", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            Text(
+                listOfNotNull(source, control, ui.route?.sessionLabel).joinToString(" · "),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onReturn) { Text("Return to Display") }
                 onSettings?.let { OutlinedButton(onClick = it) { Text("Settings") } }
@@ -348,7 +401,11 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
 
 /** One short line for the home screen and Settings. What to do about a state is in How to Connect. */
 internal fun sessionStatus(ui: MediaUiState, mac: String): String = when (ui.phase) {
-    SessionPhase.Connected -> if (ui.admitted) "Connected to $mac" else "Connecting to $mac…"
+    SessionPhase.Connected -> when {
+        ui.awaitingMacApproval -> "Waiting for $mac to accept"
+        ui.admitted -> "Connected to $mac"
+        else -> "Connecting to $mac…"
+    }
     SessionPhase.Connecting -> "Connecting to $mac…"
     SessionPhase.Paused -> "Paused by $mac"
     SessionPhase.Reconnecting -> "Reconnecting to $mac…"
@@ -403,7 +460,10 @@ private fun Notice(text: String, onDismiss: () -> Unit) {
 
 /** One Mac in the card: name and one-word subtitle, a prominent action, and a ••• menu for the rest. */
 @Composable
-private fun MacRow(title: String, subtitle: String?, primary: Pair<String, () -> Unit>?, enabled: Boolean, menu: List<Pair<String, () -> Unit>>) {
+private fun MacRow(
+    title: String, subtitle: String?, primary: Pair<String, () -> Unit>?, enabled: Boolean, menu: List<Pair<String, () -> Unit>>,
+    detail: String? = null,
+) {
     var open by remember { mutableStateOf(false) }
     // Large font scales stack the buttons under the name instead of squeezing the name.
     val stacked = LocalDensity.current.fontScale >= 1.5f
@@ -411,6 +471,7 @@ private fun MacRow(title: String, subtitle: String?, primary: Pair<String, () ->
         Column(modifier.semantics(mergeDescendants = true) {}) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
             subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            detail?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
     val actions: @Composable () -> Unit = {

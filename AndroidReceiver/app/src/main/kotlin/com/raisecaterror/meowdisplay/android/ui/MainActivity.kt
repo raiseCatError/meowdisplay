@@ -36,6 +36,8 @@ class MainActivity : ComponentActivity() {
         // And the controls, so the first session's Admitted and input state
         // reach them (C4 F-01: no Request Control prompt in the first session).
         app.receiver
+        // Remote Access follows the session from the first one on (and keeps no state of its own across processes).
+        app.remote
         // Recreated for a rotation: same session, new panel dimensions (PROTOCOL.md 6.1).
         if (savedInstanceState != null) app.media.session.resendHello()
         enableEdgeToEdge()
@@ -60,6 +62,9 @@ class MainActivity : ComponentActivity() {
                 var homeShown by rememberSaveable { mutableStateOf(false) }
                 if (mediaUi.admitted) {
                     val macName = paired.firstOrNull { it.peerID == mediaUi.peerID }?.name ?: "your Mac"
+                    // Our Connect was accepted but the Mac's own user hasn't approved it: there is no picture
+                    // to show yet, so Home stays up and says so.
+                    val homeUp = homeShown || mediaUi.awaitingMacApproval
                     ReceiverScreen(
                         app.receiver, app.pipeline,
                         overlay = { window, actions, generation -> ReceiverOverlayHost(app.receiver, window, actions, generation) },
@@ -67,19 +72,20 @@ class MainActivity : ComponentActivity() {
                         onBack = { app.receiver.releaseHeldInput(); homeShown = true },
                         workspace = app.workspace, macName = macName,
                         onMode = { app.media.session.requestDisplayMode(it) },
-                        immersive = !homeShown,
+                        immersive = !homeUp,
                         showPerformance = perf, rttMs = { app.media.session.rttMs },
+                        routeLabel = mediaUi.route?.overlayLabel,
                     )
-                    if (homeShown) {
+                    if (homeUp) {
                         BackHandler { moveTaskToBack(true) }
-                        ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media,
+                        ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote,
                             onReturnToDisplay = { homeShown = false }, onOpenSettings = { settingsOpen = true })
                     }
                     if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false }, diagnostics = app.diagnostics,
                         onStartPictureInPicture = if (supportsPictureInPicture) ({ enterPictureInPicture() }) else null)
                 } else {
                     homeShown = false
-                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, onOpenSettings = { settingsOpen = true })
+                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote, onOpenSettings = { settingsOpen = true })
                     if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false }, diagnostics = app.diagnostics)
                 }
             }
@@ -139,12 +145,15 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         app.pairing.start()
         app.media.start()
+        app.remote.onForeground()
     }
 
     override fun onStop() {
         // A rotation recreates the activity: the session and listeners stay.
         if (!isChangingConfigurations) {
             app.pairing.stop()
+            // Before the session is told we're away: a live remote session is remembered for the way back.
+            app.remote.onBackground(resumable = !isFinishing)
             // Nothing stays held on the Mac once this device leaves the foreground.
             app.receiver.releaseHeldInput()
             // Backgrounded, not quit: the Mac is told to expect this device back.

@@ -33,6 +33,11 @@ class MeowReceiverApplication : Application() {
             inputAutoRequest = InputAutoRequestPrefs(this))
     }
 
+    /** Remote Access: knock, saved addresses and honest status for Macs on another network. */
+    val remote: com.raisecaterror.meowdisplay.android.remote.RemoteAccess by lazy {
+        com.raisecaterror.meowdisplay.android.remote.RemoteAccess(this, identity, pins, media, bonjour)
+    }
+
     val pipeline: MediaPipeline by lazy { MediaPipeline(media, avSyncOffsetMs = { controls.current.avSyncOffsetMs }) }
 
     /** Device-local diagnostics switches (the performance overlay). */
