@@ -2,11 +2,16 @@ package com.raisecaterror.meowdisplay.android.session
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.discovery.ServiceTypes
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.trust.PinStore
+import com.raisecaterror.meowdisplay.core.session.ConnectRequestState
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.HelloFields
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 import com.raisecaterror.meowdisplay.core.session.MediaListener
@@ -63,6 +68,12 @@ data class MediaUiState(
     val updateLink: String? = null,
     val listening: Boolean = false,
     val listenerError: String? = null,
+    /** A Connect this device sent and is waiting on (the Mac dials in). */
+    val connectingTo: String? = null,
+    /** The last Connect that got no answer in time. */
+    val connectFailedFor: String? = null,
+    /** The Mac's confirmed source for this session: "mirror", "extend" or "window". */
+    val source: String? = null,
 )
 
 /**
@@ -76,7 +87,7 @@ class MediaController(
     private val policies: SessionPolicyStore,
     private val bonjour: Bonjour,
     private val localName: () -> String,
-    panel: () -> HelloFields,
+    private val panel: () -> HelloFields,
 ) {
     private val state = MutableStateFlow(MediaUiState())
     val ui: StateFlow<MediaUiState> = state.asStateFlow()
@@ -87,8 +98,55 @@ class MediaController(
     /** The receiver controls subscribe here, after the decoders. */
     @Volatile var controlEvents: ((SessionEvent) -> Unit)? = null
 
-    val session = ReceiverSession(policies, pins::pinnedPeers, panel, ::onEvent)
+    val session = ReceiverSession(policies, pins::pinnedPeers, ::hello, ::onEvent)
     private var listener: MediaListener? = null
+    private val connectRequests = ConnectRequestState()
+    private val main = Handler(Looper.getMainLooper())
+
+    /** The hello: the panel, plus the mode this device asked for when this is the Mac it asked. */
+    private fun hello(): HelloFields =
+        panel().copy(requestedMode = connectRequests.requestedMode(session.peerID, SystemClock.elapsedRealtime()))
+
+    private fun advertiseMedia() {
+        val txt = ServiceTypes.mediaTxt(identity.installID, WireProtocol.VERSION).toMutableMap()
+        connectRequests.token(SystemClock.elapsedRealtime())?.let { txt["cr"] = it }
+        bonjour.advertise(ServiceTypes.MEDIA, localName(), ServiceTypes.MEDIA_PORT, txt)
+    }
+
+    /**
+     * Ask a paired Mac to connect (PROTOCOL.md 6.9): a one-shot token in this
+     * device's own advertisement. The Mac dials only a receiver it has
+     * pinned, over pinned TLS; nothing here grants input.
+     */
+    @Synchronized
+    fun requestConnect(peerID: String, mode: DisplayMode? = null) {
+        if (listener == null || pins.paired.value.none { it.peerID == peerID }) return
+        val request = connectRequests.request(peerID, mode, SystemClock.elapsedRealtime())
+        state.update { it.copy(connectingTo = peerID, connectFailedFor = null) }
+        advertiseMedia()
+        main.postDelayed({ if (connectRequests.token(SystemClock.elapsedRealtime()) == null) refreshAdvertisement() }, ConnectRequestState.TOKEN_MS + 50)
+        main.postDelayed({
+            if (state.value.connectingTo == peerID && !connectRequests.isPending(peerID, SystemClock.elapsedRealtime())) {
+                connectRequests.clear(peerID)
+                state.update { it.copy(connectingTo = null, connectFailedFor = peerID) }
+            }
+        }, ConnectRequestState.REQUEST_MS + 50)
+        Log.i("MeowMedia", "connect request for ${peerID.take(8)} token=${request.token.take(4)}…")
+    }
+
+    @Synchronized
+    fun cancelConnect() {
+        connectRequests.clear()
+        state.update { it.copy(connectingTo = null) }
+        refreshAdvertisement()
+    }
+
+    fun dismissConnectFailure() = state.update { it.copy(connectFailedFor = null) }
+
+    @Synchronized
+    private fun refreshAdvertisement() {
+        if (listener != null) advertiseMedia()
+    }
 
     @Synchronized
     fun start() {
@@ -105,7 +163,7 @@ class MediaController(
             return
         }
         listener = started
-        bonjour.advertise(ServiceTypes.MEDIA, localName(), ServiceTypes.MEDIA_PORT, ServiceTypes.mediaTxt(identity.installID, WireProtocol.VERSION))
+        advertiseMedia()
         state.update { it.copy(listening = true, listenerError = null) }
     }
 
@@ -120,12 +178,15 @@ class MediaController(
 
     /** Forget: the pin, its policy and any live session for that Mac all go. */
     fun forget(peerID: String) {
+        connectRequests.clear(peerID)
+        state.update { if (it.connectingTo == peerID) it.copy(connectingTo = null) else it }
         pins.forget(peerID)
         policies.setPolicy(peerID, null)
         session.revoke(peerID, blocked = false)
     }
 
     fun block(peerID: String) {
+        connectRequests.clear(peerID)
         policies.setPolicy(peerID, PeerSessionPolicy.Blocked)
         session.revoke(peerID, blocked = true)
     }
@@ -138,8 +199,15 @@ class MediaController(
         when (event) {
             is SessionEvent.Phase -> state.update { it.copy(phase = event.phase) }
             is SessionEvent.Connected -> state.update { it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null) }
-            is SessionEvent.Disconnected -> state.update { it.copy(admitted = false, approval = null) }
-            is SessionEvent.Admitted -> state.update { it.copy(admitted = true) }
+            is SessionEvent.Disconnected -> state.update { it.copy(admitted = false, approval = null, source = null) }
+            is SessionEvent.Admitted -> {
+                // The Connect was answered: withdraw the token and stop offering the mode.
+                if (connectRequests.isPending(event.peerID, SystemClock.elapsedRealtime())) {
+                    connectRequests.clear(event.peerID)
+                    main.post { refreshAdvertisement() }
+                }
+                state.update { it.copy(admitted = true, connectingTo = null, connectFailedFor = null) }
+            }
             SessionEvent.AdmissionWithdrawn -> state.update { it.copy(admitted = false) }
             is SessionEvent.ApprovalRequested -> state.update { it.copy(approval = event.approval) }
             is SessionEvent.ApprovalDismissed -> state.update { if (it.approval?.id == event.id) it.copy(approval = null) else it }

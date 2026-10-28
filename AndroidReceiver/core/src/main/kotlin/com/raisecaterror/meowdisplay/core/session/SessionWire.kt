@@ -34,7 +34,9 @@ object WireProtocol {
 }
 
 enum class DisplayMode(val wire: String) {
-    Mirror("mirror"), Extend("extend");
+    Mirror("mirror"), Extend("extend"),
+    /** Selected Mac windows (PROTOCOL.md 6.10); only with a Mac that offers it. */
+    Window("window");
 
     companion object {
         fun of(wire: String?) = entries.firstOrNull { it.wire == wire }
@@ -65,6 +67,8 @@ data class HelloFields(
     val scale: Double,
     val installID: String,
     val requestedMode: DisplayMode? = null,
+    /** Window workspaces version this receiver speaks (hello `ws`); null = none. */
+    val windowWorkspace: Int? = null,
     val trayEnabled: Boolean = true,
     val keyboardButtonEnabled: Boolean = true,
     val maxEncodeWide: Int? = null,
@@ -85,7 +89,9 @@ object ReceiverMessages {
         put("pv", WireProtocol.VERSION)
         // Unauthenticated pairing-version hint, early UX only.
         put("pp", PairingProtocol.VERSION)
-        fields.requestedMode?.let { put("requestedMode", it.wire) }
+        // Older Macs read only mirror/extend here; Window is asked for with displayModeRequest instead.
+        fields.requestedMode?.takeIf { it != DisplayMode.Window }?.let { put("requestedMode", it.wire) }
+        fields.windowWorkspace?.let { put("ws", it) }
         put("trayEnabled", fields.trayEnabled)
         put("keyboardButtonEnabled", fields.keyboardButtonEnabled)
         if (fields.maxEncodeWide != null && fields.maxEncodeHigh != null) {
@@ -110,12 +116,14 @@ object ReceiverMessages {
 
     fun encode(message: JsonObject): ByteArray = message.toString().utf8
 
+    fun displayModeRequest(mode: DisplayMode) = buildJsonObject { put("type", "displayModeRequest"); put("mode", mode.wire) }
+
     private fun typeOnly(type: String) = buildJsonObject { put("type", type) }
 }
 
 /** Sender-to-receiver control messages this core acts on (PROTOCOL.md 6.2). */
 sealed interface SenderMessage {
-    data class Welcome(val pv: Int, val min: Int) : SenderMessage
+    data class Welcome(val pv: Int, val min: Int, val features: Set<String> = emptySet()) : SenderMessage
     data class UpdateRequired(val message: String?, val store: String?) : SenderMessage
     data class Pong(val t: Double, val mt: Double) : SenderMessage
     data object Ping : SenderMessage
@@ -154,6 +162,8 @@ sealed interface SenderMessage {
                 "welcome" -> Welcome(
                     pv = obj.int("pv") ?: WireProtocol.ASSUMED_WHEN_ABSENT,
                     min = obj.int("min") ?: WireProtocol.ASSUMED_WHEN_ABSENT,
+                    features = (obj["features"] as? kotlinx.serialization.json.JsonArray)?.take(16)
+                        ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.take(32) }?.toSet() ?: emptySet(),
                 )
                 "updateRequired" -> UpdateRequired(obj.string("message"), obj.string("store"))
                 "pong" -> {

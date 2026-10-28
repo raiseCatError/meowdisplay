@@ -23,4 +23,8 @@ tasks.test {
     val fixtures = rootProject.layout.projectDirectory.dir("../fixtures/receiver-protocol")
     inputs.dir(fixtures)
     systemProperty("meow.fixtures", fixtures.asFile.absolutePath)
+    // The Swift workspace engine's vectors (fixtures/workspace, MacTests/WindowWorkspaceVectorTests).
+    val workspaceFixtures = rootProject.layout.projectDirectory.dir("../fixtures/workspace")
+    inputs.dir(workspaceFixtures)
+    systemProperty("meow.workspaceFixtures", workspaceFixtures.asFile.absolutePath)
 }

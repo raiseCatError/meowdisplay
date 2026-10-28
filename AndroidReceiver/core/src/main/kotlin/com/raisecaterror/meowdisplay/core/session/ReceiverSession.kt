@@ -40,6 +40,8 @@ sealed interface SessionEvent {
     data class CodecChanged(val codec: StreamCodec) : SessionEvent
     data class DisplayPaused(val paused: Boolean) : SessionEvent
     data class DisplayModeConfirmed(val mode: DisplayMode) : SessionEvent
+    /** What the Mac offers beyond its protocol version (welcome `features`), e.g. "window". */
+    data class MacFeatures(val features: Set<String>) : SessionEvent
     data class Cursor(val x: Double, val y: Double, val visible: Boolean) : SessionEvent
     data class UpdateRequired(val message: String?, val storeUrl: String?) : SessionEvent
     data object UpdateMac : SessionEvent
@@ -139,6 +141,7 @@ class ReceiverSession(
         paused = false
         incompatible = false
         macPV = null
+        macFeatures = emptySet()
         video.reset(StreamCodec.H264)
         lastCursorSequence = 0
         lastKeyframeRequestMs = null
@@ -275,6 +278,25 @@ class ReceiverSession(
         return send(message)
     }
 
+    /** Features from this connection's welcome. */
+    @Volatile var macFeatures: Set<String> = emptySet()
+        private set
+
+    /** Mirror / Extend / Window for this device only. The Mac decides and confirms (displayModeState). */
+    @Synchronized
+    fun requestDisplayMode(mode: DisplayMode): Boolean {
+        if (link == null || !admission.admitted || (macPV ?: 0) < WireProtocol.DISPLAY_MODE) return false
+        if (mode == DisplayMode.Window && "window" !in macFeatures) return false
+        return send(ReceiverMessages.displayModeRequest(mode))
+    }
+
+    /** A window-workspace message (PROTOCOL.md 6.10): admitted sessions with a Mac that offers windows only. */
+    @Synchronized
+    fun sendWorkspace(message: JsonObject): Boolean {
+        if (link == null || !admission.admitted || "window" !in macFeatures) return false
+        return send(message)
+    }
+
     /** Asks the Mac for (or gives back) input on this connection. Never grants anything locally. */
     @Synchronized
     fun requestAllowInput(allowed: Boolean): Boolean {
@@ -323,6 +345,8 @@ class ReceiverSession(
         when (message) {
             is SenderMessage.Welcome -> {
                 macPV = message.pv
+                macFeatures = message.features
+                deliver("features", SessionEvent.MacFeatures(message.features))
                 if (message.pv < WireProtocol.SESSION_INVITATION) admitLegacySenderOrClose(from)
                 if (link !== from) return
                 if (message.pv < WireProtocol.MIN_SUPPORTED_PEER) {
