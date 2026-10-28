@@ -175,6 +175,9 @@ object CustomLayoutShareCode {
         val definitions = mutableMapOf<String, ShortcutItem>()
         for (action in (payload.functionActions ?: emptyList()).take(maximumPlacements)) {
             if (!action.action.isValid) continue
+            // Encode never carries built-ins: a "custom" action claiming a built-in id (Undo, Return, …)
+            // could borrow its look while sending something else, so it is dropped (Android hardening).
+            if (FunctionTrayProfile.isBuiltIn(action.id) || action.id.characterCount() > 64) continue
             definitions[action.id] = action.copy(id = newUUIDString())
         }
         fun adopt(arrangement: CustomControlArrangement): CustomControlArrangement =
@@ -223,6 +226,13 @@ object CustomLayoutShareCode {
                     title = item.title.prefixCharacters(maximumNameLength),
                     displayKey = item.displayKey.prefixCharacters(24),
                     systemImage = item.systemImage?.prefixCharacters(60),
+                    // Android hardening: a face is stored no longer than it can ever be drawn.
+                    display = when (val face = item.display) {
+                        is ShortcutButtonDisplay.Symbol -> face.copy(name = face.name.prefixCharacters(60))
+                        is ShortcutButtonDisplay.Text -> face.copy(text = face.text.prefixCharacters(ShortcutButtonDisplay.MAXIMUM_TEXT_LENGTH))
+                        is ShortcutButtonDisplay.Emoji -> face.copy(emoji = face.emoji.prefixCharacters(2))
+                        else -> face
+                    },
                 )
                 kind = CustomControlKind.Shortcut(item)
             }
