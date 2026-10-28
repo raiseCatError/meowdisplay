@@ -347,7 +347,7 @@
     "Connect" : {
 
     },
-    "Connect the %@ by USB, or join the same WiFi" : {
+    "Connect the %@ by USB, or join the same Wi-Fi" : {
 
     },
     "Connect with Extend" : {
@@ -971,7 +971,7 @@
     "MeowDisplay on GitHub" : {
 
     },
-    "MeowDisplay turns this %@ into a second screen for your Mac — but it needs the **MeowDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network." : {
+    "You also need the **MeowDisplay Mac app**, open on your Mac." : {
 
     },
     "Metal renderer (experimental)" : {

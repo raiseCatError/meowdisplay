@@ -101,7 +101,6 @@ fun ReceiverHome(
                             modifier = Modifier.weight(1f).semantics { heading() })
                         onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings") } }
                     }
-                    Text("A second screen for your Mac.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (onReturnToDisplay != null && mediaUi.admitted) {

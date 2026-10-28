@@ -1572,7 +1572,7 @@ struct OnboardingView: View {
                         Text("One more app to go")
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
-                        Text("MeowDisplay turns this \(deviceKind) into a second screen for your Mac — but it needs the **MeowDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
+                        Text("You also need the **MeowDisplay Mac app**, open on your Mac.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -1581,7 +1581,7 @@ struct OnboardingView: View {
 
                     VStack(alignment: .leading, spacing: 14) {
                         Label("Install the MeowDisplay Mac app on your Mac", systemImage: "1.circle.fill")
-                        Label("Connect the \(deviceKind) by USB, or join the same WiFi", systemImage: "2.circle.fill")
+                        Label("Connect the \(deviceKind) by USB, or join the same Wi-Fi", systemImage: "2.circle.fill")
                         Label("Keep this app open — streaming starts on its own", systemImage: "3.circle.fill")
                     }
                     .font(.subheadline)
