@@ -55,9 +55,9 @@ class MainActivity : ComponentActivity() {
                     }
                     if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
                 } else {
-                    settingsOpen = false
                     homeShown = false
-                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media)
+                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, onOpenSettings = { settingsOpen = true })
+                    if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false })
                 }
             }
         }

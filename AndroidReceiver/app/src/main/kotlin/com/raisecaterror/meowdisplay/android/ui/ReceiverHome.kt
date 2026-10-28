@@ -89,8 +89,11 @@ fun ReceiverHome(
         ) {
             item {
                 Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(top = 24.dp)) {
-                    Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.semantics { heading() })
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("MeowDisplay", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f).semantics { heading() })
+                        onOpenSettings?.let { open -> TextButton(onClick = open) { Text("Settings") } }
+                    }
                     Text("A second screen for your Mac.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
