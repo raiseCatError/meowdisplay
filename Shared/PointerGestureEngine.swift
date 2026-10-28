@@ -188,6 +188,10 @@ enum PointerGestureConfig {
     /// iOS's long press; Android's own is 0.4 s. Tuned down from 0.55 s on a
     /// Moto G5S Plus: holds sweep cleanly (one click or one right click).
     static let naturalLongPressDelay: TimeInterval = 0.5
+    /// A Natural hold this close to the Mac display's left edge (normalized
+    /// x) parks the pointer on the edge instead of right-clicking, so the
+    /// Mac's own Stage Manager can appear; nothing happens if it is off.
+    static let naturalEdgeHoldBand: CGFloat = 0.025
     /// Natural Touch: a scroll coasts after lift only once the finger has
     /// travelled this far from touch-down. A tap that slips just past
     /// `dragSlop` otherwise coasts several times its own travel (measured on
@@ -1571,6 +1575,10 @@ final class PointerGestureEngine {
         naturalLastClick = nil
         var out = consumeTouch(id: id)
         guard let n = start?.normalized else { return out }
+        if n.x <= PointerGestureConfig.naturalEdgeHoldBand {
+            // Left-edge hold: the pointer rests on the edge, no click.
+            return out + [.moveAbsolute(x: 0, y: Double(n.y))]
+        }
         out += [.moveAbsolute(x: Double(n.x), y: Double(n.y)),
                 .mouseDown(button: .right, clickCount: 1),
                 .mouseUp(button: .right, clickCount: 1),

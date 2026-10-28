@@ -1414,6 +1414,27 @@ final class NaturalTouchVectorTests: XCTestCase {
         XCTAssertEqual(engine.pollDelay(now: 10)!, PointerGestureConfig.naturalLongPressDelay, accuracy: 1e-9)
     }
 
+    /// Full-desktop view: a still hold on the Mac display's left edge parks
+    /// the pointer there (the Mac's Stage Manager may appear) and never
+    /// right-clicks; the same hold elsewhere still right-clicks.
+    func testLeftEdgeHoldParksThePointerWithoutRightClick() {
+        func hold(at x: CGFloat) -> [PointerCommand] {
+            let engine = PointerGestureEngine()
+            engine.setTouchStyle(.natural)
+            var out = engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .began, viewPoint: .zero,
+                                                       normalized: CGPoint(x: x, y: 0.4), time: 0))
+            out += engine.poll(now: PointerGestureConfig.naturalLongPressDelay)
+            out += engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .ended, viewPoint: .zero,
+                                                    normalized: CGPoint(x: x, y: 0.4), time: 1))
+            return out
+        }
+        func isDown(_ c: PointerCommand) -> Bool { if case .mouseDown = c { return true }; return false }
+        let edge = hold(at: 0.01)
+        XCTAssertTrue(edge.contains(.moveAbsolute(x: 0, y: 0.4)), "the pointer rests on the edge")
+        XCTAssertFalse(edge.contains(where: isDown), "no click of any kind: \(edge)")
+        XCTAssertTrue(hold(at: 0.5).contains(.mouseDown(button: .right, clickCount: 1)), "elsewhere a hold still right-clicks")
+    }
+
     func testLiftFarFromTouchDownWithoutMoveEventsDoesNotClick() {
         let engine = PointerGestureEngine()
         engine.setTouchStyle(.natural)
