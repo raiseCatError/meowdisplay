@@ -13,6 +13,7 @@ import com.raisecaterror.meowdisplay.core.session.StreamCodec
 import com.raisecaterror.meowdisplay.core.video.DecodableSample
 import com.raisecaterror.meowdisplay.core.video.DecodeQueue
 import com.raisecaterror.meowdisplay.core.video.StreamStats
+import com.raisecaterror.meowdisplay.core.video.VideoDelay
 import java.nio.ByteBuffer
 
 /**
@@ -31,6 +32,8 @@ class VideoDecoder(
     private val stats: StreamStats? = null,
     /** A Mac capture time on this device's wall clock; null until the clocks are synced. */
     private val captureToLocalMs: (Double) -> Double? = { null },
+    /** A negative A/V sync offset: how long to hold the picture back (ms). */
+    private val videoDelayMs: () -> Int = { 0 },
 ) {
     private val thread = HandlerThread("meow-video").apply { start() }
     private val handler = Handler(thread.looper)
@@ -66,8 +69,20 @@ class VideoDecoder(
         if (queue.awaitingKeyframe) requestKeyframe() else startIfReady()
     }
 
-    fun submit(sample: DecodableSample) = handler.post {
+    private val delay = VideoDelay()
+    /** Frames held back for a negative A/V offset; dropped by [reset]. */
+    private val delayed = Any()
+
+    fun submit(sample: DecodableSample) {
         stats?.frameArrived(sample.data.size, System.currentTimeMillis().toDouble())
+        val hold = videoDelayMs()
+        val now = SystemClock.uptimeMillis()
+        // No offset: straight to the decoder, as always. With one, in order, after the delay.
+        val due = synchronized(delay) { delay.dueAt(now, hold) }
+        if (due <= now) handler.post { offer(sample) } else handler.postAtTime({ offer(sample) }, delayed, due)
+    }
+
+    private fun offer(sample: DecodableSample) {
         when (queue.offer(sample)) {
             DecodeQueue.Offer.HeldNeedsDecoder -> {
                 trace("format ${sample.codec.wire} sets=" + sample.newFormat!!.joinToString { "${it.size}B" })
@@ -90,6 +105,8 @@ class VideoDecoder(
     /** The stream stopped, changed codec or the session changed: nothing carries over. */
     fun reset() = handler.post {
         Log.i(TRACE, "t=${now()} reset (codec=${codec != null})")
+        handler.removeCallbacksAndMessages(delayed)
+        synchronized(delay) { delay.reset() }
         release()
         queue.reset()
     }

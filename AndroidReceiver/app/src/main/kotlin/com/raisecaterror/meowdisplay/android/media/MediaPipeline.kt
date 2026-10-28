@@ -2,6 +2,7 @@ package com.raisecaterror.meowdisplay.android.media
 
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
+import com.raisecaterror.meowdisplay.core.controls.AVSyncOffset
 import com.raisecaterror.meowdisplay.core.video.StreamStats
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,7 @@ class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
         onVideoSize = { w, h -> size.value = w to h },
         stats = stats,
         captureToLocalMs = { capture -> media.session.clockOffsetMs?.let { capture - it } },
+        videoDelayMs = { AVSyncOffset.videoDelayMs(avSyncOffsetMs()) },
     )
     private val audio = AudioPlayer(avSyncOffsetMs)
 

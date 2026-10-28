@@ -39,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -259,13 +260,19 @@ private fun SettingsPageContent(
                 media.session.requestAudio(on)
             }
             Caption("Plays your Mac's sound on this device. Your Mac confirms it; the choice is kept for every connection.")
-            val delay = prefs.avSyncOffsetMs.coerceAtLeast(0)
-            Row { Text("Delay Audio", Modifier.weight(1f)); Text("$delay ms") }
+            val offset = AVSyncOffset.clamped(prefs.avSyncOffsetMs)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("A/V Sync", Modifier.weight(1f))
+                Text(if (offset > 0) "+$offset ms" else "$offset ms")
+                if (offset != 0) TextButton(onClick = { set { it.avSyncOffsetMs = 0 } }) { Text("Reset") }
+            }
             Slider(
-                value = delay.toFloat(), valueRange = 0f..AVSyncOffset.range.last.toFloat(), steps = AVSyncOffset.range.last / AVSyncOffset.STEP_MS - 1,
+                value = offset.toFloat(), valueRange = AVSyncOffset.range.first.toFloat()..AVSyncOffset.range.last.toFloat(),
+                steps = (AVSyncOffset.range.last - AVSyncOffset.range.first) / AVSyncOffset.STEP_MS - 1,
                 onValueChange = { value -> set { it.avSyncOffsetMs = AVSyncOffset.clamped((value / AVSyncOffset.STEP_MS).roundToInt() * AVSyncOffset.STEP_MS) } },
+                modifier = Modifier.semantics { contentDescription = "A/V Sync" },
             )
-            Caption("Use it when sound arrives before the picture. Applies from the next audio buffer.")
+            Caption("Adjust if sound plays slightly before or after the picture. Right delays the sound; left delays the picture.")
         }
         SettingsPage.Session -> {
             val mediaUi by media.ui.collectAsState()
