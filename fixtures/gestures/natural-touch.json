@@ -1600,6 +1600,43 @@
     "down left 1",
     "up left 1"
    ]
+  },
+  {
+   "name": "still hold on the Mac display's left edge parks the pointer there, no right click (Stage Manager can appear)",
+   "steps": [
+    {
+     "id": 1,
+     "phase": "began",
+     "t": 0,
+     "view": [
+      3,
+      200
+     ],
+     "norm": [
+      0.01,
+      0.4
+     ]
+    },
+    {
+     "poll": 0.5
+    },
+    {
+     "id": 1,
+     "phase": "ended",
+     "t": 0.8,
+     "view": [
+      3,
+      200
+     ],
+     "norm": [
+      0.01,
+      0.4
+     ]
+    }
+   ],
+   "expect": [
+    "move 0 0.4"
+   ]
   }
  ]
 }

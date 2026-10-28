@@ -201,6 +201,11 @@ object PointerGestureConfig {
      * from 0.55 s on a Moto G5S Plus.
      */
     const val naturalLongPressDelay: TimeInterval = 0.5
+    /**
+     * A Natural hold this close to the Mac display's left edge (normalized x) parks the pointer on
+     * the edge instead of right-clicking, so the Mac's own Stage Manager can appear.
+     */
+    const val naturalEdgeHoldBand: Double = 0.025
 
     /**
      * Natural Touch: a scroll coasts after lift only once the finger has travelled this far from
@@ -1553,6 +1558,8 @@ class PointerGestureEngine {
         naturalLastClick = null
         consumeTouch(id)
         val n = start?.normalized ?: return emptyList()
+        // Left-edge hold: the pointer rests on the edge, no click.
+        if (n.x <= PointerGestureConfig.naturalEdgeHoldBand) return listOf(PointerCommand.MoveAbsolute(0.0, n.y))
         return listOf(
             PointerCommand.MoveAbsolute(n.x, n.y),
             PointerCommand.MouseDown(PointerButton.Right, 1),
