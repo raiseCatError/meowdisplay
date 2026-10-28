@@ -616,7 +616,7 @@ private struct InputSettingsPage: View {
             Section {
                 // Never optimistic: this only ever reflects the Mac's last
                 // CONFIRMED decision (`ReceiverControlStore.sessionInputState`).
-                LabeledContent("Control", value: controlStore.sessionInputState.receiverDisplayText)
+                LabeledContent("Status", value: controlStore.sessionInputState.receiverDisplayText)
                     .settingsAnchor("control")
                 switch controlStore.sessionInputState {
                 case .off, .notAllowed:
