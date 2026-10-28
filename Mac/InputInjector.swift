@@ -383,9 +383,12 @@ final class InputInjector {
         // down already posted must always be free to release the button,
         // exactly like legacy touch's `"ended"`/`"cancelled"` handling.
         let cgButton: CGMouseButton = button == .left ? .left : .right
+        // Window mode: the release always ends the workspace's drag binding,
+        // even when its press was refused (nothing was pressed on the Mac).
+        let mapped = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
         guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
         let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
-        let point = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0) ?? currentCursor()
+        let point = mapped ?? currentCursor()
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))

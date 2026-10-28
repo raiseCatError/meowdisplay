@@ -79,8 +79,9 @@ enum WorkspaceRequestValidator {
             }
             guard let windowNumber = (item["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
                   let entry = catalog[windowNumber] else { rejected[id] = "unavailable"; continue }
-            if let gen = item["gen"] as? Int, UInt64(exactly: gen) != entry.generation {
-                rejected[id] = "unavailable"   // the id was reused by another window
+            // The generation is required: without it a reused id can't be told apart.
+            guard let gen = (item["gen"] as? Int).flatMap({ UInt64(exactly: $0) }), gen == entry.generation else {
+                rejected[id] = "unavailable"
                 continue
             }
             let follow = (item["follow"] as? String).flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window
@@ -228,6 +229,9 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         guard let a = assignment(activeTile), windowFrames[a.windowID] != nil else { return nil }
         return a
     }
+
+    /// A press the engine refused (covered, gone): no tile stays bound to it.
+    mutating func cancelBinding() { boundTile = nil }
 
     mutating func setActive(_ id: String?) {
         activeTile = id.flatMap { assignment($0)?.tileID }

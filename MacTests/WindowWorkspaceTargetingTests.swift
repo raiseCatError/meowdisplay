@@ -49,7 +49,11 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         let b = ledger.generation(windowID: 42, pid: 200)
         XCTAssertNotEqual(a, b, "same id, other process: another window")
         XCTAssertEqual(ledger.current(windowID: 42)?.pid, 200)
-        ledger.retain([])
+        ledger.retain([42], now: 100)
+        ledger.retain([], now: 102)
+        XCTAssertEqual(ledger.current(windowID: 42)?.pid, 200, "missing from one listing: still the same window")
+        XCTAssertTrue(ledger.knows(windowID: 42, generation: b))
+        ledger.retain([], now: 100 + WindowIdentityLedger.absenceGrace + 1)
         XCTAssertNil(ledger.current(windowID: 42))
         XCTAssertNotEqual(ledger.generation(windowID: 42, pid: 100), a, "a window that came back after closing is new too")
     }
@@ -80,6 +84,10 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(r.assignments.map(\.tileID), ["a"])
         XCTAssertEqual(r.rejected["b"], "unavailable")
         XCTAssertEqual(r.rejected["c"], "unavailable")
+        let noGen = WorkspaceRequestValidator.validate(
+            tiles: [["id": "n", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "window": 10]], catalog: catalog, hostID: "mac-a",
+            canvasPixels: CGSize(width: 2000, height: 1000), previous: [:], nextGeneration: &next)
+        XCTAssertEqual(noGen.rejected["n"], "unavailable", "a tile without the window's generation is refused")
         XCTAssertEqual(r.rejected["d"], "overlap")
         XCTAssertEqual(r.rejected["a"], "duplicate")
         XCTAssertNil(r.rejected["e"], "another host's tile is not this Mac's to judge")
@@ -97,7 +105,7 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         for i in 0..<12 {
             let x: Double = Double(i % 4) / 4
             let y: Double = Double(i / 4) / 3
-            let tile: [String: Any] = ["id": "t\(i)", "x": x, "y": y, "w": 0.25, "h": 1.0 / 3, "window": i]
+            let tile: [String: Any] = ["id": "t\(i)", "x": x, "y": y, "w": 0.25, "h": 1.0 / 3, "window": i, "gen": 1]
             tiles.append(tile)
         }
         let r = WorkspaceRequestValidator.validate(tiles: tiles, catalog: catalog, hostID: "m", canvasPixels: CGSize(width: 2732, height: 2048),
@@ -107,8 +115,8 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         // Same window again keeps its generation (no capture restart); a new window bumps it.
         let previous = Dictionary(uniqueKeysWithValues: r.assignments.map { ($0.tileID, $0) })
         let again = WorkspaceRequestValidator.validate(
-            tiles: [["id": "t0", "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "window": 0, "rotation": 90],
-                    ["id": "t1", "x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5, "window": 5]],
+            tiles: [["id": "t0", "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "window": 0, "gen": 1, "rotation": 90],
+                    ["id": "t1", "x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5, "window": 5, "gen": 1]],
             catalog: catalog, hostID: "m", canvasPixels: CGSize(width: 2732, height: 2048), previous: previous, nextGeneration: &next)
         XCTAssertEqual(again.assignments[0].assignmentGeneration, previous["t0"]!.assignmentGeneration)
         XCTAssertEqual(again.assignments[0].rotation, .quarter, "rotation changes don't restart the window")
@@ -183,6 +191,16 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
                 XCTAssertEqual(back.point.y, g.y, accuracy: 1e-6, "\(rotation)")
             }
         }
+    }
+
+    func testARefusedPressLeavesNothingBound() {
+        var t = twoTiles()
+        _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))
+        XCTAssertEqual(t.boundTile, "a")
+        t.cancelBinding()   // the engine refused it (covered window)
+        XCTAssertNil(t.boundTile)
+        let next = try! XCTUnwrap(t.resolve(.down, at: .init(x: 0.75, y: 0.5)))
+        XCTAssertEqual(next.tileID, "b", "the next press goes where it lands, not into the refused tile")
     }
 
     func testReplacingTheBoundTilesWindowReleasesHeldInput() {

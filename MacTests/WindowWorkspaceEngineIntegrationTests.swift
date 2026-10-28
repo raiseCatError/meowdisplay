@@ -7,15 +7,23 @@ import XCTest
 /// per-window streams, the GPU compositor. Skipped (not passed) when this
 /// process has no Screen Recording permission.
 final class WindowWorkspaceEngineIntegrationTests: XCTestCase {
+    /// Keeps only the newest frames (the compositor's pool is bounded, like the
+    /// encoder's hold) and checks each frame as it arrives.
     private final class Box: @unchecked Sendable {
         let lock = NSLock()
         var frames: [(at: Int, buffer: CVPixelBuffer)] = []
         var messages: [[String: Any]] = []
+        var check: ((Int, CVPixelBuffer) -> Void)?
         func add(_ m: [String: Any]) { lock.withLock { messages.append(m) } }
-        func add(_ b: CVPixelBuffer) { lock.withLock { frames.append((messages.count, b)); if frames.count > 400 { frames.removeFirst(200) } } }
+        func add(_ b: CVPixelBuffer) {
+            let (at, check) = lock.withLock { () -> (Int, ((Int, CVPixelBuffer) -> Void)?) in
+                frames.append((messages.count, b)); if frames.count > 4 { frames.removeFirst() }
+                return (messages.count, self.check)
+            }
+            check?(at, b)
+        }
         func last(_ type: String) -> [String: Any]? { lock.withLock { messages.last { $0["type"] as? String == type } } }
         var messageCount: Int { lock.withLock { messages.count } }
-        func frames(after index: Int) -> [CVPixelBuffer] { lock.withLock { frames.filter { $0.at > index }.map(\.buffer) } }
         var lastFrame: CVPixelBuffer? { lock.withLock { frames.last?.buffer } }
     }
 
@@ -111,18 +119,22 @@ final class WindowWorkspaceEngineIntegrationTests: XCTestCase {
         // Replace tile a's window with the green one: from the state that
         // confirms it, no frame may show magenta in tile a again.
         let mark = box.messageCount
+        let stats = NSLock()
+        var afterMark = 0, staleMagenta = 0, greenSeen = false
+        box.check = { at, buffer in
+            guard at > mark else { return }
+            let magenta = self.share(of: (230, 26, 178), in: buffer, rect: .init(x: 0, y: 0, width: 0.5, height: 1))
+            let green = self.share(of: (26, 204, 51), in: buffer, rect: .init(x: 0.15, y: 0.3, width: 0.2, height: 0.4))
+            stats.withLock { afterMark += 1; if magenta >= 0.01 { staleMagenta += 1 }; if green > 0.9 { greenSeen = true } }
+        }
         engine.handle(type: WireMessage.workspaceRequest, message: ["tiles": [
             ["id": "a", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "window": green.windowNumber, "gen": gGen],
             ["id": "b", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0, "window": green.windowNumber, "gen": gGen, "rotation": 90],
         ] as [[String: Any]]], inputGranted: false)
-        XCTAssertTrue(waitUntil(5) {
-            box.frames(after: mark).contains { self.share(of: (26, 204, 51), in: $0, rect: .init(x: 0.15, y: 0.3, width: 0.2, height: 0.4)) > 0.9 }
-        }, "tile a switches to green")
-        let after = box.frames(after: mark)
-        XCTAssertFalse(after.isEmpty)
-        for f in after {
-            XCTAssertLessThan(share(of: (230, 26, 178), in: f, rect: .init(x: 0, y: 0, width: 0.5, height: 1)), 0.01,
-                              "a stale magenta frame leaked into the replaced tile")
+        XCTAssertTrue(waitUntil(5) { stats.withLock { greenSeen } }, "tile a switches to green")
+        stats.withLock {
+            XCTAssertGreaterThan(afterMark, 0)
+            XCTAssertEqual(staleMagenta, 0, "a stale magenta frame leaked into the replaced tile")
         }
 
         // A stale generation is refused, not retargeted.

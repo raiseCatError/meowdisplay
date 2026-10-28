@@ -5530,6 +5530,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// gap held back, on this connection only.
     private func connectionAdmitted(generation: UInt64, first: Bool) {
         Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
+        syncWorkspaceSuspension()
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
         }
@@ -5580,6 +5581,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// input the old connection held — a grant, or a request still waiting
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
+        // No admitted receiver: window streams stop until one is admitted again.
+        workspaceEngine?.setSuspended(true)
         if dropped {
             sessionInputGrant.set(false)
             inputInjector?.cancelActiveInput()
@@ -6785,14 +6788,20 @@ extension MacSender {
         let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps)
         let selfBox = self.selfBox
         let queue = self.queue
-        engine.deliverFrame = { buffer in
+        // Only the CURRENT engine may reach this session: a stopped one's late
+        // frames or messages (a thumbnail batch mid-loop) are dropped.
+        engine.deliverFrame = { [weak engine] buffer in
             let box = WorkspaceFrameBox(buffer: buffer)
-            queue.async { selfBox.currentOnQueue()?.deliverWorkspaceFrame(box.buffer) }
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine else { return }
+                sender.deliverWorkspaceFrame(box.buffer)
+            }
         }
-        engine.sendMessage = { message in
+        engine.sendMessage = { [weak engine] message in
             let box = WorkspaceMessageBox(value: message)
             queue.async {
-                guard let sender = selfBox.currentOnQueue(), sender.sessionAuthorization.isAdmitted else { return }
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine,
+                      sender.sessionAuthorization.isAdmitted else { return }
                 sender.sendJSONObject(box.value)
             }
         }
@@ -6813,7 +6822,7 @@ extension MacSender {
     func syncWorkspaceSuspension() {
         let phase = captureStateSnapshot().phase
         let paused = phase == .pausing || phase == .paused || phase == .stopped
-        workspaceEngine?.setSuspended(!videoEnabled || paused)
+        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
     }
 
     /// `queue` only. Stops every window stream this receiver owns.

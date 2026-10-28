@@ -120,7 +120,11 @@ struct WindowIdentityLedger: Sendable {
     private struct Key: Hashable { let id: UInt32; let pid: Int32 }
     private var owners: [UInt32: Key] = [:]
     private var generations: [Key: UInt64] = [:]
+    private var lastSeen: [UInt32: TimeInterval] = [:]
     private var next: UInt64 = 1
+    /// A window missing from one listing keeps its identity this long (SCK
+    /// listings can skip a window briefly); after that it is gone for good.
+    static let absenceGrace: TimeInterval = 5
 
     mutating func generation(windowID: UInt32, pid: Int32) -> UInt64 {
         let key = Key(id: windowID, pid: pid)
@@ -138,12 +142,19 @@ struct WindowIdentityLedger: Sendable {
         return (key.pid, gen)
     }
 
-    /// Forget ids no longer present so the ledger stays bounded.
-    mutating func retain(_ live: Set<UInt32>) {
-        for (id, key) in owners where !live.contains(id) {
+    /// Forget ids absent for longer than the grace, so the ledger stays bounded.
+    mutating func retain(_ live: Set<UInt32>, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        for id in live { lastSeen[id] = now }
+        for (id, key) in owners where !live.contains(id) && now - (lastSeen[id] ?? now) > Self.absenceGrace {
             owners[id] = nil
             generations[key] = nil
+            lastSeen[id] = nil
         }
+    }
+
+    /// Still known (seen within the grace) under this generation.
+    func knows(windowID: UInt32, generation: UInt64) -> Bool {
+        current(windowID: windowID)?.generation == generation
     }
 }
 

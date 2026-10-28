@@ -21,6 +21,7 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     private let lock = NSLock()
     private var latest: CVPixelBuffer?
     private var frames = 0
+    private var lastFrameAt: TimeInterval = 0
     private var stream: SCStream?
     private var config = SCStreamConfiguration()
     private let outputQueue = DispatchQueue(label: "meow.workspace.tile", qos: .userInteractive)
@@ -66,6 +67,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     }
 
     func latestFrame() -> CVPixelBuffer? { lock.withLock { latest } }
+    /// Frames arrived recently: the window is being captured (a window on
+    /// another Space is, a minimized one isn't), whatever "on screen" says.
+    var isDelivering: Bool { lock.withLock { ProcessInfo.processInfo.systemUptime - lastFrameAt < 2 } }
     var hasFrame: Bool { lock.withLock { latest != nil } }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -77,6 +81,7 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             guard self.stream === stream else { return false }
             latest = pixels
             frames += 1
+            lastFrameAt = ProcessInfo.processInfo.systemUptime
             return true
         }
         if current { onFrame?() }
@@ -212,6 +217,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var lastStateSent: String = ""
     private var thumbnailsBusy = false
     private var lastThumbnailsAt: TimeInterval = 0
+    private var lastCatalogRequestAt: TimeInterval = 0
+    private var stopped = false
     private var installedCache: [(bundleID: String, name: String, url: URL)]?
     private var keyboardDecision: WorkspaceKeyboardGate.Decision = .noActiveTile
     private var keyboardCheckedAt: TimeInterval = 0
@@ -248,6 +255,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     func stop(completion: (@Sendable () -> Void)? = nil) {
         queue.async { [self] in
             running = false
+            stopped = true
+            deliverFrame = nil
+            sendMessage = nil
+            releaseHeldInput = nil
             composeTimer?.cancel(); composeTimer = nil
             refreshTimer?.cancel(); refreshTimer = nil
             let all = Array(captures.values)
@@ -265,6 +276,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// are kept, so resuming shows the same workspace.
     func setSuspended(_ suspended: Bool) {
         queue.async { [self] in
+            guard !stopped else { return }
             if suspended {
                 guard running else { return }
                 running = false
@@ -336,12 +348,26 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     func handle(type: String, message obj: [String: Any], inputGranted: Bool) {
         queue.async { [self] in
+            // Paused, Video Off or no admitted receiver: no titles, stills or changes.
+            guard running, !stopped else { return }
             switch type {
             case WireMessage.windowCatalogRequest:
-                if obj["installed"] as? Bool == true, installedCache == nil {
-                    installedCache = WindowCatalogBuilder.installedApplications()
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now - lastCatalogRequestAt >= 0.5 else { return }
+                lastCatalogRequestAt = now
+                let wantsInstalled = obj["installed"] as? Bool == true
+                if wantsInstalled, installedCache == nil {
+                    // A directory walk: never on the engine queue.
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        let apps = WindowCatalogBuilder.installedApplications()
+                        self?.queue.async {
+                            guard let self, !self.stopped else { return }
+                            self.installedCache = apps
+                            self.refresh(sendCatalog: true, includeInstalled: true)
+                        }
+                    }
                 }
-                refresh(sendCatalog: true, includeInstalled: obj["installed"] as? Bool == true)
+                refresh(sendCatalog: true, includeInstalled: wantsInstalled)
             case WireMessage.windowThumbnailRequest:
                 let ids = (obj["ids"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
                 let maxWidth = min(max(obj["max"] as? Int ?? 240, 64), 320)
@@ -368,14 +394,30 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Catalog
 
+    private var refreshInFlight = false
+    private var refreshQueued: (catalog: Bool, installed: Bool)?
+
     private func refresh(sendCatalog: Bool, includeInstalled: Bool = false) {
         guard running || sendCatalog else { return }
+        // One listing at a time: two overlapping ones would each start from the
+        // same ledger and the later would overwrite the earlier's identities.
+        guard !refreshInFlight else {
+            let q = refreshQueued
+            refreshQueued = ((q?.catalog ?? false) || sendCatalog, (q?.installed ?? false) || includeInstalled)
+            return
+        }
+        refreshInFlight = true
         let ledgerIn = ledger
         let includeOwn = includeOwnProcessForTesting
         Task { [weak self] in
             let built = try? await WindowCatalogBuilder.build(ledger: ledgerIn, includeOwnProcess: includeOwn)
             self?.queue.async {
                 guard let self else { return }
+                self.refreshInFlight = false
+                if let queued = self.refreshQueued {
+                    self.refreshQueued = nil
+                    self.queue.async { self.refresh(sendCatalog: queued.catalog, includeInstalled: queued.installed) }
+                }
                 if let built { self.ledger = built.1 }
                 guard let snapshot = built?.0 else {
                     if sendCatalog { self.sendMessage?(["type": WireMessage.windowCatalog, "windows": [], "apps": [], "error": "unavailable"]) }
@@ -392,14 +434,24 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         catalog = Dictionary(snap.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
         followApps(snap)
         var frames: [UInt32: CGRect] = [:]
+        let previousFrames = inputLock.withLock { targeting.windowFrames }
         for a in assignments {
             guard let entry = catalog[a.windowID], entry.generation == a.windowGeneration else {
-                setState(a.tileID, "closed")
+                if ledger.knows(windowID: a.windowID, generation: a.windowGeneration) {
+                    // Skipped by this listing only: keep it as it was.
+                    if let f = previousFrames[a.windowID] { frames[a.windowID] = f }
+                } else {
+                    setState(a.tileID, "closed")
+                }
                 continue
             }
+            let delivering = captures[a.tileID]?.isDelivering == true
+            // The frame sizes the tile's picture even off screen. Input to a window
+            // that isn't on screen is refused at press/hover time (isTopmost checks
+            // the window's own current on-screen bounds).
             frames[a.windowID] = entry.frame
             if entry.availability == .offscreen {
-                setState(a.tileID, "offscreen")
+                setState(a.tileID, delivering ? "live" : "offscreen")
             } else if tileState[a.tileID] == "offscreen" || tileState[a.tileID] == "closed" {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
@@ -455,7 +507,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         assignments = result.assignments
         rejected = result.rejected
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
+        // Geometry from the catalog right away, so a new tile draws on the next tick.
+        let knownFrames = Dictionary(assignments.compactMap { a in catalog[a.windowID].map { (a.windowID, $0.frame) } },
+                                     uniquingKeysWith: { a, _ in a })
         let release = inputLock.withLock { () -> Bool in
+            targeting.windowFrames.merge(knownFrames) { _, new in new }
             let r = targeting.update(assignments: assignments)
             if let focus = obj["focus"] as? String { targeting.setActive(focus) }
             return r
@@ -511,6 +567,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             Task { [weak self] in
                 do {
                     try await capture.start(window: window, size: size, fps: fps)
+                    // Superseded while starting (stopped, replaced): don't leave it running.
+                    let current = await self?.isCurrent(capture) ?? false
+                    if !current { await capture.stop() }
                 } catch {
                     let code = (error as NSError).code
                     self?.queue.async {
@@ -524,6 +583,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     }
                 }
             }
+        }
+    }
+
+    private func isCurrent(_ capture: WindowTileCapture) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in continuation.resume(returning: !stopped && captures[capture.tileID] === capture) }
         }
     }
 
@@ -577,6 +642,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     private func sendThumbnails(ids: [UInt32], maxWidth: Int) {
         let now = ProcessInfo.processInfo.systemUptime
+        if thumbnailsBusy, now - lastThumbnailsAt > 6 { thumbnailsBusy = false }   // a hung batch never blocks for good
         guard !thumbnailsBusy, now - lastThumbnailsAt > 1.0, let snap = snapshot else { return }
         thumbnailsBusy = true
         lastThumbnailsAt = now
@@ -586,6 +652,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         Task { [weak self] in
             for (id, gen, window) in wanted {
+                guard let engine = self, await engine.isActiveForThumbnails() else { break }
                 let cfg = SCStreamConfiguration()
                 let aspect = window.frame.height / max(window.frame.width, 1)
                 cfg.width = maxWidth
@@ -601,6 +668,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 self?.queue.async { self?.sendMessage?(msg) }
             }
             self?.queue.async { self?.thumbnailsBusy = false }
+        }
+    }
+
+    private func isActiveForThumbnails() async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in continuation.resume(returning: running && !stopped) }
         }
     }
 
@@ -641,8 +714,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard let action = obj["action"] as? String else { return }
         switch action {
         case "activate":
-            guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id] else { return }
-            if let gen = obj["gen"] as? Int, UInt64(exactly: gen) != entry.generation { return }
+            guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
+                  (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
             Self.raise(pid: entry.pid, frame: entry.frame)
         case "launch":
             guard let bundle = obj["bundle"] as? String else { return }
@@ -661,7 +734,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // side effect of removing a tile.
             guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            Self.pressClose(pid: entry.pid, frame: entry.frame)
+            Self.pressClose(pid: entry.pid, frame: entry.frame, title: entry.title)
             refreshSoon()
         default:
             break
@@ -685,8 +758,23 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         case .up: target = x == nil ? targeting.resolveAtPointer(.up) : targeting.resolve(.up, at: p)
         case .scroll: target = targeting.resolveAtPointer(.scroll)
         }
-        guard let target else { return nil }
+        guard var target else { return nil }
         if phase == .up { return target.point }   // a release always goes through
+        if phase == .down || phase == .scroll {
+            // The window may have moved since the last refresh: map against its
+            // current frame, and only while it is on screen.
+            guard let fresh = Self.currentFrame(target.windowID) else {
+                if phase == .down { targeting.cancelBinding() }
+                return nil
+            }
+            if fresh != targeting.windowFrames[target.windowID] {
+                targeting.windowFrames[target.windowID] = fresh
+                // Re-map at the same pointer (a bound press stays bound to its tile).
+                let again = x == nil ? targeting.resolveAtPointer(.scroll) : targeting.resolve(.scroll, at: p)
+                guard let again else { if phase == .down { targeting.cancelBinding() }; return nil }
+                target.point = again.point
+            }
+        }
         if target.activates {
             Self.raise(pid: target.pid, frame: targeting.windowFrames[target.windowID] ?? .zero)
             keyboardCheckedAt = 0
@@ -701,9 +789,19 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard isTopmost(target.windowID, at: target.point, cached: phase == .hover || phase == .drag) else {
             // Something covers the window here (another app, a panel): send
             // nothing rather than click into the wrong window.
+            if phase == .down { targeting.cancelBinding() }
             return nil
         }
         return target.point
+    }
+
+    /// The window's current on-screen frame, or nil when it isn't on screen.
+    static func currentFrame(_ windowID: UInt32) -> CGRect? {
+        guard let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first,
+              (info[kCGWindowIsOnscreen as String] as? Bool) == true,
+              let dict = info[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: dict) else { return nil }
+        return bounds
     }
 
     func scrollVector(dx: Double, dy: Double) -> CGVector {
@@ -758,7 +856,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                   (info[kCGWindowOwnerName as String] as? String) != "Window Server" else { continue }
             if bounds.contains(point) { covering = bounds; break }
         }
-        let ok = covering == nil
+        // The point must also be inside the target itself, on screen.
+        let ok = covering == nil && (Self.currentFrame(windowID)?.contains(point) ?? false)
         topmostCache[windowID] = (now, ok ? CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80) : covering!, ok)
         return ok
     }
@@ -805,8 +904,24 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         return window != nil
     }
 
-    static func pressClose(pid: Int32, frame: CGRect) {
-        guard AXIsProcessTrusted(), let window = axWindow(pid: pid, frame: frame) else { return }
+    /// Only an unambiguous match: one AX window with this frame (and title).
+    static func pressClose(pid: Int32, frame: CGRect, title: String) {
+        guard AXIsProcessTrusted() else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return }
+        let matches = windows.filter { w in
+            guard let f = axFrame(w), framesMatch(f, frame) else { return false }
+            var t: CFTypeRef?
+            AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &t)
+            return title.isEmpty || (t as? String) == title
+        }
+        guard matches.count == 1, let window = matches.first else {
+            Log.info("workspace: close refused, \(matches.count) matching windows")
+            return
+        }
         var button: CFTypeRef?
         if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success, let button {
             // swiftlint:disable:next force_cast
