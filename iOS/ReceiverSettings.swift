@@ -651,7 +651,20 @@ private struct InputSettingsPage: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if controlStore.preferences.inputMode == .direct {
-                    smartTouchRows
+                    Picker("Touch Style", selection: preferenceBinding(controlStore, \.touchStyle)) {
+                        ForEach(DirectTouchStyle.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .settingsAnchor("touchStyle")
+                    .accessibilityIdentifier("touchStylePicker")
+                    Text(controlStore.preferences.touchStyle == .natural
+                         ? "Tap to click, swipe to scroll, press then move to drag, touch and hold to right-click. Pinch follows the Pinch setting in Gestures."
+                         : "The finger is the pointer: tap to click, tap then hold to drag. Choose Natural Touch for macOS-style touch.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if controlStore.preferences.touchStyle == .classic {
+                        smartTouchRows
+                    }
                 }
             } header: {
                 Text("Input Mode")

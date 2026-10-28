@@ -275,6 +275,7 @@ struct ReceiverScreen: View {
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
                                    smartTouchEnabled: controlStore.preferences.smartTouchEnabled
                                        && model.receiver.macSupportsSmartTouch,
+                                   touchStyle: controlStore.preferences.touchStyle,
                                    allowInput: inputReachesMac,
                                    videoEnabled: model.receiver.videoEnabled,
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
@@ -392,6 +393,15 @@ struct ReceiverScreen: View {
                                       y: keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if inputReachesMac, controlStore.preferences.inputMode == .direct,
+                       controlStore.preferences.touchStyle == .natural,
+                       !controlStore.preferences.naturalTouchHintShown {
+                        NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: 460)
+                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
+                            .transition(.opacity)
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
                                        inputAllowed: inputReachesMac,
@@ -1863,6 +1873,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// Smart Touch (Experimental), already ANDed with the Mac's support for
     /// it — see `PointerGestureEngine.smartTouchEnabled`.
     let smartTouchEnabled: Bool
+    /// Direct Touch style — see `DirectTouchStyle`.
+    let touchStyle: DirectTouchStyle
     /// Master remote-input gate (SETTINGS / ALLOW INPUT INVARIANTS). Belt-
     /// and-suspenders alongside the `.allowsHitTesting` gate `ReceiverScreen`
     /// applies to this whole view: that gate stops new touches from ever
@@ -1922,6 +1934,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setInputMode(inputMode)
         view.setTrackpadSensitivity(trackpadSensitivity)
         view.setSmartTouchEnabled(smartTouchEnabled)
+        view.setTouchStyle(touchStyle)
         view.setAllowInput(allowInput)
         view.setLocalNavigationAllowed(allowLocalViewNavigation)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
@@ -2053,6 +2066,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
         uiView.setSmartTouchEnabled(smartTouchEnabled)
+        uiView.setTouchStyle(touchStyle)
         uiView.setAllowInput(allowInput)
         uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
@@ -2595,6 +2609,14 @@ struct VideoLayerView: UIViewRepresentable {
         func setSmartTouchEnabled(_ enabled: Bool) {
             guard enabled != pointerEngine.smartTouchEnabled else { return }
             pointerEngine.smartTouchEnabled = enabled
+        }
+
+        /// Natural Touch or Classic. Like `setInputMode`, cancels only the
+        /// gesture in flight (any held button is released); the session,
+        /// capture, input grant and workspace are untouched.
+        func setTouchStyle(_ style: DirectTouchStyle) {
+            guard style != pointerEngine.touchStyle else { return }
+            dispatchPointerCommands(pointerEngine.setTouchStyle(style))
         }
 
         /// Plays Smart Touch hold feedback; the owner sets `isEnabled`.
@@ -3680,6 +3702,9 @@ struct VideoLayerView: UIViewRepresentable {
                 }
                 let sample = PointerTouchSample(id: AnyHashable(ObjectIdentifier(touch)), phase: enginePhase,
                                                 viewPoint: viewPoint, normalized: norm, time: touch.timestamp)
+                // Natural Touch scrolls without a Smart Touch probe, so its
+                // velocity history starts clean at each fresh touch-down.
+                if sample.phase == .began, pointerEngine.mode == .idle { scrollVelocityTracker.reset() }
                 let commands = pointerEngine.handle(sample)
                 dispatchPointerCommands(commands)
                 // The single-finger primary press is the M4 typing-focus
@@ -4432,6 +4457,40 @@ private struct InputPromptButton: View {
         case .requesting: return "hourglass"
         case .enabled: return "checkmark.circle.fill"
         case .unavailable: return "hand.raised.slash"
+        }
+    }
+}
+
+
+/// One-time note after Natural Touch became the default: what changed and
+/// where Classic is. Shown once; dismissed by the button or after a while.
+struct NaturalTouchHint: View {
+    let onDone: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "hand.tap")
+                .font(.title3)
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Natural Touch is on")
+                    .font(.subheadline.weight(.semibold))
+                Text("Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings & Help > Input.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("OK", action: onDone)
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("naturalTouchHintOK")
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("naturalTouchHint")
+        .task {
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            onDone()
         }
     }
 }
