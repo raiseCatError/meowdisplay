@@ -260,6 +260,31 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
     }
 
+    /// Paused display or Video Off: every window stream stops (nothing is
+    /// captured or composited) but the tiles, their windows and the focus
+    /// are kept, so resuming shows the same workspace.
+    func setSuspended(_ suspended: Bool) {
+        queue.async { [self] in
+            if suspended {
+                guard running else { return }
+                running = false
+                composeTimer?.cancel(); composeTimer = nil
+                refreshTimer?.cancel(); refreshTimer = nil
+                let all = Array(captures.values)
+                captures.removeAll()
+                Self.releaseBudget(all.count)
+                for id in assignments.map(\.tileID) where tileState[id] == "live" { tileState[id] = "waiting" }
+                Task { for c in all { await c.stop() } }
+            } else {
+                guard !running else { return }
+                running = true
+                dirty = true
+                startTimers()
+                refresh(sendCatalog: false)
+            }
+        }
+    }
+
     func update(canvas newCanvas: CGSize, fps: Int) {
         queue.async { [self] in
             canvas = newCanvas

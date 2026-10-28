@@ -5,6 +5,7 @@ import SwiftUI
 /// (bitrate, frame rate) belongs to Streaming instead.
 struct DisplaysSettingsView: View {
     @ObservedObject var controller: SenderController
+    @AppStorage(WindowStreamingPolicy.defaultsKey) private var allowWindowStreaming = true
 
     var body: some View {
         Form {
@@ -35,6 +36,16 @@ struct DisplaysSettingsView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Let devices show individual windows", isOn: $allowWindowStreaming)
+            } header: {
+                Text("Windows")
+            } footer: {
+                Text("A connected device can pick Mac windows to show side by side instead of a whole display. Nothing on this Mac moves. Applies the next time a device connects.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if controller.mode == .mirror {

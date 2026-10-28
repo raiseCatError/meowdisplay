@@ -3054,6 +3054,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   self.updateCaptureState({ $0.requestPause() }) else { return }
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
+            self.workspaceEngine?.setSuspended(true)
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
@@ -3100,6 +3101,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue(),
                   self.updateCaptureState({ $0.requestResume() }) else { return }
             self.captureRecoveryBudget.reset()
+            self.workspaceEngine?.setSuspended(!self.videoEnabled)
             Task { await self.resumeCapture() }
         }
     }
@@ -3110,6 +3112,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         videoEnabled = enabled
+        workspaceEngine?.setSuspended(!enabled)
         sendVideoState()
         if !enabled {
             let phase = captureStateSnapshot().phase
