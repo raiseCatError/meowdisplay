@@ -340,7 +340,12 @@ class EmulatorSmokeTest {
 
             tapAt(command.first, command.second)
             assertEquals("command", session.expect("keyboard")["modifier"]!!.jsonPrimitive.content)
+            Thread.sleep(600)
             shot("command-latched")
+            // A latched chord keeps its palette open (no auto-hide while a chord is held).
+            val latched = screen()
+            File(shots, "$profile-command-latched.txt").writeText(describe(latched))
+            checkNotNull(centerIn(latched, "Copy")) { "the Command palette should be open; on screen: ${describe(latched)}" }
             tapAt(command.first, command.second)
             assertEquals("modifierUp", session.expect("keyboard")["action"]!!.jsonPrimitive.content)
 
@@ -369,6 +374,8 @@ class EmulatorSmokeTest {
             tapAt(width / 2, height / 4)
             center("Command", timeoutMs = 5_000)
 
+            // The reveal tap's click is still in flight: take it before revoking.
+            session.drain(1_500)
             session.send("{\"type\":\"allowInputState\",\"allowed\":false,\"state\":\"off\"}")
             Thread.sleep(500)
             tapAt(width / 2, height / 2)
@@ -396,14 +403,15 @@ class EmulatorSmokeTest {
             // rebuilt stream (new SPS) reconfigures the decoder on the same surface.
             adb("logcat", "-c")
             rotate(1)
-            val landscape = session.expect("hello")
-            assertTrue("landscape hello: $landscape", landscape.int("pixelsWide") > landscape.int("pixelsHigh"))
+            val turned = session.expect("hello")
+            // A quarter turn swaps the panel, whichever way the device is natively held.
+            assertEquals("turned hello: $turned", hello.int("pixelsWide") to hello.int("pixelsHigh"), turned.int("pixelsHigh") to turned.int("pixelsWide"))
             stream(session, accessUnits(resource("video/testsrc-180x320.h264"), hevc = false))
             waitForLog("output 180x320 (h264)")
             waitForLog("decoded 16 frames (h264)")
             rotate(0)
-            val portrait = session.expect("hello")
-            assertTrue("portrait hello: $portrait", portrait.int("pixelsWide") < portrait.int("pixelsHigh"))
+            val back = session.expect("hello")
+            assertEquals("back hello: $back", hello.int("pixelsWide") to hello.int("pixelsHigh"), back.int("pixelsWide") to back.int("pixelsHigh"))
             stream(session, h264)
             waitForLog("output 320x180 (h264)")
 
