@@ -59,6 +59,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
@@ -139,6 +141,8 @@ fun ReceiverScreen(
     val hostView = LocalView.current
     var canvas by remember { mutableStateOf<CGRect?>(null) }
     var occupied by remember { mutableStateOf(emptyList<CGRect>()) }
+    // The one-time Natural Touch hint's frame: like the controls, taps on it never reach the Mac.
+    var hintFrame by remember { mutableStateOf<CGRect?>(null) }
     val folds = rememberFoldRegions()
 
     LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
@@ -203,8 +207,8 @@ fun ReceiverScreen(
         )
         controller.store.isExpanded = window.expanded
         val windowRect = CGRect(0.0, 0.0, widthDp, heightDp)
-        LaunchedEffect(window, canvas, occupied, decoded, state.videoEnabled, prefs.inputMode) {
-            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied, folds)
+        LaunchedEffect(window, canvas, occupied, hintFrame, decoded, state.videoEnabled, prefs.inputMode) {
+            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame), folds)
         }
 
         val transform = state.transform
@@ -290,8 +294,13 @@ fun ReceiverScreen(
         ) {
             NaturalTouchHint(
                 onDone = { controller.store.update { it.naturalTouchHintShown = true } },
-                modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = (insets.top + 12).dp),
+                modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = (insets.top + 12).dp)
+                    .onGloballyPositioned { c ->
+                        val b = c.boundsInRoot(); val d = density.density.toDouble()
+                        hintFrame = CGRect(b.left / d, b.top / d, b.width / d, b.height / d)
+                    },
             )
+            DisposableEffect(Unit) { onDispose { hintFrame = null } }
         }
         if (showPerformance) {
             com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(
@@ -306,7 +315,11 @@ fun ReceiverScreen(
 /** One-time note after Natural Touch became the default: what changed and where Classic is. */
 @Composable
 private fun NaturalTouchHint(onDone: () -> Unit, modifier: Modifier = Modifier) {
-    LaunchedEffect(Unit) {
+    // Counts down only while this screen has focus: under the Settings dialog (or with the app in
+    // the background) nobody can read it.
+    val focused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    LaunchedEffect(focused) {
+        if (!focused) return@LaunchedEffect
         kotlinx.coroutines.delay(12_000)
         onDone()
     }

@@ -396,7 +396,7 @@ struct ReceiverScreen: View {
                     }
                     if inputReachesMac, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
-                       !controlStore.preferences.naturalTouchHintShown {
+                       !controlStore.preferences.naturalTouchHintShown, !showSettings {
                         NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
                             .padding(.horizontal, 16)
                             .frame(maxWidth: 460)
