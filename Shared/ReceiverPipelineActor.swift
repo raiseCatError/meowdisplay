@@ -260,6 +260,17 @@ actor ReceiverPipelineActor {
         var onPathUpdate: @Sendable (NWConnection, NWPath) -> Void
         var sendPing: @Sendable () -> Void
         var checkAddressChangeAndSendHello: @Sendable (NWConnection) -> Void
+
+        // F2, make-before-break: another Mac waits while this session is
+        // admitted (see `heldNewcomer`). Defaults keep every other caller
+        // (and the old replace-on-proof behavior) unchanged.
+        /// Is the session at `generation` admitted? (`ReceiverMediaAdmissionGate`.)
+        var sessionAdmitted: @Sendable (_ generation: Int) -> Bool = { _ in false }
+        /// The waiting Mac's invitation (raw JSON payload): the host judges it
+        /// and answers with `resolveHeldNewcomer`.
+        var judgeNewcomer: @Sendable (NWConnection, _ peerID: String, _ invitation: Data) -> Void = { _, _, _ in }
+        /// The waiting Mac went away undecided: its prompt, if any, goes too.
+        var newcomerDropped: @Sendable (NWConnection) -> Void = { _ in }
     }
 
     // MARK: - Session transition input
@@ -317,6 +328,8 @@ actor ReceiverPipelineActor {
     }
 
     private func pingTick() {
+        // A Mac waiting on this device's answer is kept alive too (PROTOCOL.md 8.2).
+        if let held = heldNewcomer, held.judged { Self.sendPing(on: held.conn) }
         guard let conn = connection, conn.state == .ready else { return }
         hostEffects.sendPing()
     }
@@ -352,6 +365,7 @@ actor ReceiverPipelineActor {
     func cancelPendingConnections() {
         pendingConnections.forEach { retire($0) }
         pendingConnections.removeAll()
+        dropHeldNewcomer()
     }
 
     /// Forget (`trustRemoved`) or Block of `peerID` — see `StreamReceiver.
@@ -369,6 +383,10 @@ actor ReceiverPipelineActor {
         }
         revoked.forEach { retire($0, error: .peerRevoked) }
         pendingConnections.removeAll { candidate in revoked.contains { $0 === candidate } }
+        if let held = heldNewcomer {
+            let owner = hostEffects.resolvePinnedPeerID(held.conn)
+            if owner == nil || owner == peerID { dropHeldNewcomer(error: .peerRevoked) }
+        }
         // QUIC connections that have not handed a Control stream to this
         // actor yet carry no application authority; after Forget/Block
         // none of them may go on to present one.
@@ -381,6 +399,139 @@ actor ReceiverPipelineActor {
         if trustRemoved || currentIsPeer {
             disconnectCurrentConnection(reason: .explicitDisconnect)
         }
+    }
+
+    // MARK: - Another Mac waits (F2, make-before-break)
+
+    /// Another Mac's connection that proved itself while this session was
+    /// admitted. It replaces the session only when this device accepts its
+    /// invitation; declined, blocked, revoked or gone, it is closed and the
+    /// session carries on. It is read only up to its invitation: a
+    /// `receive` can't be withdrawn, so none is outstanding by the time the
+    /// answer comes, and adoption replays everything it said (`welcome`,
+    /// invitation) through the normal path.
+    private struct HeldNewcomer {
+        let conn: NWConnection
+        let peerID: String
+        var buffer: Data
+        var reads: Int
+        var judged = false
+    }
+    private var heldNewcomer: HeldNewcomer?
+    private static let heldNewcomerReadLimit = 8
+    private static let heldNewcomerByteLimit = 1 << 20
+
+    private func holdsNewcomer(peerID: String) -> Bool {
+        guard let current = connection, current.state == .ready,
+              hostEffects.sessionAdmitted(sessionState.generation),
+              let currentPeer = hostEffects.resolvePinnedPeerID(current) else { return false }
+        return currentPeer != peerID
+    }
+
+    private func hold(_ conn: NWConnection, peerID: String, data: Data) {
+        if heldNewcomer != nil { dropHeldNewcomer() }
+        Log.info("sessionInvite: another Mac waits for its invitation to be accepted peer=\(peerID)")
+        heldNewcomer = HeldNewcomer(conn: conn, peerID: peerID, buffer: data, reads: 1)
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled: Task { await self?.heldNewcomerEnded(conn) }
+            default: break
+            }
+        }
+        examineHeldNewcomer()
+    }
+
+    private func examineHeldNewcomer() {
+        guard var held = heldNewcomer, !held.judged else { return }
+        let messages = ControlFrameScan.messages(in: held.buffer)
+        if let invitation = messages.first(where: { ControlFrameScan.type(of: $0) == WireMessage.sessionInvite }) {
+            held.judged = true
+            heldNewcomer = held
+            hostEffects.judgeNewcomer(held.conn, held.peerID, invitation)
+            return
+        }
+        if let welcome = messages.first(where: { ControlFrameScan.type(of: $0) == WireMessage.welcome }),
+           let pv = ControlFrameScan.object(welcome)?["pv"] as? Int, pv < WireProtocol.sessionInvitationWireVersion {
+            // Too old to be asked: replaces the session only when a background attempt would be accepted.
+            if ReceiverSessionAdmission.admitsLegacySender(peerID: held.peerID) {
+                heldNewcomer = nil
+                adopt(held.conn, greeted: true, initialData: held.buffer)
+            } else {
+                dropHeldNewcomer()
+            }
+            return
+        }
+        guard held.reads < Self.heldNewcomerReadLimit, held.buffer.count < Self.heldNewcomerByteLimit else {
+            dropHeldNewcomer()
+            return
+        }
+        held.reads += 1
+        heldNewcomer = held
+        let conn = held.conn
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, isComplete, error in
+            Task { await self?.continueHeldNewcomer(conn, data: data, ended: isComplete || error != nil) }
+        }
+    }
+
+    private func continueHeldNewcomer(_ conn: NWConnection, data: Data?, ended: Bool) {
+        guard var held = heldNewcomer, held.conn === conn else { return }
+        if let data, !data.isEmpty {
+            held.buffer.append(data)
+            heldNewcomer = held
+        }
+        if ended { dropHeldNewcomer(); return }
+        examineHeldNewcomer()
+    }
+
+    private func heldNewcomerEnded(_ conn: NWConnection) {
+        guard let held = heldNewcomer, held.conn === conn else { return }
+        dropHeldNewcomer()
+    }
+
+    /// This device's answer to the waiting Mac's invitation: `accept`
+    /// replaces the session with it, anything else closes it.
+    func resolveHeldNewcomer(_ conn: NWConnection, accept: Bool) {
+        guard let held = heldNewcomer, held.conn === conn else {
+            if !accept { retire(conn) }
+            return
+        }
+        heldNewcomer = nil
+        guard accept, conn.state == .ready, hostEffects.resolvePinnedPeerID(conn) == held.peerID else {
+            retire(conn, error: accept ? .peerRevoked : nil)
+            if accept { hostEffects.newcomerDropped(conn) }
+            return
+        }
+        Log.info("sessionInvite: the waiting Mac was accepted — it replaces the session peer=\(held.peerID)")
+        adopt(conn, greeted: true, initialData: held.buffer)
+    }
+
+    private func dropHeldNewcomer(error: QUICApplicationError? = nil) {
+        guard let held = heldNewcomer else { return }
+        heldNewcomer = nil
+        retire(held.conn, error: error)
+        hostEffects.newcomerDropped(held.conn)
+    }
+
+    /// The session ended while another Mac waited: that Mac is judged as a
+    /// new connection now (everything it said is replayed), unless this
+    /// device ended the session itself.
+    private func promoteHeldNewcomerAfterLoss(reason: ReceiverSessionLossReason) {
+        guard let held = heldNewcomer else { return }
+        guard reason != .explicitDisconnect, held.conn.state == .ready else {
+            dropHeldNewcomer()
+            return
+        }
+        heldNewcomer = nil
+        Log.info("sessionInvite: the session ended — the waiting Mac is judged as a new connection peer=\(held.peerID)")
+        adopt(held.conn, greeted: true, initialData: held.buffer)
+    }
+
+    private static func sendPing(on conn: NWConnection) {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["type": "ping", "t": Date().timeIntervalSince1970 * 1000]) else { return }
+        var header = UInt32(payload.count).bigEndian
+        var frame = Data(bytes: &header, count: 4)
+        frame.append(payload)
+        conn.send(content: frame, completion: .contentProcessed { _ in })
     }
 
     private static func isFailed(_ state: NWConnection.State) -> Bool {
@@ -435,12 +586,16 @@ actor ReceiverPipelineActor {
         // Re-checked here, not only at the handshake: Forget may have
         // removed its pin while it waited, and an unpinned peer must never
         // replace the session.
-        guard hostEffects.resolvePinnedPeerID(pending) != nil else {
+        guard let peerID = hostEffects.resolvePinnedPeerID(pending) else {
             Log.info("reconnectDebug: parked candidate no longer resolves to a pinned peer — not adopting it")
             retire(pending, error: .peerRevoked)
             return
         }
         if let data, !data.isEmpty {
+            if holdsNewcomer(peerID: peerID) {
+                hold(pending, peerID: peerID, data: data)
+                return
+            }
             adopt(pending, greeted: true, initialData: data)
         } else {
             Log.info("ignored a stale TLS connection that closed at once"
@@ -782,6 +937,7 @@ actor ReceiverPipelineActor {
                         ? "Connection lost" : "Waiting for Mac")
                 }
             }
+            if !staleAfterIntent { promoteHeldNewcomerAfterLoss(reason: classified) }
         } else {
             recoveryPeerID = nil
             // The box, not `StreamReceiver` directly — this actor is one of
@@ -807,4 +963,31 @@ actor ReceiverPipelineActor {
         cancelReconnect()
         setConnected(false, reason: reason)
     }
+}
+
+/// Whole control messages in bytes read off a connection, which may end
+/// mid-frame (PROTOCOL.md 3 and 4): a 4-byte big-endian length, then a
+/// payload that is JSON when shorter than 32768 bytes, starts with `{` and
+/// holds no NUL. Video frames and a trailing partial frame are skipped.
+enum ControlFrameScan {
+    static func messages(in data: Data) -> [Data] {
+        let bytes = [UInt8](data)
+        var out: [Data] = []
+        var i = 0
+        while bytes.count - i >= 4 {
+            let length = Int(bytes[i]) << 24 | Int(bytes[i + 1]) << 16 | Int(bytes[i + 2]) << 8 | Int(bytes[i + 3])
+            let start = i + 4
+            guard bytes.count - start >= length else { break }
+            let payload = bytes[start..<start + length]
+            if length > 0, length < 32768, payload.first == 0x7B, !payload.contains(0) { out.append(Data(payload)) }
+            i = start + length
+        }
+        return out
+    }
+
+    static func object(_ payload: Data) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any]
+    }
+
+    static func type(of payload: Data) -> String? { object(payload)?["type"] as? String }
 }

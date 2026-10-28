@@ -2515,6 +2515,17 @@ final class StreamReceiver: ObservableObject {
     /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
         resetSessionNegotiation()
+        // F2: a Mac still waiting for its answer keeps its prompt across another
+        // connection's adoption; once it is the session itself, its replayed
+        // invitation is judged on the normal path.
+        if let held = heldNewcomerApproval {
+            if held.conn === conn {
+                heldNewcomerApproval = nil
+            } else {
+                _ = incomingSessionApprovals.begin(held.approval)
+                publishSessionNegotiation(awaitingSenderName: nil)
+            }
+        }
         mediaAdmissionGate.begin(generation: generation)
         resetStreamState()
         receivedVideoEnabled = true
@@ -4399,6 +4410,97 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Session invitations (pv 21)
 
+    /// F2: the prompt for another Mac that waits while this session is
+    /// admitted (`ReceiverPipelineActor.heldNewcomer`); answered on that
+    /// Mac's own connection.
+    private var heldNewcomerApproval: (conn: NWConnection, approval: PendingSessionApproval)?
+    /// An invitation this device already accepted while its Mac waited: when
+    /// that Mac's connection replaces the session, its replayed invitation is
+    /// admitted without asking again.
+    private var preApprovedInvitation: (id: String, peerID: String)?
+
+    /// The waiting Mac's invitation, by the same rules as one on the session
+    /// itself (minus continuation: it is another Mac). Only `accept` lets it
+    /// replace the session.
+    private func judgeHeldNewcomer(_ conn: NWConnection, peerID: String, payload: Data) {
+        let pipeline = self.pipeline
+        guard let object = ControlFrameScan.object(payload), let invitation = SessionInvitation(message: object),
+              isPeerPinned(peerID) else {
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            return
+        }
+        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent, role: .receiverRole)
+        let decision: IncomingSessionDecision
+        if policy == .block {
+            decision = .block
+        } else if invitation.initiator == .receiver, invitation.intent == .manual,
+                  let request = outgoingSessionRequest, Date() < request.until, request.peerID == peerID {
+            decision = .accept   // this device asked this Mac (left for the replay to consume)
+        } else {
+            decision = policy
+        }
+        Log.info("sessionInvite: waiting Mac id=\(invitation.id) peer=\(peerID) decision=\(decision)")
+        switch decision {
+        case .accept:
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: true) }
+        case .askUser:
+            let approval = PendingSessionApproval(
+                id: invitation.id, peerID: peerID, peerName: peerName(peerID),
+                localRole: .receiver, mode: invitation.mode, createdAt: Date())
+            heldNewcomerApproval = (conn, approval)
+            if incomingSessionApprovals.begin(approval).started {
+                let selfBox = self.selfBox
+                queue.asyncAfter(deadline: .now() + PendingSessionApprovals.timeout) {
+                    selfBox.currentOnQueue()?.resolveSessionApproval(id: approval.id, decision: .rejectForSession)
+                }
+            }
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .pending).message, on: conn)
+            publishSessionNegotiation(awaitingSenderName: nil)
+        case .decline, .block:
+            let result: SessionInvitationResult = decision == .block ? .blocked : .declined
+            sendControl(SessionInvitationResponse(id: invitation.id, result: result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+        }
+    }
+
+    /// The waiting Mac went away undecided: its prompt goes with it.
+    private func heldNewcomerDropped(_ conn: NWConnection) {
+        guard let held = heldNewcomerApproval, held.conn === conn else { return }
+        heldNewcomerApproval = nil
+        if incomingSessionApprovals.resolve(id: held.approval.id) != nil { publishSessionNegotiation(awaitingSenderName: nil) }
+    }
+
+    /// The prompt for the waiting Mac was answered (or timed out).
+    private func resolveHeldNewcomerApproval(_ approval: PendingSessionApproval, conn: NWConnection,
+                                              decision: ReceiverApprovalDecision) {
+        let pipeline = self.pipeline
+        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .receiverRole)
+        guard PendingApprovalRevalidation.isStillAuthorized(
+            isPinned: isPeerPinned(approval.peerID), currentPolicy: currentPolicy) else {
+            let result: SessionInvitationResult = currentPolicy == .blocked ? .blocked : .declined
+            sendControl(SessionInvitationResponse(id: approval.id, result: result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+            publishSessionNegotiation(awaitingSenderName: nil)
+            return
+        }
+        let plan = SessionApprovalPlan.plan(for: decision)
+        if let policy = plan.persistPolicy {
+            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID, role: .receiverRole)
+        }
+        if plan.accept {
+            // Answered on that Mac's connection once it is the session (the replayed invitation).
+            preApprovedInvitation = (approval.id, approval.peerID)
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: true) }
+        } else {
+            sendControl(SessionInvitationResponse(id: approval.id, result: plan.result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+        }
+        publishSessionNegotiation(awaitingSenderName: nil)
+    }
+
     /// This device's answer to a Mac's invitation, by its own incoming
     /// policy. Every path answers the Mac exactly once per invitation
     /// packet; a manual prompt answers `pending` first.
@@ -4420,6 +4522,10 @@ final class StreamReceiver: ObservableObject {
         } else if sessionAdmission.isContinuation(of: invitation, peerID: peerID) {
             // Same session after a reconnect or pipeline rebuild.
             decision = .accept
+        } else if let pre = preApprovedInvitation, pre.id == invitation.id, pre.peerID == peerID {
+            // Accepted while this Mac waited for the session it replaced (F2).
+            decision = .accept
+            preApprovedInvitation = nil
         } else if invitation.initiator == .receiver, invitation.intent == .manual,
                   let request = outgoingSessionRequest,
                   Date() < request.until, request.peerID == nil || request.peerID == peerID {
@@ -4467,6 +4573,11 @@ final class StreamReceiver: ObservableObject {
         // Stale (answered, withdrawn, timed out, or from a connection that
         // has since been replaced): never acts.
         guard let approval = incomingSessionApprovals.resolve(id: id) else { return }
+        if let held = heldNewcomerApproval, held.approval.id == id, held.approval.peerID == approval.peerID {
+            heldNewcomerApproval = nil
+            resolveHeldNewcomerApproval(approval, conn: held.conn, decision: decision)
+            return
+        }
         // The prompt captured authority when it was raised. Forget or Block
         // since then withdrew it (normally by removing the prompt, but the
         // pin or policy change can land first): the answer is inert — no
@@ -5387,6 +5498,15 @@ final class StreamReceiver: ObservableObject {
                         maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
                         advertisesAddresses: advertises)
                 }
+            },
+            sessionAdmitted: { [mediaAdmissionGate] generation in
+                mediaAdmissionGate.isAdmitted(generation: generation)
+            },
+            judgeNewcomer: { conn, peerID, payload in
+                queue.async { selfBox.currentOnQueue()?.judgeHeldNewcomer(conn, peerID: peerID, payload: payload) }
+            },
+            newcomerDropped: { conn in
+                queue.async { selfBox.currentOnQueue()?.heldNewcomerDropped(conn) }
             })
     }
 

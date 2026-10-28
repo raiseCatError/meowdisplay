@@ -74,7 +74,20 @@ over USB (dial a tunneled port), and one code path serves both transports.
 * A receiver serves **one sender at a time**. When a new inbound connection
   arrives while one is active, the receiver MUST adopt the new connection
   and drop the old one (the official receiver cancels the old connection
-  and resets its decoder state).
+  and resets its decoder state), with one exception: **make-before-break
+  for another Mac.** While the current session is admitted (6.9), a
+  connection whose certificate resolves to a *different* pinned peer does
+  not replace it on arrival. The receiver sends it `hello`, reads only its
+  `welcome`, `sessionInvite` and `sessionInviteCancel`, keeps it alive with
+  `ping`, and answers its invitation as usual (`pending` while it asks the
+  user). Only when that invitation is accepted does the new connection
+  replace the session; declined, blocked, withdrawn, silent or unanswered,
+  it is closed and the current session is untouched. If the current session
+  ends first (not by this device's own disconnect), the waiting connection
+  is judged as a new one. A pre-21 sender, which can't be asked, replaces
+  the session only when its automatic invitation would be accepted.
+  Reconnects from the same peer are never held. Senders need no change:
+  they already wait for `accepted` before streaming.
 
 ## 2. Transport bindings
 
@@ -1457,7 +1470,9 @@ Rules already stated elsewhere, gathered:
   (6.9).
 * First frame after (re)connect is an IDR (5.3).
 * Rotation is a re-`hello` on the live connection, not a reconnect (6.1).
-* A new inbound connection replaces the current one (section 1).
+* A new inbound connection replaces the current one, except another peer's
+  while the session is admitted, which waits for its invitation to be
+  accepted (section 1).
 * Silence over ~5 s is death (8.2); `sleeping`/`closing` are best-effort
   courtesies, absence of them means nothing (6.1).
 

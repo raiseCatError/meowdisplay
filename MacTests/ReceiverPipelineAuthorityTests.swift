@@ -236,6 +236,104 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
         await close(rig)
     }
 
+    // MARK: - Another Mac waits while the session is admitted (F2)
+
+    private static func frame(_ json: String) -> Data {
+        let body = Data(json.utf8)
+        var length = UInt32(body.count).bigEndian
+        var frame = Data(bytes: &length, count: 4)
+        frame.append(body)
+        return frame
+    }
+
+    private static let welcomeAndInvite = frame(#"{"type":"welcome","pv":22,"min":1}"#)
+        + frame(#"{"type":"sessionInvite","id":"b1","initiator":"sender","intent":"manual","mode":"extend","awaitingSender":false}"#)
+
+    /// A rig whose live session is admitted and whose other Mac has said its welcome and invitation.
+    private func makeWaitingMacRig() async throws -> ParkedCandidateRig {
+        let rig = try await makeParkedCandidateRig()
+        rig.host.admitSession()
+        rig.candidateMacSide.send(content: Self.welcomeAndInvite, completion: .contentProcessed { _ in })
+        let judged = await eventually { rig.host.judged == ["mac-A"] }
+        XCTAssertTrue(judged, "the waiting Mac's invitation must reach the host")
+        return rig
+    }
+
+    func testAnotherMacWaitsWhileTheSessionIsAdmittedAndReplacesItOnlyWhenAccepted() async throws {
+        let rig = try await makeWaitingMacRig()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        var current = await rig.pipeline.connection
+        XCTAssertTrue(current === rig.incumbent, "the admitted session stays while the other Mac waits")
+        XCTAssertNotEqual(rig.candidate.state, .cancelled)
+
+        await rig.pipeline.resolveHeldNewcomer(rig.candidate, accept: true)
+        let adopted = await eventually { await rig.pipeline.connection === rig.candidate }
+        XCTAssertTrue(adopted)
+        current = await rig.pipeline.connection
+        XCTAssertTrue(current === rig.candidate)
+        await close(rig)
+    }
+
+    func testADeclinedWaitingMacIsClosedAndTheSessionCarriesOn() async throws {
+        let rig = try await makeWaitingMacRig()
+        await rig.pipeline.resolveHeldNewcomer(rig.candidate, accept: false)
+        let cancelled = await eventually { rig.candidate.state == .cancelled }
+        XCTAssertTrue(cancelled)
+        let current = await rig.pipeline.connection
+        XCTAssertTrue(current === rig.incumbent)
+        let phase = await rig.pipeline.currentPhase
+        XCTAssertEqual(phase, .connected)
+        await close(rig)
+    }
+
+    func testBlockingTheWaitingMacClosesOnlyIt() async throws {
+        let rig = try await makeWaitingMacRig()
+        await rig.pipeline.revokePeer("mac-A", trustRemoved: false)
+        let cancelled = await eventually { rig.candidate.state == .cancelled }
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(rig.host.dropped, 1, "its prompt goes too")
+        let current = await rig.pipeline.connection
+        XCTAssertTrue(current === rig.incumbent)
+        await close(rig)
+    }
+
+    func testWhenTheSessionIsLostTheWaitingMacIsJudgedAsANewConnection() async throws {
+        let rig = try await makeWaitingMacRig()
+        await rig.pipeline.disconnectCurrentConnection(reason: .transportLost)
+        let adopted = await eventually { await rig.pipeline.connection === rig.candidate }
+        XCTAssertTrue(adopted, "the waiting Mac replays its invitation as the session")
+        await close(rig)
+    }
+
+    func testEndingTheSessionHereClosesTheWaitingMacToo() async throws {
+        let rig = try await makeWaitingMacRig()
+        await rig.pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+        let cancelled = await eventually { rig.candidate.state == .cancelled }
+        XCTAssertTrue(cancelled)
+        await close(rig)
+    }
+
+    func testTheSameMacReconnectingIsNeverHeld() async throws {
+        let rig = try await makeParkedCandidateRig(candidatePeer: "mac-B")
+        rig.host.admitSession()
+        rig.candidateMacSide.send(content: Self.welcomeAndInvite, completion: .contentProcessed { _ in })
+        let adopted = await eventually { await rig.pipeline.connection === rig.candidate }
+        XCTAssertTrue(adopted)
+        XCTAssertTrue(rig.host.judged.isEmpty)
+        await close(rig)
+    }
+
+    func testControlFrameScanSkipsVideoAndATrailingPartialFrame() {
+        var bytes = Self.frame(#"{"type":"welcome","pv":22}"#)
+        var videoLength = UInt32(6).bigEndian
+        bytes.append(Data(bytes: &videoLength, count: 4))
+        bytes.append(contentsOf: [0, 0, 0, 1, 0x65, 0x88])
+        bytes.append(Self.frame(#"{"type":"sessionInvite","id":"x"}"#))
+        bytes.append(Self.frame(#"{"type":"ping"}"#).prefix(7))
+        XCTAssertEqual(ControlFrameScan.messages(in: bytes).compactMap(ControlFrameScan.type(of:)), ["welcome", "sessionInvite"])
+        XCTAssertTrue(ControlFrameScan.messages(in: Data([0, 0])).isEmpty)
+    }
+
     // MARK: - Helpers
 
     /// A live session with `peerID`, as after its connection became ready.
@@ -279,7 +377,7 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
     /// mac-B's live session (the incumbent) plus mac-A's newcomer parked
     /// behind it, ready and waiting to prove itself — over loopback TCP,
     /// with the listener's side of each connection standing in for the Mac.
-    private func makeParkedCandidateRig() async throws -> ParkedCandidateRig {
+    private func makeParkedCandidateRig(candidatePeer: String = "mac-A") async throws -> ParkedCandidateRig {
         let host = PipelineTestHost()
         let pipeline = host.makePipeline()
         let accepted = OSAllocatedUnfairLock<[NWConnection]>(initialState: [])
@@ -305,7 +403,7 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
         XCTAssertTrue(connected, "the incumbent never became the live session")
 
         let candidate = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
-        host.pin(candidate, as: "mac-A")
+        host.pin(candidate, as: candidatePeer)
         await pipeline.handleIncomingConnection(candidate)
         let parked = await eventually {
             candidate.state == .ready && accepted.withLock { $0.count } == 2
@@ -335,6 +433,15 @@ private final class PipelineTestHost: Sendable {
     let context = ReconnectContext()
     private let recordedKnocks = OSAllocatedUnfairLock<[PipelineTestKnock]>(initialState: [])
     private let pins = OSAllocatedUnfairLock<[ObjectIdentifier: String]>(initialState: [:])
+    private let admittedState = OSAllocatedUnfairLock(initialState: false)
+    private let judgedState = OSAllocatedUnfairLock<[String]>(initialState: [])
+    private let droppedState = OSAllocatedUnfairLock(initialState: 0)
+
+    /// The live session counts as admitted from now on (F2 holds another Mac).
+    func admitSession() { admittedState.withLock { $0 = true } }
+    /// Peers whose waiting connection's invitation reached the host.
+    var judged: [String] { judgedState.withLock { $0 } }
+    var dropped: Int { droppedState.withLock { $0 } }
 
     var knocks: [PipelineTestKnock] { recordedKnocks.withLock { $0 } }
 
@@ -401,7 +508,12 @@ private final class PipelineTestHost: Sendable {
             sendHello: { _ in },
             onPathUpdate: { _, _ in },
             sendPing: {},
-            checkAddressChangeAndSendHello: { _ in })
+            checkAddressChangeAndSendHello: { _ in },
+            sessionAdmitted: { [admittedState] _ in admittedState.withLock { $0 } },
+            judgeNewcomer: { [judgedState] _, peerID, payload in
+                if ControlFrameScan.type(of: payload) == WireMessage.sessionInvite { judgedState.withLock { $0.append(peerID) } }
+            },
+            newcomerDropped: { [droppedState] _ in droppedState.withLock { $0 += 1 } })
         let framePipeline = ReceiverFramePipeline(outputEffects: .init(
             controlMessage: { _ in },
             audioPayload: { _ in },
