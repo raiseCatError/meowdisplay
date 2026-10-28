@@ -9,6 +9,8 @@ import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.WHinge
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.android.receiver.workspace.StagePeekOverlay
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowModePrompt
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowOverview
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowRail
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceChrome
@@ -85,6 +87,8 @@ import com.raisecaterror.meowdisplay.core.controls.ReceiverInputPrompt
 import com.raisecaterror.meowdisplay.core.controls.DirectTouchStyle
 import com.raisecaterror.meowdisplay.core.controls.PointerInputMode
 import com.raisecaterror.meowdisplay.core.controls.SmartTouchFeedback
+import com.raisecaterror.meowdisplay.core.controls.StagePeekEdge
+import com.raisecaterror.meowdisplay.core.controls.WindowSwitcherStyle
 import kotlin.math.roundToInt
 
 /** Everything the screen learned about the window this frame, in dp. */
@@ -143,6 +147,9 @@ fun ReceiverScreen(
     var occupied by remember { mutableStateOf(emptyList<CGRect>()) }
     // The one-time Natural Touch hint's frame: like the controls, taps on it never reach the Mac.
     var hintFrame by remember { mutableStateOf<CGRect?>(null) }
+    // Stage Peek's edge strip and the "Switch to Window view?" offer are controls too: the rest of the screen avoids them.
+    var stripFrame by remember { mutableStateOf<CGRect?>(null) }
+    var promptFrame by remember { mutableStateOf<CGRect?>(null) }
     val folds = rememberFoldRegions()
 
     LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
@@ -207,8 +214,8 @@ fun ReceiverScreen(
         )
         controller.store.isExpanded = window.expanded
         val windowRect = CGRect(0.0, 0.0, widthDp, heightDp)
-        LaunchedEffect(window, canvas, occupied, hintFrame, decoded, state.videoEnabled, prefs.inputMode) {
-            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame), folds)
+        LaunchedEffect(window, canvas, occupied, hintFrame, stripFrame, promptFrame, decoded, state.videoEnabled, prefs.inputMode) {
+            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame, stripFrame, promptFrame), folds)
         }
 
         val transform = state.transform
@@ -278,11 +285,34 @@ fun ReceiverScreen(
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
             }
             WorkspaceChrome(workspace, transform, state.inputAllowed, avoid = occupied)
-            if (wsUi.available) WindowRail(workspace)
+            if (wsUi.available && prefs.windowSwitcher == WindowSwitcherStyle.Rail) WindowRail(workspace)
         }
 
         val actions = remember(controller) { controller.overlayActions(onOpenSettings, onOccupied = { occupied = it }, onCanvas = { canvas = it }) }
         overlay(window, actions, state.inputResetGeneration)
+
+        // Stage Peek: Window mode only (in Mirror/Extend the edge belongs to the Mac), above the controls.
+        // Only its edge strip takes touches until it opens; the picture underneath never moves.
+        if (workspace != null && immersive && prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) {
+            val wsUi by workspace.ui.collectAsState()
+            val peekFrame = canvas ?: windowRect
+            val peekSafe = CGRect(
+                insets.leading, insets.top, widthDp - insets.leading - insets.trailing, heightDp - insets.top - insets.bottom,
+            ).intersection(peekFrame).offsetBy(-peekFrame.minX, -peekFrame.minY)
+            if (wsUi.windowMode && !peekSafe.isNull && !peekSafe.isEmpty) {
+                StagePeekOverlay(
+                    controller = workspace,
+                    edge = prefs.stagePeekEdge,
+                    frame = peekFrame,
+                    safe = peekSafe,
+                    avoiding = (occupied + folds).map { it.offsetBy(-peekFrame.minX, -peekFrame.minY) },
+                    hapticsEnabled = prefs.hapticsEnabled,
+                    isExpanded = window.expanded,
+                    onFullDesktop = { onMode(workspace.fullDisplayMode) },
+                    onStripFrame = { stripFrame = it },
+                )
+            }
+        }
 
         InputPromptCapsule(
             kind = state.prompt,
@@ -301,6 +331,24 @@ fun ReceiverScreen(
                     },
             )
             DisposableEffect(Unit) { onDispose { hintFrame = null } }
+        }
+        // The full-desktop view offers Window view once per launch, never forced.
+        if (workspace != null && immersive) {
+            val wsUi by workspace.ui.collectAsState()
+            val answered by workspace.windowPromptAnswered
+            if (wsUi.available && !wsUi.windowMode && !answered && !wsUi.overviewOpen) {
+                val top = maxOf(insets.top + 12, (hintFrame?.maxY ?: 0.0) + 8, (workspace.railHandle.value?.maxY ?: 0.0) + 8)
+                WindowModePrompt(
+                    onYes = { workspace.windowPromptAnswered.value = true; onMode(DisplayMode.Window) },
+                    onNo = { workspace.windowPromptAnswered.value = true },
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = top.dp)
+                        .onGloballyPositioned { c ->
+                            val b = c.boundsInRoot(); val d = density.density.toDouble()
+                            promptFrame = CGRect(b.left / d, b.top / d, b.width / d, b.height / d)
+                        },
+                )
+                DisposableEffect(Unit) { onDispose { promptFrame = null } }
+            }
         }
         if (showPerformance) {
             com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(

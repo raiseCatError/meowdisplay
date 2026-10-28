@@ -64,6 +64,8 @@ import com.raisecaterror.meowdisplay.core.controls.PointerInputMode
 import com.raisecaterror.meowdisplay.core.controls.ReceiverControlPreferences
 import com.raisecaterror.meowdisplay.core.controls.ReceiverGestureTarget
 import com.raisecaterror.meowdisplay.core.controls.ShareCodeResult
+import com.raisecaterror.meowdisplay.core.controls.StagePeekEdge
+import com.raisecaterror.meowdisplay.core.controls.WindowSwitcherStyle
 import com.raisecaterror.meowdisplay.core.controls.activeCustomLayout
 import com.raisecaterror.meowdisplay.core.controls.appGestureCommandDisplayText
 import com.raisecaterror.meowdisplay.core.controls.canCreateCustomLayout
@@ -268,6 +270,19 @@ private fun SettingsPageContent(
             if (onStartPictureInPicture != null && prefs.pictureInPictureEnabled && media.ui.collectAsState().value.admitted) {
                 OutlinedButton(onClick = { onDismiss(); onStartPictureInPicture() }) { Text("Start Picture in Picture") }
             }
+            Section("Window Switcher")
+            Choice("Window Switcher", WindowSwitcherStyle.entries, prefs.windowSwitcher, { if (it == WindowSwitcherStyle.StagePeek) "Stage Peek" else "Rail" }) { style ->
+                set { it.windowSwitcher = style }
+            }
+            if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) {
+                Choice("Stage Peek Edge", StagePeekEdge.entries, prefs.stagePeekEdge, { if (it == StagePeekEdge.Left) "Left" else "Right" }) { edge ->
+                    set { it.stagePeekEdge = edge }
+                }
+            }
+            Caption(
+                (if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) "Touch and hold the screen edge to see your windows. Tap one to switch."
+                else "A compact strip of windows along one edge.") + " Used in Window mode."
+            )
         }
         SettingsPage.Audio -> {
             Toggle("Mac Audio", prefs.audioPreferred) { on ->

@@ -57,6 +57,8 @@ data class WorkspaceUi(
     /** The overview is choosing a window for this tile. */
     val replacingTile: String? = null,
     val railExpanded: Boolean = false,
+    /** Stage Peek is open or about to open: keep the catalog and thumbnails fresh. Changes nothing on the Mac. */
+    val stagePeekOpen: Boolean = false,
     val railEdge: RailEdge = RailEdge.Top,
     /** Tile handles and dividers shown for moving and resizing. */
     val arranging: Boolean = false,
@@ -67,6 +69,11 @@ data class WorkspaceUi(
 ) {
     val active: String? get() = remote?.active
     fun tileState(id: String) = remote?.tiles?.firstOrNull { it.id == id }
+    /** The window in the tile a switcher replaces: the active tile, or the only one. */
+    val currentWindowID: Long? get() = (active ?: layout.orderedTileIDs.singleOrNull())?.let { layout.tiles[it]?.source?.windowID }
+    val canAddTile: Boolean get() = layout.tiles.size < capacity
+    /** A switcher is showing windows, so the catalog and thumbnails refresh. */
+    val wantsCatalog: Boolean get() = overviewOpen || railExpanded || stagePeekOpen
 }
 
 /**
@@ -85,6 +92,13 @@ class WorkspaceController(context: Context, private val media: MediaController) 
     /** Where the collapsed rail handle is (window dp), so tile pills stay clear of it. UI only. */
     val railHandle = androidx.compose.runtime.mutableStateOf<com.raisecaterror.meowdisplay.core.controls.CGRect?>(null)
 
+    /** The full-desktop "Switch to Window view?" offer was answered since the app started (UI only: asked once per launch). */
+    val windowPromptAnswered = androidx.compose.runtime.mutableStateOf(false)
+
+    /** The Mirror or Extend mode the Mac last confirmed this session: what Stage Peek's Full Desktop card returns to. */
+    var fullDisplayMode = DisplayMode.Extend
+        private set
+
     private val thumbs = MutableStateFlow<Map<Long, ImageBitmap>>(emptyMap())
     val thumbnails: StateFlow<Map<Long, ImageBitmap>> = thumbs.asStateFlow()
     private val iconState = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
@@ -102,9 +116,9 @@ class WorkspaceController(context: Context, private val media: MediaController) 
     private val refreshRunnable = object : Runnable {
         override fun run() {
             val s = state.value
-            if (!s.overviewOpen && !s.railExpanded) return
+            if (!s.wantsCatalog) return
             requestCatalog()
-            main.postDelayed(this, if (s.overviewOpen) 3_000 else 5_000)
+            main.postDelayed(this, if (s.overviewOpen || s.stagePeekOpen) 3_000 else 5_000)
         }
     }
 
@@ -119,12 +133,14 @@ class WorkspaceController(context: Context, private val media: MediaController) 
             is SessionEvent.MacFeatures -> state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
             is SessionEvent.DisplayModeConfirmed -> {
                 val window = event.mode == DisplayMode.Window
+                if (!window) fullDisplayMode = event.mode
                 state.update { it.copy(windowMode = window, remote = if (window) it.remote else null) }
                 if (window) { catalogAwaitingSend = true; requestCatalog() }
             }
             is SessionEvent.Disconnected, SessionEvent.AdmissionWithdrawn -> {
                 main.removeCallbacks(sendRunnable)
-                state.update { it.copy(windowMode = false, remote = null, available = false, arranging = false) }
+                fullDisplayMode = DisplayMode.Extend
+                state.update { it.copy(windowMode = false, remote = null, available = false, arranging = false, stagePeekOpen = false) }
             }
             is SessionEvent.Control -> when (event.type) {
                 WorkspaceWire.CATALOG -> onCatalog(WindowCatalog.parse(event.body))
@@ -166,11 +182,11 @@ class WorkspaceController(context: Context, private val media: MediaController) 
 
     private fun requestThumbnails(catalog: WindowCatalog) {
         val s = state.value
-        if (!s.overviewOpen && !s.railExpanded) return
+        if (!s.wantsCatalog) return
         val now = SystemClock.uptimeMillis()
         val ids = catalog.windows.filter { now - (thumbAge[it.id] ?: 0) > 8_000 }.map { it.id }.take(24)
         val icons = catalog.apps.map { it.bundleID }.filter { it !in iconState.value }.take(32)
-        if (ids.isNotEmpty() || icons.isNotEmpty()) media.session.sendWorkspace(WorkspaceWire.thumbnailRequest(ids, 240, icons))
+        if (ids.isNotEmpty() || icons.isNotEmpty()) media.session.sendWorkspace(WorkspaceWire.thumbnailRequest(ids, if (s.stagePeekOpen) 320 else 240, icons))
     }
 
     private fun onThumbnail(t: WindowThumbnail) {
@@ -300,7 +316,7 @@ class WorkspaceController(context: Context, private val media: MediaController) 
         val source = WSource(host, window.id, window.generation, window.bundleID)
         val replacing = state.value.replacingTile
         closeOverview()
-        state.update { it.copy(railExpanded = false) }
+        state.update { it.copy(railExpanded = false, stagePeekOpen = false) }
         if (!state.value.windowMode) media.session.requestDisplayMode(DisplayMode.Window)
         edit { layout ->
             val target = replacing ?: if (asNewTile) null else (state.value.active ?: layout.orderedTileIDs.singleOrNull())
@@ -348,6 +364,13 @@ class WorkspaceController(context: Context, private val media: MediaController) 
     fun setRailExpanded(expanded: Boolean) {
         state.update { it.copy(railExpanded = expanded) }
         if (expanded) startRefreshing()
+    }
+
+    /** Stage Peek is arming or open (browsing only: nothing is sent to change the Mac). */
+    fun setStagePeekOpen(open: Boolean) {
+        if (state.value.stagePeekOpen == open) return
+        state.update { it.copy(stagePeekOpen = open) }
+        if (open) startRefreshing()
     }
 
     fun setRailEdge(edge: RailEdge) {
