@@ -261,4 +261,72 @@ class ReceiverSurfaceInputTest {
         assertFalse(surface.threeFingerHoldDue(1.6))
         three(SurfaceTouchPhase.Ended, 1.7)
     }
+
+    // MARK: Natural Touch through a real, granted session
+
+    private fun natural(allowsInput: Boolean = true) =
+        surface.updateConfig(surface.config.copy(allowsInput = allowsInput, touchStyle = DirectTouchStyle.Natural))
+
+    private fun pointerActions() = link.sent.filter { it["type"]!!.jsonPrimitive.content == "pointer" }
+        .map { it["action"]!!.jsonPrimitive.content + (it["button"]?.jsonPrimitive?.content?.let { b -> " $b" } ?: "") }
+
+    @Test
+    fun naturalTapClicksOnLiftAndASwipeScrollsWithoutAnyButton() {
+        natural()
+        tap(500.0, 300.0, 1.0)
+        assertEquals(listOf("move", "down left", "up left"), pointerActions())
+        val before = link.sent.size
+        surface.touches(SurfaceTouchPhase.Began, listOf(finger(1, 500.0, 300.0)), 3.0)
+        surface.touches(SurfaceTouchPhase.Moved, listOf(finger(1, 500.0, 360.0)), 3.03)
+        surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, 500.0, 360.0)), 3.05)
+        val after = link.sent.drop(before).map { it["type"]!!.jsonPrimitive.content }
+        assertTrue(after.contains("scroll"))
+        assertFalse("a swipe never presses a button", link.sent.drop(before).any { it["action"]?.jsonPrimitive?.content == "down" })
+    }
+
+    @Test
+    fun naturalViewOnlySendsNothingForTapsSwipesDragsOrLongPresses() {
+        natural(allowsInput = false)
+        val before = inputTypes().size
+        tap(500.0, 300.0, 1.0)
+        surface.touches(SurfaceTouchPhase.Began, listOf(finger(1, 500.0, 300.0)), 2.0)
+        surface.touches(SurfaceTouchPhase.Moved, listOf(finger(1, 500.0, 380.0)), 2.03)
+        surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, 500.0, 380.0)), 2.05)
+        surface.touches(SurfaceTouchPhase.Began, listOf(finger(1, 500.0, 300.0)), 3.0)
+        surface.poll(3.0 + PointerGestureConfig.naturalLongPressDelay + 0.01)
+        surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, 500.0, 300.0)), 4.0)
+        assertEquals(before, inputTypes().size)
+    }
+
+    @Test
+    fun revokingInputMidNaturalDragForgetsTheButtonAndSendsNothingMore() {
+        natural()
+        surface.touches(SurfaceTouchPhase.Began, listOf(finger(1, 500.0, 300.0)), 1.0)
+        surface.touches(SurfaceTouchPhase.Moved, listOf(finger(1, 560.0, 300.0)), 1.3)
+        assertEquals(setOf("left"), session.input.heldButtonNames())
+        say("""{"type":"allowInputState","allowed":false,"state":"off"}""")
+        assertFalse(session.input.holdsInput)
+        val count = link.sent.size
+        surface.touches(SurfaceTouchPhase.Moved, listOf(finger(1, 600.0, 320.0)), 1.4)
+        surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, 600.0, 320.0)), 1.5)
+        surface.poll(3.0)
+        assertEquals(count, link.sent.size)
+    }
+
+    @Test
+    fun switchingToClassicMidNaturalDragReleasesTheButtonWithoutTouchingTheSession() {
+        natural()
+        surface.touches(SurfaceTouchPhase.Began, listOf(finger(1, 500.0, 300.0)), 1.0)
+        surface.touches(SurfaceTouchPhase.Moved, listOf(finger(1, 560.0, 300.0)), 1.3)
+        assertEquals(setOf("left"), session.input.heldButtonNames())
+        surface.updateConfig(surface.config.copy(touchStyle = DirectTouchStyle.Classic))
+        assertFalse(session.input.holdsInput)
+        assertEquals("up left", pointerActions().last())
+        surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, 560.0, 300.0)), 1.4)
+        // The session and grant are untouched: the next (Classic) tap still clicks.
+        val clicks = pointerActions().count { it == "down left" }
+        tap(800.0, 300.0, 2.0)
+        surface.poll(3.0)
+        assertEquals(clicks + 1, pointerActions().count { it == "down left" })
+    }
 }

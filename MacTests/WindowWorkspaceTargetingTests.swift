@@ -294,3 +294,102 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(fill.width, 640)
     }
 }
+
+// MARK: - Natural Touch in Window mode
+
+/// Natural Touch commands from the real engine, mapped the way `InputInjector`
+/// maps them in Window mode: moves resolve as hover/drag, buttons and scrolls
+/// at the workspace pointer.
+extension WindowWorkspaceTargetingTests {
+    private func naturalTiles(rotationB: WorkspaceRotation = .none) -> WorkspaceInputTargeting {
+        var t = WorkspaceInputTargeting()
+        t.canvas = CGSize(width: 2000, height: 1000)
+        t.windowFrames = [10: CGRect(x: 0, y: 0, width: 1000, height: 1000), 11: CGRect(x: 3000, y: 100, width: 1000, height: 1000)]
+        _ = t.update(assignments: [
+            WorkspaceTileAssignment(tileID: "a", rect: .init(x: 0, y: 0, width: 0.5, height: 1), windowID: 10, windowGeneration: 1,
+                                    pid: 100, bundleID: "a", follow: .window, rotation: .none, fit: .fit, assignmentGeneration: 1),
+            WorkspaceTileAssignment(tileID: "b", rect: .init(x: 0.5, y: 0, width: 0.5, height: 1), windowID: 11, windowGeneration: 1,
+                                    pid: 200, bundleID: "b", follow: .window, rotation: rotationB, fit: .fit, assignmentGeneration: 2),
+        ])
+        return t
+    }
+
+    private enum Routed: Equatable { case hover(String?), down(String), up(String), scroll(String) }
+
+    private func route(_ commands: [PointerCommand], _ t: inout WorkspaceInputTargeting) -> [Routed] {
+        var out: [Routed] = []
+        for c in commands {
+            switch c {
+            case .moveAbsolute(let x, let y): out.append(.hover(t.resolve(.move, at: .init(x: x, y: y))?.tileID))
+            case .mouseDown: if let r = t.resolveAtPointer(.down) { out.append(.down(r.tileID)) }
+            case .mouseUp: if let r = t.resolveAtPointer(.up) { out.append(.up(r.tileID)) }
+            case .scroll: if let r = t.resolveAtPointer(.scroll) { out.append(.scroll(r.tileID)) }
+            default: break
+            }
+        }
+        return out
+    }
+
+    private func touch(_ e: PointerGestureEngine, _ phase: PointerTouchSample.Phase, _ x: Double, _ y: Double, _ time: Double) -> [PointerCommand] {
+        // Canvas 2000x1000 shown 1:1 in view points.
+        e.handle(PointerTouchSample(id: AnyHashable(1), phase: phase, viewPoint: CGPoint(x: x, y: y),
+                                    normalized: CGPoint(x: x / 2000, y: y / 1000), time: time))
+    }
+
+    func testNaturalScrollStaysInTheTouchedTileEvenWhenInactiveAndTheFingerCrossesTiles() {
+        var t = naturalTiles()
+        _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5)); _ = t.resolve(.up, at: .init(x: 0.25, y: 0.5))
+        XCTAssertEqual(t.activeTile, "a")
+        let e = PointerGestureEngine(); e.setTouchStyle(.natural)
+        var commands = touch(e, .began, 1500, 500, 0)
+        commands += touch(e, .moved, 1500, 540, 0.03)
+        commands += touch(e, .moved, 900, 600, 0.06)   // the finger is now over tile a
+        commands += touch(e, .ended, 900, 600, 0.08)
+        let routed = route(commands, &t)
+        XCTAssertEqual(routed.first, .hover(nil), "parking the pointer over an inactive tile moves nothing on the Mac")
+        XCTAssertEqual(routed.filter { if case .scroll = $0 { return true }; return false }, [.scroll("b"), .scroll("b")],
+                       "every scroll of the gesture goes to the tile it started in")
+        XCTAssertEqual(t.activeTile, "a", "scrolling never changes the active tile or keyboard focus")
+        XCTAssertNil(t.boundTile)
+    }
+
+    func testNaturalPressDragIsBoundToItsStartTileAndPressesAtTheTouchDownPoint() {
+        var t = naturalTiles()
+        let e = PointerGestureEngine(); e.setTouchStyle(.natural)
+        var commands = touch(e, .began, 500, 500, 0)
+        commands += touch(e, .moved, 1500, 500, 0.3)    // rested, then moved into tile b
+        commands += touch(e, .ended, 1500, 500, 0.4)
+        guard case .moveAbsolute(let px, _) = commands[0] else { return XCTFail("press point first") }
+        XCTAssertEqual(px, 0.25, accuracy: 1e-9)
+        var downPoint: CGPoint?
+        var probe = t
+        _ = probe.resolve(.move, at: .init(x: 0.25, y: 0.5)); downPoint = probe.resolveAtPointer(.down)?.point
+        XCTAssertEqual(downPoint?.x ?? -1, 500, accuracy: 1e-6, "the press lands under the touch-down point")
+        XCTAssertEqual(route(commands, &t), [.hover(nil), .down("a"), .hover("a"), .up("a")])
+        XCTAssertNil(t.boundTile, "released on lift")
+    }
+
+    func testNaturalLongPressRightClicksInTheTouchedTileAndActivatesIt() {
+        var t = naturalTiles()
+        let e = PointerGestureEngine(); e.setTouchStyle(.natural)
+        var commands = touch(e, .began, 1500, 500, 0)
+        commands += e.poll(now: PointerGestureConfig.naturalLongPressDelay)
+        commands += touch(e, .ended, 1500, 500, 1)
+        XCTAssertEqual(route(commands, &t), [.hover(nil), .down("b"), .up("b")])
+        XCTAssertEqual(t.activeTile, "b")
+    }
+
+    func testNaturalScrollInRotatedTilesFollowsTheWindowsAxes() {
+        for rotation in WorkspaceRotation.allCases {
+            var t = naturalTiles(rotationB: rotation)
+            _ = t.resolve(.move, at: .init(x: 0.75, y: 0.5))   // pointer parked in tile b
+            let v = t.sourceVector(dx: 0, dy: 40)               // a downward swipe on the canvas
+            switch rotation {
+            case .none: XCTAssertTrue(abs(v.dx) < 1e-6 && v.dy > 0, "\(rotation) \(v)")
+            case .half: XCTAssertTrue(abs(v.dx) < 1e-6 && v.dy < 0, "\(rotation) \(v)")
+            case .quarter, .threeQuarter: XCTAssertTrue(abs(v.dy) < 1e-6 && abs(v.dx) > 0, "\(rotation) \(v)")
+            }
+            XCTAssertEqual(t.resolveAtPointer(.scroll)?.tileID, "b", "\(rotation)")
+        }
+    }
+}
