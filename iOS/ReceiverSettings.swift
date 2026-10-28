@@ -1157,7 +1157,7 @@ private struct ConnectionSettingsPage: View {
                       systemImage: "wifi")
                 Label("Rotate the \(deviceKind) for a vertical second monitor.",
                       systemImage: "rectangle.portrait.rotate")
-                Label("Touch: tap to click, drag to drag, two-finger pan to scroll.",
+                Label("Touch: tap to click, swipe to scroll, press and move to drag, hold to right-click.",
                       systemImage: "hand.tap")
             } header: {
                 Text("How to connect")
