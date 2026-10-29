@@ -297,6 +297,8 @@ targets:
       - Shared/StreamReceiver.swift
       - Shared/WorkspaceClient.swift
       - Shared/RemoteFiles.swift
+      - Shared/RemoteFilesActions.swift
+      - Shared/RemoteTransferQueue.swift
       - Shared/ControlChunks.swift
       - Shared/AppMenu.swift
       - Shared/WorkspaceBrowse.swift

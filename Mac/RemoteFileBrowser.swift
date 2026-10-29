@@ -766,7 +766,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
     private func uploadEnd(_ obj: [String: Any], req: Int?) {
         guard let x = obj["x"] as? Int else { return reply("uploadEnd", req: req, error: "badRequest") }
         do {
-            let name = try transfers.finishUpload(x)
+            let digest = (obj["sha"] as? String).flatMap { $0.count >= 16 && $0.count <= 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil }
+            let name = try transfers.finishUpload(x, digest: digest)
             Log.info("files: upload finished")
             replyOK("uploadEnd", req: req, ["x": x, "name": name])
         } catch let e as RemoteFileTransfers.TransferError {

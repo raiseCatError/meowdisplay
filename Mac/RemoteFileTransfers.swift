@@ -178,12 +178,12 @@ final class RemoteFileTransfers: @unchecked Sendable {
     }
 
     /// Checks size and digest, then puts the file in place (never silently over another).
-    func finishUpload(_ id: Int) throws -> String {
+    func finishUpload(_ id: Int, digest: String? = nil) throws -> String {
         guard let u = uploads.removeValue(forKey: id) else { throw TransferError(code: "noTransfer") }
         try? u.handle.synchronize()
         try? u.handle.close()
         guard u.written == u.size else { discard(u); throw TransferError(code: "short") }
-        if let want = u.expectedDigest {
+        if let want = digest ?? u.expectedDigest {
             let got = u.hasher.finalize().map { String(format: "%02x", $0) }.joined()
             guard got.hasPrefix(want.lowercased()), want.count >= 16 else { discard(u); throw TransferError(code: "digest") }
         }

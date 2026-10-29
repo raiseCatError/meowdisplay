@@ -1508,8 +1508,11 @@ Mac, on its own screen.
   * `uploadBegin` (`root`, `path` folder, `name`, `size`, `conflict`:
     `ask` | `rename` | `replace` | `skip`, optional `sha` hex prefix ≥ 16 of
     the file's SHA-256, `mod`): upload; `replace` also needs delete. Then
-    `uploadData` (`x`, `o`, `d` base64 of ≤ 96 KiB, in order) and
-    `uploadEnd` (`x`), or `uploadCancel` (`x`). At most 4 at once.
+    `uploadData` (`x`, `o`, `d` base64 of ≤ 22000 bytes so each message
+    stays under the control limit; the Mac refuses parts over 96 KiB; in
+    order, a window of acknowledged parts) and
+    `uploadEnd` (`x`, optional `sha`, checked like the one at the start), or
+    `uploadCancel` (`x`). At most 4 at once.
   * `mkdir` (`root`, `path`, `name`, `conflict`; `skip` uses an existing
     folder): upload.
   * `rename` (`root`, `path`, `name`), `copy` / `move` (`root`, `path`,

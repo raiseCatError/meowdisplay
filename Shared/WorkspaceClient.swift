@@ -190,7 +190,8 @@ enum WorkspaceEvent: Sendable {
     }
 }
 
-/// Hands workspace events from the network queue to the main actor.
+/// Hands workspace events from the network queue to the main actor, in the order they came
+/// (Remote Finder's file data arrives in ordered parts).
 final class WorkspaceEventSink: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: (@MainActor @Sendable (WorkspaceEvent) -> Void)?
@@ -202,7 +203,7 @@ final class WorkspaceEventSink: @unchecked Sendable {
     func emit(_ event: WorkspaceEvent) {
         lock.lock(); let handler = self.handler; lock.unlock()
         guard let handler else { return }
-        Task { @MainActor in handler(event) }
+        DispatchQueue.main.async { MainActor.assumeIsolated { handler(event) } }
     }
 }
 
@@ -423,6 +424,7 @@ final class WorkspaceModel: ObservableObject {
         menus = AppMenuModel(defaults: defaults)
         files.send = { [weak self] m in self?.send(m) ?? false }
         files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
+        files.macKey = { [weak self] in self?.host }
         menus.send = { [weak self] m in self?.send(m) ?? false }
     }
 

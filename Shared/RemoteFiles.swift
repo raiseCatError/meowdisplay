@@ -1,9 +1,10 @@
 import CoreGraphics
 import Foundation
 
-// Remote Finder on the receiver (PROTOCOL.md 6.12): a temporary, read-only, Finder-like
-// browser of the folders the Mac's owner approved. Everything is read on the Mac; this side
-// only asks, draws and caches a bounded number of previews.
+// Remote Finder on the receiver (PROTOCOL.md 6.12): a Finder-like browser of what the Mac's
+// owner allowed this device to reach. Everything is read and checked on the Mac; this side
+// asks, draws, caches a bounded number of previews and moves files through `RemoteTransferQueue`.
+// What it may change follows the Mac's grant (`state.grant`); the Mac refuses anything else.
 
 enum RemoteFileKind: String, Sendable {
     case folder, app, image, video, audio, pdf, archive, text, document, file
@@ -21,6 +22,10 @@ struct RemoteFileEntry: Equatable, Identifiable, Sendable {
     /// Search results: the folder it is in, below `root`.
     var location: [String]?
     var root: String?
+    var created: Date?
+    var hidden = false
+    /// The Mac can't write it.
+    var readOnly = false
 
     var id: String { (root ?? "") + "/" + (location ?? []).joined(separator: "/") + "/" + name }
 }
@@ -47,8 +52,30 @@ struct RemoteFilesReply: Sendable {
     var text: String?
     var image: Data?
     var name: String?
+    /// Transfers (6.12): the Mac's transfer id, an offset, a size, a part, a range digest.
+    var x: Int?
+    var offset: Int64?
+    var length: Int?
+    var size: Int64?
+    var data: Data?
+    var sha: String?
+    var mod: Int?
+    var mime: String?
+    var uti: String?
+    var skipped = false
+    var suggest: String?
+    var need: String?
+    var token: String?
+    var grant: RemoteFilesGrant?
+    var info: RemoteFileInfo?
+    var apps: [RemoteOpenWithApp] = []
 
-    static let maxBase64 = 1_600_000   // a 1024-sided JPEG preview
+    static let maxBase64 = 3_000_000   // a 1600-sided JPEG preview
+
+    /// A reply made here: the request failed before the Mac answered.
+    static func failure(_ op: String, _ code: String) -> RemoteFilesReply {
+        RemoteFilesReply(op: op, req: nil, ok: false, error: code, state: nil)
+    }
 
     static func parse(_ obj: [String: Any]) -> RemoteFilesReply? {
         guard let op = obj["op"] as? String, op.count <= 16 else { return nil }
@@ -68,7 +95,9 @@ struct RemoteFilesReply: Sendable {
             return RemoteFileEntry(name: String(name.prefix(255)), isDirectory: dir,
                                    kind: (e["kind"] as? String).flatMap(RemoteFileKind.init(rawValue:)) ?? (dir ? .folder : .file),
                                    size: e["size"] as? Int, modified: (e["mod"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                                   location: e["in"] == nil ? nil : names(e["in"]), root: e["in"] == nil ? nil : r.root)
+                                   location: e["in"] == nil ? nil : names(e["in"]), root: e["in"] == nil ? nil : r.root,
+                                   created: (e["made"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                                   hidden: e["hidden"] as? Bool ?? false, readOnly: e["ro"] as? Bool ?? false)
         }
         r.truncated = obj["truncated"] as? Bool ?? false
         r.complete = obj["complete"] as? Bool ?? true
@@ -76,8 +105,77 @@ struct RemoteFilesReply: Sendable {
         r.text = (obj["text"] as? String).map { String($0.prefix(40_000)) }
         r.image = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
         r.name = str("name")
+        r.x = obj["x"] as? Int
+        r.offset = (obj["o"] as? NSNumber)?.int64Value
+        r.length = obj["n"] as? Int
+        r.size = (obj["size"] as? NSNumber)?.int64Value
+        r.data = (obj["d"] as? String).flatMap { $0.count <= 40_000 ? Data(base64Encoded: $0) : nil }
+        r.sha = str("sha", 64)
+        r.mod = obj["mod"] as? Int
+        r.mime = str("mime", 100)
+        r.uti = str("uti", 200)
+        r.skipped = obj["skipped"] as? Bool ?? false
+        r.suggest = str("suggest")
+        r.need = str("need", 16)
+        r.token = str("token", 64)
+        r.grant = (obj["grant"] as? [String: Any]).map(RemoteFilesGrant.init(wire:))
+        r.info = (obj["info"] as? [String: Any]).map(RemoteFileInfo.init(wire:))
+        r.apps = ((obj["apps"] as? [[String: Any]]) ?? []).prefix(24).compactMap { a in
+            guard let b = a["bundle"] as? String, let n = a["name"] as? String else { return nil }
+            return RemoteOpenWithApp(bundleID: String(b.prefix(255)), name: String(n.prefix(100)), isDefault: a["default"] as? Bool ?? false)
+        }
         return r
     }
+}
+
+/// What this device may do on the Mac's files (`state.grant`), for the indicator and the menus.
+struct RemoteFilesGrant: Equatable, Sendable {
+    var always: Bool
+    var allFiles: Bool
+    var capabilities: Set<String>
+    var hidden: Bool
+
+    init(always: Bool = false, allFiles: Bool = false, capabilities: Set<String> = ["browse", "download"], hidden: Bool = false) {
+        self.always = always; self.allFiles = allFiles; self.capabilities = capabilities; self.hidden = hidden
+    }
+
+    init(wire w: [String: Any]) {
+        always = (w["duration"] as? String) == "always"
+        allFiles = (w["scope"] as? String) == "allAccessible"
+        capabilities = Set(((w["caps"] as? [String]) ?? []).prefix(8).map { String($0.prefix(16)) })
+        hidden = w["hidden"] as? Bool ?? false
+    }
+
+    var canDownload: Bool { capabilities.contains("download") }
+    var canUpload: Bool { capabilities.contains("upload") }
+    var canModify: Bool { capabilities.contains("modify") }
+    var canDelete: Bool { capabilities.contains("delete") }
+    var readOnly: Bool { !canUpload && !canModify && !canDelete }
+}
+
+struct RemoteFileInfo: Equatable, Sendable {
+    var name = "", kind = "", owner = "", permissions = ""
+    var size: Int64?, items: Int?, complete = true
+    var created: Date?, modified: Date?, opened: Date?
+    var writable = false, locked = false
+    var cloud: String?
+
+    init(wire w: [String: Any]) {
+        func date(_ k: String) -> Date? { (w[k] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) } }
+        name = String((w["name"] as? String ?? "").prefix(255)); kind = String((w["kind"] as? String ?? "").prefix(100))
+        owner = String((w["owner"] as? String ?? "").prefix(64)); permissions = String((w["perm"] as? String ?? "").prefix(8))
+        size = (w["size"] as? NSNumber)?.int64Value; items = w["items"] as? Int; complete = w["complete"] as? Bool ?? true
+        created = date("made"); modified = date("mod"); opened = date("used")
+        writable = w["writable"] as? Bool ?? false; locked = w["locked"] as? Bool ?? false
+        cloud = (w["cloud"] as? String).map { String($0.prefix(16)) }
+    }
+}
+
+struct RemoteOpenWithApp: Equatable, Identifiable, Sendable {
+    var bundleID: String
+    var name: String
+    var isDefault: Bool
+    var id: String { bundleID }
 }
 
 enum RemoteFilesRequests {
@@ -99,9 +197,9 @@ enum RemoteFilesLocation: Equatable, Sendable {
 
 @MainActor
 final class RemoteFilesModel: ObservableObject {
-    enum Access: Equatable { case unknown, off, asking, denied, noFolders, ready }
+    enum Access: Equatable { case unknown, off, asking, denied, noFolders, ready, revoked }
     enum Style: String { case list, grid }
-    enum PreviewContent { case loading, image(CGImage), text(String, truncated: Bool), unavailable }
+    enum PreviewContent { case loading, image(CGImage), text(String, truncated: Bool), unavailable, failed(String) }
     struct Preview: Identifiable {
         var entry: RemoteFileEntry
         var root: String
@@ -109,7 +207,15 @@ final class RemoteFilesModel: ObservableObject {
         var content: PreviewContent
         var id: String { root + "/" + path.joined(separator: "/") }
     }
-    enum Notice: Equatable { case opened(String), needsControl, openFailed, macRefused }
+    enum Notice: Equatable {
+        case opened(String), needsControl, openFailed, macRefused
+        /// Something finished or failed (already worded).
+        case text(String)
+        /// Moved to the Trash, with Put Back tokens for Undo.
+        case trashed(count: Int, tokens: [String])
+        /// The Mac's grant doesn't include this capability: offer to ask for it.
+        case needs(String)
+    }
 
     /// The connected Mac offers Remote Finder (welcome feature `files`).
     @Published private(set) var available = false
@@ -117,7 +223,7 @@ final class RemoteFilesModel: ObservableObject {
     @Published private(set) var access = Access.unknown
     @Published private(set) var roots: [RemoteFileRootItem] = []
     @Published private(set) var location = RemoteFilesLocation.locations
-    @Published private(set) var entries: [RemoteFileEntry] = []
+    @Published private(set) var entries: [RemoteFileEntry] = [] { didSet { updateVisible() } }
     @Published private(set) var loading = false
     /// `notFound`, `permission` or another error code from the Mac, for the current folder.
     @Published private(set) var folderError: String?
@@ -130,8 +236,44 @@ final class RemoteFilesModel: ObservableObject {
     @Published private(set) var thumbnails: [String: CGImage] = [:]
     @Published private(set) var notice: Notice?
     /// The entry to point out after "Show in Folder".
-    @Published private(set) var highlighted: String?
+    @Published var highlighted: String?
     @Published var style: Style { didSet { defaults.set(style.rawValue, forKey: Self.styleKey) } }
+
+    /// What this device may do on the Mac (`state.grant`); nil until browsing is allowed.
+    @Published var grant: RemoteFilesGrant?
+    /// The current folder as shown: hidden files, kind filter and order applied.
+    @Published var visibleEntries: [RemoteFileEntry] = []
+    @Published var sort: RemoteFilesSort { didSet { defaults.set(sort.rawValue, forKey: Self.sortKey); updateVisible() } }
+    @Published var ascending: Bool { didSet { defaults.set(ascending, forKey: Self.ascendingKey); updateVisible() } }
+    /// Hidden files the Mac lists (only when its owner allows it) are shown.
+    @Published var showHidden = false { didSet { updateVisible() } }
+    @Published var kindFilter = RemoteFileKindFilter.all { didSet { updateVisible() } }
+    @Published var selecting = false { didSet { if !selecting { selection = [] } } }
+    /// Selected entries of the current folder, by `RemoteFileEntry.id`.
+    @Published var selection: Set<String> = []
+    /// Items copied or cut here, to paste into another folder on the Mac.
+    @Published var clipboard: RemoteFilesClipboard?
+    @Published var info: RemoteFileInfoSheet?
+    /// A file downloaded for viewing in this app.
+    @Published var viewer: RemoteFileViewer?
+    /// Files ready to save to this device or share.
+    @Published var export: RemoteFilesExport?
+    /// An uploaded folder exists on the Mac: Merge, Keep Both or Skip.
+    @Published var folderConflict: RemoteFolderConflict?
+    @Published var favorites: [RemoteFavorite] = []
+    /// Files opened this session (never stored).
+    @Published var recents: [RemoteFileEntry] = []
+    /// A file operation is waiting for the Mac.
+    @Published var busy = false
+
+    let transfers = RemoteTransferQueue()
+    /// The connected Mac's paired identity, for favorites.
+    var macKey: () -> String? = { nil }
+    var waiters: [Int: CheckedContinuation<RemoteFilesReply, Never>] = [:]
+    var viewerTransfer: (id: UUID, entry: RemoteFileEntry)?
+    var exportBatches: [UUID: RemoteFilesExportBatch] = [:]
+    var streams: [Int: RemoteFileStream] = [:]
+    var refreshTask: Task<Void, Never>?
 
     var send: ([String: Any]) -> Bool = { _ in false }
     var inputAllowed: () -> Bool = { false }
@@ -155,11 +297,30 @@ final class RemoteFilesModel: ObservableObject {
     static let styleKey = "files.style"
     static let maxThumbnails = 240
     static let maxCachedPreviews = 12
-    static let previewSide = 1024
+    static let previewSide = 1600
+    static let sortKey = "files.sort"
+    static let ascendingKey = "files.ascending"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         style = defaults.string(forKey: Self.styleKey).flatMap(Style.init(rawValue:)) ?? .list
+        sort = defaults.string(forKey: Self.sortKey).flatMap(RemoteFilesSort.init(rawValue:)) ?? .name
+        ascending = defaults.object(forKey: Self.ascendingKey) as? Bool ?? true
+        transfers.nextRequestID = { [weak self] in self?.nextReq() ?? 0 }
+        transfers.send = { [weak self] m in self?.send(m) ?? false }
+        transfers.onSettled = { [weak self] item in self?.transferSettled(item) }
+        transfers.onRemoteChange = { [weak self] root, path in self?.remoteChanged(root: root, path: path) }
+        RemoteTransferQueue.removeStaleCache()
+    }
+
+    var defaultsStore: UserDefaults { defaults }
+
+    func updateVisible() {
+        var list = entries
+        if !showHidden { list.removeAll { $0.hidden } }
+        if kindFilter != .all { list.removeAll { !kindFilter.matches($0) } }
+        visibleEntries = RemoteFilesSorting.sorted(list, by: sort, ascending: ascending)
+        if !selection.isEmpty { selection.formIntersection(visibleEntries.map(\.id)) }
     }
 
     var canGoBack: Bool { !back.isEmpty }
@@ -214,6 +375,20 @@ final class RemoteFilesModel: ObservableObject {
         notice = nil
         highlighted = nil
         listReq = nil; searchReq = nil; previewReq = nil
+        grant = nil
+        selecting = false
+        clipboard = nil
+        info = nil
+        viewer = nil
+        viewerTransfer = nil
+        folderConflict?.answer(nil)
+        folderConflict = nil
+        recents = []
+        busy = false
+        failWaiters("disconnected")
+        stopStreams()
+        transfers.disconnected()
+        transfers.purgeViewCache()
     }
 
     /// Opens the browser. The first time in a session this asks the Mac, which shows its
@@ -236,6 +411,11 @@ final class RemoteFilesModel: ObservableObject {
         previewReq = nil
         thumbTask?.cancel()
         wantedThumbs = []
+        selecting = false
+        viewer = nil
+        viewerTransfer = nil
+        stopStreams()
+        transfers.purgeViewCache()
     }
 
     /// Ask again (the owner may have turned it on or added a folder).
@@ -280,10 +460,10 @@ final class RemoteFilesModel: ObservableObject {
         highlighted = entry.name
     }
 
-    private var currentRootID: String? { if case .folder(let r, _) = location { return r }; return nil }
-    private var currentPath: [String] { if case .folder(_, let p) = location { return p }; return [] }
+    var currentRootID: String? { if case .folder(let r, _) = location { return r }; return nil }
+    var currentPath: [String] { if case .folder(_, let p) = location { return p }; return [] }
 
-    private func refresh() {
+    func refresh() {
         guard access == .ready else { return }
         guard case .folder(let root, let path) = location else {
             entries = []; loading = false; folderError = nil; truncated = false
@@ -293,7 +473,17 @@ final class RemoteFilesModel: ObservableObject {
         folderError = nil
         let r = nextReq()
         listReq = r
-        _ = send(RemoteFilesRequests.make("list", req: r, ["root": root, "path": path]))
+        guard send(RemoteFilesRequests.make("list", req: r, ["root": root, "path": path])) else {
+            loading = false; folderError = "disconnected"; return
+        }
+        // No endless spinner: a folder the Mac doesn't answer for says so, with Try Again.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard let self, self.listReq == r, self.loading else { return }
+            self.loading = false
+            self.listReq = nil
+            if self.entries.isEmpty { self.folderError = "timeout" } else { self.show(.text(String(localized: "The Mac didn't answer. Pull down or tap Refresh to try again."))) }
+        }
     }
 
     // MARK: Search
@@ -342,15 +532,38 @@ final class RemoteFilesModel: ObservableObject {
         let key = root + "/" + path.joined(separator: "/")
         if let cached = previewCache[key] {
             preview = Preview(entry: entry, root: root, path: path, content: cached)
+            noteRecent(entry, root: root)
+            startViewer(entry, root: root, path: path)
             return
         }
         preview = Preview(entry: entry, root: root, path: path, content: .loading)
+        noteRecent(entry, root: root)
         let r = nextReq()
         previewReq = r
-        _ = send(RemoteFilesRequests.make("preview", req: r, ["root": root, "path": path, "max": Self.previewSide]))
+        guard send(RemoteFilesRequests.make("preview", req: r, ["root": root, "path": path, "max": Self.previewSide])) else {
+            preview?.content = .failed("disconnected"); return
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            guard let self, self.previewReq == r, var p = self.preview, case .loading = p.content else { return }
+            p.content = .failed("timeout")
+            self.preview = p
+        }
+        startViewer(entry, root: root, path: path)
     }
 
-    func closePreview() { preview = nil; previewReq = nil }
+    /// Asks for the preview again (after a timeout or a failure).
+    func retryPreview() {
+        guard let p = preview else { return }
+        previewCache[p.id] = nil
+        showPreview(p.entry)
+    }
+
+    func closePreview() {
+        preview = nil
+        previewReq = nil
+        closeViewer()
+    }
 
     func thumbnailKey(_ entry: RemoteFileEntry) -> String? {
         guard entry.kind.hasThumbnail, let root = entry.root ?? currentRootID else { return nil }
@@ -391,11 +604,17 @@ final class RemoteFilesModel: ObservableObject {
 
     private var pendingOpenName = ""
 
-    private func show(_ n: Notice) {
+    func show(_ n: Notice) {
         notice = n
         noticeTask?.cancel()
+        let seconds: UInt64
+        switch n {
+        case .trashed, .needs: seconds = 6
+        case .text: seconds = 4
+        default: seconds = 3
+        }
         noticeTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
             self?.notice = nil
         }
@@ -404,21 +623,38 @@ final class RemoteFilesModel: ObservableObject {
     // MARK: Replies
 
     func apply(_ r: RemoteFilesReply) {
-        if let e = r.error, ["off", "asking", "denied"].contains(e) {
-            access = e == "off" ? .off : e == "denied" ? .denied : .asking
+        let accessError = r.error.flatMap { ["off", "asking", "denied", "revoked"].contains($0) ? $0 : nil }
+        if let e = accessError {
+            access = e == "off" ? .off : e == "denied" ? .denied : e == "revoked" ? .revoked : .asking
             loading = false; searching = false
+            if e != "asking" { grant = nil; transfers.failRunning(e) }
+        }
+        // Transfers, streams and awaited operations take their own replies.
+        if applyStream(r) || transfers.apply(r) { return }
+        if let req = r.req, let waiter = waiters.removeValue(forKey: req) { return waiter.resume(returning: r) }
+        if accessError != nil {
+            if var p = preview, case .loading = p.content { p.content = .failed(accessError ?? "failed"); preview = p }
             return
         }
         switch r.op {
         case "state":
+            if r.state != "ready" { grant = nil }
             switch r.state {
             case "off": access = .off
             case "denied": access = .denied
+            case "revoked":
+                access = .revoked
+                transfers.failRunning("revoked")
+                stopStreams()
+                selecting = false
             case "noFolders": access = .noFolders; roots = []
             case "ready":
                 let wasReady = access == .ready
                 access = .ready
+                grant = r.grant ?? RemoteFilesGrant()
+                if !(grant?.hidden ?? false) { showHidden = false }
                 roots = r.roots
+                loadFavorites()
                 if case .folder(let root, _) = location, !roots.contains(where: { $0.id == root }) {
                     location = .locations; back = []
                 }
@@ -461,6 +697,8 @@ final class RemoteFilesModel: ObservableObject {
                 content = .text(text, truncated: r.truncated)
             } else if let data = r.image, let image = WorkspaceImageDecoder.image(data, maxSide: Self.previewSide) {
                 content = .image(image)
+            } else if let e = r.error, e != "noPreview", e != "unsupported" {
+                content = .failed(e)
             } else {
                 content = .unavailable
             }
@@ -488,14 +726,14 @@ final class RemoteFilesModel: ObservableObject {
     }
 
     private func cachePreview(_ key: String, _ content: PreviewContent) {
-        if case .loading = content { return }
+        switch content { case .loading, .failed: return; default: break }
         previewCache[key] = content
         previewOrder.removeAll { $0 == key }
         previewOrder.append(key)
         while previewOrder.count > Self.maxCachedPreviews { previewCache[previewOrder.removeFirst()] = nil }
     }
 
-    private func nextReq() -> Int { req &+= 1; if req > 1_000_000_000 { req = 1 }; return req }
+    func nextReq() -> Int { req &+= 1; if req > 1_000_000_000 { req = 1 }; return req }
 }
 
 /// Sizes and dates the way Finder shows them.
