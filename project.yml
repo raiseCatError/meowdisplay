@@ -86,7 +86,7 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
-        NSLocalNetworkUsageDescription: MeowDisplay connects to your iPad or iPhone over the local network in WiFi mode.
+        NSLocalNetworkUsageDescription: MeowDisplay connects to your iPhone, iPad, Android device or other Mac over your Wi-Fi network.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
         # The receiver role keeps its own identity and pins (see
@@ -379,7 +379,7 @@ targets:
         UIRequiresFullScreen: true
         # Mouse and trackpad clicks arrive as pointer touches (hover, right click, scroll): HID-B.
         UIApplicationSupportsIndirectInputEvents: true
-        NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
+        NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over Wi-Fi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
         # Export compliance, as declared in App Store Connect: the app uses
         # only standard, exempt encryption (TLS and pairing through Apple's
