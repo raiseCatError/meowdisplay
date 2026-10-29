@@ -80,6 +80,9 @@ enum WorkspaceEvent: Sendable {
     case launchResult(bundleID: String, ok: Bool)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
+    /// Pane menus (PROTOCOL.md 6.13).
+    case menu(AppMenuReply)
+    case menuResult(ok: Bool, error: String?)
     case connected(peerID: String)
     case disconnected
 
@@ -152,6 +155,10 @@ enum WorkspaceEvent: Sendable {
             return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
+        case WireMessage.menu:
+            return AppMenuReply.parse(obj).map { .menu($0) }
+        case WireMessage.menuResult:
+            return .menuResult(ok: obj["ok"] as? Bool ?? false, error: (obj["error"] as? String).map { String($0.prefix(32)) })
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
@@ -376,9 +383,14 @@ final class WorkspaceModel: ObservableObject {
         self.defaults = defaults
         railEdge = defaults.string(forKey: Self.railKey).flatMap(WorkspaceRailEdge.init(rawValue:)) ?? .top
         files = RemoteFilesModel(defaults: defaults)
+        menus = AppMenuModel(defaults: defaults)
         files.send = { [weak self] m in self?.send(m) ?? false }
         files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
+        menus.send = { [weak self] m in self?.send(m) ?? false }
     }
+
+    /// The focused pane's app menus (a bar under its label).
+    let menus: AppMenuModel
 
     /// Remote Finder: the Mac's approved folders, browsed here (Finder in the carousel opens it).
     let files: RemoteFilesModel
@@ -400,8 +412,13 @@ final class WorkspaceModel: ObservableObject {
         case .features(let f):
             available = f.contains(WindowWorkspaceWire.welcomeFeature)
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
+            menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
+        case .menu(let reply):
+            menus.apply(reply)
+        case .menuResult(let ok, let error):
+            menus.applyResult(ok: ok, error: error)
         case .mode(let window):
             windowMode = window
             if !window { remote = nil }
@@ -451,6 +468,7 @@ final class WorkspaceModel: ObservableObject {
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
             files.setAvailable(false)
+            menus.setAvailable(false)
         }
     }
 

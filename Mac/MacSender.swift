@@ -5303,7 +5303,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let phase = captureStateSnapshot().phase
             guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
-        case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction:
+        case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
+             WireMessage.menuRequest, WireMessage.menuPress:
             // Admitted sessions only (gate above). Window metadata exists only
             // while this receiver is in Window mode on this Mac.
             guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
@@ -6466,7 +6467,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                       "min": WireProtocol.minSupportedPeer]
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature]
-        if WindowStreamingPolicy.isAllowed() { features.insert(WindowWorkspaceWire.welcomeFeature, at: 0) }
+        if WindowStreamingPolicy.isAllowed() {
+            features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
+            features.append(AppMenuWire.welcomeFeature)
+        }
         welcome["features"] = features
         sendJSONObject(welcome)
     }

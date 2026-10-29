@@ -399,6 +399,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             case WireMessage.windowAction:
                 guard inputGranted else { return }   // changing the Mac needs control
                 performWindowAction(obj)
+            case WireMessage.menuRequest:
+                // A pane's app menus: a control feature (reading them alone is of no use, and
+                // Open Recent lists file names), so only with this session's input grant.
+                guard inputGranted else { return replyMenu(obj, error: "control") }
+                readMenu(obj)
+            case WireMessage.menuPress:
+                guard inputGranted else { return replyMenuPress(obj, ok: false, error: "control") }
+                pressMenu(obj)
             default:
                 break
             }
@@ -690,6 +698,84 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             refreshSoon()
         default:
             break
+        }
+    }
+
+    // MARK: Pane menus (PROTOCOL.md 6.13)
+
+    /// The app shown in a tile (a window tile, not a desktop).
+    private func menuApp(_ obj: [String: Any]) -> (tile: String, pid: Int32, windowID: UInt32)? {
+        guard let tile = obj["tile"] as? String,
+              let a = assignments.first(where: { $0.tileID == tile }), !WorkspaceSource.isDisplayKey(a.windowID), a.pid > 0 else { return nil }
+        return (tile, a.pid, a.windowID)
+    }
+
+    private func menuPath(_ obj: [String: Any]) -> [Int]? {
+        let path = (obj["path"] as? [Int]) ?? []
+        return path.count < AppMenuReader.maxDepth && path.allSatisfy({ $0 >= 0 && $0 < 500 }) && (path.first.map { $0 >= 1 } ?? true) ? path : nil
+    }
+
+    private func replyMenu(tile: String?, path: [Int], req: Int?, error: String) {
+        var m: [String: Any] = ["type": WireMessage.menu, "ok": false, "error": error, "path": path]
+        if let tile { m["tile"] = String(tile.prefix(32)) }
+        if let req { m["req"] = req }
+        sendMessage?(m)
+    }
+
+    private func replyMenu(_ obj: [String: Any], error: String) {
+        replyMenu(tile: obj["tile"] as? String, path: (obj["path"] as? [Int]) ?? [], req: obj["req"] as? Int, error: error)
+    }
+
+    private func readMenu(_ obj: [String: Any]) {
+        guard let target = menuApp(obj), let path = menuPath(obj) else { return replyMenu(obj, error: "notFound") }
+        let req = obj["req"] as? Int
+        // AX calls can block for the messaging timeout: never on the engine's queue.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = AppMenuReader.items(pid: target.pid, path: path)
+            let trusted = AXIsProcessTrusted()
+            let app = result.map { String($0.app.prefix(80)) } ?? ""
+            let items = MenuItemsBox(value: result?.items.map(\.wire) ?? [])
+            let found = result != nil
+            self?.queue.async {
+                guard let self, self.running, !self.stopped else { return }
+                guard found else { return self.replyMenu(tile: target.tile, path: path, req: req, error: trusted ? "unavailable" : "accessibility") }
+                var m: [String: Any] = ["type": WireMessage.menu, "ok": true, "tile": target.tile, "path": path,
+                                        "app": app, "items": items.value]
+                if let req { m["req"] = req }
+                self.sendMessage?(m)
+            }
+        }
+    }
+
+    private func replyMenuPress(req: Int?, ok: Bool, error: String? = nil) {
+        var m: [String: Any] = ["type": WireMessage.menuResult, "ok": ok]
+        if let error { m["error"] = error }
+        if let req { m["req"] = req }
+        sendMessage?(m)
+    }
+
+    private func replyMenuPress(_ obj: [String: Any], ok: Bool, error: String? = nil) {
+        replyMenuPress(req: obj["req"] as? Int, ok: ok, error: error)
+    }
+
+    /// Presses one menu item of a pane's app. Like a click in that pane, its window comes
+    /// to the front first, so the command acts on the window the pane shows.
+    private func pressMenu(_ obj: [String: Any]) {
+        let path = (obj["path"] as? [Int]) ?? []
+        let titles = ((obj["titles"] as? [String]) ?? []).map { String($0.prefix(120)) }
+        let req = obj["req"] as? Int
+        guard let target = menuApp(obj), AppMenuReader.isValidPath(path, titles: titles), path.count >= 2 else {
+            return replyMenuPress(req: req, ok: false, error: "notFound")
+        }
+        let frame = catalog[target.windowID]?.frame ?? inputLock.withLock { targeting.windowFrames[target.windowID] } ?? .zero
+        DispatchQueue.main.async { [weak self] in
+            if frame != .zero { Self.raise(pid: target.pid, frame: frame) }
+            let ok = AppMenuReader.press(pid: target.pid, path: path, titles: titles)
+            Log.info("workspace: menu item pressed ok=\(ok) depth=\(path.count)")
+            self?.queue.async {
+                self?.replyMenuPress(req: req, ok: ok, error: ok ? nil : "changed")
+                self?.refreshSoon()
+            }
         }
     }
 
@@ -993,3 +1079,5 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         budgetLock.withLock { globalCaptures = max(globalCaptures - n, 0) }
     }
 }
+
+private struct MenuItemsBox: @unchecked Sendable { let value: [[String: Any]] }

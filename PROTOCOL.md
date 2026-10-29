@@ -1495,6 +1495,35 @@ approved, on its own screen, read-only.
 * **Never.** No writes, deletes, renames, uploads or downloads of whole files;
   no Finder windows on the Mac and no change of display mode or focus.
 
+### 6.13 Pane menus (`menuRequest` / `menu` / `menuPress` / `menuResult`)
+
+Optional and additive: no `pv` bump. In Window mode a receiver can show the menus of the app a
+pane shows (File, Edit, …) and press their items, since the Mac's own menu bar only shows the
+frontmost app.
+
+* **Capability.** A sender that can answer lists `"menus"` in `welcome.features` (with
+  `"window"`, 6.10).
+* **Gates (sender).** Window mode only, and only for a session with the input grant (6.1
+  `allowInputState`): both reading and pressing are control features (an Open Recent submenu
+  lists file names). Without it the reply is the error `control`. Never the Apple menu (index 0
+  of the menu bar): its items are the system's.
+* **`menuRequest`** (receiver to sender): `{"type":"menuRequest","tile":"w1","path":[],"req":3}`.
+  `path` `[]` asks for the menu bar's titles; `[i]` for the items of the menu at index `i`;
+  `[i, j]` for the submenu of item `j`; at most 3 steps. Indices are the Accessibility children
+  indices the sender sent, separators included.
+* **`menu`** (sender to receiver): `{"type":"menu","ok":true,"tile":"w1","path":[2],"app":"Zed","req":3,"items":[…]}`.
+  An item is `{"i":0,"t":"New File","key":"⌘N"}`, with `on:false` when disabled, `mark:true` when
+  checked, `sub:true` when it opens a submenu, or `{"i":1,"sep":true}`. At most 24 titles and 120
+  items a level. Errors (`ok:false`, `error`): `control`, `accessibility` (the Mac app lacks the
+  permission), `notFound` (no such pane or a desktop pane), `unavailable` (the app exposes no
+  menus).
+* **`menuPress`** (receiver to sender): `{"type":"menuPress","tile":"w1","path":[2,0],"titles":["File","New File"],"req":4}`.
+  `titles` repeats the title at every step; the sender presses only if each still matches, so a
+  menu that changed meanwhile is never pressed. Like a click in that pane, the pane's window
+  comes to the front first, then the item gets the Accessibility press action.
+* **`menuResult`** (sender to receiver): `{"type":"menuResult","ok":true,"req":4}`, or
+  `ok:false` with `error` `control`, `notFound` or `changed`.
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1760,3 +1789,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: text caret (section 6.11), `welcome.features` `textCaret`, `keyboardState`, `textCaret` |
 | 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |
 | 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |
+| 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |

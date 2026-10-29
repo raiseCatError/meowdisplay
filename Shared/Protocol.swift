@@ -230,6 +230,12 @@ enum RemoteFilesWire {
     static let version = 1
 }
 
+/// Pane menu bar (PROTOCOL.md 6.13): the menus of the app a Window-mode pane shows, read and
+/// pressed through Accessibility. Only for a session with control; never the Apple menu.
+enum AppMenuWire {
+    static let welcomeFeature = "menus"
+}
+
 enum WireMessage {
     static let welcome = "welcome"                  // Mac -> phone: Mac's pv + min supported
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
@@ -257,6 +263,10 @@ enum WireMessage {
     static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
     static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
     static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)
+    static let menuRequest = "menuRequest"                     // receiver -> Mac: a pane's app menus, one level (control)
+    static let menu = "menu"                                   // Mac -> receiver: that level's items
+    static let menuPress = "menuPress"                         // receiver -> Mac: press one menu item (control)
+    static let menuResult = "menuResult"                       // Mac -> receiver: whether it was pressed
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off

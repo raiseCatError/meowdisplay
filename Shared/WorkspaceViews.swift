@@ -101,6 +101,14 @@ struct WorkspaceChromeView: View {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
+                if let id = model.active, let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
+                   multi || model.localFullscreen == id {
+                    // The focused pane's app menus, as a bar under its label (control only).
+                    let e = unsafeInsets(of: rect)
+                    let pane = CGRect(x: rect.minX + e.leading, y: rect.minY + e.top,
+                                      width: rect.width - e.leading - e.trailing, height: rect.height - e.top - e.bottom)
+                    PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
+                }
                 WorkspaceDropOverlay(model: model, picture: picture)
                 if model.arranging {
                     arrangeControls(frames)
@@ -128,8 +136,22 @@ struct WorkspaceChromeView: View {
                 Text("The window closes on the Mac itself, as if you clicked its close button. The app keeps running, and unsaved work asks to be saved there first.")
             }
             .onChange(of: model.localFullscreen) { full in if full != nil { revealStrip() } }
+            .onAppear { syncMenus() }
+            .onChange(of: menuKey) { _ in syncMenus() }
             .onChange(of: model.touchPulse) { _ in if model.localFullscreen != nil { revealStrip() } }
         }
+    }
+
+    /// What decides whose menus the bar shows: the focused pane, its app, and control.
+    private var menuKey: String {
+        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
+        return "\(model.active ?? "")|\(source?.isDisplay == false ? source?.bundleID ?? "" : "")|\(inputAllowed)|\(model.windowMode)"
+    }
+
+    private func syncMenus() {
+        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
+        model.menus.sync(tile: model.active, bundle: source?.isDisplay == false ? source?.bundleID : nil,
+                         enabled: inputAllowed && model.windowMode)
     }
 
     private var closeTitle: String {
@@ -352,6 +374,9 @@ struct WorkspaceChromeView: View {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
             }
             menuRow("Remove from Layout", "rectangle.badge.minus") { model.removeTile(m.tile) }
+            if isWindow, model.menus.available, inputAllowed {
+                menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
+            }
             if isWindow {
                 Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
                 menuRow("Minimize on Mac", "minus.rectangle", enabled: inputAllowed) { model.minimizeRemoteWindow(m.tile) }
@@ -983,5 +1008,157 @@ struct PaneOutlineShape: InsettableShape {
         #else
         return 0
         #endif
+    }
+}
+
+// MARK: - Pane menu bar (PROTOCOL.md 6.13)
+
+/// The focused pane's app menus (File, Edit, …) as a slim bar across the top of the pane, under
+/// its label; a title opens its menu as a drop-down here. Pressing an item presses it on the Mac.
+struct PaneMenuBar: View {
+    @ObservedObject var menus: AppMenuModel
+    /// The pane, clear of the screen's unsafe edges.
+    let pane: CGRect
+    let top: CGFloat
+    let bounds: CGRect
+    @State private var titleFrames: [Int: CGRect] = [:]
+
+    private static let height: CGFloat = 28
+
+    var body: some View {
+        if menus.barShown, menus.tile != nil, pane.width >= 120 {
+            ZStack(alignment: .topLeading) {
+                if !menus.open.isEmpty {
+                    // Tap anywhere else to close; nothing reaches the Mac while a menu is open.
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { menus.close() }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                bar
+                    .frame(width: pane.width - 12, height: Self.height)
+                    .offset(x: pane.minX + 6, y: top)
+                if let level = menus.open.last {
+                    let anchor = titleFrames[level.path.first ?? -1]?.minX ?? pane.minX + 6
+                    let width: CGFloat = 270
+                    let y = top + Self.height + 4
+                    dropDown(level)
+                        .frame(width: width)
+                        .frame(maxHeight: max(120, min(460, bounds.maxY - y - 8)), alignment: .top)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .offset(x: min(max(anchor, bounds.minX + 6), bounds.maxX - width - 6), y: y)
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .environment(\.colorScheme, .dark)
+        }
+    }
+
+    private var bar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                if !menus.app.isEmpty {
+                    Text(menus.app).font(.caption.weight(.bold)).padding(.horizontal, 8)
+                }
+                if let error = menus.topError {
+                    Text(Self.message(error)).font(.caption).foregroundStyle(.white.opacity(0.75)).padding(.horizontal, 8)
+                } else if menus.top.isEmpty {
+                    ProgressView().scaleEffect(0.6).padding(.horizontal, 8)
+                }
+                ForEach(menus.top) { item in
+                    Button { menus.openMenu(item) } label: {
+                        Text(item.title).font(.caption)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(menus.open.first?.path == [item.index] ? workspaceAccent.opacity(0.85) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!item.enabled)
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { titleFrames[item.index] = g.frame(in: .named("workspace")) }
+                            .onChange(of: g.frame(in: .named("workspace"))) { titleFrames[item.index] = $0 }
+                    })
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 2)
+        }
+        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("\(menus.app) menus"))
+    }
+
+    private func dropDown(_ level: AppMenuModel.Level) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if menus.open.count > 1 {
+                Button { menus.back() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left").font(.caption.weight(.semibold))
+                        Text(level.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Divider().overlay(Color.white.opacity(0.2))
+            }
+            if level.loading {
+                ProgressView().frame(maxWidth: .infinity).padding(16)
+            } else if let error = level.error {
+                Text(Self.message(error)).font(.footnote).foregroundStyle(.white.opacity(0.75)).padding(14)
+            } else if level.items.isEmpty {
+                Text("No items").font(.footnote).foregroundStyle(.white.opacity(0.6)).padding(14)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(level.items) { item in row(item) }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            if let failed = menus.failed {
+                Text(Self.message(failed)).font(.caption2).foregroundStyle(.orange).padding(10)
+            }
+        }
+        .foregroundStyle(.white)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.ultraThinMaterial))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.4)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+    }
+
+    @ViewBuilder
+    private func row(_ item: AppMenuEntry) -> some View {
+        if item.separator {
+            Divider().overlay(Color.white.opacity(0.2)).padding(.vertical, 4)
+        } else {
+            Button { item.hasSubmenu ? menus.openSubmenu(item) : menus.press(item) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark").font(.caption2.weight(.bold)).opacity(item.checked ? 1 : 0).frame(width: 14)
+                    Text(item.title).font(.subheadline).lineLimit(1)
+                    Spacer(minLength: 8)
+                    if let key = item.shortcut { Text(key).font(.caption).foregroundStyle(.white.opacity(0.55)) }
+                    if item.hasSubmenu { Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.6)) }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .contentShape(Rectangle())
+                .opacity(item.enabled ? 1 : 0.4)
+            }
+            .buttonStyle(.plain)
+            .disabled(!item.enabled)
+        }
+    }
+
+    static func message(_ error: String) -> String {
+        switch error {
+        case "accessibility": return String(localized: "Allow Accessibility for MeowDisplay on the Mac to use menus.")
+        case "control": return String(localized: "Menus need control of the Mac.")
+        case "changed": return String(localized: "That menu changed on the Mac. Try again.")
+        default: return String(localized: "This app's menus aren't available.")
+        }
     }
 }
