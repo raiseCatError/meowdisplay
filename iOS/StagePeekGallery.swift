@@ -259,6 +259,8 @@ struct StagePeekGallery: View {
     let onAddTile: (CatalogWindowItem) -> Void
     /// A card was dropped (or the drag ended): the peek decides whether to close.
     var onDragEnded: (Bool) -> Void = { _ in }
+    /// Search the Mac's approved folders for the query (Remote Finder), when the Mac offers it.
+    var onSearchFiles: ((String) -> Void)?
     @State private var visible: [UInt32] = []
 
     /// Two columns at most; one when two would make cards too small.
@@ -285,6 +287,20 @@ struct StagePeekGallery: View {
                         emptyText(results.apps.isEmpty ? String(localized: "No apps or windows match “\(query)”.") : String(localized: "No open windows match."))
                     } else {
                         grid(results.windows, cols)
+                    }
+                    if let onSearchFiles {
+                        sectionTitle(String(localized: "Files"))
+                        Button { onSearchFiles(query) } label: {
+                            HStack(spacing: 10) {
+                                kindIcon(.folder, size: 26)
+                                Text("Search files on \(model.hostName) for “\(query)”").lineLimit(2)
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            }
+                            .padding(12)
+                            .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
                     }
                 } else if let app = appFilter {
                     let windows = allWindows.filter { $0.bundleID == app.bundleID }

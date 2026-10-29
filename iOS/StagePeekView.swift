@@ -113,6 +113,9 @@ struct StagePeekOverlay: View {
             if launchpad {
                 launchpadView.transition(.opacity)
             }
+            RemoteFinderHost(files: model.files, workspace: model, inputAllowed: inputAllowed,
+                             safe: safe, onFinderWindows: { showFinderWindows() })
+                .zIndex(45)
             if model.drag != nil, !model.windowMode {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
                 WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
@@ -309,7 +312,8 @@ struct StagePeekOverlay: View {
                          onDragEnded: { dropped in
                              // Dropped on a pane: done. Dropped nowhere: the peek comes back as it was.
                              if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false }
-                         })
+                         },
+                         onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil)
             .frame(width: safe.width, height: safe.height)
             .position(x: safe.midX, y: safe.midY)
             .environment(\.colorScheme, .dark)
@@ -344,10 +348,25 @@ struct StagePeekOverlay: View {
     /// gallery on its empty state ("Open on Mac" there). Browsing never opens or activates anything.
     private func tapApp(_ app: MacAppItem, forceFilter: Bool = false) {
         haptics.play(.tick, enabled: hapticsEnabled)
+        // Finder opens a Finder-like browser here, backed by the Mac (its windows stay one tap away).
+        if app.bundleID == Self.finderBundleID, model.files.available, !forceFilter {
+            searchFocused = false
+            model.files.open()
+            return
+        }
         let clearing = appFilter == app.bundleID && !forceFilter
         withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { appFilter = clearing ? nil : app.bundleID }
         let hasWindows = (model.catalog?.windows ?? []).contains { $0.bundleID == app.bundleID }
         if !clearing, !hasWindows || forceFilter, machine.isVisible, !machine.expanded { animate { machine.expand() } }
+    }
+
+    static let finderBundleID = "com.apple.finder"
+
+    /// From Remote Finder's menu: Finder's own windows, in the gallery.
+    private func showFinderWindows() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { appFilter = Self.finderBundleID }
+        if !machine.isVisible { finish(machine.openDirectly()) }
+        if !machine.expanded { animate { machine.expand() } }
     }
 
     private func pick(_ w: CatalogWindowItem) {
@@ -753,5 +772,25 @@ final class StagePeekHaptics {
         case .select:
             medium.impactOccurred()
         }
+    }
+}
+
+/// Shows Remote Finder while it is open (observes the files model, which the peek doesn't).
+private struct RemoteFinderHost: View {
+    @ObservedObject var files: RemoteFilesModel
+    let workspace: WorkspaceModel
+    let inputAllowed: Bool
+    let safe: CGRect
+    let onFinderWindows: () -> Void
+
+    var body: some View {
+        ZStack {
+            if files.isOpen {
+                RemoteFinderView(files: files, workspace: workspace, inputAllowed: inputAllowed, safe: safe,
+                                 onFinderWindows: onFinderWindows)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: files.isOpen)
     }
 }

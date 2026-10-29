@@ -78,6 +78,8 @@ enum WorkspaceEvent: Sendable {
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
     case launchResult(bundleID: String, ok: Bool)
+    /// Remote Finder (PROTOCOL.md 6.12).
+    case files(RemoteFilesReply)
     case connected(peerID: String)
     case disconnected
 
@@ -148,6 +150,8 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
             return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
+        case WireMessage.files:
+            return RemoteFilesReply.parse(obj).map { .files($0) }
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
@@ -371,7 +375,13 @@ final class WorkspaceModel: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         railEdge = defaults.string(forKey: Self.railKey).flatMap(WorkspaceRailEdge.init(rawValue:)) ?? .top
+        files = RemoteFilesModel(defaults: defaults)
+        files.send = { [weak self] m in self?.send(m) ?? false }
+        files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
     }
+
+    /// Remote Finder: the Mac's approved folders, browsed here (Finder in the carousel opens it).
+    let files: RemoteFilesModel
 
     var active: String? { remote?.active }
     /// The connected Mac's name as paired (never a name the network claims).
@@ -389,6 +399,9 @@ final class WorkspaceModel: ObservableObject {
             if peer != host { load(for: peer) }
         case .features(let f):
             available = f.contains(WindowWorkspaceWire.welcomeFeature)
+            files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
+        case .files(let reply):
+            files.apply(reply)
         case .mode(let window):
             windowMode = window
             if !window { remote = nil }
@@ -437,6 +450,7 @@ final class WorkspaceModel: ObservableObject {
             sendTask?.cancel()
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
+            files.setAvailable(false)
         }
     }
 
