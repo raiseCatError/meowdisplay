@@ -156,7 +156,16 @@ class WorkspaceController(
             }
             is SessionEvent.Control -> when (event.type) {
                 WorkspaceWire.CATALOG -> onCatalog(WindowCatalog.parse(event.body))
-                WorkspaceWire.WORKSPACE_STATE -> state.update { it.copy(remote = WorkspaceState.parse(event.body)) }
+                WorkspaceWire.WORKSPACE_STATE -> {
+                    val parsed = WorkspaceState.parse(event.body)
+                    state.update { it.copy(remote = parsed) }
+                    // The Mac refused a tile because its window already shows in another one
+                    // (e.g. a layout saved before that rule): empty the tile instead of leaving
+                    // it labelled with a window it will never show.
+                    val layout = state.value.layout
+                    val duplicates = parsed.rejected.filterValues { it == "duplicateWindow" }.keys.filter { layout.tiles[it]?.source != null }
+                    if (duplicates.isNotEmpty()) edit { l -> duplicates.fold(l) { acc, id -> acc.replacingSource(id, null) } }
+                }
                 WorkspaceWire.THUMBNAIL -> WindowThumbnail.parse(event.body)?.let(::onThumbnail)
                 WorkspaceWire.APP_ICON -> AppIcon.parse(event.body)?.let(::onIcon)
             }

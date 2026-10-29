@@ -296,6 +296,13 @@ final class WorkspaceModel: ObservableObject {
             onCatalog(c)
         case .state(let s):
             remote = s
+            // The Mac refused a tile because its window already shows in another one
+            // (e.g. a layout saved before that rule): empty the tile instead of leaving
+            // it labelled with a window it will never show.
+            let duplicates = s.rejected.filter { $0.value == "duplicateWindow" }.map(\.key).filter { layout.tiles[$0]?.source != nil }
+            if !duplicates.isEmpty {
+                edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
+            }
         case .thumbnail(let id, _, let data):
             guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 320) else { return }
             thumbAge[id] = Date()

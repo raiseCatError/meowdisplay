@@ -169,7 +169,7 @@ fun WorkspaceChrome(
                     var menu by remember { mutableStateOf(false) }
                     var moved by remember { mutableStateOf(false) }
                     var pill by remember { mutableStateOf(IntSize.Zero) }
-                    val name = remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
+                    val name = if (tile.source == null) "Empty" else remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
                     // Where the pill would sit; if the rail handle or a control is there, it moves down below it.
                     val nominal = CGRect(r.minX + 6, maxOf(r.minY, topInset) + 6, pill.width / density.toDouble(), pill.height / density.toDouble())
                     val clear = (avoid + listOfNotNull(railHandle)).filter { !nominal.isEmpty && it.intersects(nominal) }

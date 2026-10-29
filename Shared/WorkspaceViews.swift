@@ -168,7 +168,8 @@ struct WorkspaceChromeView: View {
 
     private func pill(id: String, tile: WorkspaceTile, active: Bool, rect: CGRect) -> some View {
         let remoteName = model.tileState(id)?.app ?? ""
-        let name = !remoteName.isEmpty ? remoteName : (model.catalog?.windows.first { $0.id == tile.source?.windowID }?.app ?? "Window")
+        let name = tile.source == nil ? "Empty"
+            : (!remoteName.isEmpty ? remoteName : (model.catalog?.windows.first { $0.id == tile.source?.windowID }?.app ?? "Window"))
         return Menu {
             Button("Change Window…") { model.openOverview(replacing: id) }
             Button("Rotate") { model.rotate(id) }
