@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.20.0](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0) (2026-10-25)
+
+The first MeowDisplay release, built from OpenDisplay 1.19.0. Release notes: the
+[v1.20.0 GitHub Release](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0).
+Entries below this one are upstream OpenDisplay's.
+
 ## [1.19.0](https://github.com/peetzweg/opendisplay/compare/v1.18.0...v1.19.0) (2026-09-01)
 
 

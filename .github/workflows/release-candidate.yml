@@ -1,0 +1,110 @@
+name: Release candidate
+
+# Every push to release/<version> makes that exact commit the release
+# candidate for every platform and builds it: the two Mac apps
+# (release-mac.yml), the iPhone/iPad app (release-ios.yml) and the Android
+# app (release-android.yml), each verified, signed and staged or uploaded.
+# Nothing here publishes, submits for review or touches a release or tag:
+# the release monitor follows the stores, and release-publish.yml, behind
+# its approval, is the only publisher.
+#
+# A newer push supersedes the candidate: its run cancels this one, and the
+# release state refuses anything recorded for the older commit
+# (scripts/release/lib/meow_release/state.rb).
+on:
+  push:
+    branches: ['release/**']
+
+permissions: {}
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - name: Only from release/<version>
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF#refs/heads/release/}
+          if [ "$GITHUB_REF" = "$version" ] || ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release candidates come only from release/X.Y.Z (got $GITHUB_REF)"
+            exit 1
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Plan the candidate
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF#refs/heads/release/}
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$(cat version.txt)" = "$version" ] || fail "version.txt is $(cat version.txt), not $version: merge the release PR first"
+          [ "$(jq -r '."."' .release-please-manifest.json)" = "$version" ] || fail ".release-please-manifest.json is not $version"
+          grep -q "^## \[$version\]" CHANGELOG.md || fail "CHANGELOG.md has no $version entry"
+          if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/v$version" >/dev/null; then
+            fail "tag v$version already exists: $version is released; start release/<next version>"
+          fi
+          scripts/release/release-state.sh "$version" init STATE --config .github/release-config.json --version "$version"
+          scripts/release/release-state.sh "$version" candidate STATE --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID"
+          { echo "version=$version"; echo "sha=$GITHUB_SHA"; } >> "$GITHUB_OUTPUT"
+
+  mac:
+    needs: plan
+    uses: ./.github/workflows/release-mac.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      sha: ${{ needs.plan.outputs.sha }}
+
+  ios:
+    needs: plan
+    uses: ./.github/workflows/release-ios.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      sha: ${{ needs.plan.outputs.sha }}
+
+  android:
+    needs: plan
+    uses: ./.github/workflows/release-android.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      sha: ${{ needs.plan.outputs.sha }}
+
+  summary:
+    needs: [plan, mac, ios, android]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Release readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/heads/release/$VERSION" | cut -f1)
+          scripts/release/release-state.sh "$VERSION" summary STATE --branch-head "$head" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,62 @@
+name: Reference sync (OpenDisplay)
+
+# Keeps reference/opendisplay equal to the external OpenDisplay project's
+# main branch (peetzweg/opendisplay), for the reference-intake review. It is
+# independent of MeowDisplay's releases: it only creates or fast-forwards that
+# one branch (scripts/reference/sync-reference.sh), fetches no tags, merges
+# nothing into MeowDisplay, and holds no secrets. Its push uses GITHUB_TOKEN,
+# which starts no workflows, so the external project's workflow files on that
+# branch never run from it.
+#
+# Scheduled runs happen only while the repository variable REFERENCE_SYNC is
+# `enabled`; until then it runs only when dispatched.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: reference-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.REFERENCE_SYNC == 'enabled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: The external repository is the expected one
+        id: external
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Pinned identity: a renamed, transferred or replaced repository
+          # under the same name fails here instead of being followed.
+          repo=$(gh api repos/peetzweg/opendisplay --jq '[.node_id, .full_name, .default_branch] | join(" ")')
+          [ "$repo" = "R_kgDOS2SYLQ peetzweg/opendisplay main" ] || { echo "::error::unexpected external repository: $repo"; exit 1; }
+          echo "sha=$(gh api repos/peetzweg/opendisplay/branches/main --jq .commit.sha)" >> "$GITHUB_OUTPUT"
+      - name: Create or fast-forward reference/opendisplay
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED: ${{ steps.external.outputs.sha }}
+        run: scripts/reference/sync-reference.sh "$EXPECTED"
+      - name: Sync record
+        if: always()
+        run: |
+          if [ -f reference-sync.json ]; then
+            { echo '### Reference sync'; echo '```json'; cat reference-sync.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reference-sync
+          path: reference-sync.json
+          retention-days: 90
+          if-no-files-found: ignore

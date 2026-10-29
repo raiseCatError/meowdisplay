@@ -150,10 +150,10 @@ next to the Sparkle appcast.
 
 > **MeowDisplay status: disabled.** `VersionGate.manifestURL` is `nil`, so no
 > request is made: MeowDisplay hosts no policy file yet and must not follow
-> upstream OpenDisplay's. The design below is upstream's, kept for when a
-> MeowDisplay-owned file exists.
+> the OpenDisplay reference project's. The design below is that project's,
+> kept for when a MeowDisplay-owned file exists.
 
-- **URL:** upstream used `https://opendisplay.app/ios-version.json` (source of
+- **URL:** OpenDisplay used `https://opendisplay.app/ios-version.json` (source of
   truth: `public/ios-version.json`; Vite copies it into `docs/` and Pages
   serves it). This repository has no `public/ios-version.json`.
 - **Shape:**

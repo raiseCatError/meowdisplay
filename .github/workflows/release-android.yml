@@ -1,0 +1,179 @@
+name: Release candidate (Android)
+
+# The Android app of one release candidate, from the exact commit
+# release-candidate.yml was started for:
+#  - validate (no secrets): unit tests, lint and an unsigned release bundle;
+#  - upload (android-upload environment): the release bundle signed with the
+#    upload key, its signer checked against the expected upload certificate,
+#    with a versionCode above everything Google Play has, uploaded to the
+#    internal testing track as its own committed edit;
+#  - record.
+# It never sends anything for review or publishes: the release monitor
+# sends the uploaded build to the review track, and only
+# release-publish.yml (with Play Console's Publish for managed publishing)
+# makes it public. A candidate without the Android app is recorded as
+# blocked rather than failing the release; the release only requires Android
+# once .github/release-config.json declares crossPlatformReady.
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+      uploaded: ${{ steps.check.outputs.uploaded }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Android app present, and not yet uploaded for this commit?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -f AndroidReceiver/settings.gradle.kts ]; then present=true; else present=false; fi
+          echo "present=$present" >> "$GITHUB_OUTPUT"
+          record=$(scripts/release/release-state.sh "$VERSION" show STATE --platform android --sha "$SHA" --at-least uploaded)
+          echo "uploaded=$(jq -r .done <<< "$record")" >> "$GITHUB_OUTPUT"
+          if [ "$present" = false ]; then
+            scripts/release/release-state.sh "$VERSION" record STATE --platform android --stage blocked --sha "$SHA" \
+              --set "blockers=this candidate has no Android app (AndroidReceiver/)"
+          fi
+
+  validate:
+    needs: check
+    if: needs.check.outputs.present == 'true' && needs.check.outputs.uploaded != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Tests, lint and an unsigned release bundle
+        working-directory: AndroidReceiver
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./gradlew --no-daemon :core:test :app:testDebugUnitTest :app:lintRelease :app:bundleRelease "-Pmeow.versionName=$VERSION"
+
+  upload:
+    needs: [check, validate]
+    runs-on: ubuntu-latest
+    environment: android-upload
+    permissions:
+      contents: read
+    outputs:
+      version_code: ${{ steps.upload.outputs.version_code }}
+      aab_sha256: ${{ steps.upload.outputs.aab_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh android-upload
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Sign, check the signer, upload to internal testing
+        id: upload
+        env:
+          VERSION: ${{ inputs.version }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          MEOW_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          MEOW_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          MEOW_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          EXPECTED_UPLOAD_CERT_SHA256: ${{ vars.ANDROID_UPLOAD_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for name in PLAY_SERVICE_ACCOUNT_JSON UPLOAD_KEYSTORE_BASE64 MEOW_UPLOAD_STORE_PASSWORD MEOW_UPLOAD_KEY_ALIAS \
+                      MEOW_UPLOAD_KEY_PASSWORD EXPECTED_UPLOAD_CERT_SHA256; do
+            [ -n "${!name}" ] || { echo "::error::$name is not configured (RELEASE.md: Android credentials)"; exit 1; }
+          done
+          package=$(jq -r .android.package .github/release-config.json)
+          highest=$(ruby -Iscripts/release/lib -rmeow_release -e 'puts MeowRelease::GooglePlay.from_env.highest_version_code(ARGV[0])' "$package")
+          code=$(scripts/release/meow-release next-build android --version "$VERSION" --latest "$highest")
+          export MEOW_UPLOAD_STORE_FILE="$RUNNER_TEMP/upload.jks"
+          printf '%s' "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$MEOW_UPLOAD_STORE_FILE"
+          (cd AndroidReceiver && ./gradlew --no-daemon :app:bundleRelease "-Pmeow.versionName=$VERSION" "-Pmeow.versionCode=$code")
+          rm -f "$MEOW_UPLOAD_STORE_FILE"
+          aab=AndroidReceiver/app/build/outputs/bundle/release/app-release.aab
+          # The bundle must be signed by exactly the expected upload key, never
+          # by a key nobody registered with Play.
+          jarsigner -verify -strict "$aab" >/dev/null
+          signer=$(keytool -printcert -jarfile "$aab" | awk '/SHA256:/ {print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          expected=$(printf '%s' "$EXPECTED_UPLOAD_CERT_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
+          [ "$signer" = "$expected" ] || { echo "::error::bundle signed by $signer, expected upload certificate $expected"; exit 1; }
+          uploaded=$(ruby -Iscripts/release/lib -rmeow_release -e '
+            puts MeowRelease::GooglePlay.from_env.upload(ARGV[0], ARGV[1], track: ARGV[2], release_name: ARGV[3])' \
+            "$package" "$aab" "$(jq -r .android.uploadTrack .github/release-config.json)" "$VERSION ($code)")
+          [ "$uploaded" = "$code" ] || { echo "::error::Play read versionCode $uploaded, expected $code"; exit 1; }
+          echo "version_code=$code" >> "$GITHUB_OUTPUT"
+          echo "aab_sha256=$(shasum -a 256 "$aab" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+  record:
+    needs: [check, validate, upload]
+    if: always() && needs.check.outputs.present == 'true' && needs.check.outputs.uploaded != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Record the Android candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          VALIDATE: ${{ needs.validate.result }}
+          UPLOAD: ${{ needs.upload.result }}
+          CODE: ${{ needs.upload.outputs.version_code }}
+          AAB_SHA256: ${{ needs.upload.outputs.aab_sha256 }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          state() { scripts/release/release-state.sh "$VERSION" "$@"; }
+          if [ "$VALIDATE" != success ]; then
+            state record STATE --platform android --stage failed --sha "$SHA" --set "blockers=Android tests or build $VALIDATE (run $RUN_ID)"
+            exit 1
+          fi
+          state record STATE --platform android --stage built --sha "$SHA"
+          if [ "$UPLOAD" != success ] || ! [[ $CODE =~ ^[0-9]+$ ]]; then
+            state record STATE --platform android --stage blocked --sha "$SHA" --set "blockers=Android signing or upload $UPLOAD (run $RUN_ID)"
+            exit 1
+          fi
+          for stage in signed uploaded; do
+            state record STATE --platform android --stage "$stage" --sha "$SHA" --set "versionCode=$CODE" --set "aabSha256=$AAB_SHA256" --set "runId=$RUN_ID"
+          done

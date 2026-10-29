@@ -1,0 +1,79 @@
+name: Release monitor
+
+# Follows every unfinished release in the release state: App Store Connect
+# build processing and review (submitting a processed build for review when
+# the release config allows it), and Google Play's per-track release
+# lifecycle (sending the uploaded build to the review track, then
+# IN_REVIEW / APPROVED_NOT_PUBLISHED / NOT_APPROVED / PUBLISHED). It records
+# what it sees, never treats a processed build as approved, and writes the
+# readiness report. It publishes nothing itself:
+#  - auto-publish-after-approval: once the publication gate opens, it starts
+#    release-publish.yml for that candidate;
+#  - either mode: when a started publication is waiting (Play's managed
+#    publishing click, the website), it resumes it.
+# Scheduled runs only happen while the repository variable
+# RELEASE_AUTOMATION is `enabled`; until then it runs only when dispatched.
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.event_name == 'workflow_dispatch' || vars.RELEASE_AUTOMATION == 'enabled'
+    runs-on: ubuntu-latest
+    environment: release-stores
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Follow every unfinished release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          versions=$(git ls-remote "$repo" 'refs/heads/release/*' | sed -n 's#.*refs/heads/release/\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p')
+          [ -n "$versions" ] || { echo "No release branches."; exit 0; }
+          for version in $versions; do
+            head=$(git ls-remote "$repo" "refs/heads/release/$version" | cut -f1)
+            git fetch -q --depth 1 origin "$head"
+            git show "$head:.github/release-config.json" > "$RUNNER_TEMP/config-$version.json"
+            state() { scripts/release/release-state.sh "$version" "$@"; }
+            status=$(state status STATE)
+            if [ "$(jq -r .candidate <<< "$status")" = null ]; then echo "release/$version has no candidate yet"; continue; fi
+            if [ "$(jq -r .publication <<< "$status")" = published ]; then continue; fi
+            echo "::group::release/$version"
+            state monitor STATE --config "$RUNNER_TEMP/config-$version.json" --stores live
+            state summary STATE --branch-head "$head" | tee -a "$GITHUB_STEP_SUMMARY"
+            mode=$(jq -r .publishMode "$RUNNER_TEMP/config-$version.json")
+            if [ "$(state status STATE | jq -r .publication)" = in-progress ]; then
+              echo "Resuming the publication of $version"
+              gh workflow run release-publish.yml --ref "release/$version" -f version="$version" -f sha="$head" -f resume=true
+            elif [ "$mode" = auto-publish-after-approval ] && state gate STATE --branch-head "$head" 2>/dev/null; then
+              echo "Gate open in auto-publish mode: starting the publication of $version"
+              gh workflow run release-publish.yml --ref "release/$version" -f version="$version" -f sha="$head" -f resume=false
+            fi
+            echo "::endgroup::"
+          done

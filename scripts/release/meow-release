@@ -1,0 +1,210 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The release workflows' only way to read or change release state.
+#
+#   meow-release init      STATE --config CFG --version V
+#   meow-release candidate STATE --sha SHA --run-id N
+#   meow-release record    STATE --platform P --stage S --sha SHA [--set k=v]... [--artifact FILE]...
+#   meow-release monitor   STATE --config CFG [--stores live|fixture:FILE]
+#   meow-release gate      STATE --branch-head SHA
+#   meow-release publish   STEP STATE --config CFG [--branch-head SHA] [--stores ...] [step options]
+#            STEP: start | mac-published --url U | mac-failed --reason R [--reverted]
+#                  | stores | website-manifest --out F | website-updated --url U --live-version V
+#                  | finish [--pr N]
+#   meow-release summary   STATE --branch-head SHA
+#   meow-release show      STATE --platform P [--sha SHA --at-least STAGE]
+#   meow-release status    STATE
+#   meow-release next-build ios|android --version V [--latest N]
+#   meow-release attest    STATE --platform android --result approved|published|rejected --actor NAME
+#
+# STATE is a JSON file (the workflows keep it on the `release-state` branch).
+# Exit status 1 with `::error::` lines on any refusal.
+require "digest"
+require "json"
+require "optparse"
+require_relative "lib/meow_release"
+
+include MeowRelease # rubocop:disable Style/MixinUsage
+
+def fail!(message)
+  warn "::error::#{message}"
+  exit 1
+end
+
+def parse(args, *flags)
+  opts = { set: {}, artifacts: [] }
+  OptionParser.new do |o|
+    flags.each do |flag|
+      case flag
+      when :set then o.on("--set KEY=VALUE") { |kv| k, v = kv.split("=", 2); opts[:set][k.to_sym] = v.match?(/\A\d+\z/) ? v.to_i : v }
+      when :artifact then o.on("--artifact FILE") { |f| opts[:artifacts] << f }
+      when :reverted then o.on("--reverted") { opts[:reverted] = true }
+      else o.on("--#{flag.to_s.tr('_', '-')} VALUE") { |v| opts[flag] = v }
+      end
+    end
+  end.parse!(args)
+  opts
+end
+
+def load_state(path)
+  ReleaseState.load(File.read(path))
+rescue Errno::ENOENT
+  fail!("no release state at #{path}")
+end
+
+def save(state, path)
+  File.write(path, state.to_json)
+end
+
+def stores(spec, config)
+  case spec
+  when nil, "live"
+    apple = AppStoreConnect.from_env(app_id: config.ios.fetch("appId")) if ENV["APP_STORE_CONNECT_KEY_ID"].to_s != ""
+    play = GooglePlay.from_env if ENV["PLAY_SERVICE_ACCOUNT_JSON"].to_s != ""
+    [apple, play]
+  when /\Afixture:(.+)\z/
+    script = JSON.parse(File.read(Regexp.last_match(1)))
+    revive = lambda do |answers|
+      answers.map do |a|
+        next TransientError.new(a["transient"]) if a.is_a?(Hash) && a["transient"]
+        next Error.new(a["error"]) if a.is_a?(Hash) && a["error"]
+        next IosObservation.new(**a.transform_keys(&:to_sym)) if a.is_a?(Hash) && a.key?("version_state")
+        next AndroidObservation.new(**a.transform_keys(&:to_sym)) if a.is_a?(Hash) && a.key?("releases")
+
+        a
+      end
+    end
+    [FakeAppStore.new(script.fetch("apple", {}).transform_values(&revive)),
+     FakePlay.new(script.fetch("play", {}).transform_values(&revive))]
+  else
+    fail!("--stores must be live or fixture:FILE")
+  end
+end
+
+def coordinator_for(state, config, spec)
+  apple, play = stores(spec, config)
+  if state.required_platforms.include?("ios") && apple.nil?
+    fail!("App Store Connect credentials are not configured (APP_STORE_CONNECT_*)")
+  end
+  if state.required_platforms.include?("android") && play.nil?
+    fail!("Google Play credentials are not configured (PLAY_SERVICE_ACCOUNT_JSON)")
+  end
+  Coordinator.new(state: state, config: config, apple: apple, play: play)
+end
+
+command = ARGV.shift
+begin
+  case command
+  when "init"
+    path = ARGV.shift
+    o = parse(ARGV, :config, :version)
+    config = Config.load(o.fetch(:config))
+    if File.exist?(path)
+      puts "release state exists: #{path}"
+    else
+      save(ReleaseState.fresh(version: o.fetch(:version), mode: config.mode,
+                              required_platforms: config.required_platforms), path)
+      puts "created #{path}"
+    end
+  when "candidate"
+    path = ARGV.shift
+    o = parse(ARGV, :sha, :run_id)
+    state = load_state(path)
+    changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i)
+    save(state, path)
+    puts changed ? "candidate #{o[:sha][0, 12]}" : "candidate unchanged (re-run of #{o[:sha][0, 12]})"
+  when "record"
+    path = ARGV.shift
+    o = parse(ARGV, :platform, :stage, :sha, :set, :artifact)
+    state = load_state(path)
+    details = o[:set].dup
+    unless o[:artifacts].empty?
+      details[:artifacts] = o[:artifacts].map { |f| { "name" => File.basename(f), "sha256" => Digest::SHA256.file(f).hexdigest } }
+    end
+    state.advance(o.fetch(:platform), o.fetch(:stage), sha: o.fetch(:sha), **details)
+    save(state, path)
+    puts "#{o[:platform]}: #{Stage.label(o[:stage])}"
+  when "monitor"
+    path = ARGV.shift
+    o = parse(ARGV, :config, :stores)
+    state = load_state(path)
+    actions = coordinator_for(state, Config.load(o.fetch(:config)), o[:stores]).tick
+    save(state, path)
+    puts(actions.empty? ? "nothing to do" : actions)
+  when "gate"
+    o = parse(ARGV.drop(1), :branch_head)
+    blockers = load_state(ARGV.first).publication_blockers(branch_head: o.fetch(:branch_head))
+    blockers.each { |b| warn "::error::#{b}" }
+    exit(blockers.empty? ? 0 : 1)
+  when "publish"
+    step = ARGV.shift
+    path = ARGV.shift
+    o = parse(ARGV, :config, :branch_head, :stores, :url, :reason, :reverted, :out, :live_version, :pr)
+    state = load_state(path)
+    config = Config.load(o.fetch(:config))
+    publisher = Publisher.new(state: state, config: config)
+    case step
+    when "start" then publisher.start!(branch_head: o.fetch(:branch_head))
+    when "mac-published" then publisher.mac_published!(release_url: o.fetch(:url))
+    when "mac-failed" then publisher.mac_failed!(reason: o.fetch(:reason), reverted: o.fetch(:reverted, false))
+    when "stores"
+      waiting = publisher.publish_stores!(coordinator_for(state, config, o[:stores]))
+      puts(waiting.empty? ? "stores published" : "waiting: #{waiting.join(', ')}")
+    when "website-manifest" then File.write(o.fetch(:out), JSON.pretty_generate(publisher.website_manifest) + "\n")
+    when "website-updated"
+      publisher.website_updated!(url: o.fetch(:url), live_version: o.fetch(:live_version))
+    when "finish"
+      pending = publisher.finish!(promotion_pr: o[:pr]&.to_i)
+      puts(pending.empty? ? "published" : "still pending: #{pending.join(', ')}")
+    else fail!("unknown publish step #{step.inspect}")
+    end
+    save(state, path)
+  when "summary"
+    o = parse(ARGV.drop(1), :branch_head)
+    puts Summary.render(load_state(ARGV.first), branch_head: o.fetch(:branch_head))
+  when "status"
+    # Candidate, publication and stages as one JSON line, for scripts.
+    path = ARGV.shift
+    unless File.exist?(path)
+      puts JSON.generate("candidate" => nil)
+      exit 0
+    end
+    state = load_state(path)
+    puts JSON.generate("candidate" => state.candidate_sha, "mode" => state.mode,
+                       "publication" => state.publication_stage, "website" => state.website["stage"],
+                       "stages" => PLATFORMS.map { |p| [p, state.stage(p)] }.to_h)
+  when "show"
+    # One platform's record as JSON, plus whether it already reached
+    # `--at-least STAGE` for `--sha` (how a re-run skips finished work).
+    path = ARGV.shift
+    o = parse(ARGV, :platform, :sha, :at_least)
+    state = File.exist?(path) ? load_state(path) : nil
+    record = state&.platform(o.fetch(:platform)) || {}
+    done = !!(state && o[:at_least] && record["sha"] == o[:sha] &&
+              Stage.rank(record["stage"]) >= Stage.rank(o[:at_least]))
+    puts JSON.generate(record.merge("done" => done))
+  when "next-build"
+    platform = ARGV.shift
+    o = parse(ARGV, :version, :latest)
+    latest = o[:latest].to_s.empty? ? nil : o[:latest].to_i
+    case platform
+    when "ios" then puts BuildNumbers.ios_next(latest)
+    when "android" then puts BuildNumbers.android_version_code(o.fetch(:version), BuildNumbers.android_next(o.fetch(:version), latest))
+    else fail!("next-build ios|android")
+    end
+  when "attest"
+    path = ARGV.shift
+    o = parse(ARGV, :platform, :result, :actor, :sha)
+    state = load_state(path)
+    fail!("only android needs an attestation") unless o.fetch(:platform) == "android"
+    fail!("result must be approved, published or rejected") unless %w[approved published rejected].include?(o.fetch(:result))
+    state.advance("android", o[:result], sha: state.candidate_sha, attestedBy: o.fetch(:actor),
+                                         attestedAt: Time.now.utc.iso8601)
+    save(state, path)
+  else
+    fail!("usage: meow-release init|candidate|record|monitor|gate|publish|summary|next-build|attest (see the header)")
+  end
+rescue GateClosed, Error, KeyError, OptionParser::ParseError => e
+  fail!(e.message)
+end

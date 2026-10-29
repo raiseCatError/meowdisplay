@@ -24,8 +24,9 @@ instead (repository → **Security** → **Report a vulnerability**). See
 
 ## Pull requests
 
-1. Fork the repository and create a branch from the repository's default
-   branch.
+1. Fork the repository and create a branch from `dev` (or from
+   `release/<version>` for a fix to a release being prepared). Branch names:
+   `feature/*`, `fix/*`, `infra/*`. See [BRANCHING.md](BRANCHING.md).
 2. Make a focused change — one fix or feature per PR, without unrelated
    refactors or formatting churn.
 3. Follow the existing Swift and project style (see [AGENTS.md](AGENTS.md) and
@@ -40,6 +41,12 @@ instead (repository → **Security** → **Report a vulnerability**). See
 Do not commit secrets, credentials, signing identities, provisioning profiles,
 private endpoints or personal logs. Keep local signing overrides out of tracked
 files.
+
+Releases are cut from `release/<version>` branches by the maintainers and
+published only after review and approval ([RELEASE.md](RELEASE.md)); a PR
+never needs to bump versions or edit `CHANGELOG.md`. Changes inspired by the
+OpenDisplay project are welcome as ordinary PRs that follow
+[REFERENCE.md](REFERENCE.md).
 
 ## Translations
 
@@ -67,8 +74,7 @@ every catalog already contains the current English strings.
 
 To contribute a translation:
 
-1. Fork and clone the repository, and create a branch from the repository's
-   default branch.
+1. Fork and clone the repository, and create a branch from `dev`.
 2. Generate and open the Xcode project as described in [SETUP.md](SETUP.md).
 3. Open a String Catalog, click **+** at the bottom of its language list and
    add your language (or select it if it already exists).
