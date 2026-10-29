@@ -60,6 +60,29 @@ class MeowReceiverApplication : Application() {
     /** Window mode: the arrangement of Mac windows on this device (per Mac). */
     val workspace: WorkspaceController by lazy { WorkspaceController(this, media) }
 
+    private val demoState = kotlinx.coroutines.flow.MutableStateFlow<com.raisecaterror.meowdisplay.android.demo.DemoRuntime?>(null)
+
+    /** Explore Demo's run, while one is open. Never while a real session is admitted. */
+    val demo: kotlinx.coroutines.flow.StateFlow<com.raisecaterror.meowdisplay.android.demo.DemoRuntime?> = demoState
+
+    override fun onCreate() {
+        super.onCreate()
+        // A demo that was open when the process ended leaves nothing behind.
+        com.raisecaterror.meowdisplay.android.demo.DemoRuntime.clearFiles(this)
+    }
+
+    fun startDemo() {
+        if (demoState.value != null || media.ui.value.admitted) return
+        // The demo never sees this device's real install id.
+        demoState.value = com.raisecaterror.meowdisplay.android.demo.DemoRuntime(this) { panel().copy(installID = "demo-receiver") }
+    }
+
+    fun endDemo() {
+        val run = demoState.value ?: return
+        demoState.value = null
+        run.close()
+    }
+
     /**
      * The panel: the whole current display in its current orientation, never
      * the app's window. Rotation and fold/unfold change it (and re-announce

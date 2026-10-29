@@ -116,16 +116,16 @@ class MediaController(
     private val localName: () -> String,
     private val panel: () -> HelloFields,
     /** Per-Mac "Request Control Automatically"; null (tests, previews): never. */
-    val inputAutoRequest: InputAutoRequestPrefs? = null,
-) {
+    override val inputAutoRequest: InputAutoRequestPrefs? = null,
+) : SessionHost {
     private val state = MutableStateFlow(MediaUiState())
-    val ui: StateFlow<MediaUiState> = state.asStateFlow()
+    override val ui: StateFlow<MediaUiState> = state.asStateFlow()
 
     /** The decoders subscribe here: every session event, in order, on the thread it happened on. */
     @Volatile var mediaEvents: ((SessionEvent) -> Unit)? = null
 
     /** The receiver controls subscribe here, after the decoders. */
-    @Volatile var controlEvents: ((SessionEvent) -> Unit)? = null
+    @Volatile override var controlEvents: ((SessionEvent) -> Unit)? = null
 
     /** Remote Access follows admissions and losses from here, after the UI state is updated. */
     @Volatile var remoteEvents: ((SessionEvent) -> Unit)? = null
@@ -134,9 +134,9 @@ class MediaController(
     @Volatile var routeOf: ((java.net.InetAddress, java.net.InetAddress?, String) -> RouteInfo?)? = null
 
     /** A paired Mac's name for the UI ("your Mac" when unknown). */
-    fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
+    override fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
 
-    val session = ReceiverSession(policies, pins::pinnedPeers, ::hello, ::onEvent)
+    override val session = ReceiverSession(policies, pins::pinnedPeers, ::hello, ::onEvent)
     private var listener: MediaListener? = null
     private val connectRequests = ConnectRequestState()
     private val main = Handler(Looper.getMainLooper())

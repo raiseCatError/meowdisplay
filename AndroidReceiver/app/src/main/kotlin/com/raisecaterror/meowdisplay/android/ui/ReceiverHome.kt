@@ -91,6 +91,8 @@ fun ReceiverHome(
     remote: RemoteAccess,
     onReturnToDisplay: (() -> Unit)? = null,
     onOpenSettings: (() -> Unit)? = null,
+    /** Explore Demo; null while a real session is up. */
+    onTryDemo: (() -> Unit)? = null,
 ) {
     val ui by pairing.ui.collectAsState()
     val mediaUi by media.ui.collectAsState()
@@ -210,6 +212,14 @@ fun ReceiverHome(
                             enabled = ui.pairingWith == null, menu = emptyList(),
                         )
                     }
+                    if (onTryDemo != null && paired.isEmpty()) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        OutlinedButton(
+                            onClick = onTryDemo,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp)
+                                .semantics { contentDescription = "Try the Demo. Opens a sample session. Nothing connects to another device." },
+                        ) { Text("Try the Demo") }
+                    }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
                     TextButton(
                         onClick = { showAddRemote = true },
@@ -218,9 +228,11 @@ fun ReceiverHome(
                 }
             }
 
-            if (compactHeight) item { FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }) }
+            val footerDemo = onTryDemo.takeIf { paired.isNotEmpty() }
+            if (compactHeight) item { FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }, onDemo = footerDemo) }
         }
-        if (!compactHeight) FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }, Modifier.padding(horizontal = 20.dp))
+        if (!compactHeight) FooterLinks(onSteps = { showSteps = true }, onDevice = { showDetails = true }, onDemo = onTryDemo.takeIf { paired.isNotEmpty() },
+            modifier = Modifier.padding(horizontal = 20.dp))
         onOpenSettings?.let { open ->
             OutlinedButton(onClick = open, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)) {
                 GlyphIcon(OverlayGlyph.Gear, 18.dp, MaterialTheme.colorScheme.primary)
@@ -431,13 +443,17 @@ private fun MacsCard(content: @Composable ColumnScope.() -> Unit) {
 
 /** How to Connect · This Device: quiet text links under the card. */
 @Composable
-private fun FooterLinks(onSteps: () -> Unit, onDevice: () -> Unit, modifier: Modifier = Modifier) {
+private fun FooterLinks(onSteps: () -> Unit, onDevice: () -> Unit, onDemo: (() -> Unit)? = null, modifier: Modifier = Modifier) {
     Row(
         modifier.widthIn(max = 640.dp).fillMaxWidth(),
         horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
     ) {
         TextButton(onClick = onSteps, modifier = Modifier.weight(1f, fill = false)) { Text("How to Connect", textAlign = TextAlign.Center) }
         Text("·", color = MaterialTheme.colorScheme.outline, modifier = Modifier.clearAndSetSemantics {})
+        if (onDemo != null) {
+            TextButton(onClick = onDemo, modifier = Modifier.weight(1f, fill = false)) { Text("Try the Demo", textAlign = TextAlign.Center) }
+            Text("·", color = MaterialTheme.colorScheme.outline, modifier = Modifier.clearAndSetSemantics {})
+        }
         TextButton(onClick = onDevice, modifier = Modifier.weight(1f, fill = false)) { Text("This Device", textAlign = TextAlign.Center) }
     }
 }

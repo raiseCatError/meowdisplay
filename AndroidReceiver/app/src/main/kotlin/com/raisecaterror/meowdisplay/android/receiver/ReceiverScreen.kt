@@ -125,7 +125,8 @@ data class ReceiverWindow(
 @Composable
 fun ReceiverScreen(
     controller: ReceiverController,
-    pipeline: MediaPipeline,
+    /** The decoders; null in Explore Demo, which draws [picture] instead. */
+    pipeline: MediaPipeline?,
     overlay: @Composable (ReceiverWindow, OverlayActions, Int) -> Unit,
     onOpenSettings: () -> Unit,
     onBack: () -> Unit = {},
@@ -141,11 +142,14 @@ fun ReceiverScreen(
     rttMs: () -> Double? = { null },
     /** `Remote (Tailscale)` and the like when the session came over Remote Access; null for a local one. */
     routeLabel: String? = null,
+    /** Explore Demo: drawn where the Mac's picture goes, at the same frame, sized by [pictureSize]. */
+    picture: (@Composable (Modifier) -> Unit)? = null,
+    pictureSize: kotlinx.coroutines.flow.StateFlow<Pair<Int, Int>?>? = null,
 ) {
     val state by controller.view.collectAsState()
     val prefs by controller.store.preferences.collectAsState()
     val transient by controller.store.transient.collectAsState()
-    val decoded by pipeline.videoSize.collectAsState()
+    val decoded by (pipeline?.videoSize ?: pictureSize ?: NoPictureSize).collectAsState()
     val density = LocalDensity.current
     val context = LocalContext.current
     val hostView = LocalView.current
@@ -250,7 +254,7 @@ fun ReceiverScreen(
         } else {
             Modifier.fillMaxSize()
         }
-        AndroidView(factory = { ctx -> videoSurface(ctx, pipeline) }, modifier = videoModifier)
+        if (picture != null) picture(videoModifier) else if (pipeline != null) AndroidView(factory = { ctx -> videoSurface(ctx, pipeline) }, modifier = videoModifier)
         // Video off: the last frame is discarded from view (PROTOCOL.md 6.2) and the mapped surface shown.
         if (!state.videoEnabled) {
             Box(Modifier.fillMaxSize().background(Color.Black))
@@ -381,7 +385,7 @@ fun ReceiverScreen(
                 DisposableEffect(Unit) { onDispose { promptFrame = null } }
             }
         }
-        if (showPerformance) {
+        if (showPerformance && pipeline != null) {
             com.raisecaterror.meowdisplay.android.media.PerformanceOverlay(
                 pipeline.stats, rttMs,
                 Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 + 34).dp),
@@ -391,6 +395,8 @@ fun ReceiverScreen(
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
     }
 }
+
+private val NoPictureSize = kotlinx.coroutines.flow.MutableStateFlow<Pair<Int, Int>?>(null)
 
 /** One-time note after Natural Touch became the default: what changed and where Classic is. */
 @Composable

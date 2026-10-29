@@ -47,7 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.raisecaterror.meowdisplay.android.session.MediaController
+import com.raisecaterror.meowdisplay.android.session.SessionHost
 import com.raisecaterror.meowdisplay.core.controls.AVSyncOffset
 import com.raisecaterror.meowdisplay.core.controls.ControlEdge
 import com.raisecaterror.meowdisplay.core.controls.ControlProfileSlot
@@ -89,7 +89,7 @@ enum class SettingsPage(val title: String) {
  */
 @Composable
 fun ReceiverSettings(
-    controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null,
+    controller: ReceiverController, media: SessionHost, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null,
     diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs? = null,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
@@ -108,6 +108,13 @@ fun ReceiverSettings(
                         TextButton(onClick = onDismiss) { Text("Done", fontWeight = FontWeight.SemiBold) }
                     }
                     HorizontalDivider()
+                    if (media.isDemo) {
+                        Text(
+                            "DEMO · Sample session with ${media.macName(null)}. No Mac is connected; changes here are discarded when you leave.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer).padding(horizontal = 20.dp, vertical = 8.dp),
+                        )
+                    }
                     Row(Modifier.fillMaxSize()) {
                         if (wide || page == null) {
                             Column(Modifier.then(if (wide) Modifier.width(240.dp) else Modifier.fillMaxWidth()).fillMaxHeight().verticalScroll(rememberScrollState())) {
@@ -138,7 +145,7 @@ fun ReceiverSettings(
 
 @Composable
 private fun SettingsPageContent(
-    page: SettingsPage, controller: ReceiverController, media: MediaController, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?,
+    page: SettingsPage, controller: ReceiverController, media: SessionHost, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?,
     diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs?,
 ) {
     val store = controller.store
@@ -266,7 +273,8 @@ private fun SettingsPageContent(
             OutlinedButton(onClick = { controller.resetViewport() }) { Text("Reset View") }
             Toggle("Picture in Picture", prefs.pictureInPictureEnabled) { on -> set { it.pictureInPictureEnabled = on } }
             Caption(
-                if (onStartPictureInPicture == null) "This device doesn't offer Picture in Picture."
+                if (media.isDemo) "In a session with your Mac: when you leave MeowDisplay, your Mac stays on screen in a small window."
+                else if (onStartPictureInPicture == null) "This device doesn't offer Picture in Picture."
                 else "When you leave MeowDisplay during a session, your Mac stays on screen in a small window. It shows your Mac; control stays in MeowDisplay."
             )
             if (onStartPictureInPicture != null && prefs.pictureInPictureEnabled && media.ui.collectAsState().value.admitted) {
@@ -312,7 +320,7 @@ private fun SettingsPageContent(
             val view by controller.view.collectAsState()
             val mac = media.macName(mediaUi.peerID)
             Section("Status")
-            LabeledRow("Connection", com.raisecaterror.meowdisplay.android.ui.sessionStatus(mediaUi, mac))
+            LabeledRow("Connection", if (media.isDemo) "Demo: a sample Mac on this device. Nothing is connected." else com.raisecaterror.meowdisplay.android.ui.sessionStatus(mediaUi, mac))
             if (view.videoSize.width > 0) {
                 LabeledRow("Stream", "${view.videoSize.width.roundToInt()}×${view.videoSize.height.roundToInt()}" +
                     (when (mediaUi.source) { "mirror" -> " · Mirror"; "extend" -> " · Extend"; "window" -> " · Windows"; else -> "" }))
@@ -329,8 +337,8 @@ private fun SettingsPageContent(
             }
             Caption("Reconnects by itself after a dropped connection. Off, tap Connect on the home screen, or connect from the Mac.")
             Section("Session")
-            Button(onClick = { media.session.disconnect(); onDismiss() }) { Text("Disconnect") }
-            Caption("Ends this session. The Mac can connect again.")
+            Button(onClick = { media.session.disconnect(); onDismiss() }) { Text(if (media.isDemo) "Exit Demo" else "Disconnect") }
+            Caption(if (media.isDemo) "Ends the demo and returns to Home." else "Ends this session. The Mac can connect again.")
         }
     }
 }

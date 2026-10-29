@@ -10,7 +10,7 @@ import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.edit
-import com.raisecaterror.meowdisplay.android.session.MediaController
+import com.raisecaterror.meowdisplay.android.session.SessionHost
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import com.raisecaterror.meowdisplay.core.workspace.AppIcon
@@ -90,8 +90,13 @@ data class WorkspaceUi(
  * without ever dropping tiles, and sends only this Mac's tiles to it.
  * Main thread only.
  */
-class WorkspaceController(context: Context, private val media: MediaController) {
-    private val prefs = context.getSharedPreferences("workspace", Context.MODE_PRIVATE)
+class WorkspaceController(
+    context: Context,
+    private val media: SessionHost,
+    /** Explore Demo keeps its arrangement in its own file, cleared on entry and exit. */
+    prefsName: String = "workspace",
+) {
+    private val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private val state = MutableStateFlow(WorkspaceUi(railEdge = runCatching { RailEdge.valueOf(prefs.getString(RAIL_EDGE, null) ?: "") }.getOrDefault(RailEdge.Top)))
     val ui: StateFlow<WorkspaceUi> = state.asStateFlow()

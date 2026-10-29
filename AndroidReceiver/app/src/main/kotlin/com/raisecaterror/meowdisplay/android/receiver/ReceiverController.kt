@@ -8,7 +8,6 @@ import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import com.raisecaterror.meowdisplay.android.controls.ReceiverControlStore
-import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.core.controls.CGRect
 import com.raisecaterror.meowdisplay.core.controls.CGSize
 import com.raisecaterror.meowdisplay.core.controls.ControlActionOperation
@@ -86,7 +85,7 @@ sealed interface ReceiverHaptic {
  * session events are hopped onto it.
  */
 class ReceiverController(
-    private val media: MediaController,
+    private val media: com.raisecaterror.meowdisplay.android.session.SessionHost,
     val store: ReceiverControlStore,
     /** The decoded picture's size in pixels, once known. */
     private val decodedSize: StateFlow<Pair<Int, Int>?>,

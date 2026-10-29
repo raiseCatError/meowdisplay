@@ -22,8 +22,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** The preference blob in app-private SharedPreferences (never backed up, like pins). */
-class SharedPreferenceBlobStore(context: Context) : PreferenceBlobStore {
-    private val prefs = context.getSharedPreferences("receiverControls", Context.MODE_PRIVATE)
+class SharedPreferenceBlobStore(context: Context, name: String = "receiverControls") : PreferenceBlobStore {
+    private val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
     override fun read(key: String): String? = prefs.getString(key, null)
 
     @SuppressLint("UseKtx")

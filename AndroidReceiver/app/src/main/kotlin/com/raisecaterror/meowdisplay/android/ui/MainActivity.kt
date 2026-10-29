@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
                 val prefs by app.receiver.store.preferences.collectAsState()
                 val pip by inPictureInPicture
                 val perf by app.diagnostics.performanceOverlay.collectAsState()
+                val demo by app.demo.collectAsState()
                 // Android 12+: leaving the app during a session slides the picture into a small window.
                 LaunchedEffect(mediaUi.admitted, prefs.pictureInPictureEnabled) { updatePictureInPicture() }
                 if (pip) {
@@ -57,6 +58,18 @@ class MainActivity : ComponentActivity() {
                     return@MeowTheme
                 }
                 var settingsOpen by remember { mutableStateOf(false) }
+                // Explore Demo: its own session and controls. A real Mac that connects ends it.
+                demo?.let { run ->
+                    val demoUi by run.host.ui.collectAsState()
+                    var wasAdmitted by remember(run) { mutableStateOf(false) }
+                    LaunchedEffect(demoUi.admitted) { if (demoUi.admitted) wasAdmitted = true else if (wasAdmitted) app.endDemo() }
+                    LaunchedEffect(mediaUi.admitted) { if (mediaUi.admitted) app.endDemo() }
+                    if (!mediaUi.admitted) {
+                        com.raisecaterror.meowdisplay.android.demo.DemoScreen(run, onExit = { settingsOpen = false; app.endDemo() }, onOpenSettings = { settingsOpen = true })
+                        if (settingsOpen) ReceiverSettings(run.controller, run.host, onDismiss = { settingsOpen = false })
+                        return@MeowTheme
+                    }
+                }
                 // Home while connected: shown over the live picture, so the session, the Mac's
                 // display and the decoder are untouched and Return to Display is instant (R-01).
                 var homeShown by rememberSaveable { mutableStateOf(false) }
@@ -85,7 +98,8 @@ class MainActivity : ComponentActivity() {
                         onStartPictureInPicture = if (supportsPictureInPicture) ({ enterPictureInPicture() }) else null)
                 } else {
                     homeShown = false
-                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote, onOpenSettings = { settingsOpen = true })
+                    ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote, onOpenSettings = { settingsOpen = true },
+                        onTryDemo = { app.startDemo() })
                     if (settingsOpen) ReceiverSettings(app.receiver, app.media, onDismiss = { settingsOpen = false }, diagnostics = app.diagnostics)
                 }
             }
@@ -98,6 +112,7 @@ class MainActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         app.media.session.resendHello()
+        app.demo.value?.host?.session?.resendHello()
         updatePictureInPicture()
     }
 
