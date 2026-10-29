@@ -16,18 +16,20 @@ import org.junit.Test
 class RemoteFilesModelTest {
     private val sent = mutableListOf<JsonObject>()
     private var control = false
-    private val timers = mutableListOf<Pair<() -> Unit, BooleanArray>>()
+    private val timers = mutableListOf<Triple<() -> Unit, BooleanArray, Long>>()
 
     private fun model() = RemoteFilesModel(
         send = { sent += it; true },
         inputAllowed = { control },
-        scheduler = { _, block -> val alive = booleanArrayOf(true); timers += block to alive; { alive[0] = false } },
+        scheduler = { ms, block -> val alive = booleanArrayOf(true); timers += Triple(block, alive, ms); { alive[0] = false } },
+        cacheDir = kotlin.io.path.createTempDirectory("RemoteFilesModelTest").toFile(),
     ).also { it.setAvailable(true) }
 
-    /** Runs every delay that is due (all of them: time is not modelled). */
-    private fun runTimers() {
-        val due = timers.toList(); timers.clear()
-        due.forEach { (block, alive) -> if (alive[0]) block() }
+    /** Runs the short delays (debounces, notices); time is not modelled. Timeouts run only with [timeouts]. */
+    private fun runTimers(timeouts: Boolean = false) {
+        val due = timers.filter { timeouts || it.third < 10_000 }
+        timers.removeAll(due)
+        due.forEach { (block, alive, _) -> if (alive[0]) block() }
     }
 
     private fun reply(json: String) = RemoteFilesReply.parse(Json.parseToJsonElement(json).jsonObject)!!

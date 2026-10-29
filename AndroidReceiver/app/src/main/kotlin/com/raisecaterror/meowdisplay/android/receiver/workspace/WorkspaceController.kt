@@ -221,6 +221,12 @@ class WorkspaceController(
         scheduler = { ms, block -> val r = Runnable(block); main.postDelayed(r, ms); { main.removeCallbacks(r) } },
         style = runCatching { RemoteFilesStyle.valueOf(prefs.getString(FILES_STYLE, null) ?: "") }.getOrDefault(RemoteFilesStyle.List),
         onStyle = { prefs.edit().putString(FILES_STYLE, it.name).apply() },
+        cacheDir = java.io.File(java.io.File(context.cacheDir, "RemoteFinder"), prefsName),
+        settings = object : com.raisecaterror.meowdisplay.core.workspace.RemoteFilesSettings {
+            override fun get(key: String): String? = prefs.getString(key, null)
+            override fun set(key: String, value: String?) { prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply() }
+        },
+        macKey = { host },
     )
 
     /** The focused pane's app menus (a bar under its label). */

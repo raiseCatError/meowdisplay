@@ -58,6 +58,10 @@ internal object DemoFiles {
             "state" -> listOf(reply {
                 put("state", "ready")
                 put("roots", buildJsonArray { roots.forEach { (id, n) -> add(buildJsonObject { put("id", id); put("name", n.name) }) } })
+                // The demo Mac lets you look around only: nothing is copied or changed.
+                put("grant", buildJsonObject {
+                    put("duration", "session"); put("scope", "selectedFolders"); put("caps", buildJsonArray { add(JsonPrimitive("browse")) })
+                })
             })
             "list" -> {
                 val dir = find()?.takeIf { it.dir } ?: return error("notFound")
