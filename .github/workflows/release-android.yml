@@ -129,8 +129,11 @@ jobs:
           rm -f "$MEOW_UPLOAD_STORE_FILE"
           aab=AndroidReceiver/app/build/outputs/bundle/release/app-release.aab
           # The bundle must be signed by exactly the expected upload key, never
-          # by a key nobody registered with Play.
-          jarsigner -verify -strict "$aab" >/dev/null
+          # by a key nobody registered with Play. Not `-strict`: an upload
+          # certificate is self-signed, which -strict always rejects (exit 4).
+          verified=$(jarsigner -verify "$aab")
+          grep -q '^jar verified\.' <<< "$verified" || { echo "::error::bundle signature does not verify"; exit 1; }
+          if grep -qi 'unsigned entries' <<< "$verified"; then echo "::error::bundle has unsigned entries"; exit 1; fi
           signer=$(keytool -printcert -jarfile "$aab" | awk '/SHA256:/ {print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
           expected=$(printf '%s' "$EXPECTED_UPLOAD_CERT_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
           [ "$signer" = "$expected" ] || { echo "::error::bundle signed by $signer, expected upload certificate $expected"; exit 1; }
