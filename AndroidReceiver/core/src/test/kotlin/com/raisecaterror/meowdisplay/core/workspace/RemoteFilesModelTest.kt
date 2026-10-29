@@ -171,4 +171,13 @@ class RemoteFilesModelTest {
         assertNull(r.jpegBase64)
         assertNull(RemoteFilesReply.parse(Json.parseToJsonElement("""{"ok":true}""").jsonObject))
     }
+
+    @Test
+    fun namesThatCouldLeaveTheirFolderAreDropped() {
+        val r = reply("""{"op":"list","ok":true,"entries":[{"name":".."},{"name":"."},{"name":"a/b"},{"name":"../../x"},
+            {"name":"nul\u0000x"},{"name":""},{"name":"ok.txt"},{"name":"..hidden"}]}""")
+        assertEquals(listOf("ok.txt", "..hidden"), r.entries.map { it.name })
+        assertFalse(RemoteFilesReply.isSafeName("a\u0000"))
+        assertTrue(RemoteFilesReply.isSafeName("a\\b"))
+    }
 }

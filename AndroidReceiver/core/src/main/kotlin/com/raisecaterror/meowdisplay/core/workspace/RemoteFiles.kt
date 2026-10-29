@@ -145,6 +145,9 @@ data class RemoteFilesReply(
         /** A reply made here: the request failed before the Mac answered. */
         fun failure(op: String, code: String) = RemoteFilesReply(op, ok = false, error = code)
 
+        /** One path component from the Mac that is safe to use on this device: not empty, not `.` or `..`, no separator or NUL. */
+        fun isSafeName(name: String) = name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name
+
         fun parse(obj: JsonObject): RemoteFilesReply? {
             val op = obj.s("op")?.takeIf { it.length <= 16 } ?: return null
             val root = obj.s("root")?.take(64)
@@ -162,7 +165,8 @@ data class RemoteFilesReply(
                 root = root,
                 path = names("path"),
                 entries = (obj["entries"] as? JsonArray).orEmpty().take(2000).mapNotNull { it as? JsonObject }.mapNotNull { e ->
-                    val name = e.s("name")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                    // A name is used for local copies too: never one that could leave its folder.
+                    val name = e.s("name")?.takeIf(::isSafeName) ?: return@mapNotNull null
                     val dir = e.b("dir") == true
                     val inFolder = if (e["in"] != null) names("in", e) else null
                     RemoteFileEntry(name.take(255), dir, RemoteFileKind.of(e.s("kind")) ?: if (dir) RemoteFileKind.Folder else RemoteFileKind.File,
@@ -1136,17 +1140,21 @@ class RemoteFilesModel(
         exportBatches.remove(id)
         val dir = File(transfers.cacheDir, "export-$id")
         dir.mkdirs()
-        b.folders.forEach { File(dir, it.joinToString(File.separator)).mkdirs() }
+        val base = dir.canonicalPath + File.separator
+        // Second guard: every copy and folder stays inside the export folder.
+        fun inside(rel: List<String>): File? =
+            if (rel.all(RemoteFilesReply::isSafeName)) File(dir, rel.joinToString(File.separator)).takeIf { it.canonicalPath.startsWith(base) } else null
+        b.folders.forEach { inside(it)?.mkdirs() }
         var moved = 0
         for ((t, rel) in b.paths) {
             val item = transfers.items.value.firstOrNull { it.id == t } ?: continue
             val src = item.localFile ?: continue
             if (item.state != RemoteTransferItem.State.Done) continue
-            val dest = File(dir, rel.joinToString(File.separator))
+            val dest = inside(rel) ?: continue
             dest.parentFile?.mkdirs()
             if (src.renameTo(dest)) { moved++; src.parentFile?.deleteRecursively() }
         }
-        val files = b.tops.distinct().map { File(dir, it) }.filter { it.exists() }
+        val files = b.tops.distinct().filter(RemoteFilesReply::isSafeName).map { File(dir, it) }.filter { it.exists() }
         if (files.isEmpty() || (moved == 0 && b.folders.isEmpty())) {
             dir.deleteRecursively()
             if (b.failed > 0) show(RemoteFilesNotice.Text("Nothing could be copied from the Mac."))

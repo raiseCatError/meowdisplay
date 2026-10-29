@@ -72,6 +72,12 @@ struct RemoteFilesReply: Sendable {
 
     static let maxBase64 = 3_000_000   // a 1600-sided JPEG preview
 
+    /// One path component from the Mac that is safe to use on this device: not empty, not `.`
+    /// or `..`, no separator or NUL.
+    static func isSafeName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\0")
+    }
+
     /// A reply made here: the request failed before the Mac answered.
     static func failure(_ op: String, _ code: String) -> RemoteFilesReply {
         RemoteFilesReply(op: op, req: nil, ok: false, error: code, state: nil)
@@ -90,7 +96,8 @@ struct RemoteFilesReply: Sendable {
         r.root = str("root", 64)
         r.path = names(obj["path"])
         r.entries = ((obj["entries"] as? [[String: Any]]) ?? []).prefix(2000).compactMap { e in
-            guard let name = e["name"] as? String, !name.isEmpty else { return nil }
+            // A name is used for local copies too: never one that could leave its folder.
+            guard let name = e["name"] as? String, RemoteFilesReply.isSafeName(name) else { return nil }
             let dir = e["dir"] as? Bool ?? false
             return RemoteFileEntry(name: String(name.prefix(255)), isDirectory: dir,
                                    kind: (e["kind"] as? String).flatMap(RemoteFileKind.init(rawValue:)) ?? (dir ? .folder : .file),

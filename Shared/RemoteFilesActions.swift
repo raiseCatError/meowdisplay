@@ -651,13 +651,16 @@ extension RemoteFilesModel {
         let fm = FileManager.default
         let dir = RemoteTransferQueue.cacheDirectory.appendingPathComponent("export-" + batch.uuidString, isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        for f in b.folders {
+        for f in b.folders where f.allSatisfy(RemoteFilesReply.isSafeName) {
             try? fm.createDirectory(at: f.reduce(dir) { $0.appendingPathComponent($1, isDirectory: true) }, withIntermediateDirectories: true)
         }
         var moved = 0
+        let base = dir.standardizedFileURL.path + "/"
         for (id, rel) in b.paths {
             guard let item = transfers.items.first(where: { $0.id == id }), item.state == .done, let src = item.localURL else { continue }
             let dest = rel.reduce(dir) { $0.appendingPathComponent($1) }
+            // Second guard: every copy stays inside the export folder.
+            guard rel.allSatisfy(RemoteFilesReply.isSafeName), dest.standardizedFileURL.path.hasPrefix(base) else { continue }
             try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if (try? fm.moveItem(at: src, to: dest)) != nil {
                 moved += 1
@@ -665,7 +668,7 @@ extension RemoteFilesModel {
             }
         }
         var seen = Set<String>()
-        let urls = b.tops.filter { seen.insert($0).inserted }.map { dir.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
+        let urls = b.tops.filter { RemoteFilesReply.isSafeName($0) && seen.insert($0).inserted }.map { dir.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
         guard !urls.isEmpty, moved > 0 || !b.folders.isEmpty else {
             try? fm.removeItem(at: dir)
             if b.failed > 0 { show(.text(String(localized: "Nothing could be copied from the Mac."))) }

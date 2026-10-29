@@ -304,7 +304,7 @@ class RemoteTransferQueue(
 
     private fun partialFile(id: String): File? {
         val i = item(id) ?: return null
-        val safe = i.name.replace('/', '_').replace(':', '_').ifEmpty { "file" }
+        val safe = i.name.replace('/', '_').replace(':', '_').replace('\u0000', '_').takeIf { it.isNotEmpty() && it != "." && it != ".." } ?: "file"
         return File(File(cacheDir, id), safe)
     }
 

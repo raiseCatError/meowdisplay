@@ -296,8 +296,9 @@ final class RemoteTransferQueue: ObservableObject {
 
     private func partialURL(_ id: UUID) -> URL? {
         guard let item = items.first(where: { $0.id == id }) else { return nil }
-        let safe = item.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
-        return Self.cacheDirectory.appendingPathComponent(id.uuidString, isDirectory: true).appendingPathComponent(safe.isEmpty ? "file" : safe)
+        let safe = item.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_").replacingOccurrences(of: "\0", with: "_")
+        return Self.cacheDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent(safe.isEmpty || safe == "." || safe == ".." ? "file" : safe)
     }
 
     private func touch(_ id: UUID, bytes: Int) {

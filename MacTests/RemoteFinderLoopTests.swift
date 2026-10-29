@@ -313,4 +313,10 @@ final class RemoteFinderLoopTests: XCTestCase {
         XCTAssertNil(RemoteFilesModel.cleanName(".."))
         XCTAssertNil(RemoteFilesModel.cleanName(".hidden"))
     }
+
+    func testNamesThatCouldLeaveTheirFolderAreDropped() throws {
+        let names = ["..", ".", "a/b", "../../x", "nul\0x", "", "ok.txt", "..hidden"]
+        let reply = try XCTUnwrap(RemoteFilesReply.parse(["op": "list", "ok": true, "entries": names.map { ["name": $0] }]))
+        XCTAssertEqual(reply.entries.map(\.name), ["ok.txt", "..hidden"])
+    }
 }
