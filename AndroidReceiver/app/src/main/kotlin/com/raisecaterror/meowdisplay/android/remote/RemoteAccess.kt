@@ -11,6 +11,7 @@ import com.raisecaterror.meowdisplay.core.remote.RemoteConnectCoordinator
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnockClient
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnocker
 import com.raisecaterror.meowdisplay.core.remote.RemoteMacStore
+import com.raisecaterror.meowdisplay.core.remote.RouteClassifier
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
@@ -39,7 +40,8 @@ class RemoteAccess(
 
     private val host = object : RemoteConnectCoordinator.Host {
         override fun isPaired(peerID: String) = pins.pin(peerID) != null
-        override fun isNearby(peerID: String) = nearby(peerID)
+        // Recovery ignores a Bonjour entry that outlived the phone's Wi-Fi: with no Wi-Fi/Ethernet the Mac can't be local.
+        override fun isNearby(peerID: String) = nearby(peerID) && RouteClassifier.mayReachLocalNetwork(routes.snapshot())
         override fun autoReconnectEnabled() = media.session.autoReconnectEnabled
         override fun liveSessionPeer() = media.ui.value.takeIf { it.admitted }?.peerID
         override fun markConnectPending(peerID: String, mode: DisplayMode?) = media.markRemoteConnect(peerID, mode)

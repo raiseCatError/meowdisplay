@@ -45,7 +45,7 @@ internal val connectionHelp = listOf(
     "Another network" to "Put Tailscale on this device and on your Mac, signed in to the same account (any VPN that connects them works too). On your Mac, open Settings → Devices and choose Open Pair over Remote. Here, tap + Add Remote Mac, enter the Mac's Tailscale name or address, tap Pair New Mac, and confirm the same code on both screens. After that, tap Connect on the Mac, even away from its Wi-Fi.",
     "Addresses" to "Use the Mac's MagicDNS name (mac.tailnet.ts.net, or just mac), its Tailscale IPv4 address (100.101.102.103) or an IPv6 address ([fd7a:115c:a1e0::1]). Add :port only if you changed it. The address only tells this device where to look. Whether a Mac is trusted comes from pairing, never from the address or from sharing a Tailscale network.",
     "Can't find the Mac?" to "Check that MeowDisplay is open on the Mac and that both are on the same Wi-Fi. Guest networks often keep devices apart.",
-    "Connection lost" to "This device reconnects by itself when the Mac is back (Auto-Reconnect in Settings). Over Remote it asks your Mac to connect again for a few minutes while this app is open. Or tap Connect on the home screen.",
+    "Connection lost" to "This device reconnects by itself when the Mac is back (Auto-Reconnect in Settings). If the Mac has a saved remote address, this device also asks it to connect again over Remote for a few minutes while this app is open, including after leaving the Mac's Wi-Fi. Or tap Connect on the home screen.",
     "Needs an update" to "If a Mac needs a newer MeowDisplay, or this device does, update the older one so both match.",
 )
 

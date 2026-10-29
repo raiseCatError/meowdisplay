@@ -40,7 +40,10 @@ class RemoteRecoveryPolicyTest {
         assertTrue(policy.shouldStart(context.copy(reason = SessionLossReason.ListenerFailed)))
         for (reason in listOf(SessionLossReason.ExplicitDisconnect, SessionLossReason.PeerClosed, SessionLossReason.ProtocolIncompatible))
             assertFalse("$reason", policy.shouldStart(context.copy(reason = reason)))
-        assertFalse("a local session isn't recovered by knocking", policy.shouldStart(context.copy(wasRemote = false)))
+        assertTrue("a local session with a saved address falls back to Remote", policy.shouldStart(context.copy(wasRemote = false)))
+        assertTrue("even while Bonjour still lists the Mac (it waits)", policy.shouldStart(context.copy(wasRemote = false, nearby = true)))
+        assertFalse("but never without a saved address", policy.shouldStart(context.copy(wasRemote = false, hasSavedAddress = false)))
+        assertFalse(policy.shouldStart(context.copy(wasRemote = false, reason = SessionLossReason.ExplicitDisconnect)))
         assertFalse(policy.shouldStart(context.copy(autoReconnectEnabled = false)))
         assertFalse("foreground only", policy.shouldStart(context.copy(foreground = false)))
         assertFalse(policy.shouldStart(context.copy(hasSavedAddress = false)))
@@ -156,5 +159,22 @@ class RemoteRecoveryPolicyTest {
         policy.knockStarted(2_000)
         policy.knockFinished(2_050, KnockResult.Cancelled)
         assertEquals(RemoteRecoveryPolicy.Step.Idle, policy.next(2_100))
+    }
+
+    @Test
+    fun anAttemptSkippedWhileNearbyFollowsTheBackoffAndSendsNothing() {
+        val run = policy.start("A", now = 0, fromLocal = true)
+        assertTrue(run.fromLocal)
+        assertEquals(RemoteRecoveryPolicy.Step.Wait(2_000), policy.next(0))
+        policy.skippedWhileNearby(2_000)
+        assertNull("no knock was sent", run.lastKnockAt)
+        assertEquals(RemoteRecoveryPolicy.Step.Wait(7_000), policy.next(2_000))
+        policy.skippedWhileNearby(7_000)
+        assertEquals(RemoteRecoveryPolicy.Step.Wait(17_000), policy.next(7_000))
+        // A network change in the meantime is taken by the next due attempt, sent or skipped.
+        assertTrue(policy.networkChanged(8_000))
+        policy.skippedWhileNearby(8_000)
+        assertTrue(policy.next(8_000) is RemoteRecoveryPolicy.Step.Wait)
+        assertTrue("still bounded by the window", policy.next(600_000) == RemoteRecoveryPolicy.Step.Idle)
     }
 }

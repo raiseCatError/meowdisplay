@@ -48,6 +48,14 @@ data class RouteInfo(val kind: RouteKind, val remote: Boolean) {
 
 object RouteClassifier {
     /**
+     * Whether a Mac can be on this device's local network at all: false only when the system lists
+     * its networks and none is Wi-Fi or Ethernet (a Bonjour entry left over from a Wi-Fi this phone
+     * just lost). Nothing known yet counts as possible, so a missing snapshot never hides a Mac.
+     */
+    fun mayReachLocalNetwork(networks: List<NetworkFacts>): Boolean =
+        networks.isEmpty() || networks.any { it.transport == Transport.WiFi || it.transport == Transport.Ethernet }
+
+    /**
      * Classifies a connection from the peer's address, this device's own address on it and the
      * networks the system knows. Tailscale needs evidence: the peer in Tailscale's address space
      * AND a VPN network whose routes cover that address. A VPN whose routes can't be read is just

@@ -196,8 +196,12 @@ class RemoteConnectCoordinator(
     }
 
     /** True while a knock this device sent is still being answered (used to label the session Remote). */
-    fun isKnockPending(peerID: String): Boolean = state.value[peerID].let {
-        it is RemoteAttempt.Knocking || it == RemoteAttempt.WaitingForDialBack || it == RemoteAttempt.Recovering
+    fun isKnockPending(peerID: String): Boolean = synchronized(lock) {
+        val attempt = state.value[peerID]
+        // A run after a local drop that hasn't knocked yet: whatever connects is the Mac's own local redial.
+        val run = policy.run
+        if (attempt == RemoteAttempt.Recovering && run?.peerID == peerID && run.fromLocal && run.lastKnockAt == null) return false
+        attempt is RemoteAttempt.Knocking || attempt == RemoteAttempt.WaitingForDialBack || attempt == RemoteAttempt.Recovering
     }
 
     /** The live session for [peerID] ended. A dropped remote session starts bounded automatic recovery. */
@@ -215,7 +219,7 @@ class RemoteConnectCoordinator(
                 nearby = host.isNearby(peerID), otherSessionLive = host.liveSessionPeer()?.let { it != peerID } == true,
             )
             if (!policy.shouldStart(context)) return
-            startRecoveryLocked(peerID)
+            startRecoveryLocked(peerID, fromLocal = !wasRemote)
         }
     }
 
@@ -259,8 +263,10 @@ class RemoteConnectCoordinator(
     /** Bonjour's current view: a Mac that shows up locally lets the normal local path take over, with no knock. */
     fun onNearbyChanged() {
         synchronized(lock) {
-            val peerID = policy.run?.peerID ?: return
-            if (host.isNearby(peerID)) {
+            val run = policy.run ?: return
+            val peerID = run.peerID
+            // A run from a local drop already expects the Mac nearby: it waits, the Mac's local redial ends it.
+            if (!run.fromLocal && host.isNearby(peerID)) {
                 stopRecoveryLocked()
                 if (state.value[peerID] == RemoteAttempt.Recovering) clear(peerID)
             }
@@ -269,14 +275,14 @@ class RemoteConnectCoordinator(
 
     // MARK: - Recovery
 
-    private fun startRecoveryLocked(peerID: String) {
+    private fun startRecoveryLocked(peerID: String, fromLocal: Boolean = false) {
         stopRecoveryLocked()
         val mine = ++recoveryGeneration
         recoveryFailure = null
         deliveredAt = null
-        policy.start(peerID, nowMs())
+        policy.start(peerID, nowMs(), fromLocal)
         set(peerID, RemoteAttempt.Recovering)
-        host.log("remote recovery: started")
+        host.log(if (fromLocal) "remote recovery: started after a local drop" else "remote recovery: started")
         recovery = scope.launch { recoveryLoop(peerID, mine) }
     }
 
@@ -329,11 +335,17 @@ class RemoteConnectCoordinator(
         synchronized(lock) {
             if (recoveryGeneration != mine) return false
             val saved = store.endpoint(peerID)
+            val nearby = host.isNearby(peerID)
             if (saved == null || !host.isPaired(peerID) || !foreground || !host.autoReconnectEnabled() ||
-                host.isNearby(peerID) || host.liveSessionPeer() != null
+                (nearby && policy.run?.fromLocal != true) || host.liveSessionPeer() != null
             ) {
                 stopRecoveryLocked()
                 return false
+            }
+            if (nearby) {
+                // Local drop, Mac still on this network: its own redial comes first. Try again later.
+                policy.skippedWhileNearby(nowMs())
+                return true
             }
             endpoint = saved
             policy.knockStarted(nowMs())

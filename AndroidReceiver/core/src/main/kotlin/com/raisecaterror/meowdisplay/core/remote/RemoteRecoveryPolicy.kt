@@ -10,6 +10,10 @@ import com.raisecaterror.meowdisplay.core.session.SessionLossReason
  * Bounded for the battery and for the Mac: backoff attempts for about three minutes, one extra
  * immediate attempt per network change within ten minutes of the drop, never closer together than
  * the Mac's own 5 s limit, one at a time.
+ *
+ * A LOCAL session that drops is recovered the same way when the Mac has a saved Remote address
+ * (Wi-Fi lost, phone now on cellular + Tailscale): the run starts, but it only knocks while
+ * Bonjour no longer shows the Mac, so the local path (the Mac redialing over Wi-Fi) stays first.
  */
 class RemoteRecoveryPolicy(private val config: Config = Config()) {
     data class Config(
@@ -26,7 +30,10 @@ class RemoteRecoveryPolicy(private val config: Config = Config()) {
     /** Everything that decides whether a dropped session starts recovery. */
     data class DropContext(
         val reason: SessionLossReason,
-        /** The session that dropped came over Remote Access (a knock, a VPN/Tailscale/cellular path or a non-local address). */
+        /**
+         * The session that dropped came over Remote Access (a knock, a VPN/Tailscale/cellular path or a
+         * non-local address). False for a local Wi-Fi session, which may still fall back to Remote.
+         */
         val wasRemote: Boolean,
         val autoReconnectEnabled: Boolean,
         val foreground: Boolean,
@@ -49,7 +56,11 @@ class RemoteRecoveryPolicy(private val config: Config = Config()) {
         data class Dormant(val untilMs: Long) : Step
     }
 
-    class Run internal constructor(val peerID: String, val startedAt: Long) {
+    /**
+     * [fromLocal]: the session that dropped was local. Such a run waits while the Mac is nearby
+     * (the local path is first) instead of ending.
+     */
+    class Run internal constructor(val peerID: String, val startedAt: Long, val fromLocal: Boolean = false) {
         internal var attempts = 0
         internal var nextBackoffAt: Long? = null
         internal var kickAt: Long? = null
@@ -63,13 +74,15 @@ class RemoteRecoveryPolicy(private val config: Config = Config()) {
         private set
 
     fun shouldStart(context: DropContext): Boolean = with(context) {
-        reason.automaticallyRecoverable && wasRemote && autoReconnectEnabled && foreground &&
-            hasSavedAddress && stillPaired && !nearby && !otherSessionLive
+        // A remote drop with the Mac visible locally: the local path takes over, no run.
+        // A local drop starts regardless (Bonjour may still list a Mac this phone just lost); it waits while nearby.
+        reason.automaticallyRecoverable && autoReconnectEnabled && foreground &&
+            hasSavedAddress && stillPaired && !otherSessionLive && (!wasRemote || !nearby)
     }
 
     /** Begins a run for [peerID]; any earlier run is replaced. The first knock is due after the first backoff. */
-    fun start(peerID: String, now: Long): Run {
-        val started = Run(peerID, now)
+    fun start(peerID: String, now: Long, fromLocal: Boolean = false): Run {
+        val started = Run(peerID, now, fromLocal)
         started.nextBackoffAt = now + config.backoffMs.first()
         run = started
         return started
@@ -106,6 +119,18 @@ class RemoteRecoveryPolicy(private val config: Config = Config()) {
             current.kickAt = null
             current.networkAttempts++
         }
+    }
+
+    /**
+     * A due attempt of a [Run.fromLocal] run was not sent because the Mac is still nearby: the
+     * next one follows the backoff as if it had been tried. Nothing reaches the Mac.
+     */
+    fun skippedWhileNearby(now: Long) {
+        val current = run ?: return
+        current.kickAt?.let { if (now >= it) current.kickAt = null }
+        // Counted like a knock, so the next gap is the one knockFinished would have used.
+        current.attempts++
+        current.nextBackoffAt = now + config.backoffMs[minOf(current.attempts, config.backoffMs.size - 1)]
     }
 
     /** A knock ended. A security failure ends the run; everything else schedules the next backoff attempt. */

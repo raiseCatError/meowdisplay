@@ -102,4 +102,14 @@ class RouteClassifierTest {
         assertFalse("different families never match", prefix("0.0.0.0", 0).contains(ip("::1")))
         assertTrue(prefix("fd7a:115c:a1e0::", 48).contains(ip("fd7a:115c:a1e0:1::1")))
     }
+
+    @Test
+    fun aMacCanBeLocalOnlyWithWiFiOrEthernetOrWhenNothingIsKnown() {
+        assertTrue("no snapshot yet: never hide a Mac", RouteClassifier.mayReachLocalNetwork(emptyList()))
+        assertTrue(RouteClassifier.mayReachLocalNetwork(listOf(wifi())))
+        assertTrue(RouteClassifier.mayReachLocalNetwork(listOf(cellular(), NetworkFacts(Transport.Ethernet, emptyList(), null))))
+        assertTrue("Wi-Fi under Tailscale", RouteClassifier.mayReachLocalNetwork(listOf(wifi(), NetworkFacts(Transport.Vpn, emptyList(), null, isDefault = true))))
+        assertFalse("cellular + Tailscale only: a Bonjour entry is stale", RouteClassifier.mayReachLocalNetwork(
+            listOf(cellular(default = true), NetworkFacts(Transport.Vpn, emptyList(), null))))
+    }
 }

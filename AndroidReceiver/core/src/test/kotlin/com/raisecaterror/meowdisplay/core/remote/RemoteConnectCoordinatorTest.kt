@@ -288,12 +288,13 @@ class RemoteConnectCoordinatorTest {
     }
 
     @Test
-    fun nothingIsRecoveredAfterADisconnectAForgetOrALocalSession() = runTest {
+    fun nothingIsRecoveredAfterADisconnectAForgetOrALocalSessionWithNoSavedAddress() = runTest {
         val disconnect = rig()
         dropRemoteSession(disconnect, reason = SessionLossReason.ExplicitDisconnect)
         val closed = rig()
         dropRemoteSession(closed, reason = SessionLossReason.PeerClosed)
-        val local = rig()
+        // A local session falls back to Remote only with a saved address (see the Wi-Fi fallback tests below).
+        val local = rig(save = false)
         local.coordinator.onAdmitted("A", remote = false)
         local.coordinator.onSessionLost("A", SessionLossReason.TransportLost)
         val autoOff = rig().also { it.host.autoReconnect = false }
@@ -457,5 +458,85 @@ class RemoteConnectCoordinatorTest {
         advanceTimeBy(300_000)
         runCurrent()
         assertEquals("recovery ended when the user took over", 2, rig.transport.calls.size)
+    }
+
+    // MARK: - Local Wi-Fi session falling back to Remote
+
+    private fun TestScope.dropLocalSession(rig: Rig, reason: SessionLossReason = SessionLossReason.TransportLost) {
+        rig.coordinator.onAdmitted("A", remote = false)
+        rig.coordinator.onSessionLost("A", reason)
+        runCurrent()
+    }
+
+    @Test
+    fun aLocalDropWhileTheMacIsStillNearbyWaitsForTheLocalRedialAndKnocksNothing() = runTest {
+        val rig = rig()
+        rig.host.nearby += "A"
+        dropLocalSession(rig)
+        assertEquals(RemoteAttempt.Recovering, rig.attempt())
+        assertFalse("a session arriving now is the Mac's local redial, labelled Local", rig.coordinator.isKnockPending("A"))
+        advanceTimeBy(30_000)
+        runCurrent()
+        rig.coordinator.onNearbyChanged()
+        assertTrue("nearby: no knock", rig.transport.calls.isEmpty())
+        rig.coordinator.onAdmitted("A", remote = false)
+        assertNull(rig.attempt())
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertTrue("the Mac's redial ended it", rig.transport.calls.isEmpty())
+    }
+
+    @Test
+    fun aLocalDropFallsBackToAutomaticKnocksOnceTheMacIsNoLongerNearby() = runTest {
+        val rig = rig()
+        rig.transport.result = KnockResult.Delivered
+        rig.host.nearby += "A"
+        dropLocalSession(rig)
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertTrue(rig.transport.calls.isEmpty())
+        // Wi-Fi gone: Bonjour no longer shows the Mac, the phone is on cellular + Tailscale.
+        rig.host.nearby -= "A"
+        rig.coordinator.onNetworkChanged()
+        advanceTimeBy(6_000)
+        runCurrent()
+        val knock = rig.transport.calls.single()
+        assertEquals(KnockIntent.Automatic, knock.intent)
+        assertEquals(endpointA, knock.endpoint)
+        assertTrue(rig.coordinator.isKnockPending("A"))
+        rig.coordinator.onAdmitted("A", remote = true)
+        assertNull(rig.attempt())
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals(1, rig.transport.calls.size)
+    }
+
+    @Test
+    fun aLocalDropWithoutASavedAddressOrAfterDisconnectDoesNothing() = runTest {
+        val noAddress = rig(save = false)
+        dropLocalSession(noAddress)
+        assertNull(noAddress.attempt())
+        val disconnected = rig()
+        dropLocalSession(disconnected, SessionLossReason.ExplicitDisconnect)
+        assertNull(disconnected.attempt())
+        val off = rig().also { it.host.autoReconnect = false }
+        dropLocalSession(off)
+        assertNull(off.attempt())
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertTrue(noAddress.transport.calls.isEmpty() && disconnected.transport.calls.isEmpty() && off.transport.calls.isEmpty())
+    }
+
+    @Test
+    fun aLocalFallbackIsBoundedLikeRemoteRecovery() = runTest {
+        val rig = rig()
+        rig.transport.result = KnockResult.TimedOut
+        dropLocalSession(rig)
+        advanceTimeBy(700_000)
+        runCurrent()
+        assertTrue(rig.transport.calls.isNotEmpty())
+        assertTrue(rig.transport.calls.all { it.intent == KnockIntent.Automatic })
+        assertTrue("same bound as remote recovery", rig.transport.calls.size in 5..12)
+        assertTrue(rig.transport.calls.all { it.at < 180_000 })
     }
 }
