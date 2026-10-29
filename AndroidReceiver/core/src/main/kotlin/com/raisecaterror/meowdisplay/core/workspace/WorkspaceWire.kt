@@ -55,7 +55,7 @@ object WorkspaceWire {
     fun appLaunch(bundleID: String) = buildJsonObject { put("type", APP_LAUNCH); put("bundle", bundleID) }
 
     /** The tiles this host shows, at their normalized frames. Tiles of other hosts are not sent here. */
-    fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?) = buildJsonObject {
+    fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?, displayID: (WSource) -> Long? = { null }) = buildJsonObject {
         put("type", WORKSPACE_REQUEST)
         put("tiles", buildJsonArray {
             for (id in layout.orderedTileIDs) {
@@ -64,14 +64,21 @@ object WorkspaceWire {
                 if (source.host != host) continue
                 val r = frames.tiles[id] ?: continue
                 if (r.width <= 0 || r.height <= 0) continue
+                // A whole display goes by its real display id; one no longer listed isn't sent.
+                val display = if (source.isDisplay) displayID(source) ?: continue else null
                 add(buildJsonObject {
                     put("id", id); put("host", host)
                     put("x", r.x); put("y", r.y); put("w", r.width); put("h", r.height)
-                    put("window", source.windowID)
-                    source.generation?.let { put("gen", it) }
+                    if (display != null) {
+                        put("display", display)
+                    } else {
+                        put("window", source.windowID)
+                        source.generation?.let { put("gen", it) }
+                    }
                     put("follow", source.follow.wire)
                     put("rotation", tile.rotation.degrees)
                     put("fit", tile.fit.wire)
+                    tile.crop?.let { c -> put("crop", buildJsonArray { add(JsonPrimitive(c.x)); add(JsonPrimitive(c.y)); add(JsonPrimitive(c.width)); add(JsonPrimitive(c.height)) }) }
                 })
             }
         })
@@ -120,6 +127,7 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
      */
     fun missingTiles(layout: WLayout): Set<String> = layout.tiles.mapNotNullTo(mutableSetOf()) { (id, tile) ->
         val source = tile.source ?: return@mapNotNullTo null
+        if (source.isDisplay) return@mapNotNullTo id.takeUnless { displays.any { WSource.displayKey(it.id) == source.windowID } }
         id.takeUnless { windows.any { it.id == source.windowID && (source.bundleID == null || source.bundleID == it.bundleID) } }
     }
 

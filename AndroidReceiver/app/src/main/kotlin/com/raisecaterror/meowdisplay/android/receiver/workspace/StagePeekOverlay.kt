@@ -12,22 +12,41 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.systemGestureExclusion
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -37,13 +56,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
@@ -52,6 +77,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -67,8 +93,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -77,18 +105,23 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.dismiss
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.edit
 import androidx.core.graphics.withMatrix
 import com.raisecaterror.meowdisplay.core.controls.CGPoint
 import com.raisecaterror.meowdisplay.core.controls.CGRect
@@ -98,12 +131,18 @@ import com.raisecaterror.meowdisplay.core.controls.StagePeekEffect
 import com.raisecaterror.meowdisplay.core.controls.StagePeekHaptic
 import com.raisecaterror.meowdisplay.core.controls.StagePeekLayout
 import com.raisecaterror.meowdisplay.core.controls.StagePeekMachine
+import com.raisecaterror.meowdisplay.core.workspace.CatalogDisplay
 import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
+import com.raisecaterror.meowdisplay.core.workspace.MacApp
+import com.raisecaterror.meowdisplay.core.workspace.WSource
 import com.raisecaterror.meowdisplay.core.workspace.WindowAvailability
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceSearch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -112,22 +151,35 @@ import kotlin.math.roundToInt
 private val StagePeekAccent = Color(0xFF5499FF)
 private val CardFill = Color(0xFF2B2B2B)
 private val ChipFill = Color(0xE61C1C1E)
+private val Glass = Color(0xD92A2A2E)
 
 /** Room around a card's rectangle for what its perspective and shadow draw beyond it (dp). */
 private const val CARD_BLEED = 24.0
 
+/** Stage Peek ids for display cards: 0 is the main display (Full Desktop), others count up from a reserved base. */
+private object PeekIDs {
+    fun display(index: Int): Long = if (index == 0) StagePeekMachine.fullDesktopID else 0xFFFF_FF00L + index
+    fun displayIndex(id: Long): Int? = when {
+        id == StagePeekMachine.fullDesktopID -> 0
+        id > 0xFFFF_FF00L && id <= 0xFFFF_FF08L -> (id - 0xFFFF_FF00L).toInt()
+        else -> null
+    }
+}
+
+/** Height of the floating search pill and app carousel above the gallery (dp). */
+private const val TOP_CONTROLS = 12.0 + 44 + 10 + 66 + 14
+
 /**
- * Stage Peek: hold the configured screen edge, scrub the floating window stack, lift (nothing
- * changes), tap a card to switch. Drawn above the video and the controls; the picture underneath
- * never moves or resizes. Mirrors iOS StagePeekView; the rules live in [StagePeekMachine].
+ * Stage Peek (iOS StagePeekView): tap, flick or hold the configured screen edge for a Dock-like
+ * column of the Mac's windows; scrub it, then tap a card to show that window. A sideways flick
+ * opens the gallery (every window and display, two columns at most), with a floating search pill
+ * and an app carousel at the top. Hold a card and drag it onto a pane (or onto the desktop in
+ * Mirror/Extend). Browsing never changes the Mac: only a tap or a drop does.
  *
  * Touch ownership: while closed only the edge strip takes touches; while open the whole overlay
- * does. A pointer-input node above the receiver's input view claims the touch in Compose's hit
- * test, so nothing Stage Peek handles reaches the Mac.
- *
- * All geometry is in dp, in the overlay's own coordinates: [frame] is the picture area in the
- * window, [safe] the safe part of it and [avoiding] the controls and hinges the strip stays clear
- * of, both relative to [frame].
+ * does, so nothing Stage Peek handles reaches the Mac. Geometry is in dp: [frame] is the picture
+ * area in the window, [safe] its safe part and [avoiding] the controls the strip stays clear of,
+ * both relative to [frame].
  */
 @Composable
 fun StagePeekOverlay(
@@ -139,55 +191,77 @@ fun StagePeekOverlay(
     hapticsEnabled: Boolean,
     /** A tablet-class window (the iPad layout metrics). */
     isExpanded: Boolean,
-    /** The Full Desktop card: leave Window mode for the whole Mac screen. */
+    /** This session may change the Mac ("Open on Mac"). */
+    inputAllowed: Boolean,
+    /** A display card in Mirror/Extend (the desktop already shows: nothing to do by default). */
     onFullDesktop: () -> Unit,
     /** The edge strip's frame in window dp (null when there is none): the screen's other controls avoid it. */
     onStripFrame: (CGRect?) -> Unit,
 ) {
     val ui by controller.ui.collectAsState()
     val thumbnails by controller.thumbnails.collectAsState()
+    val displayStills by controller.displayThumbnails.collectAsState()
     val icons by controller.icons.collectAsState()
     val context = LocalContext.current
     val view = LocalView.current
     val density = LocalDensity.current.density
     val scope = rememberCoroutineScope()
-    val windows = ui.catalog?.windows.orEmpty()
     val host = remember { StagePeekHost(controller, scope) }
     val machine = host.machine
     // Reading the revision subscribes this composition to every state change of the machine.
     @Suppress("UNUSED_VARIABLE") val revision = host.revision
     val visible = machine.isVisible
     val reduceMotion = remember(visible) { reduceMotionRequested(context) }
+    val focusManager = LocalFocusManager.current
+
+    val allWindows = ui.catalog?.windows.orEmpty()
+    val displays = ui.catalog?.displays.orEmpty()
+    // The compact column's windows: the chosen app's, matching the search.
+    val windows = allWindows.filter { host.appFilter == null || it.bundleID == host.appFilter }.let {
+        if (host.query.isBlank()) it else WorkspaceSearch.search(host.query, emptyList(), it).windows
+    }
+    // Finder first, running apps next, then every installed app; the running apps from the window list until the Mac's app list arrives.
+    val dockApps = ui.apps.ifEmpty {
+        WorkspaceSearch.carouselOrder(ui.catalog?.apps.orEmpty().map { a -> MacApp(a.bundleID, a.name, true, allWindows.count { it.bundleID == a.bundleID }) })
+    }
 
     host.edge = edge
     host.safe = safe
+    host.frame = frame
     host.isExpanded = isExpanded
     host.reduceMotion = reduceMotion
     host.windows = windows
+    host.displays = displays
     host.onFullDesktop = onFullDesktop
     host.haptics = { haptic -> if (hapticsEnabled) view.performHapticFeedback(haptic.feedbackConstant()) }
 
-    LaunchedEffect(windows, ui.currentWindowID) {
-        // Full Desktop first (top of the stack), then the Mac's windows.
-        val ids = windows.map { it.id }
-        machine.setItems(if (ids.isEmpty()) emptyList() else listOf(StagePeekMachine.fullDesktopID) + ids, ui.currentWindowID)
+    LaunchedEffect(frame) { controller.desktopFrame = frame }
+    LaunchedEffect(windows, displays, ui.currentWindowID, ui.windowMode) {
+        // Displays first (Full Desktop at the top), then the Mac's windows. Always at least Full Desktop,
+        // so the edge bar works before the first listing (it asks for one).
+        val displayIDs = if (displays.isEmpty()) listOf(StagePeekMachine.fullDesktopID) else displays.indices.map(PeekIDs::display)
+        machine.setItems(displayIDs + windows.map { it.id }, if (ui.windowMode) ui.currentWindowID else StagePeekMachine.fullDesktopID)
         host.changed()
     }
-    // Everything that makes an open or half-open Stage Peek stale: the Mac went away, the overview took
-    // over, the window changed shape (rotation, fold, split screen), the edge moved, focus left the window.
+    // Everything that makes an open or half-open Stage Peek stale.
     LaunchedEffect(ui.available) { if (!ui.available) host.cancelAll() }
     LaunchedEffect(ui.overviewOpen) { if (ui.overviewOpen) host.cancelAll() }
     val resizeCount = remember { intArrayOf(0) }
-    LaunchedEffect(frame.width, frame.height, edge) { if (resizeCount[0]++ > 0) host.cancelAll() }
+    LaunchedEffect(frame.width, edge) { if (resizeCount[0]++ > 0 && !host.searchFocused) host.cancelAll() }
     val windowFocused = LocalWindowInfo.current.isWindowFocused
-    LaunchedEffect(windowFocused) { if (!windowFocused) host.cancelAll() }
+    LaunchedEffect(windowFocused) { if (!windowFocused && !host.searchFocused) host.cancelAll() }
+    LaunchedEffect(visible) { if (!visible) { host.query = ""; focusManager.clearFocus(); host.searchFocused = false } }
+    LaunchedEffect(host.launchpad) { controller.setLaunchpadOpen(host.launchpad) }
     DisposableEffect(host) {
         onDispose {
             host.cancelAll()
             onStripFrame(null)
+            controller.setLaunchpadOpen(false)
         }
     }
-    BackHandler(enabled = visible) { host.finish(machine.dismiss()) }
+    BackHandler(enabled = visible || host.launchpad) {
+        if (host.launchpad) host.launchpad = false else host.finish(machine.dismiss())
+    }
 
     // Animated position and expansion: they follow the finger exactly while scrubbing and settle with a spring otherwise.
     val following = !visible || machine.phase == StagePeekMachine.Phase.Scrubbing
@@ -197,12 +271,17 @@ fun StagePeekOverlay(
     val shownPosition = if (following) machine.position else settledPosition.toDouble()
     val shownExpansion = if (following) machine.expansion else settledExpansion.toDouble()
     val appear by animateFloatAsState(if (visible) 1f else 0f, if (visible) tween(if (reduceMotion) 120 else 200) else snap(), label = "stagePeekAppear")
+    val dragging = ui.drag != null
 
-    val cards = StagePeekLayout.cards(
-        host.aspects(), shownPosition, shownExpansion, edge, safe, isExpanded, reduceMotion,
-    )
-    val strip = if (machine.ids.isNotEmpty() && !ui.overviewOpen) StagePeekLayout.strip(edge, safe, avoiding) else null
+    val cards = StagePeekLayout.cards(host.aspects(), shownPosition, shownExpansion, edge, safe, isExpanded, reduceMotion)
+    val strip = if (machine.ids.isNotEmpty() && !ui.overviewOpen && !host.launchpad) StagePeekLayout.strip(edge, safe, avoiding) else null
     LaunchedEffect(strip == null) { if (strip == null) onStripFrame(null) }
+    // Cards near the highlight first (compact); the gallery reports its own visible cards.
+    LaunchedEffect(visible, machine.expanded, shownPosition.roundToInt(), windows) {
+        if (visible && !machine.expanded) {
+            controller.thumbnailPriority = machine.ids.indices.filter { abs(it - machine.position) <= 4 }.map { machine.ids[it] }.filter { PeekIDs.displayIndex(it) == null }
+        }
+    }
 
     Box(
         Modifier
@@ -210,36 +289,61 @@ fun StagePeekOverlay(
             .size(frame.width.dp, frame.height.dp),
     ) {
         if (visible) {
-            Backdrop(edge, frame, shownExpansion, isExpanded, { appear }, host)
-            Box(
-                Modifier.fillMaxSize().graphicsLayer {
-                    alpha = appear
-                    if (!reduceMotion) translationX = (1f - appear) * 48.dp.toPx() * (if (edge == StagePeekEdge.Left) -1f else 1f)
-                },
-            ) {
-                for (card in cards) key(card.index) {
-                    val id = machine.ids.getOrNull(card.index)
-                    val window = id?.let { wanted -> windows.firstOrNull { it.id == wanted } }
-                    StagePeekCardView(
-                        card = card, fullDesktop = id == StagePeekMachine.fullDesktopID, window = window,
-                        thumbnail = window?.let { thumbnails[it.id] }, icon = window?.let { icons[it.bundleID] },
-                        radius = if (isExpanded) 14.0 else 11.0, host = host,
-                    )
+            // Barely there (not gone) while dragging, so the finger's gesture keeps its node.
+            Backdrop(edge, frame, shownExpansion, isExpanded, { if (dragging) 0.001f else appear }, host)
+            if (shownExpansion < 0.999 && !dragging) {
+                Box(
+                    Modifier.fillMaxSize().graphicsLayer {
+                        alpha = appear * (1f - shownExpansion.toFloat())
+                        if (!reduceMotion) translationX = (1f - appear) * 48.dp.toPx() * (if (edge == StagePeekEdge.Left) -1f else 1f)
+                    },
+                ) {
+                    for (card in cards) key(card.index) {
+                        val id = machine.ids.getOrNull(card.index)
+                        val displayIndex = id?.let(PeekIDs::displayIndex)
+                        val display = displayIndex?.let { displays.getOrNull(it) }
+                        val window = if (displayIndex == null) id?.let { wanted -> windows.firstOrNull { it.id == wanted } } else null
+                        StagePeekCardView(
+                            card = card, displayIndex = displayIndex, display = display, window = window,
+                            thumbnail = window?.let { thumbnails[it.id] } ?: display?.let { displayStills[it.id] },
+                            icon = window?.let { icons[it.bundleID] },
+                            radius = if (isExpanded) 14.0 else 11.0, host = host,
+                        )
+                    }
+                    if (shownExpansion < 0.5) cards.firstOrNull { it.highlighted }?.let { focus ->
+                        val id = machine.ids.getOrNull(focus.index)
+                        val window = id?.let { wanted -> windows.firstOrNull { it.id == wanted } }
+                        val display = id?.let(PeekIDs::displayIndex)?.let { displays.getOrNull(it) }
+                        TitleChip(focus, window, display, window?.let { icons[it.bundleID] }, safe, edge)
+                    }
                 }
-                cards.firstOrNull { it.highlighted }?.let { focus ->
-                    val window = machine.ids.getOrNull(focus.index)?.let { wanted -> windows.firstOrNull { it.id == wanted } }
-                    TitleChip(focus, window, window?.let { icons[it.bundleID] }, safe)
-                }
-                Toolbar(host, cards, safe, ui.canAddTile, windows)
+            }
+            if (shownExpansion > 0.001) {
+                Gallery(
+                    controller, ui, host, allWindows, displays, thumbnails, displayStills, icons, inputAllowed, safe,
+                    Modifier.graphicsLayer { alpha = if (dragging) 0f else shownExpansion.toFloat() },
+                    enabled = machine.expanded,
+                )
+            }
+            if (!dragging) {
+                TopControls(host, controller, dockApps, icons, safe, shownExpansion, appear, avoiding)
+                Toolbar(host, cards, safe)
             }
         }
-        if (strip != null) StripView(strip, edge, host, frame, onStripFrame)
+        if (host.launchpad) Launchpad(controller, ui, host, icons, inputAllowed, safe)
+        if (dragging) {
+            // Landing areas and Cancel over the panes (Window mode) or over the desktop (Mirror/Extend).
+            WorkspaceDropOverlay(controller, CGPoint(frame.minX, frame.minY))
+            val d = ui.drag
+            if (d != null && d.item is WorkspaceDrag.Item.Window) DragPreview(d.item.window, controller.still(d.item.window), icons[d.item.window.bundleID], d.location, frame)
+        }
+        if (strip != null) StripView(strip, edge, host, onStripFrame)
     }
 }
 
 // MARK: - Pieces
 
-/** Translucent depth behind the stack, strongest at the edge; the Mac stays visible. The expanded browser adds a darker veil. Never opaque. Owns every touch while Stage Peek is open. */
+/** Translucent depth behind the stack, strongest at the edge; the Mac stays visible. The gallery adds a soft veil. Never opaque. Owns every touch while Stage Peek is open. */
 @Composable
 private fun Backdrop(edge: StagePeekEdge, frame: CGRect, expansion: Double, isExpanded: Boolean, appear: () -> Float, host: StagePeekHost) {
     val touches = remember(host) { stagePeekTouches(host, onStrip = false) { CGPoint.zero } }
@@ -255,13 +359,11 @@ private fun Backdrop(edge: StagePeekEdge, frame: CGRect, expansion: Double, isEx
                 val x0 = if (left) 0f else size.width
                 val x1 = if (left) gradientWidth else size.width - gradientWidth
                 drawRect(
-                    Brush.horizontalGradient(listOf(Color.Black.copy(alpha = 0.42f), Color.Black.copy(alpha = 0f)), startX = x0, endX = x1),
+                    Brush.horizontalGradient(listOf(Color.Black.copy(alpha = 0.30f), Color.Black.copy(alpha = 0f)), startX = x0, endX = x1),
                     topLeft = Offset(min(x0, x1), 0f), size = Size(gradientWidth, size.height),
                 )
-                if (expansion > 0) {
-                    drawRect(Color(0xFF111114).copy(alpha = (0.62 * expansion).toFloat()))
-                    drawRect(Color.Black.copy(alpha = (0.2 * expansion).toFloat()))
-                }
+                // The gallery: a soft veil over the Mac picture (a live video surface can't be blurred from here).
+                if (expansion > 0) drawRect(Color(0xFF15151A).copy(alpha = (0.55 * expansion).toFloat()))
             }
             .semantics {
                 paneTitle = "Stage Peek"
@@ -270,20 +372,20 @@ private fun Backdrop(edge: StagePeekEdge, frame: CGRect, expansion: Double, isEx
     )
 }
 
-/** One card: the window's thumbnail (or its icon) on a rounded plate, tilted in perspective exactly as [StagePeekLayout.hit] assumes. */
+/** One compact card: the window's still (or its icon) on a rounded plate, drawn exactly where [StagePeekLayout.hit] looks. */
 @Composable
 private fun StagePeekCardView(
-    card: StagePeekCard, fullDesktop: Boolean, window: CatalogWindow?,
+    card: StagePeekCard, displayIndex: Int?, display: CatalogDisplay?, window: CatalogWindow?,
     thumbnail: ImageBitmap?, icon: ImageBitmap?, radius: Double, host: StagePeekHost,
 ) {
     val d = LocalDensity.current.density
     val bleed = CARD_BLEED
     val left = card.center.x - card.size.width / 2
     val top = card.center.y - card.size.height / 2
-    // The card's projected corners, relative to the padded node's top-left, in px.
     val projected = StagePeekLayout.corners(card).flatMap { listOf(((it.x - left + bleed) * d).toFloat(), ((it.y - top + bleed) * d).toFloat()) }.toFloatArray()
+    val desktopName = if (display?.isMain == false) display.name else "Full Desktop"
     val label = when {
-        fullDesktop -> "Full Desktop"
+        displayIndex != null -> desktopName
         window == null -> ""
         else -> (if (window.title.isEmpty()) window.app else "${window.app}, ${window.title}") +
             if (window.availability == WindowAvailability.Offscreen) ", minimized" else ""
@@ -300,8 +402,6 @@ private fun StagePeekCardView(
                 val pad = bleed.toFloat() * d
                 val r = radius.toFloat() * d
                 val src = floatArrayOf(pad, pad, pad + w, pad, pad + w, pad + h, pad, pad + h)
-                // A tilted rectangle seen through a perspective camera is a homography of the flat one, so
-                // mapping the flat card's corners onto StagePeekLayout.corners draws exactly what the hit test tests.
                 val matrix = android.graphics.Matrix().apply { setPolyToPoly(src, 0, projected, 0, 4) }
                 val outline = Path().apply { addRoundRect(RoundRect(pad, pad, pad + w, pad + h, CornerRadius(r))) }
                 drawIntoCanvas { canvas ->
@@ -309,10 +409,7 @@ private fun StagePeekCardView(
                         val flat = this
                         val plate = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                             color = CardFill.toArgb()
-                            setShadowLayer(
-                                (if (highlighted) 18f else 8f) * d, 0f, 6f * d,
-                                Color.Black.copy(alpha = if (highlighted) 0.5f else 0.32f).toArgb(),
-                            )
+                            setShadowLayer((if (highlighted) 18f else 8f) * d, 0f, 6f * d, Color.Black.copy(alpha = if (highlighted) 0.5f else 0.32f).toArgb())
                         }
                         flat.drawRoundRect(pad, pad, pad + w, pad + h, r, r, plate)
                         this@drawWithContent.clipPath(outline) { this@drawWithContent.drawContent() }
@@ -335,51 +432,55 @@ private fun StagePeekCardView(
                     contentDescription = label
                     role = Role.Button
                     selected = highlighted
-                    onClick(label = if (fullDesktop) "Show the whole Mac screen" else "Switch to this window") {
-                        host.finish(host.machine.select(card.index)); true
-                    }
+                    onClick(label = if (displayIndex != null) "Show the desktop" else "Show this window") { host.finish(host.machine.select(card.index)); true }
                 },
             contentAlignment = Alignment.Center,
         ) {
             when {
-                fullDesktop -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    MonitorGlyph(Modifier.size(34.dp, 28.dp), Color.White)
-                    Text("Full Desktop", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                }
                 thumbnail != null -> Image(thumbnail, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                displayIndex != null -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    MonitorGlyph(Modifier.size(34.dp, 28.dp), Color.White)
+                    Text(desktopName, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
                 icon != null -> Image(icon, null, Modifier.size(44.dp))
                 else -> WindowGlyph(Modifier.size(34.dp, 26.dp), Color.White.copy(alpha = 0.6f))
             }
+            if (displayIndex != null && thumbnail != null) {
+                Text(desktopName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 2.dp))
+            }
+            if (icon != null && thumbnail != null) {
+                // The app's icon at the card's bottom-left, like Stage Manager.
+                Image(icon, null, Modifier.align(Alignment.BottomStart).padding(6.dp).size(24.dp))
+            }
             if (window?.availability == WindowAvailability.Offscreen) {
-                Text(
-                    "Minimized", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                        .background(Color.Black.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 2.dp),
-                )
+                Text("Minimized", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 2.dp))
             }
         }
     }
 }
 
-/** The highlighted window's app and title, under its card. Not interactive. */
+/** The highlighted card's app and title, beside it. Not interactive. */
 @Composable
-private fun TitleChip(focus: StagePeekCard, window: CatalogWindow?, icon: ImageBitmap?, safe: CGRect) {
-    val width = min(max(focus.size.width + 48, 200.0), safe.width - 24)
-    val x = min(max(focus.center.x, safe.minX + width / 2), safe.maxX - width / 2)
-    val y = min(focus.center.y + focus.size.height / 2 + 24, safe.maxY - 72)
+private fun TitleChip(focus: StagePeekCard, window: CatalogWindow?, display: CatalogDisplay?, icon: ImageBitmap?, safe: CGRect, edge: StagePeekEdge) {
+    // Beside the highlighted card (never over the next card); under it only when there's no room.
+    val width = min(200.0, safe.width - 24)
+    val left = edge == StagePeekEdge.Left
+    val fits = if (left) focus.center.x + focus.size.width / 2 + 12 + width <= safe.maxX else focus.center.x - focus.size.width / 2 - 12 - width >= safe.minX
+    val x = if (!fits) min(max(focus.center.x, safe.minX + width / 2), safe.maxX - width / 2)
+        else if (left) focus.center.x + focus.size.width / 2 + 12 + width / 2 else focus.center.x - focus.size.width / 2 - 12 - width / 2
+    val y = if (fits) focus.center.y else min(focus.center.y + focus.size.height / 2 + 30, safe.maxY - 72)
     CenteredAt(x, y, width) {
         Row(
-            Modifier.background(ChipFill, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 6.dp)
-                .clearAndSetSemantics { },
+            Modifier.background(ChipFill, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 6.dp).clearAndSetSemantics { },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (icon != null) Image(icon, null, Modifier.size(22.dp))
             Column(Modifier.widthIn(max = (width - 20).dp)) {
-                Text(window?.app ?: "Full Desktop", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (window == null) {
-                    Text("Show the whole Mac screen", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+                Text(window?.app ?: if (display?.isMain == false) display.name else "Full Desktop", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (window == null) Text("Hold and drag into a pane", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (window != null && window.title.isNotEmpty() && window.title != window.app) {
                     Text(window.title, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -388,21 +489,95 @@ private fun TitleChip(focus: StagePeekCard, window: CatalogWindow?, icon: ImageB
     }
 }
 
-/** Expand/Compact, Add as Tile (expanded, room for another tile), Close. Kept at the bottom of the stack's column, away from the cards' centre. */
+/** The floating search pill and the Dock-like app carousel: pinned at the top of the column (compact) or centred over the gallery. */
 @Composable
-private fun Toolbar(host: StagePeekHost, cards: List<StagePeekCard>, safe: CGRect, canAddTile: Boolean, windows: List<CatalogWindow>) {
+private fun TopControls(host: StagePeekHost, controller: WorkspaceController, apps: List<MacApp>, icons: Map<String, ImageBitmap>, safe: CGRect, e: Double, appear: Float, avoiding: List<CGRect>) {
+    val compactWidth = min(if (host.isExpanded) 380.0 else 320.0, safe.width - 24)
+    val wideWidth = min(if (host.isExpanded) 620.0 else 560.0, safe.width - 32)
+    val width = compactWidth + (wideWidth - compactWidth) * e
+    val compactX = if (host.edge == StagePeekEdge.Left) safe.minX + 12 + compactWidth / 2 else safe.maxX - 12 - compactWidth / 2
+    val x = compactX + (safe.midX - compactX) * e
+    val focus = remember { FocusRequester() }
+    val d = LocalDensity.current.density
+    // Below any control already at the top of the screen (a badge, the rail handle).
+    val band = CGRect(x - width / 2, safe.minY, width, 12.0 + TOP_CONTROLS)
+    val top = maxOf(safe.minY + 12, (avoiding.filter { it.intersects(band) && it.minY < safe.minY + 80 }.maxOfOrNull { it.maxY + 8 } ?: 0.0))
+    Column(
+        Modifier.offset { IntOffset(((x - width / 2) * d).roundToInt(), (top * d).roundToInt()) }.width(width.dp).graphicsLayer { alpha = appear },
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // Search: the phone's own keyboard. Nothing typed here reaches the Mac.
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).background(Glass, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                .clickable { focus.requestFocus() }.padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("⌕", color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp)
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.weight(1f)) {
+                if (host.query.isEmpty()) Text("Search apps and windows", color = Color.White.copy(alpha = 0.55f), fontSize = 15.sp)
+                BasicTextField(
+                    value = host.query,
+                    onValueChange = { q -> host.query = q; if (q.isNotEmpty() && !host.machine.expanded) host.expand() },
+                    singleLine = true,
+                    textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
+                    cursorBrush = SolidColor(StagePeekAccent),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus).onFocusChanged { f ->
+                        host.searchFocused = f.isFocused
+                        if (f.isFocused && !host.machine.expanded) host.expand()
+                    }.semantics { contentDescription = "Search apps and windows on the Mac" },
+                )
+            }
+            if (host.query.isNotEmpty()) Text("✕", color = Color.White.copy(alpha = 0.7f), modifier = Modifier.clickable { host.query = "" }.padding(6.dp))
+        }
+        // The app carousel: Finder first; tap an app to show just its windows (tap again for all).
+        Row(
+            Modifier.fillMaxWidth().height(66.dp).background(Glass, RoundedCornerShape(22.dp)).border(0.75.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(apps.take(120), key = { it.bundleID }) { app ->
+                    LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
+                    val selected = host.appFilter == app.bundleID
+                    Box(
+                        Modifier.size(50.dp).clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) StagePeekAccent.copy(alpha = 0.35f) else Color.Transparent)
+                            .clickable { host.tapApp(app) }
+                            .semantics { contentDescription = app.name + if (app.running) ", running" else "" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        AppIconView(icons[app.bundleID], app.name, 40.0)
+                        if (app.running) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 1.dp).size(4.dp).background(Color.White.copy(alpha = 0.85f), CircleShape))
+                    }
+                }
+            }
+            Box(
+                Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)).clickable { host.launchpad = true }.semantics { contentDescription = "All apps" },
+                contentAlignment = Alignment.Center,
+            ) { Text("⋯", color = Color.White, fontSize = 24.sp) }
+        }
+    }
+}
+
+@Composable
+private fun AppIconView(icon: ImageBitmap?, name: String, size: Double) {
+    if (icon != null) Image(icon, null, Modifier.size(size.dp))
+    else Box(Modifier.size(size.dp).background(Color.White.copy(alpha = 0.14f), RoundedCornerShape((size * 0.22).dp)), contentAlignment = Alignment.Center) {
+        Text(name.take(1).uppercase(), color = Color.White, fontSize = (size * 0.42).sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Expand/Compact and Close, at the bottom of the column. */
+@Composable
+private fun Toolbar(host: StagePeekHost, cards: List<StagePeekCard>, safe: CGRect) {
     val machine = host.machine
-    val column = cards.firstOrNull { it.highlighted }?.center?.x ?: safe.midX
-    val chosen = machine.highlightedID?.let { id -> windows.firstOrNull { it.id == id } }
+    val column = if (machine.expanded) safe.midX else cards.firstOrNull { it.highlighted }?.center?.x ?: safe.midX
     CenteredAt(min(max(column, safe.minX + 130), safe.maxX - 130), safe.maxY - 30, safe.width) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            ToolbarButton(if (machine.expanded) "Compact" else "Expand") {
-                if (machine.expanded) machine.compact() else machine.expand()
-                host.changed()
-            }
-            if (machine.expanded && canAddTile && chosen != null) {
-                ToolbarButton("Add as Tile") { host.addAsTile(chosen) }
-            }
+            ToolbarButton(if (machine.expanded) "Compact" else "Expand") { if (machine.expanded) host.compact() else host.expand() }
             ToolbarButton("Close", glyph = "✕") { host.finish(machine.dismiss()) }
         }
     }
@@ -423,12 +598,302 @@ private fun ToolbarButton(label: String, glyph: String? = null, onClick: () -> U
     }
 }
 
-/**
- * The edge strip: a few dp wide, taking only the touches that start on it. Excluded from the system
- * back gesture so an edge hold reaches Stage Peek instead of navigating back.
- */
+/** The card under the finger while dragging; the peek steps aside to show the panes. */
 @Composable
-private fun StripView(strip: CGRect, edge: StagePeekEdge, host: StagePeekHost, frame: CGRect, onStripFrame: (CGRect?) -> Unit) {
+private fun DragPreview(w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap?, at: CGPoint, frame: CGRect) {
+    val d = LocalDensity.current.density
+    Box(
+        Modifier.offset { IntOffset(((at.x - frame.minX - 75) * d).roundToInt(), ((at.y - frame.minY - 47) * d).roundToInt()) }
+            .size(150.dp, 94.dp).graphicsLayer { alpha = 0.95f; scaleX = 1.04f; scaleY = 1.04f }
+            .background(Color(0xFF262626), RoundedCornerShape(10.dp)).border(2.dp, StagePeekAccent, RoundedCornerShape(10.dp)),
+    ) {
+        if (still != null) Image(still, null, Modifier.fillMaxSize().padding(4.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
+        else Text(w.title.ifEmpty { w.app }, color = Color.White, fontSize = 12.sp, modifier = Modifier.align(Alignment.Center).padding(8.dp), maxLines = 2)
+        if (icon != null) Image(icon, null, Modifier.align(Alignment.BottomStart).offset((-4).dp, 4.dp).size(24.dp))
+    }
+}
+
+// MARK: - Gallery (expanded)
+
+/** Every window (and display) as a vertical gallery, two columns at most; search results; an app's windows or its empty state. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Gallery(
+    controller: WorkspaceController, ui: WorkspaceUi, host: StagePeekHost, allWindows: List<CatalogWindow>, displays: List<CatalogDisplay>,
+    thumbnails: Map<Long, ImageBitmap>, displayStills: Map<Long, ImageBitmap>, icons: Map<String, ImageBitmap>,
+    inputAllowed: Boolean, safe: CGRect, modifier: Modifier, enabled: Boolean,
+) {
+    val d = LocalDensity.current.density
+    val columns = if (safe.width - 40 >= 2 * 176 + 14) 2 else 1
+    val grid = rememberLazyGridState()
+    val tiled = ui.layout.tiles.values.mapNotNull { it.source?.windowID }.toSet()
+    val query = host.query.trim()
+    val results = if (query.isEmpty()) null else WorkspaceSearch.search(query, ui.apps, allWindows)
+    val filter = host.appFilter?.let { b -> ui.apps.firstOrNull { it.bundleID == b } ?: ui.catalog?.apps?.firstOrNull { it.bundleID == b }?.let { MacApp(it.bundleID, it.name, true, 0) } }
+    LaunchedEffect(grid) {
+        snapshotFlow { grid.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? String)?.removePrefix("w")?.toLongOrNull() } }
+            .collect { controller.thumbnailPriority = it }
+    }
+    // A flick toward the edge compacts the gallery again.
+    var flick by remember { mutableStateOf(0f) }
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(columns), state = grid, userScrollEnabled = enabled && ui.drag == null,
+        modifier = modifier
+            .offset { IntOffset((safe.minX * d).roundToInt(), (safe.minY * d).roundToInt()) }.size(safe.width.dp, safe.height.dp)
+            .pointerInput(host.edge) {
+                detectHorizontalDragGestures(onDragStart = { flick = 0f }, onDragEnd = {
+                    val toward = if (host.edge == StagePeekEdge.Left) -flick else flick
+                    if (toward / density > 90) host.compact()
+                }) { _, amount -> flick += amount }
+            }
+            .padding(horizontal = 20.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(TOP_CONTROLS.dp)) }
+        fun windowCards(list: List<CatalogWindow>) = items(list, key = { "w" + it.id }) { w ->
+            GalleryCard(controller, host, w, thumbnails[w.id], icons[w.bundleID], inTile = w.id in tiled, current = ui.windowMode && ui.currentWindowID == w.id)
+        }
+        when {
+            results != null -> {
+                if (results.apps.isNotEmpty()) {
+                    item(span = { GridItemSpan(columns) }) { SectionTitle("Applications") }
+                    item(span = { GridItemSpan(columns) }) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(results.apps.take(30), key = { it.bundleID }) { app ->
+                                LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
+                                Column(
+                                    Modifier.width(76.dp).clickable { host.query = ""; host.tapApp(app, forceFilter = true) }.semantics { contentDescription = app.name },
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    AppIconView(icons[app.bundleID], app.name, 48.0)
+                                    Text(app.name, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(if (app.running) (if (app.windowCount > 0) "${app.windowCount} open" else "Running") else "Not running",
+                                        color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+                item(span = { GridItemSpan(columns) }) { SectionTitle("Windows") }
+                if (results.windows.isEmpty()) item(span = { GridItemSpan(columns) }) {
+                    EmptyText(if (results.apps.isEmpty()) "No apps or windows match “$query”." else "No open windows match.")
+                } else windowCards(results.windows)
+            }
+            filter != null -> {
+                val list = allWindows.filter { it.bundleID == filter.bundleID }
+                item(span = { GridItemSpan(columns) }) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        AppIconView(icons[filter.bundleID], filter.name, 40.0)
+                        Column {
+                            Text(filter.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when { list.size == 1 -> "1 window"; list.isNotEmpty() -> "${list.size} windows"; filter.running -> "Running, no open windows"; else -> "Not running" },
+                                color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp,
+                            )
+                        }
+                    }
+                }
+                if (list.isEmpty()) item(span = { GridItemSpan(columns) }) { EmptyApp(controller, ui, filter, icons[filter.bundleID], inputAllowed) }
+                else windowCards(list)
+            }
+            else -> {
+                if (displays.isNotEmpty()) {
+                    item(span = { GridItemSpan(columns) }) { SectionTitle("Displays") }
+                    items(displays, key = { "d" + it.id }) { disp ->
+                        DisplayCard(controller, host, disp, displayStills[disp.id], current = if (ui.windowMode) WSource.displayKey(disp.id) in tiled else disp.isMain)
+                    }
+                }
+                item(span = { GridItemSpan(columns) }) { SectionTitle("Windows") }
+                if (allWindows.isEmpty()) item(span = { GridItemSpan(columns) }) {
+                    EmptyText(when { ui.catalog?.unavailable == true -> "The Mac can't list its windows right now."; ui.catalog == null -> "Loading windows…"; else -> "No windows are open on the Mac." })
+                } else windowCards(allWindows)
+            }
+        }
+        item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(64.dp)) }
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) =
+    Text(text, color = Color.White.copy(alpha = 0.85f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { heading() })
+
+@Composable
+private fun EmptyText(text: String) =
+    Text(text, color = Color.White.copy(alpha = 0.8f), fontSize = 15.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp))
+
+/** An app with no window: "Open on Mac" (explicit; needs control). Browsing never opens or activates anything. */
+@Composable
+private fun EmptyApp(controller: WorkspaceController, ui: WorkspaceUi, app: MacApp, icon: ImageBitmap?, inputAllowed: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AppIconView(icon, app.name, 72.0)
+        Text(if (app.running) "${app.name} has no windows you can show." else "${app.name} isn't open on the Mac.", color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center)
+        if (app.bundleID in ui.launching) {
+            Text("Opening on the Mac…", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp)
+        } else {
+            Text(
+                "Open on Mac", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.graphicsLayer { alpha = if (inputAllowed) 1f else 0.5f }.background(Glass, CircleShape)
+                    .border(0.75.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                    .clickable(enabled = inputAllowed) { controller.launch(app.bundleID) }.padding(horizontal = 18.dp, vertical = 10.dp),
+            )
+            if (!inputAllowed) Text("Opening apps needs control of the Mac. Use Request Control first.", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, textAlign = TextAlign.Center)
+            if (ui.launchFailed == app.bundleID) Text("The Mac couldn't open ${app.name}.", color = Color(0xFFFFA94D), fontSize = 12.sp)
+        }
+    }
+}
+
+/** Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits. Coordinates in window dp. */
+private fun Modifier.dragToPane(controller: WorkspaceController, host: StagePeekHost, item: CatalogWindow, origin: () -> CGPoint): Modifier =
+    pointerInput(item.id) {
+        detectDragGesturesAfterLongPress(
+            onDragStart = { p ->
+                val o = origin()
+                host.haptics(StagePeekHaptic.Activate)
+                controller.beginDrag(WorkspaceDrag.Item.Window(item), CGPoint(o.x + p.x / density, o.y + p.y / density))
+                host.dragStart = CGPoint(o.x + p.x / density, o.y + p.y / density)
+            },
+            onDrag = { change, amount ->
+                change.consume()
+                host.dragStart = CGPoint(host.dragStart.x + amount.x / density, host.dragStart.y + amount.y / density)
+                controller.moveDrag(host.dragStart)
+            },
+            onDragEnd = { host.dropped(controller.endDrag()) },
+            onDragCancel = { controller.cancelDrag() },
+        )
+    }
+
+@Composable
+private fun GalleryCard(controller: WorkspaceController, host: StagePeekHost, w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap?, inTile: Boolean, current: Boolean) {
+    val d = LocalDensity.current.density
+    var origin by remember { mutableStateOf(CGPoint.zero) }
+    Column(
+        Modifier
+            .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
+            .dragToPane(controller, host, w) { origin }
+            .clickable { if (controller.ui.value.drag == null) host.pick(w) }
+            .semantics {
+                contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (w.availability == WindowAvailability.Offscreen) ", minimized" else "") + (if (inTile) ", in a pane" else "")
+                customActions = listOf(CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true })
+            },
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(12.dp))
+                .border(if (current) 2.5.dp else 0.6.dp, if (current) StagePeekAccent else Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (still != null) Image(still, null, Modifier.fillMaxSize().padding(6.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
+            else AppIconView(icon, w.app, 44.0)
+            Row(Modifier.align(Alignment.TopStart).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (w.availability == WindowAvailability.Offscreen) Badge("Minimized")
+                if (inTile) Badge("In Pane")
+            }
+            if (icon != null && still != null) Image(icon, null, Modifier.align(Alignment.BottomStart).padding(8.dp).size(26.dp))
+        }
+        Text(w.title.ifEmpty { w.app }, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (w.title.isNotEmpty()) Text(w.app, color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun DisplayCard(controller: WorkspaceController, host: StagePeekHost, disp: CatalogDisplay, still: ImageBitmap?, current: Boolean) {
+    val d = LocalDensity.current.density
+    var origin by remember { mutableStateOf(CGPoint.zero) }
+    val name = if (disp.isMain) "Full Desktop" else disp.name
+    Column(
+        Modifier
+            .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
+            .dragToPane(controller, host, controller.displayWindow(disp)) { origin }
+            .clickable { if (controller.ui.value.drag == null) host.pickDisplay(disp) }
+            .semantics { contentDescription = if (disp.isMain) "Full Desktop, ${disp.name}" else disp.name },
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(12.dp))
+                .border(if (current) 2.5.dp else 0.6.dp, if (current) StagePeekAccent else Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (still != null) Image(still, null, Modifier.fillMaxSize().padding(6.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
+            else MonitorGlyph(Modifier.size(40.dp, 34.dp), Color.White.copy(alpha = 0.8f))
+        }
+        Text(name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(if (disp.isMain) disp.name else if (disp.isVirtual) "Extended display" else "Display", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun Badge(text: String) =
+    Text(text, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.background(Color.Black.copy(alpha = 0.6f), CircleShape).padding(horizontal = 6.dp, vertical = 2.dp))
+
+// MARK: - Launchpad
+
+/** Every Mac app as a grid: favorites, recent, running, all. Tap: its windows in the gallery (or "Open on Mac"). Long-press: favorite. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Launchpad(controller: WorkspaceController, ui: WorkspaceUi, host: StagePeekHost, icons: Map<String, ImageBitmap>, inputAllowed: Boolean, safe: CGRect) {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("stagePeek", Context.MODE_PRIVATE) }
+    var favorites by remember { mutableStateOf(prefs.getStringSet("favorites", emptySet()).orEmpty()) }
+    val d = LocalDensity.current.density
+    val apps = ui.apps
+    val sections = buildList {
+        val fav = apps.filter { it.bundleID in favorites }
+        if (fav.isNotEmpty()) add("Favorites" to fav)
+        val recent = WorkspaceSearch.recents(apps)
+        if (recent.isNotEmpty()) add("Recent" to recent)
+        val running = apps.filter { it.running }
+        if (running.isNotEmpty()) add("Running" to running)
+        add("All Apps" to apps)
+    }
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)).pointerInput(Unit) { detectDragGesturesAfterLongPress(onDrag = { _, _ -> }) }.clickable { host.launchpad = false }) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(84.dp),
+            modifier = Modifier.offset { IntOffset((safe.minX * d).roundToInt(), (safe.minY * d).roundToInt()) }.size(safe.width.dp, safe.height.dp).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Apps on the Mac", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    ToolbarButton("Done") { host.launchpad = false }
+                }
+            }
+            if (apps.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { EmptyText("Loading apps…") }
+            for ((title, list) in sections) {
+                if (apps.isEmpty()) break
+                item(span = { GridItemSpan(maxLineSpan) }, key = "h$title") { SectionTitle(title) }
+                items(list, key = { "$title/${it.bundleID}" }) { app ->
+                    LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
+                    Column(
+                        Modifier.combinedClickable(
+                            onClick = { host.launchpad = false; host.openApp(app) },
+                            onLongClick = {
+                                favorites = if (app.bundleID in favorites) favorites - app.bundleID else favorites + app.bundleID
+                                prefs.edit { putStringSet("favorites", favorites) }
+                            },
+                        ).semantics { contentDescription = app.name + (if (app.running) ", running" else "") + (if (app.bundleID in favorites) ", favorite" else "") },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Box { AppIconView(icons[app.bundleID], app.name, 56.0)
+                            if (app.running) Box(Modifier.align(Alignment.BottomCenter).offset(y = 6.dp).size(4.dp).background(Color.White, CircleShape)) }
+                        Spacer(Modifier.height(8.dp))
+                        Text(app.name, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                    }
+                }
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text(if (inputAllowed) "Tap an app to see its windows. Hold to make it a favorite." else "Tap an app to see its windows. Opening apps needs control of the Mac.",
+                    color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+            }
+        }
+    }
+}
+
+// MARK: - Edge strip
+
+/** The edge strip: a few dp wide, taking only the touches that start on it. Excluded from the system back gesture. */
+@Composable
+private fun StripView(strip: CGRect, edge: StagePeekEdge, host: StagePeekHost, onStripFrame: (CGRect?) -> Unit) {
     val d = LocalDensity.current.density
     val machine = host.machine
     val arming = machine.phase == StagePeekMachine.Phase.Arming
@@ -449,7 +914,7 @@ private fun StripView(strip: CGRect, edge: StagePeekEdge, host: StagePeekHost, f
                 contentDescription = "Stage Peek. Shows your Mac windows"
                 role = Role.Button
                 if (machine.isVisible) stateDescription = "Open"
-                onClick(label = if (machine.isVisible) "Switch to the highlighted window" else "Show your Mac windows") {
+                onClick(label = if (machine.isVisible) "Show the highlighted window" else "Show your Mac windows") {
                     host.finish(if (machine.isVisible) machine.selectHighlighted() else machine.openDirectly()); true
                 }
                 customActions = listOf(
@@ -469,7 +934,7 @@ private fun StripView(strip: CGRect, edge: StagePeekEdge, host: StagePeekHost, f
     }
 }
 
-/** Lays [content] out at its natural size (up to [maxWidth] dp) centred on ([x], [y]) in the parent; the rest of the parent stays transparent to touches. */
+/** Lays [content] out at its natural size (up to [maxWidth] dp) centred on ([x], [y]) in the parent; the rest stays transparent to touches. */
 @Composable
 private fun CenteredAt(x: Double, y: Double, maxWidth: Double, content: @Composable () -> Unit) {
     val d = LocalDensity.current.density
@@ -505,8 +970,7 @@ private fun WindowGlyph(modifier: Modifier, color: Color) {
 /**
  * Feeds a node's pointers to Stage Peek: [onStrip] says whether a touch that begins here counts as
  * starting on the edge strip, [origin] is this node's top-left in overlay dp. Every pointer that goes
- * down here is consumed so nothing underneath sees it, and a cancelled gesture (the system took the
- * touch, the node left composition) becomes [StagePeekMachine.touchCancelled], never a selection.
+ * down here is consumed so nothing underneath sees it; a cancelled gesture never selects.
  */
 private fun stagePeekTouches(host: StagePeekHost, onStrip: Boolean, origin: () -> CGPoint): suspend androidx.compose.ui.input.pointer.PointerInputScope.() -> Unit = {
     val active = mutableSetOf<Long>()
@@ -557,39 +1021,80 @@ private class StagePeekHost(private val controller: WorkspaceController, private
 
     var edge = StagePeekEdge.Left
     var safe = CGRect.zero
+    var frame = CGRect.zero
     var isExpanded = false
     var reduceMotion = false
     var windows: List<CatalogWindow> = emptyList()
+    var displays: List<CatalogDisplay> = emptyList()
     var onFullDesktop: () -> Unit = {}
     var haptics: (StagePeekHaptic) -> Unit = {}
     var stripOrigin = CGPoint.zero
+    var query by mutableStateOf("")
+    var appFilter by mutableStateOf<String?>(null)
+    var launchpad by mutableStateOf(false)
+    var searchFocused = false
+    /** A gallery card's drag position (window dp). */
+    var dragStart = CGPoint.zero
     private var poll: Job? = null
+    /** Compact peek: a still finger on a card lifts it after a moment, then drags it. */
+    private var hold: Job? = null
+    private var holdTouch: Long? = null
+    private var holdStart = CGPoint.zero
+    private var cardDragging = false
 
     fun changed() { revision++ }
 
-    /** Width / height per card, in stack order: Full Desktop is a typical screen; a window with no known size is 3:2. */
+    /** Width / height per card, in stack order: a display is a typical screen; a window with no known size is 3:2. */
     fun aspects(): List<Double> = machine.ids.map { id ->
-        if (id == StagePeekMachine.fullDesktopID) 1.6
-        else windows.firstOrNull { it.id == id }?.takeIf { it.width > 0 && it.height > 0 }?.let { it.width.toDouble() / it.height } ?: 1.5
+        PeekIDs.displayIndex(id)?.let { i -> displays.getOrNull(i)?.takeIf { it.width > 0 && it.height > 0 }?.let { it.width.toDouble() / it.height } ?: 1.6 }
+            ?: windows.firstOrNull { it.id == id }?.takeIf { it.width > 0 && it.height > 0 }?.let { it.width.toDouble() / it.height } ?: 1.5
     }
 
     /** The cards as laid out from the machine's state right now: what a tap lands on. */
     private fun hitCards() = StagePeekLayout.cards(aspects(), machine.position, machine.expansion, edge, safe, isExpanded, reduceMotion)
 
+    private fun window(at: CGPoint) = CGPoint(frame.minX + at.x, frame.minY + at.y)
+
+    private fun itemAt(index: Int): CatalogWindow? {
+        val id = machine.ids.getOrNull(index) ?: return null
+        PeekIDs.displayIndex(id)?.let { i -> return (displays.getOrNull(i) ?: controller.mainDisplay)?.let(controller::displayWindow) }
+        return windows.firstOrNull { it.id == id }
+    }
+
     fun began(id: Long, at: CGPoint, time: Double, onStrip: Boolean) {
+        val wasOpen = machine.phase == StagePeekMachine.Phase.Open
         machine.touchBegan(id, at, time, onStrip)
         if (machine.phase == StagePeekMachine.Phase.Arming) {
             controller.setStagePeekOpen(true) // fresh catalog and thumbnails while the hold completes
             schedulePoll()
         }
+        if (wasOpen && !onStrip && machine.expansion < 0.5) armHold(id, at)
         changed()
     }
 
+    private fun armHold(id: Long, at: CGPoint) {
+        hold?.cancel()
+        val index = StagePeekLayout.hit(at, hitCards()) ?: return
+        val item = itemAt(index) ?: return
+        holdTouch = id; holdStart = at
+        hold = scope.launch {
+            delay(420)
+            if (holdTouch != id || cardDragging) return@launch
+            // The touch now belongs to the drag: the peek never selects or scrubs with it.
+            machine.touchCancelled(id)
+            cardDragging = true
+            haptics(StagePeekHaptic.Activate)
+            controller.beginDrag(WorkspaceDrag.Item.Window(item), window(at))
+            changed()
+        }
+    }
+
     fun moved(id: Long, at: CGPoint, time: Double) {
+        if (cardDragging && id == holdTouch) { controller.moveDrag(window(at)); return }
+        if (id == holdTouch && hypot(at.x - holdStart.x, at.y - holdStart.y) > 10) { hold?.cancel(); holdTouch = null }
         val wasArming = machine.phase == StagePeekMachine.Phase.Arming
         val effects = machine.touchMoved(id, at, time, edge)
         if (wasArming && machine.phase == StagePeekMachine.Phase.Closed) {
-            // A swipe from the edge: nothing opens.
             poll?.cancel()
             controller.setStagePeekOpen(false)
         }
@@ -598,25 +1103,45 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     }
 
     fun ended(id: Long, at: CGPoint, time: Double) {
+        if (id == holdTouch) { hold?.cancel(); holdTouch = null }
+        if (cardDragging) {
+            cardDragging = false
+            controller.moveDrag(window(at))
+            dropped(controller.endDrag())
+            return
+        }
         poll?.cancel()
         val cards = hitCards()
         finish(machine.touchEnded(id, at, time) { StagePeekLayout.hit(it, cards) })
         if (machine.phase == StagePeekMachine.Phase.Arming) schedulePoll() // another finger lifted; the hold goes on
     }
 
+    /** Dropped on a pane: done. On Cancel or nowhere: the peek comes back as it was. */
+    fun dropped(changed: Boolean) {
+        if (changed) { haptics(StagePeekHaptic.Select); closeAfterPick() }
+        changed()
+    }
+
     /** The system took a touch (a gesture conflict, a fold, focus loss): never selects. */
     fun cancelled(id: Long) {
+        if (id == holdTouch) { hold?.cancel(); holdTouch = null }
+        if (cardDragging) { cardDragging = false; controller.cancelDrag() }
         poll?.cancel()
         machine.touchCancelled(id)
         finish(emptyList())
     }
 
     fun cancelAll() {
-        poll?.cancel()
+        poll?.cancel(); hold?.cancel(); holdTouch = null
+        if (cardDragging) { cardDragging = false; controller.cancelDrag() }
         machine.cancelAll()
+        appFilter = null
         changed()
         controller.setStagePeekOpen(false)
     }
+
+    fun expand() { machine.expand(); changed() }
+    fun compact() { machine.compact(); changed() }
 
     /** TalkBack's next/previous window: opens first if needed, nothing is selected. */
     fun stepFromStrip(delta: Int) {
@@ -624,12 +1149,45 @@ private class StagePeekHost(private val controller: WorkspaceController, private
         finish(machine.step(delta))
     }
 
-    fun addAsTile(window: CatalogWindow) {
+    /** A carousel app: just its windows (tap again for all). An app with no window opens the gallery on its empty state. */
+    fun tapApp(app: MacApp, forceFilter: Boolean = false) {
+        haptics(StagePeekHaptic.Tick)
+        val clearing = appFilter == app.bundleID && !forceFilter
+        appFilter = if (clearing) null else app.bundleID
+        val hasWindows = controller.ui.value.catalog?.windows?.any { it.bundleID == app.bundleID } == true
+        if (!clearing && (!hasWindows || forceFilter) && machine.isVisible && !machine.expanded) expand()
+        changed()
+    }
+
+    /** From Launchpad: open the peek (if needed) on that app. */
+    fun openApp(app: MacApp) {
+        if (!machine.isVisible) finish(machine.openDirectly())
+        tapApp(app, forceFilter = true)
+    }
+
+    fun pick(w: CatalogWindow) {
         haptics(StagePeekHaptic.Select)
+        closeAfterPick()
+        controller.switchTo(w)
+    }
+
+    /** A display: in Window mode the desktop goes into the pane (a tile source, never a mode switch); in Mirror/Extend it already shows. */
+    fun pickDisplay(d: CatalogDisplay?) {
+        haptics(StagePeekHaptic.Select)
+        closeAfterPick()
+        showDisplay(d)
+    }
+
+    private fun showDisplay(d: CatalogDisplay?) {
+        val display = d ?: controller.mainDisplay
+        if (controller.ui.value.windowMode && display != null) controller.switchTo(controller.displayWindow(display)) else onFullDesktop()
+    }
+
+    fun closeAfterPick() {
+        query = ""; appFilter = null
         machine.cancelAll()
         changed()
         controller.setStagePeekOpen(false)
-        controller.choose(window, asNewTile = true)
     }
 
     /** Performs effects, then drops the catalog refresh once nothing shows. */
@@ -659,7 +1217,8 @@ private class StagePeekHost(private val controller: WorkspaceController, private
             is StagePeekEffect.Haptic -> haptics(effect.haptic)
             is StagePeekEffect.Select -> {
                 controller.setStagePeekOpen(false)
-                if (effect.id == StagePeekMachine.fullDesktopID) onFullDesktop()
+                val index = PeekIDs.displayIndex(effect.id)
+                if (index != null) showDisplay(displays.getOrNull(index))
                 else windows.firstOrNull { it.id == effect.id }?.let { controller.switchTo(it) }
             }
             StagePeekEffect.Dismissed -> controller.setStagePeekOpen(false)
@@ -688,7 +1247,7 @@ private fun reduceMotionRequested(context: Context): Boolean =
 fun WindowModePrompt(onYes: () -> Unit, onNo: () -> Unit, modifier: Modifier = Modifier) {
     // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No) after a few
     // seconds, counting only while this screen has focus.
-    val focused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    val focused = LocalWindowInfo.current.isWindowFocused
     val latestNo by androidx.compose.runtime.rememberUpdatedState(onNo)
     LaunchedEffect(focused) {
         if (!focused) return@LaunchedEffect

@@ -139,7 +139,21 @@ enum class WFollow(val wire: String) { Window("window"), App("app");
 }
 
 /** What a tile shows. The Mac checks identity; `host` only routes requests. */
-data class WSource(val host: String, val windowID: Long, val generation: Long? = null, val bundleID: String? = null, val follow: WFollow = WFollow.Window)
+data class WSource(val host: String, val windowID: Long, val generation: Long? = null, val bundleID: String? = null, val follow: WFollow = WFollow.Window) {
+    /** A whole Mac display in a pane (Full Desktop as a tile source); see [displayKey]. */
+    val isDisplay: Boolean get() = isDisplayKey(windowID)
+
+    companion object {
+        /**
+         * A display is kept as a reserved window id with the high bit set (CGWindowIDs never get
+         * there), so layouts, tabs and records treat it like any window. On the wire it is
+         * `"display": <CGDirectDisplayID>` instead of `"window"` (WorkspaceSource.displayKey).
+         */
+        const val DISPLAY_KEY_BIT = 0x8000_0000L
+        fun displayKey(displayID: Long): Long = DISPLAY_KEY_BIT or (displayID and 0x7FFF_FFFFL)
+        fun isDisplayKey(id: Long): Boolean = id and DISPLAY_KEY_BIT != 0L
+    }
+}
 
 /**
  * One pane. [source] is what it shows (its active tab; only that one streams). [crop] is the
@@ -311,6 +325,31 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
             }
         }
         return with(tiles = tiles + (id to t.copy(source = source)))
+    }
+
+    /**
+     * No empty panes: tiles without a window are dropped, empty slots close up and their
+     * neighbours take the space (ratios kept in proportion); one window fills the picture.
+     * Only a layout with no windows at all keeps its single empty slot (WorkspaceLayout.compacted).
+     */
+    fun compacted(): WLayout {
+        val kept = tiles.filterValues { it.source != null }
+        fun prune(n: WNode): WNode? = when (n) {
+            is WNode.Slot -> if (n.tile == null || n.tile !in kept) null else n
+            is WNode.Split -> {
+                val safe = if (n.ratios.size == n.children.size) n.ratios else List(n.children.size) { 1.0 }
+                val pairs = n.children.zip(safe).mapNotNull { (c, r) -> prune(c)?.let { it to r } }
+                when (pairs.size) {
+                    0 -> null
+                    1 -> pairs[0].first
+                    else -> {
+                        val sum = pairs.sumOf { it.second }
+                        WNode.Split(n.axis, pairs.map { it.first }, if (sum > 0) pairs.map { it.second / sum } else emptyList())
+                    }
+                }
+            }
+        }
+        return of(prune(root) ?: WNode.Slot(null), kept, maximized?.takeIf { it in kept })
     }
 
     fun zooming(id: String, crop: WRect?): WLayout {

@@ -23,6 +23,8 @@ import com.raisecaterror.meowdisplay.core.controls.ReceiverGesture
 import com.raisecaterror.meowdisplay.core.controls.ReceiverGestureTarget
 import com.raisecaterror.meowdisplay.core.controls.ReceiverInputPrompt
 import com.raisecaterror.meowdisplay.core.controls.ReceiverSurfaceEffects
+import com.raisecaterror.meowdisplay.core.controls.CGPoint
+import com.raisecaterror.meowdisplay.core.workspace.WPoint
 import com.raisecaterror.meowdisplay.core.controls.ReceiverSurfaceInput
 import com.raisecaterror.meowdisplay.core.controls.ReceiverUIPreferenceUpdate
 import com.raisecaterror.meowdisplay.core.controls.RemoteKeyboardBridge
@@ -141,7 +143,15 @@ class ReceiverController(
         override fun rotationSnapped() {
             if (store.current.hapticsEnabled) haptics.tryEmit(ReceiverHaptic.RotationSnap)
         }
-        override fun activityBegan() = store.beginAutoHideActivity()
+        override fun activityBegan() {
+            store.beginAutoHideActivity()
+            workspace?.noteSurfaceTouch()   // reveals the local-fullscreen strip; never takes the touch
+        }
+        override fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double): Boolean {
+            val ws = workspace ?: return false
+            if (ws.ui.value.windowMode != true) return false
+            return ws.pinch(began, ended, isPinch, WPoint(initial.x, initial.y), WPoint(current.x, current.y), scale)
+        }
         override fun activityEnded() = store.scheduleAutoHide()
         override fun blockedAttempt(maximumTouchCount: Int) = noteBlockedAttempt()
     })
@@ -309,6 +319,7 @@ class ReceiverController(
                 appGestureCommands = p.appGestureCommands,
                 moveViewActive = t.moveViewActive,
                 screenReaderRunning = screenReaderRunning,
+                workspaceZoom = workspace?.ui?.value?.windowMode == true,
             ),
         )
         update { it.copy(inputAllowed = allowed, senderPV = session.senderProtocolVersion ?: 0) }

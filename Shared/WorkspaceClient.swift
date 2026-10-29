@@ -914,8 +914,9 @@ final class WorkspaceModel: ObservableObject {
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
         if overCancelZone(p) { return nil }
         if !windowMode {
-            guard case .window = drag?.item, desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p),
-                  let desk = desktopLayout() else { return nil }
+            guard case .window = drag?.item, desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
+            // No display listed (an older Mac): the window simply shows in Window mode.
+            guard let desk = desktopLayout() else { return .replace(tile: Self.noDesktop, preview: WorkspaceRect(x: 0, y: 0, width: 1, height: 1)) }
             let g = desktopPictureGlobal
             let s = WorkspaceSize(width: g.width, height: g.height)
             let n = WorkspacePoint(x: (p.x - g.minX) / g.width, y: (p.y - g.minY) / g.height)
@@ -926,6 +927,9 @@ final class WorkspaceModel: ObservableObject {
         let n = WorkspacePoint(x: (p.x - pictureGlobal.minX) / pictureGlobal.width, y: (p.y - pictureGlobal.minY) / pictureGlobal.height)
         return windowDrop(at: n, labelHeight: Double(labelHeight / pictureGlobal.height))
     }
+
+    /// The drop target when no display can join the window (it then shows alone).
+    static let noDesktop = "\u{0}desktop"
 
     func overCancelZone(_ p: CGPoint) -> Bool { cancelZoneGlobal.width > 0 && cancelZoneGlobal.insetBy(dx: -8, dy: -8).contains(p) }
 
@@ -941,7 +945,8 @@ final class WorkspaceModel: ObservableObject {
         case .window(let w):
             if !windowMode {
                 // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
-                guard let desk = desktopLayout(), let source = source(for: w) else { return false }
+                guard let desk = desktopLayout() else { switchTo(w); return true }
+                guard let source = source(for: w) else { return false }
                 nextTile += 1   // the desktop pane's id
                 let (next, focusTile) = dropping(source, on: target, in: desk)
                 history.record(saved)

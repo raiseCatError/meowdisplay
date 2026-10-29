@@ -44,6 +44,13 @@ interface ReceiverSurfaceEffects {
 
     /** Three fingers came down: call [ReceiverSurfaceInput.threeFingerHoldDue] after [delaySeconds]. */
     fun threeFingerHoldArmed(delaySeconds: Double) {}
+
+    /**
+     * Window mode: a two-finger gesture in one pane zooms (pinch) or pans (a zoomed or filled pane)
+     * just that pane. Points are normalized to the picture. Return true to own the gesture; false
+     * lets it scroll on the Mac as usual (WorkspaceModel.pinch on iOS).
+     */
+    fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double): Boolean = false
 }
 
 /** Everything the dispatcher reads from preferences and the session, refreshed by the host. */
@@ -65,6 +72,8 @@ data class SurfaceInputConfig(
     val appGestureCommands: AppGestureCommands = AppGestureCommands(),
     val moveViewActive: Boolean = false,
     val screenReaderRunning: Boolean = false,
+    /** Window mode: two fingers can zoom one pane (also in View Only; nothing reaches the Mac then). */
+    val workspaceZoom: Boolean = false,
 )
 
 class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val effects: ReceiverSurfaceEffects) {
@@ -165,6 +174,8 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         var midpoint: CGPoint = initialMidpoint,
         var scaleRatio: Double = 1.0,
         var rotationDelta: Double = 0.0,
+        /** Window mode: this gesture zooms or pans one pane. */
+        var workspace: Boolean = false,
     )
 
     private data class TapCandidate(val start: Double, val origins: Map<Int, CGPoint>, var maxMovement: Double = 0.0, var count: Int)
@@ -408,7 +419,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
                 finishTwoFinger(ended = false, time)
                 return
             }
-            if (count == 2 && !pointerEngineOwnsAnchor && !systemOwned && (config.allowsInput || config.localNavigationAllowed)) {
+            if (count == 2 && !pointerEngineOwnsAnchor && !systemOwned && (config.allowsInput || config.localNavigationAllowed || config.workspaceZoom)) {
                 val ids = fingers.keys.toList()
                 val p0 = fingers.getValue(ids[0]).point
                 val p1 = fingers.getValue(ids[1]).point
@@ -418,6 +429,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         }
         state ?: return
         if (phase.isEnd) {
+            if (state.workspace) workspacePinch(state, began = false, ended = true)
             finishTwoFinger(ended = phase == SurfaceTouchPhase.Ended && state.began, time)
             return
         }
@@ -432,10 +444,24 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
             val intent = state.session.update(state.initialDistance, distance, state.initialMidpoint, state.midpoint, state.rotationDelta)
             if (intent == TwoFingerGestureIntent.Undecided) return
             state.began = true
+            if (config.workspaceZoom && workspacePinch(state, began = true, ended = false)) {
+                state.workspace = true
+                return
+            }
+            if (!config.allowsInput && !config.localNavigationAllowed) return
             beginTwoFinger(state, time)
+        } else if (state.workspace) {
+            workspacePinch(state, began = false, ended = false)
         } else {
             changeTwoFinger(state, time)
         }
+    }
+
+    private fun workspacePinch(state: TwoFingerState, began: Boolean, ended: Boolean): Boolean {
+        val t = currentTransform
+        val a = t.remotePoint(state.initialMidpoint) ?: return false
+        val b = t.remotePoint(state.midpoint) ?: return state.workspace
+        return effects.workspacePinch(began, ended, state.session.intent == TwoFingerGestureIntent.ViewportZoomPan, a, b, state.scaleRatio)
     }
 
     private fun routes(state: TwoFingerState) = TwoFingerRoutingPolicy.routes(

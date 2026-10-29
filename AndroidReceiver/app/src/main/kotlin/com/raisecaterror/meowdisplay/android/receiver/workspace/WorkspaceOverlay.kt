@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -89,6 +90,17 @@ import com.raisecaterror.meowdisplay.core.workspace.WPreset
 import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.workspace.WindowAvailability
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.positionInWindow
+import com.raisecaterror.meowdisplay.core.workspace.WRotation
+import com.raisecaterror.meowdisplay.core.workspace.WSource
+import com.raisecaterror.meowdisplay.core.workspace.WTile
+import com.raisecaterror.meowdisplay.core.workspace.WWindowDrop
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 private val Accent = Color(0xFF7FB2FF)
@@ -101,33 +113,43 @@ private fun RemoteViewportTransform.viewRect(r: WRect): CGRect {
 }
 
 /**
- * Tile chrome over the live picture. Only the pills, menus and (in Arrange)
- * dividers take touches; everything else in a tile goes to the Mac as usual.
+ * Pane chrome over the live picture (iOS WorkspaceChromeView). Each pane has a strip of labels at
+ * its top-left, one per window (tabs side by side, shortened to fit, scrollable by finger only).
+ * Tap a label: that pane (or tab) is shown and typing goes there. Hold a label: drag it onto
+ * another pane's labels (merge as tabs), an edge (move/split) or a middle (swap); release without
+ * moving for the pane's menu. Everything else in a pane goes to the Mac as usual.
  */
 @Composable
 fun WorkspaceChrome(
     controller: WorkspaceController,
     transform: RemoteViewportTransform,
     inputAllowed: Boolean,
-    /** On-screen controls (window dp): tile pills and the Arrange bar stay clear of them. */
+    /** On-screen controls (window dp): labels and the Arrange bar stay clear of them. */
     avoid: List<CGRect> = emptyList(),
+    onSettings: () -> Unit = {},
+    /** "View Full Screen" on a desktop pane: back to the full-screen desktop (Mirror/Extend). */
+    onViewFullScreen: () -> Unit = {},
 ) {
     val ui by controller.ui.collectAsState()
     val icons by controller.icons.collectAsState()
     if (!ui.windowMode || !transform.isValid) return
     val frames = controller.frames()
     val density = LocalDensity.current.density
-    var dragging by remember { mutableStateOf<String?>(null) }
-    var dragPoint by remember { mutableStateOf<CGPoint?>(null) }
     var confirmClose by remember { mutableStateOf<String?>(null) }
-    val workspaceSize = WSize(transform.displayedRect.width, transform.displayedRect.height)
+    var menu by remember { mutableStateOf<PaneMenuTarget?>(null) }
     val multi = ui.layout.tiles.size > 1
-    // Pills at the top edge stay clear of the cutout and any visible status bar.
+    // Labels at the top edge stay clear of the cutout and any visible status bar.
     val topInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getTop(this).toDp().value.toDouble() }
     val railHandle by controller.railHandle
     var box by remember { mutableStateOf(IntSize.Zero) }
+    var origin by remember { mutableStateOf(CGPoint.zero) }
+    val picture = transform.displayedRect
+    LaunchedEffect(picture, origin) { controller.pictureFrame = picture.offsetBy(origin.x, origin.y) }
 
-    Box(Modifier.fillMaxSize().onSizeChanged { box = it }) {
+    Box(
+        Modifier.fillMaxSize().onSizeChanged { box = it }
+            .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / density.toDouble(), p.y / density.toDouble()) },
+    ) {
         for ((id, rect) in frames.tiles) key(id) {
             val r = transform.viewRect(rect)
             val tile = ui.layout.tiles[id] ?: continue
@@ -146,77 +168,50 @@ fun WorkspaceChrome(
                     .size(r.width.dp, r.height.dp)
                     .let { m -> border?.let { m.border(it) } ?: m },
             ) {
+                val desktop = tile.source?.isDisplay == true
                 val status = when {
-                    id in ui.missing || tile.source == null -> "Choose a window for this tile"
-                    // Refused by the Mac (e.g. that window already shows in another tile).
-                    ui.remote?.rejected?.containsKey(id) == true -> "Tap to choose a window for this tile"
+                    desktop && id in ui.missing -> "This display isn't connected to the Mac now"
+                    id in ui.missing || tile.source == null -> "Choose a window for this pane"
+                    // Refused by the Mac (e.g. that window already shows in another pane).
+                    ui.remote?.rejected?.containsKey(id) == true -> "Tap to choose a window for this pane"
                     remote == null -> null
                     remote.state == TileStatus.Waiting -> "Waiting for ${remote.app.ifEmpty { "the window" }}…"
                     remote.state == TileStatus.Offscreen -> "${remote.app.ifEmpty { "This window" }} is minimized or hidden on the Mac"
-                    remote.state == TileStatus.Closed -> "This window was closed. Tap to choose another."
+                    remote.state == TileStatus.Closed -> "Closed on Mac. Tap to choose another window."
                     remote.state == TileStatus.Failed -> "Can't show this window right now"
                     remote.state == TileStatus.Limit -> "Paused: too many windows at once"
                     else -> null
                 }
                 if (status != null) {
-                    Text(
-                        status, color = Color.White, style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.align(Alignment.Center).padding(12.dp).background(Chip, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp)
-                            .clickable { controller.openOverview(replacing = id) },
-                    )
-                }
-                if (multi || ui.arranging) {
-                    var menu by remember { mutableStateOf(false) }
-                    var moved by remember { mutableStateOf(false) }
-                    var pill by remember { mutableStateOf(IntSize.Zero) }
-                    val name = if (tile.source == null) "Empty" else remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
-                    // Where the pill would sit; if the rail handle or a control is there, it moves down below it.
-                    val nominal = CGRect(r.minX + 6, maxOf(r.minY, topInset) + 6, pill.width / density.toDouble(), pill.height / density.toDouble())
-                    val clear = (avoid + listOfNotNull(railHandle)).filter { !nominal.isEmpty && it.intersects(nominal) }
-                        .maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
-                    Row(
-                        Modifier
-                            .padding(top = (maxOf(0.0, topInset - r.minY) + clear).dp)
-                            .padding(6.dp)
-                            .background(if (active) Accent.copy(alpha = 0.9f) else Chip, RoundedCornerShape(14.dp))
-                            .pointerInput(id) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = { moved = false; dragging = id; dragPoint = CGPoint(r.minX + it.x / density, r.minY + it.y / density) },
-                                    onDrag = { change, amount -> change.consume(); if (amount.getDistance() > 0.5f) moved = true; dragPoint = dragPoint?.let { CGPoint(it.x + amount.x / density, it.y + amount.y / density) } },
-                                    onDragEnd = {
-                                        val p = dragPoint; val d = dragging
-                                        if (p != null && d != null) transform.remotePoint(p)?.let { n ->
-                                            WGeometry.dropTarget(WPoint(n.x, n.y), frames, workspaceSize, null, canSplit = true)?.let { controller.move(d, it) }
-                                        }
-                                        dragging = null; dragPoint = null
-                                        // Held without moving: the tile's actions.
-                                        if (!moved) menu = true
-                                    },
-                                    onDragCancel = { dragging = null; dragPoint = null },
-                                )
-                            }
-                            // A tap selects the tile and types there; hold for its actions.
-                            .clickable { controller.focus(id) }
-                            .semantics { contentDescription = "$name tile options" + if (active) ", typing goes here" else "" }
-                            .onSizeChanged { pill = it }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        tile.source?.bundleID?.let { icons[it] }?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
-                        Text(name, color = if (active) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Change Window…") }, onClick = { menu = false; controller.openOverview(replacing = id) })
-                            DropdownMenuItem(text = { Text("Rotate") }, onClick = { menu = false; controller.rotate(id) })
-                            DropdownMenuItem(text = { Text(if (tile.fit == WFit.Fill) "Show Whole Window" else "Fill Tile") }, onClick = { menu = false; controller.toggleFit(id) })
-                            DropdownMenuItem(text = { Text(if (ui.layout.maximized == id) "Restore Layout" else "Maximize") }, onClick = { menu = false; controller.toggleMaximize(id) })
-                            DropdownMenuItem(text = { Text("Arrange Tiles") }, onClick = { menu = false; controller.setArranging(true) })
-                            DropdownMenuItem(text = { Text("Remove Tile") }, onClick = { menu = false; controller.removeTile(id) })
-                            DropdownMenuItem(
-                                text = { Text("Close Window on Mac…") }, enabled = inputAllowed && tile.source?.generation != null,
-                                onClick = { menu = false; confirmClose = id },
+                    Column(Modifier.align(Alignment.Center).padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            status, color = Color.White, style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.background(Chip, RoundedCornerShape(10.dp)).clickable { controller.openOverview(replacing = id) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                        // A closed window's app can open it again (explicit; needs control).
+                        val bundle = remote?.bundleID?.ifEmpty { null } ?: tile.source?.bundleID
+                        if (remote?.state == TileStatus.Closed && bundle != null && !desktop) {
+                            Text(
+                                if (bundle in ui.launching) "Opening on the Mac…" else "Open on Mac", color = Color.White,
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                    .clickable(enabled = inputAllowed && bundle !in ui.launching) { controller.launch(bundle) }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    .graphicsLayer { alpha = if (inputAllowed) 1f else 0.5f },
                             )
                         }
                     }
+                }
+                if (multi || ui.arranging || tile.tabs.isNotEmpty() || ui.localFullscreen == null) {
+                    // Where the strip would sit; if the rail handle or a control is there, it moves down below it.
+                    val nominal = CGRect(r.minX + 6, maxOf(r.minY, topInset) + 6, minOf(r.width - 12, 200.0), 30.0)
+                    val clear = (avoid + listOfNotNull(railHandle)).filter { it.intersects(nominal) }.maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
+                    LabelStrip(
+                        controller, ui, id, tile, r, active, icons,
+                        top = maxOf(0.0, topInset - r.minY) + clear,
+                        onMenu = { tab -> menu = PaneMenuTarget(id, tab) },
+                    )
                 }
                 if (active && ui.remote?.hostFocus?.isMismatch == true) {
                     Text(
@@ -230,18 +225,8 @@ fun WorkspaceChrome(
             }
         }
 
-        // Drop preview while a tile is dragged.
-        val p = dragPoint
-        if (dragging != null && p != null) {
-            transform.remotePoint(p)?.let { n -> WGeometry.dropTarget(WPoint(n.x, n.y), frames, workspaceSize, null, canSplit = true) }?.let { target ->
-                val r = transform.viewRect(target.preview)
-                Box(
-                    Modifier.offset { IntOffset((r.minX * density).roundToInt(), (r.minY * density).roundToInt()) }.size(r.width.dp, r.height.dp)
-                        .background(Accent.copy(alpha = if (target is WDropTarget.Slot) 0.18f else 0.28f), RoundedCornerShape(8.dp))
-                        .border(2.dp, Accent, RoundedCornerShape(8.dp)),
-                )
-            }
-        }
+        // Landing areas and Cancel while a label (or a window from Stage Peek) is dragged.
+        WorkspaceDropOverlay(controller, origin)
 
         // Arrange: divider grips and Done.
         if (ui.arranging) {
@@ -264,7 +249,7 @@ fun WorkspaceChrome(
                                 controller.resize(current, delta.toDouble())
                             }
                         }
-                        .semantics { contentDescription = "Resize tiles" },
+                        .semantics { contentDescription = "Resize panes" },
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(Modifier.size(if (horizontal) 6.dp else 44.dp, if (horizontal) 44.dp else 6.dp).background(Color.White.copy(alpha = 0.85f), CircleShape))
@@ -278,6 +263,24 @@ fun WorkspaceChrome(
                 TextButton(onClick = { controller.setArranging(false) }) { Text("Done", color = Accent) }
             }
         }
+
+        // The label menu: tap anywhere else to close; nothing reaches the Mac while it's open.
+        menu?.let { m ->
+            val tile = ui.layout.tiles[m.tile]
+            val rect = frames.tiles[m.tile]?.let { transform.viewRect(it) }
+            if (tile == null || rect == null) { menu = null; return@let }
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.001f)).pointerInput(Unit) { detectTapGestures { menu = null } })
+            val x = minOf(maxOf(rect.minX + 6, picture.minX + 6), picture.maxX - 258)
+            val y = maxOf(minOf(maxOf(rect.minY, topInset) + 44, picture.maxY - 360), topInset + 8)
+            PaneMenu(
+                controller, ui, m, tile, inputAllowed,
+                modifier = Modifier.offset { IntOffset((x * density).roundToInt(), (y * density).roundToInt()) }
+                    .heightIn(max = maxOf(160.0, box.height / density - y - 12).dp),
+                onClose = { menu = null }, onCloseWindow = { confirmClose = m.tile }, onViewFullScreen = onViewFullScreen,
+            )
+        }
+
+        if (ui.localFullscreen != null) FullscreenStrip(controller, ui, onSettings, Modifier.align(Alignment.TopCenter).padding(top = (topInset + 8).dp))
     }
 
     confirmClose?.let { id ->
@@ -285,10 +288,243 @@ fun WorkspaceChrome(
         AlertDialog(
             onDismissRequest = { confirmClose = null },
             title = { Text("Close $name on the Mac?") },
-            text = { Text("The window closes on the Mac itself, as if you clicked its close button. Unsaved work may ask to be saved there.") },
+            text = { Text("The window closes on the Mac itself, as if you clicked its close button. The app keeps running, and unsaved work asks to be saved there first.") },
             confirmButton = { TextButton(onClick = { controller.closeRemoteWindow(id); confirmClose = null }) { Text("Close Window") } },
             dismissButton = { TextButton(onClick = { confirmClose = null }) { Text("Cancel") } },
         )
+    }
+}
+
+private data class PaneMenuTarget(val tile: String, val tab: Int?)
+
+/** A label's text: the app's name; when a pane holds several windows of one app, their titles. Desktop panes: "Full Desktop" or the display's name. */
+private fun labelText(controller: WorkspaceController, ui: WorkspaceUi, s: WSource, tile: WTile, id: String): String {
+    val w = controller.windowItem(s)
+    if (s.isDisplay) return w?.title ?: "Desktop"
+    val app = w?.app ?: (if (s == tile.source) ui.tileState(id)?.app else null) ?: "Window"
+    if (tile.windows.size <= 1) return app.ifEmpty { "Window" }
+    val apps = tile.windows.map { controller.windowItem(it)?.app ?: "" }
+    if (apps.count { it == app } > 1 && !w?.title.isNullOrEmpty()) return w!!.title
+    return app.ifEmpty { w?.title ?: "Window" }
+}
+
+@Composable
+private fun LabelStrip(
+    controller: WorkspaceController, ui: WorkspaceUi, id: String, tile: WTile, r: CGRect, active: Boolean,
+    icons: Map<String, ImageBitmap>, top: Double, onMenu: (Int?) -> Unit,
+) {
+    val windows = tile.windows
+    val available = maxOf(r.width - 12, 60.0)
+    // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
+    val each = if (windows.size <= 1) minOf(180.0, available) else maxOf(76.0, minOf(150.0, available / windows.size - 6))
+    val dragging = ui.drag != null
+    Row(
+        Modifier.padding(top = top.dp).padding(6.dp).widthIn(max = available.dp)
+            .horizontalScroll(rememberScrollState(), enabled = !dragging),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (windows.isEmpty()) PaneLabel(controller, id, null, "Empty", null, shown = true, active = active, width = each, onMenu = onMenu)
+        windows.forEachIndexed { i, s ->
+            PaneLabel(
+                controller, id, if (windows.size > 1) i else null, labelText(controller, ui, s, tile, id),
+                s.bundleID?.let { icons[it] }, shown = s == tile.source, active = active, width = each, onMenu = onMenu,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PaneLabel(
+    controller: WorkspaceController, id: String, tab: Int?, text: String, icon: ImageBitmap?, shown: Boolean, active: Boolean,
+    width: Double, onMenu: (Int?) -> Unit,
+) {
+    val density = LocalDensity.current.density
+    val view = androidx.compose.ui.platform.LocalView.current
+    var labelOrigin by remember { mutableStateOf(CGPoint.zero) }
+    val highlighted = shown && active
+    Row(
+        Modifier
+            .onGloballyPositioned { c -> val p = c.positionInWindow(); labelOrigin = CGPoint(p.x / density.toDouble(), p.y / density.toDouble()) }
+            .widthIn(max = width.dp)
+            .background(if (highlighted) Accent.copy(alpha = 0.92f) else if (shown) Chip else Chip.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
+            .border(if (shown && !active) 0.75.dp else 0.dp, Color.White.copy(alpha = if (shown && !active) 0.3f else 0f), RoundedCornerShape(14.dp))
+            .pointerInput(id, tab) {
+                val slop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // Tap (lift before the hold), scroll (moved: the strip scrolls) or hold (drag or menu).
+                    val early = withTimeoutOrNull(400) {
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            val c = e.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull false
+                            if (!c.pressed) return@withTimeoutOrNull true
+                            if ((c.position - down.position).getDistance() > slop) return@withTimeoutOrNull false
+                        }
+                        @Suppress("UNREACHABLE_CODE") false
+                    }
+                    when (early) {
+                        true -> if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id)
+                        false -> Unit
+                        null -> {
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                            var dragging = false
+                            while (true) {
+                                val e = awaitPointerEvent()
+                                val c = e.changes.firstOrNull { it.id == down.id } ?: break
+                                val at = CGPoint(labelOrigin.x + c.position.x / density, labelOrigin.y + c.position.y / density)
+                                if (!c.pressed) {
+                                    c.consume()
+                                    if (dragging) { controller.moveDrag(at); controller.endDrag() } else onMenu(tab)
+                                    break
+                                }
+                                c.consume()
+                                if (!dragging && (c.position - down.position).getDistance() > 10 * density) {
+                                    dragging = true
+                                    controller.beginDrag(WorkspaceDrag.Item.Pane(id, tab), at)
+                                }
+                                if (dragging) controller.moveDrag(at)
+                            }
+                            if (dragging && controller.ui.value.drag != null) controller.cancelDrag()
+                        }
+                    }
+                }
+            }
+            .semantics { contentDescription = "$text" + (if (active && shown) ", typing goes here" else "") + ". Hold for pane options" }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        icon?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
+        Text(text, color = if (highlighted) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** The label's floating menu (iOS paneMenu). Changing the Mac (Minimize, Close) needs control. */
+@Composable
+private fun PaneMenu(
+    controller: WorkspaceController, ui: WorkspaceUi, m: PaneMenuTarget, tile: WTile, inputAllowed: Boolean, modifier: Modifier,
+    onClose: () -> Unit, onCloseWindow: () -> Unit, onViewFullScreen: () -> Unit,
+) {
+    val full = ui.localFullscreen == m.tile
+    val desktop = tile.source?.isDisplay == true
+    val window = tile.source != null && !desktop
+    val fill = controller.effectiveFit(m.tile) == WFit.Fill
+    @Composable
+    fun row(label: String, enabled: Boolean = true, destructive: Boolean = false, action: () -> Unit) {
+        Text(
+            label, color = if (!enabled) Color.White.copy(alpha = 0.4f) else if (destructive) Color(0xFFFF6B6B) else Color.White,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.fillMaxWidth().clickable(enabled = enabled) { onClose(); action() }.padding(horizontal = 16.dp, vertical = 11.dp),
+        )
+    }
+    Column(
+        modifier.width(252.dp).background(Color(0xF2232326), RoundedCornerShape(14.dp)).border(0.75.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
+            .padding(vertical = 6.dp).verticalScroll(rememberScrollState()),
+    ) {
+        row(if (full) "Exit Fullscreen" else "Fullscreen on This Device") { if (full) controller.exitLocalFullscreen() else controller.enterLocalFullscreen(m.tile) }
+        if (desktop) row("View Full Screen", action = onViewFullScreen)
+        row(if (fill) (if (desktop) "Show Whole Desktop" else "Show Whole Window") else "Fill Pane") { controller.toggleFit(m.tile) }
+        if (tile.crop != null || tile.rotation != WRotation.None || tile.fit != WFit.Auto) row("Reset View") { controller.resetView(m.tile) }
+        row("Rotate") { controller.rotate(m.tile) }
+        row(if (desktop) "Show a Window Here…" else "Change Window…") { controller.openOverview(replacing = m.tile) }
+        row("Arrange Panes") { controller.setArranging(true) }
+        m.tab?.let { tab -> row("Remove This Tab") { controller.removeTab(m.tile, tab) } }
+        row("Remove from Layout") { controller.removeTile(m.tile) }
+        if (window) {
+            Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(0.5.dp).background(Color.White.copy(alpha = 0.25f)))
+            row("Minimize on Mac", enabled = inputAllowed) { controller.minimizeRemoteWindow(m.tile) }
+            row("Close Window on Mac…", enabled = inputAllowed, destructive = true, action = onCloseWindow)
+            if (!inputAllowed) Text("Minimize and Close need control of the Mac.", color = Color.White.copy(alpha = 0.65f),
+                style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
+    }
+}
+
+/** Local fullscreen's floating strip: shown on entering and on any touch, fades after ~3 s. Its buttons never reach the Mac. */
+@Composable
+private fun FullscreenStrip(controller: WorkspaceController, ui: WorkspaceUi, onSettings: () -> Unit, modifier: Modifier) {
+    var visible by remember { mutableStateOf(true) }
+    val talkBack = remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(Unit) {
+        talkBack.value = (context.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager)?.isTouchExplorationEnabled == true
+    }
+    LaunchedEffect(ui.localFullscreen, ui.touchPulse) {
+        visible = true
+        if (!talkBack.value) { kotlinx.coroutines.delay(3_000); visible = false }
+    }
+    val alpha by androidx.compose.animation.core.animateFloatAsState(if (visible) 1f else 0f, androidx.compose.animation.core.tween(250), label = "fullscreenStrip")
+    val id = ui.localFullscreen ?: return
+    if (alpha <= 0.01f) return
+    val fill = controller.effectiveFit(id) == WFit.Fill
+    Row(
+        modifier.graphicsLayer { this.alpha = alpha }.background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.2f), CircleShape).padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = controller::exitLocalFullscreen) { Text("Exit", color = Color.White) }
+        TextButton(onClick = { controller.toggleFit(id) }) { Text(if (fill) "Fit" else "Fill", color = Color.White) }
+        TextButton(onClick = { controller.resetView(id) }) { Text("Reset", color = Color.White) }
+        TextButton(onClick = onSettings) { Text("Settings", color = Color.White) }
+    }
+}
+
+/**
+ * While a window or a pane label is dragged: the highlighted landing area with what will happen
+ * there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over the panes;
+ * Mirror/Extend over the desktop (a window dropped there joins it in Window mode). [origin] is
+ * this overlay's top-left in window dp.
+ */
+@Composable
+fun WorkspaceDropOverlay(controller: WorkspaceController, origin: CGPoint) {
+    val ui by controller.ui.collectAsState()
+    val drag = ui.drag ?: run { controller.cancelZone = CGRect.zero; return }
+    val density = LocalDensity.current.density
+    val view = androidx.compose.ui.platform.LocalView.current
+    val target = controller.dropTarget(drag.location)
+    val frame = if (ui.windowMode) controller.pictureFrame else controller.desktopFrame
+    val over = controller.overCancelZone(drag.location)
+    val key = if (over) "cancel" else target?.toString() ?: ""
+    LaunchedEffect(key) { if (key.isNotEmpty()) view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK) }
+    Box(Modifier.fillMaxSize()) {
+        if (target != null && !frame.isEmpty) {
+            val p = target.preview
+            val r = CGRect(frame.minX + p.x * frame.width - origin.x, frame.minY + p.y * frame.height - origin.y, p.width * frame.width, p.height * frame.height)
+            val text = when (target) {
+                is WWindowDrop.Replace -> when {
+                    drag.item is WorkspaceDrag.Item.Pane -> "Swap"
+                    ui.windowMode -> "Replace"
+                    target.tile.startsWith("\u0000") -> "Show in Window Mode"
+                    else -> "Show Instead of Desktop"
+                }
+                is WWindowDrop.Tab -> "Add as Tab"
+                is WWindowDrop.Split -> "New Pane"
+                is WWindowDrop.EmptySlot -> "Show Here"
+            }
+            Box(
+                Modifier.offset { IntOffset((r.minX * density).roundToInt(), (r.minY * density).roundToInt()) }.size(r.width.dp, r.height.dp)
+                    .background(Accent.copy(alpha = 0.22f), RoundedCornerShape(10.dp)).border(2.dp, Accent, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text, color = Color.White, style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.background(Chip, CircleShape).padding(horizontal = 10.dp, vertical = 5.dp))
+            }
+        }
+        if (!frame.isEmpty) {
+            val cx = frame.midX - origin.x; val cy = frame.maxY - 64 - origin.y
+            Row(
+                Modifier
+                    .offset { IntOffset(((cx - 105) * density).roundToInt(), ((cy - 24) * density).roundToInt()) }
+                    .width(210.dp).height(48.dp)
+                    .onGloballyPositioned { c ->
+                        val b = c.boundsInWindow()
+                        controller.cancelZone = CGRect(b.left / density.toDouble(), b.top / density.toDouble(), b.width / density.toDouble(), b.height / density.toDouble())
+                    }
+                    .background(if (over) Color(0xD9E53935) else Color.Black.copy(alpha = 0.62f), CircleShape)
+                    .border(1.dp, Color.White.copy(alpha = if (over) 0.9f else 0.35f), CircleShape),
+                horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(if (over) "✕  Release to Cancel" else "✕  Drop Here to Cancel", color = Color.White, style = MaterialTheme.typography.titleSmall)
+            }
+        }
     }
 }
 

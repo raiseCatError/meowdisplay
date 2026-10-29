@@ -791,7 +791,9 @@ struct WorkspaceDropOverlay: View {
             switch target {
             case .replace:
                 if case .pane = item { return String(localized: "Swap") }
-                return model.windowMode ? String(localized: "Replace") : String(localized: "Show Instead of Desktop")
+                if model.windowMode { return String(localized: "Replace") }
+                if case .replace(let tile, _) = target, tile == WorkspaceModel.noDesktop { return String(localized: "Show in Window Mode") }
+                return String(localized: "Show Instead of Desktop")
             case .tab: return String(localized: "Add as Tab")
             case .split: return String(localized: "New Pane")
             case .emptySlot: return String(localized: "Show Here")

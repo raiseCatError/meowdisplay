@@ -13,6 +13,40 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkspaceWireTest {
+    /** No empty panes: a window leaving a pane closes it up; one window fills the picture (WorkspaceLayout.compacted). */
+    @Test
+    fun emptyPanesCloseUpAndOneWindowFillsThePicture() {
+        val tiles = (0 until 3).map { WTile("t$it", WSource("mac-a", 10L + it)) }
+        val grid = WLayout.preset(WPreset.Grid2x2, tiles)
+        assertEquals(4, grid.root.slotCount)
+        val compact = grid.compacted()
+        assertEquals(3, compact.root.slotCount)
+        assertEquals(setOf("t0", "t1", "t2"), compact.tiles.keys)
+        val frames = WGeometry.frames(compact, WSize(400.0, 800.0))
+        assertEquals(1.0, frames.tiles.values.sumOf { it.width * it.height }, 1e-9)
+        assertEquals(WNode.Slot("t0"), compact.removing("t1").removing("t2").compacted().root)
+        assertEquals(WNode.Slot("t0"), WLayout.preset(WPreset.SideBySide, listOf(tiles[0], WTile("e"))).compacted().root)
+        assertEquals(WNode.Slot(null), WLayout.of().compacted().root)
+    }
+
+    /** Full Desktop in a pane goes to the Mac as "display", never as a window number; zoom goes as "crop". */
+    @Test
+    fun aDesktopPaneIsSentAsADisplayWithItsCrop() {
+        val desk = WTile("d", WSource("mac-a", WSource.displayKey(1)), crop = WRect(0.1, 0.2, 0.5, 0.5))
+        val win = WTile("w", WSource("mac-a", 10, 5))
+        val layout = WLayout.of(WNode.Split(WAxis.Vertical, listOf(WNode.Slot("d"), WNode.Slot("w")), listOf(0.5, 0.5)), mapOf("d" to desk, "w" to win))
+        assertTrue(desk.source!!.isDisplay)
+        val msg = WorkspaceWire.workspaceRequest(layout, WGeometry.frames(layout, WSize(400.0, 800.0)), "mac-a", null) { s -> if (s.windowID == WSource.displayKey(1)) 1L else null }
+        val sent = msg.getValue("tiles").jsonArray.map { it.jsonObject }
+        assertEquals(1L, sent[0].getValue("display").jsonPrimitive.long)
+        assertNull(sent[0]["window"])
+        assertEquals(listOf(0.1, 0.2, 0.5, 0.5), sent[0].getValue("crop").jsonArray.map { it.jsonPrimitive.double })
+        assertEquals(10L, sent[1].getValue("window").jsonPrimitive.long)
+        // A display the Mac no longer lists isn't sent at all.
+        val gone = WorkspaceWire.workspaceRequest(layout, WGeometry.frames(layout, WSize(400.0, 800.0)), "mac-a", null) { null }
+        assertEquals(1, gone.getValue("tiles").jsonArray.size)
+    }
+
     @Test
     fun requestCarriesOnlyThisHostsTilesAtTheirFrames() {
         val layout = WLayout.preset(WPreset.PrimaryPlusTwo, listOf(

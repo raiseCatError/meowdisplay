@@ -307,7 +307,10 @@ fun ReceiverScreen(
             LaunchedEffect(frame, folds, transform) {
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
             }
-            WorkspaceChrome(workspace, transform, state.inputAllowed, avoid = occupied)
+            WorkspaceChrome(
+                workspace, transform, state.inputAllowed, avoid = occupied, onSettings = onOpenSettings,
+                onViewFullScreen = { onMode(workspace.fullDisplayMode) },
+            )
             if (wsUi.available && prefs.windowSwitcher == WindowSwitcherStyle.Rail) WindowRail(workspace)
         }
 
@@ -326,15 +329,15 @@ fun ReceiverScreen(
             )
         }
 
-        // Stage Peek: Window mode only (in Mirror/Extend the edge belongs to the Mac), above the controls.
-        // Only its edge strip takes touches until it opens; the picture underneath never moves.
+        // Stage Peek: in every mode (browsing never switches modes; only a tap or a drop does), above
+        // the controls. Only its edge strip takes touches until it opens; the picture never moves.
         if (workspace != null && immersive && prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) {
             val wsUi by workspace.ui.collectAsState()
             val peekFrame = canvas ?: windowRect
             val peekSafe = CGRect(
                 insets.leading, insets.top, widthDp - insets.leading - insets.trailing, heightDp - insets.top - insets.bottom,
             ).intersection(peekFrame).offsetBy(-peekFrame.minX, -peekFrame.minY)
-            if (wsUi.windowMode && !peekSafe.isNull && !peekSafe.isEmpty) {
+            if (wsUi.available && !peekSafe.isNull && !peekSafe.isEmpty) {
                 StagePeekOverlay(
                     controller = workspace,
                     edge = prefs.stagePeekEdge,
@@ -343,7 +346,9 @@ fun ReceiverScreen(
                     avoiding = (occupied + folds).map { it.offsetBy(-peekFrame.minX, -peekFrame.minY) },
                     hapticsEnabled = prefs.hapticsEnabled,
                     isExpanded = window.expanded,
-                    onFullDesktop = { onMode(workspace.fullDisplayMode) },
+                    inputAllowed = state.inputAllowed,
+                    // Mirror/Extend: the desktop already shows; nothing changes.
+                    onFullDesktop = { },
                     onStripFrame = { stripFrame = it },
                 )
             }
