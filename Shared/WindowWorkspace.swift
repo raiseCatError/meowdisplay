@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // Window workspaces: the receiver-side layout engine and the tile content
@@ -89,25 +90,51 @@ enum WorkspaceRotation: Int, Codable, CaseIterable, Sendable {
 }
 
 enum WorkspaceFit: String, Codable, Sendable {
-    /// Whole window visible, letterboxed.
+    /// Default: the whole source, centred, letterboxed where the shapes differ (like Full Desktop).
     case fit
-    /// Tile filled, window cropped evenly. Never stretched.
+    /// Explicit: the pane filled, the source cropped evenly. Never stretched.
     case fill
-    /// Default: fill when that still shows most of the window (no letterbox bars
-    /// in split panes), whole window when filling would hide too much.
+    /// Old saved layouts and older receivers: shown as `.fit` (a resized pane never crops).
     case auto
 
-    /// Filling must show at least this share of the window along the cropped side.
-    static let autoFillMinimumShown = 0.7
-
-    /// `.auto` resolved for a tile and a (rotated) source size. Pure: the Mac, iOS
-    /// and Android resolve it identically.
+    /// `.auto` is Fit. Pure: the Mac, iOS and Android resolve it identically.
     static func resolved(_ fit: WorkspaceFit, tile: WorkspaceSize, source: WorkspaceSize) -> WorkspaceFit {
-        guard fit == .auto else { return fit }
-        guard tile.width > 0, tile.height > 0, source.width > 0, source.height > 0 else { return .fit }
-        let sx = tile.width / source.width, sy = tile.height / source.height
-        return min(sx, sy) / max(sx, sy) >= autoFillMinimumShown ? .fill : .fit
+        fit == .fill ? .fill : .fit
     }
+}
+
+/// One pane's own zoom: a factor of its Fit (or Fill) size, 0.7x to 8x, and the point of the
+/// (rotated) source shown at the pane's centre, normalized to the source. Each pane has its own;
+/// a pane resize never changes it. Identity = the whole source at the mode's size, centred.
+struct WorkspacePaneZoom: Equatable, Codable, Sendable {
+    static let minimum = 0.7
+    static let maximum = 8.0
+    static let identity = WorkspacePaneZoom(scale: 1, centerX: 0.5, centerY: 0.5)
+
+    var scale: Double
+    var centerX: Double
+    var centerY: Double
+
+    var isIdentity: Bool {
+        abs(scale - 1) < 1e-4 && abs(centerX - 0.5) < 1e-4 && abs(centerY - 0.5) < 1e-4
+    }
+
+    /// Lenient decode for wire/persisted values: scale clamped, centre finite.
+    init(scale: Double, centerX: Double, centerY: Double) {
+        self.scale = scale.isFinite ? min(max(scale, Self.minimum), Self.maximum) : 1
+        self.centerX = centerX.isFinite ? min(max(centerX, -4), 5) : 0.5
+        self.centerY = centerY.isFinite ? min(max(centerY, -4), 5) : 0.5
+    }
+
+    /// `[scale, centerX, centerY]` on the wire.
+    init?(wire: Any?) {
+        guard let a = wire as? [Any], a.count == 3 else { return nil }
+        let v = a.compactMap { ($0 as? NSNumber)?.doubleValue ?? ($0 as? Double) }
+        guard v.count == 3 else { return nil }
+        self.init(scale: v[0], centerX: v[1], centerY: v[2])
+    }
+
+    var wire: [Double] { [scale, centerX, centerY] }
 }
 
 /// Maps between a source window's pixels and the workspace canvas for one
@@ -120,9 +147,8 @@ struct TileContentTransform: Equatable, Sendable {
     let source: WorkspaceSize
     let rotation: WorkspaceRotation
     let fit: WorkspaceFit
-    /// Per-tile zoom: where `source` (the zoomed-in part) starts inside the
-    /// whole window, in window pixels. Zero when the tile shows the whole window.
-    var origin = WorkspacePoint(x: 0, y: 0)
+    /// The pane's own zoom and centre (identity: the whole source at the fit's size, centred).
+    var zoom = WorkspacePaneZoom.identity
 
     /// The rotated image's size before scaling.
     var rotatedSourceSize: WorkspaceSize {
@@ -134,19 +160,36 @@ struct TileContentTransform: Equatable, Sendable {
         WorkspaceFit.resolved(fit, tile: WorkspaceSize(width: tile.width, height: tile.height), source: rotatedSourceSize)
     }
 
-    var scale: Double {
+    /// The mode's own size (zoom 1x): the whole source (Fit) or the pane filled (Fill).
+    var baseScale: Double {
         let r = rotatedSourceSize
         guard r.width > 0, r.height > 0, tile.width > 0, tile.height > 0 else { return 0 }
         let sx = tile.width / r.width, sy = tile.height / r.height
-        return effectiveFit == .fit ? min(sx, sy) : max(sx, sy)
+        return effectiveFit == .fill ? max(sx, sy) : min(sx, sy)
     }
 
-    /// Where the whole (rotated, scaled) image lands. With `.fill` it is
-    /// larger than the tile and the tile crops it.
+    var scale: Double { baseScale * zoom.scale }
+
+    /// Where the whole (rotated, scaled) source lands: `zoom`'s centre at the pane's centre,
+    /// then kept navigable per axis. Larger than the pane: no gap at either edge. Smaller
+    /// (zoomed out): the whole source stays inside the pane.
     var contentRect: WorkspaceRect {
         let r = rotatedSourceSize, s = scale
         let w = r.width * s, h = r.height * s
-        return WorkspaceRect(x: tile.midX - w / 2, y: tile.midY - h / 2, width: w, height: h)
+        func place(_ start: Double, _ extent: Double, _ size: Double, _ center: Double) -> Double {
+            let want = start + extent / 2 - center * size
+            let lo = min(start, start + extent - size), hi = max(start, start + extent - size)
+            return min(max(want, lo), hi)
+        }
+        return WorkspaceRect(x: place(tile.x, tile.width, w, zoom.centerX), y: place(tile.y, tile.height, h, zoom.centerY),
+                             width: w, height: h)
+    }
+
+    /// `zoom` with its centre as actually drawn (after keeping the source navigable).
+    var effectiveZoom: WorkspacePaneZoom {
+        let c = contentRect
+        guard c.width > 0, c.height > 0 else { return zoom }
+        return WorkspacePaneZoom(scale: zoom.scale, centerX: (tile.midX - c.x) / c.width, centerY: (tile.midY - c.y) / c.height)
     }
 
     /// The part of the tile that actually shows window pixels.
@@ -154,7 +197,7 @@ struct TileContentTransform: Equatable, Sendable {
 
     /// Source pixel (whole-window coordinates) -> canvas.
     func canvasPoint(fromSource window: WorkspacePoint) -> WorkspacePoint {
-        let r = rotated(WorkspacePoint(x: window.x - origin.x, y: window.y - origin.y))
+        let r = rotated(window)
         let c = contentRect, s = scale
         return WorkspacePoint(x: c.x + r.x * s, y: c.y + r.y * s)
     }
@@ -168,8 +211,8 @@ struct TileContentTransform: Equatable, Sendable {
         guard s > 0 else { return nil }
         let r = WorkspacePoint(x: (q.x - c.x) / s, y: (q.y - c.y) / s)
         let p = unrotated(r)
-        // Clamp float residue at the far edges into the (zoomed-in part of the) window.
-        return WorkspacePoint(x: min(max(p.x, 0), source.width) + origin.x, y: min(max(p.y, 0), source.height) + origin.y)
+        // Clamp float residue at the far edges into the window.
+        return WorkspacePoint(x: min(max(p.x, 0), source.width), y: min(max(p.y, 0), source.height))
     }
 
     /// Canvas -> source for a point that may lie outside the tile (a drag that
@@ -252,10 +295,9 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     /// The window this pane shows (its active tab). Only this one streams.
     var source: WorkspaceSource?
     var rotation: WorkspaceRotation = .none
-    var fit: WorkspaceFit = .auto
-    /// Per-tile zoom/pan: the part of the window shown, normalized to the window, with the
-    /// pane's own shape (so it fills the pane: no bars). Nil = the fit's default view.
-    var crop: WorkspaceRect?
+    var fit: WorkspaceFit = .fit
+    /// This pane's own zoom (0.7x-8x of its Fit or Fill size) and centre. Nil = 1x, centred.
+    var zoom: WorkspacePaneZoom?
     /// Every window in this pane, in label order, when it holds more than one (tabs).
     /// Empty for a single-window pane. `source` is always one of them.
     var tabs: [WorkspaceSource] = []
@@ -264,58 +306,39 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     var windows: [WorkspaceSource] { tabs.isEmpty ? (source.map { [$0] } ?? []) : tabs }
 }
 
-/// Pinch and pan inside one tile, as a change to the part of its window it shows.
-/// A zoomed tile always shows a region with the TILE's shape, drawn filling the
-/// tile: zooming never adds letterbox bars, and the Mac captures exactly that
-/// region at the tile's resolution (sharp).
+/// Pinch and pan inside one pane: the source point under the fingers when they came down stays
+/// under them, zoom 0.7x to 8x of the pane's Fit (or Fill) size, the source kept navigable.
 enum WorkspaceZoom {
-    static let maximum = 8.0
+    static let minimum = WorkspacePaneZoom.minimum
+    static let maximum = WorkspacePaneZoom.maximum
 
-    /// The largest region of the window with the tile's shape, centred: what "fill" shows.
-    /// `window` and `tile` in any units (aspects matter); `rotation` turns the tile's
-    /// shape into the window's orientation.
-    static func fillCrop(window: WorkspaceSize, tile: WorkspaceSize, rotation: WorkspaceRotation) -> WorkspaceRect {
-        guard window.width > 0, window.height > 0, tile.width > 0, tile.height > 0 else { return WorkspaceRect(x: 0, y: 0, width: 1, height: 1) }
-        let t = rotation.isQuarterTurn ? WorkspaceSize(width: tile.height, height: tile.width) : tile
-        let tileAspect = t.width / t.height, windowAspect = window.width / window.height
-        if tileAspect >= windowAspect {
-            let h = windowAspect / tileAspect
-            return WorkspaceRect(x: 0, y: (1 - h) / 2, width: 1, height: h)
-        }
-        let w = tileAspect / windowAspect
-        return WorkspaceRect(x: (1 - w) / 2, y: 0, width: w, height: 1)
-    }
-
-    /// `crop` (or `base`, the fill region, when nil) zoomed by `scale` (>1 zooms in) around
-    /// `anchor` (a point in the tile, 0..1), then moved by `pan` (the fingers' travel as a share
-    /// of the tile). The anchor stays under the fingers; the shape never changes; never larger
-    /// than `base`, never more than `maximum` times smaller; clamped to the window. Nil when it
-    /// is exactly `base` again (back to the default view).
-    static func apply(_ crop: WorkspaceRect?, base: WorkspaceRect, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
-        let c = crop ?? base
-        guard scale.isFinite, scale > 0, [anchor.x, anchor.y, pan.x, pan.y].allSatisfy(\.isFinite),
-              c.width > 0, c.height > 0, base.width > 0, base.height > 0 else { return crop }
-        // Uniform: both sides scale together (the shape is the tile's).
-        let k = min(max(c.width / scale, base.width / maximum), base.width) / c.width
-        let w = c.width * k, h = c.height * k
-        let ax = c.x + anchor.x * c.width, ay = c.y + anchor.y * c.height
-        var x = ax - anchor.x * w - pan.x * w, y = ay - anchor.y * h - pan.y * h
-        x = min(max(x, 0), max(1 - w, 0)); y = min(max(y, 0), max(1 - h, 0))
-        let r = WorkspaceRect(x: x, y: y, width: w, height: h)
-        let eps = 1e-6
-        if abs(w - base.width) < eps, abs(h - base.height) < eps, abs(x - base.x) < eps, abs(y - base.y) < eps { return nil }
-        return r
-    }
-
-    /// Back-compat for callers without a tile shape (whole window as base).
-    static func apply(_ crop: WorkspaceRect?, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
-        apply(crop, base: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), scale: scale, anchor: anchor, pan: pan)
+    /// `start` changed by a pinch of `ratio` (1 = a pan) whose midpoint went from `from` to `to`
+    /// (pane-normalized, 0..1, as drawn: rotation included). `tile` in canvas units;
+    /// `source` the window's own (unrotated) size. Nil when the result is the default view.
+    static func pinched(_ start: WorkspacePaneZoom?, tile: WorkspaceSize, source: WorkspaceSize, rotation: WorkspaceRotation,
+                        fit: WorkspaceFit, ratio: Double, from: WorkspacePoint, to: WorkspacePoint) -> WorkspacePaneZoom? {
+        let z0 = start ?? .identity
+        guard ratio.isFinite, ratio > 0, [from.x, from.y, to.x, to.y].allSatisfy(\.isFinite),
+              tile.width > 0, tile.height > 0, source.width > 0, source.height > 0 else { return start }
+        let rect = WorkspaceRect(x: 0, y: 0, width: tile.width, height: tile.height)
+        let t0 = TileContentTransform(tile: rect, source: source, rotation: rotation, fit: fit, zoom: z0)
+        let c0 = t0.contentRect
+        guard c0.width > 0, c0.height > 0 else { return start }
+        // The (rotated) source point under the fingers when they came down, normalized.
+        let ux = (from.x * tile.width - c0.x) / c0.width, uy = (from.y * tile.height - c0.y) / c0.height
+        let scale = min(max(z0.scale * ratio, minimum), maximum)
+        let w = c0.width / z0.scale * scale, h = c0.height / z0.scale * scale
+        // Put that point under the fingers now; the centre follows.
+        let ox = to.x * tile.width - ux * w, oy = to.y * tile.height - uy * h
+        let wanted = WorkspacePaneZoom(scale: scale, centerX: (tile.width / 2 - ox) / w, centerY: (tile.height / 2 - oy) / h)
+        let drawn = TileContentTransform(tile: rect, source: source, rotation: rotation, fit: fit, zoom: wanted).effectiveZoom
+        return drawn.isIdentity ? nil : drawn
     }
 }
 
-/// Hybrid zoom: while the fingers move, the receiver scales the picture it already has
-/// (instantly, clipped to the pane); the Mac's sharp frame replaces it after the gesture.
-/// Picture-normalized units throughout.
+/// Instant local zoom: while the fingers move, the receiver moves the picture it already has
+/// (clipped to the pane) and fills what that picture doesn't cover from the pane's whole-source
+/// still; the Mac's frame with the same view replaces it. Picture-normalized units throughout.
 struct WorkspaceZoomPreview: Equatable, Sendable {
     var tile: String
     /// The preview is clipped to this pane.
@@ -323,8 +346,14 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
     /// `v' = scale * v + offset` per axis: a point of the picture as drawn when the
     /// gesture began, moved to where it belongs now.
     var scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double
+    /// Where the whole (rotated) source is drawn now: the whole-source still goes here.
+    var source: WorkspaceRect
+    var rotation: WorkspaceRotation
+    /// The window (or display key) the still must be of.
+    var sourceKey: UInt32
 
-    init?(tile: String, pane: WorkspaceRect, from old: WorkspaceRect, to new: WorkspaceRect) {
+    init?(tile: String, pane: WorkspaceRect, from old: WorkspaceRect, to new: WorkspaceRect,
+          rotation: WorkspaceRotation = .none, sourceKey: UInt32 = 0) {
         guard old.width > 0, old.height > 0, new.width > 0, new.height > 0,
               [old.x, old.y, new.x, new.y, new.width, new.height].allSatisfy(\.isFinite) else { return nil }
         self.tile = tile
@@ -333,18 +362,22 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
         scaleY = new.height / old.height
         offsetX = new.x - scaleX * old.x
         offsetY = new.y - scaleY * old.y
-    }
-
-    /// Where the whole window lands when `crop` (window-normalized) is drawn into `content`.
-    static func windowRect(crop: WorkspaceRect, content: WorkspaceRect) -> WorkspaceRect? {
-        guard crop.width > 0, crop.height > 0 else { return nil }
-        let w = content.width / crop.width, h = content.height / crop.height
-        return WorkspaceRect(x: content.x - crop.x * w, y: content.y - crop.y * h, width: w, height: h)
+        source = new
+        self.rotation = rotation
+        self.sourceKey = sourceKey
     }
 
     func apply(_ p: WorkspacePoint) -> WorkspacePoint {
         WorkspacePoint(x: scaleX * p.x + offsetX, y: scaleY * p.y + offsetY)
     }
+}
+
+/// A pane's whole source as a still (from the Mac's live capture of it).
+struct WorkspaceBackdrop: @unchecked Sendable {
+    var windowID: UInt32
+    var image: CGImage
+    /// From before macOS paused the window.
+    var stale: Bool
 }
 
 // MARK: - Layout tree
@@ -497,7 +530,7 @@ enum WorkspaceWindowDrop: Equatable, Sendable {
 /// The workspace a receiver arranges. Value type: every operation returns a
 /// new layout, so undo is a stack of values and nothing is half-applied.
 struct WorkspaceLayout: Equatable, Sendable {
-    static let schema = 2
+    static let schema = 3
     /// Hard ceiling on tiles in one workspace (iPad / expanded Android).
     static let maximumTiles = 9
 
@@ -565,7 +598,7 @@ struct WorkspaceLayout: Equatable, Sendable {
     /// the active tab (nil removes it and shows the next one).
     func replacingSource(of id: String, with source: WorkspaceSource?) -> WorkspaceLayout {
         guard var tile = tiles[id] else { return self }
-        if tile.source != source { tile.crop = nil }   // zoom belongs to the window it was set on
+        if tile.source != source { tile.zoom = nil }   // zoom belongs to the window it was set on
         if !tile.tabs.isEmpty, let current = tile.source, let i = tile.tabs.firstIndex(of: current) {
             if let source {
                 tile.tabs[i] = source
@@ -602,7 +635,7 @@ struct WorkspaceLayout: Equatable, Sendable {
         list.append(source)
         tile.tabs = list.count > 1 ? list : []
         tile.source = source
-        tile.crop = nil
+        tile.zoom = nil
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -612,7 +645,7 @@ struct WorkspaceLayout: Equatable, Sendable {
     func switchingTab(of id: String, to index: Int) -> WorkspaceLayout {
         guard var tile = tiles[id], tile.tabs.indices.contains(index), tile.source != tile.tabs[index] else { return self }
         tile.source = tile.tabs[index]
-        tile.crop = nil
+        tile.zoom = nil
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -624,7 +657,7 @@ struct WorkspaceLayout: Equatable, Sendable {
         var copy = self
         var t = tile
         let removed = t.tabs.remove(at: index)
-        if t.source == removed { t.source = t.tabs.isEmpty ? nil : t.tabs[min(index, t.tabs.count - 1)]; t.crop = nil }
+        if t.source == removed { t.source = t.tabs.isEmpty ? nil : t.tabs[min(index, t.tabs.count - 1)]; t.zoom = nil }
         if t.tabs.count <= 1 { t.tabs = [] }
         copy.tiles[id] = t
         return copy
@@ -656,9 +689,10 @@ struct WorkspaceLayout: Equatable, Sendable {
         return copy
     }
 
-    func zooming(_ id: String, to crop: WorkspaceRect?) -> WorkspaceLayout {
-        guard var tile = tiles[id], tile.crop != crop else { return self }
-        tile.crop = crop
+    func zooming(_ id: String, to zoom: WorkspacePaneZoom?) -> WorkspaceLayout {
+        let zoom = zoom?.isIdentity == true ? nil : zoom
+        guard var tile = tiles[id], tile.zoom != zoom else { return self }
+        tile.zoom = zoom
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -1364,6 +1398,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var fit: String?
         /// A tabbed pane's windows, in label order (schema 2).
         var tabs: [TabRecord]?
+        /// The pane's zoom `[scale, centerX, centerY]` (schema 3).
+        var zoom: [Double]?
     }
 
     struct TabRecord: Codable, Equatable, Sendable {
@@ -1391,7 +1427,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         tiles = layout.orderedTileIDs.compactMap { layout.tiles[$0] }.map {
             Tile(id: $0.id, host: $0.source?.host, window: $0.source?.windowID, bundle: $0.source?.bundleID,
                  follow: $0.source?.follow.rawValue, rotation: $0.rotation.rawValue, fit: $0.fit.rawValue,
-                 tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { TabRecord(host: $0.host, window: $0.windowID, bundle: $0.bundleID, follow: $0.follow.rawValue) })
+                 tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { TabRecord(host: $0.host, window: $0.windowID, bundle: $0.bundleID, follow: $0.follow.rawValue) },
+                 zoom: $0.zoom?.wire)
         }
         maximized = layout.maximized
     }
@@ -1415,10 +1452,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                 source = WorkspaceSource(host: host, windowID: window, bundleID: t.bundle,
                                          follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
             }
-            // Schema 1 saved every tile as "fit" (there was no automatic fill): start them on auto.
-            let storedFit = t.fit.flatMap(WorkspaceFit.init(rawValue:))
-            let fit: WorkspaceFit = schema < 2 && storedFit == .fit ? .auto : (storedFit ?? .auto)
+            // Fit unless Fill was chosen ("auto", the old default, shows the whole window too).
+            let fit: WorkspaceFit = t.fit == WorkspaceFit.fill.rawValue ? .fill : .fit
             var tile = WorkspaceTile(id: t.id, source: source, rotation: WorkspaceRotation(degrees: t.rotation ?? 0), fit: fit)
+            if source != nil, let z = WorkspacePaneZoom(wire: t.zoom), !z.isIdentity { tile.zoom = z }
             let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
                                 follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)

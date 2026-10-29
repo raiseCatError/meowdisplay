@@ -48,10 +48,12 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(WorkspaceLayout().compacted().root, .slot(nil), "nothing at all: the single empty pane stays")
     }
 
-    /// Hybrid zoom: during a pinch the pane gets an instant local preview (the picture it had,
-    /// scaled about the fingers, uniformly); a two-finger double-tap puts the pane back.
-    func testPinchGivesAnInstantPreviewAndDoubleTapResetsThePane() {
-        let m = model { _ in }
+    /// Instant zoom: during a pinch the pane gets a local preview (the picture it had, moved about
+    /// the fingers, uniformly) and asks the Mac for its whole source; the request carries the
+    /// pane's zoom and a view epoch the Mac echoes; a two-finger double-tap puts the pane back to 1x Fit.
+    func testPinchGivesAnInstantPreviewSendsTheViewAndDoubleTapResetsThePane() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
         m.apply(.connected(peerID: "mac-a"))
         m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
         m.apply(.mode(window: true))
@@ -59,8 +61,11 @@ final class WorkspaceClientTests: XCTestCase {
         m.updateSpace(WorkspaceSize(width: 800, height: 600), hinge: nil)
         m.choose(m.catalog!.windows[0], asNewTile: false)
         guard let id = m.layout.orderedTileIDs.first else { return XCTFail("no pane") }
+        XCTAssertEqual(m.layout.tiles[id]?.fit, .fit, "new panes are Fit")
         let c = WorkspacePoint(x: 0.5, y: 0.5)
         XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
+        XCTAssertTrue(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest && $0["tile"] as? String == id },
+                      "the whole source is asked for at once")
         XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: c, scale: 2))
         guard let p = m.zoomPreview else { return XCTFail("no preview") }
         XCTAssertEqual(p.tile, id)
@@ -68,13 +73,52 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(p.scaleY, p.scaleX, accuracy: 1e-6, "zoom never stretches")
         let fixed = p.apply(c)
         XCTAssertEqual(fixed.x, 0.5, accuracy: 1e-6); XCTAssertEqual(fixed.y, 0.5, accuracy: 1e-6)
-        // A two-finger pan moves the picture with the fingers.
+        // Zooming out below 1x is allowed (0.7x), smoothly through 1x.
+        XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: c, scale: 0.5))
+        XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale ?? 0, 0.7, accuracy: 1e-9)
         XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 2))
-        XCTAssertNotNil(m.zoomPreview, "kept until the sharp frame arrives")
-        XCTAssertGreaterThan(m.zoomPreview!.apply(c).x, 0.5)
-        XCTAssertNotNil(m.layout.tiles[id]?.crop)
+        XCTAssertNotNil(m.zoomPreview, "kept until the Mac's frame with this view arrives")
+        XCTAssertNotNil(m.layout.tiles[id]?.zoom)
         m.resetView(at: WorkspacePoint(x: 0.2, y: 0.8))
-        XCTAssertNil(m.layout.tiles[id]?.crop, "double-tap resets the pane")
+        XCTAssertNil(m.layout.tiles[id]?.zoom, "double-tap resets the pane")
+        XCTAssertEqual(m.layout.tiles[id]?.fit, .fit)
+    }
+
+    func testTheMacEchoesTheViewItComposed() async throws {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed")]))
+        m.updateSpace(WorkspaceSize(width: 800, height: 600), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let request = try XCTUnwrap(sent.last { $0["type"] as? String == WireMessage.workspaceRequest })
+        let tile = try XCTUnwrap((request["tiles"] as? [[String: Any]])?.first)
+        let epoch = try XCTUnwrap(tile["view"] as? Int)
+        XCTAssertNil(tile["crop"], "no capture crop is ever asked for")
+        XCTAssertFalse(m.viewComposed(id))
+        m.apply(.view([id: epoch]))
+        XCTAssertTrue(m.viewComposed(id))
+    }
+
+    func testPausedStalledAndFailedPanesAreReportedAndRetried() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        let state = WorkspaceEvent.parse(type: WireMessage.workspaceState, ["tiles": [
+            ["id": "a", "window": 1, "gen": 1, "state": "paused", "strip": true, "app": "Zed"],
+            ["id": "b", "window": 2, "gen": 1, "state": "retrying", "attempt": 3],
+            ["id": "c", "window": 3, "gen": 1, "state": "nonsense"],
+        ]])
+        guard case .state(let s)? = state else { return XCTFail("not parsed") }
+        XCTAssertEqual(s.tiles.map(\.status), [.paused, .retrying, .waiting])
+        XCTAssertTrue(s.tiles[0].inStageStrip)
+        XCTAssertEqual(s.tiles[1].attempt, 3)
+        m.retryTile("b")
+        XCTAssertEqual(sent.last?["type"] as? String, WireMessage.workspaceRetry)
+        XCTAssertEqual(sent.last?["tile"] as? String, "b")
     }
 
     /// Undo, redo and a saved layout put back later (one undo step), kept per Mac.

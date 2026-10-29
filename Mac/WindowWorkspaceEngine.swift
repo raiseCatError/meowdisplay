@@ -15,18 +15,39 @@ import UniformTypeIdentifiers
 // MARK: - One window's stream
 
 final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    /// One captured frame: the pixels, where the source's content sits in them (ScreenCaptureKit
+    /// pads to the configured size, e.g. 1200x656 content in a 1200x800 buffer, measured), and
+    /// the source's own size in points (Stage Manager can't fake this one).
+    struct Frame {
+        var pixels: CVPixelBuffer
+        /// Content in buffer pixels, top-left origin.
+        var content: CGRect
+        var sourcePoints: CGSize?
+    }
+
+    /// What the stream has said so far, for the tile's health (`TileCaptureWatch`).
+    struct Health: Equatable {
+        var startedAt: TimeInterval = 0
+        var firstCompleteAt: TimeInterval?
+        var lastCompleteAt: TimeInterval?
+        var lastAnyAt: TimeInterval?
+        var lastStatus: SCFrameStatus?
+        var completeFrames = 0
+    }
+
     let tileID: String
     let windowID: UInt32
     let assignmentGeneration: UInt64
     private let lock = NSLock()
-    private var latest: CVPixelBuffer?
-    private var frames = 0
-    private var lastFrameAt: TimeInterval = 0
+    private var latest: Frame?
+    private var health = Health()
     private var stream: SCStream?
     private var config = SCStreamConfiguration()
     private let outputQueue = DispatchQueue(label: "meow.workspace.tile", qos: .userInteractive)
     var onFrame: (@Sendable () -> Void)?
     var onStop: (@Sendable (Int) -> Void)?
+    /// A status other than `.complete` changed (suspended, idle, blank...).
+    var onStatus: (@Sendable (SCFrameStatus) -> Void)?
 
     init(tileID: String, windowID: UInt32, assignmentGeneration: UInt64) {
         self.tileID = tileID
@@ -34,23 +55,23 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         self.assignmentGeneration = assignmentGeneration
     }
 
-    func start(window: SCWindow, size: CGSize, fps: Int, sourceRect: CGRect? = nil) async throws {
-        try await start(filter: SCContentFilter(desktopIndependentWindow: window), size: size, fps: fps, sourceRect: sourceRect)
+    /// The whole window. Never `sourceRect`: on a single-window filter it returns the crop at
+    /// 1:1 in a corner of the buffer instead of scaling it (measured), so zoom is applied when composing.
+    func start(window: SCWindow, size: CGSize, fps: Int) async throws {
+        try await start(filter: SCContentFilter(desktopIndependentWindow: window), size: size, fps: fps)
     }
 
     /// A whole display (Full Desktop in a tile). MeowDisplay's own windows are left out.
-    func start(display: SCDisplay, size: CGSize, fps: Int, sourceRect: CGRect? = nil) async throws {
+    func start(display: SCDisplay, size: CGSize, fps: Int) async throws {
         let own = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true))?
             .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
         try await start(filter: SCContentFilter(display: display, excludingApplications: own, exceptingWindows: []),
-                        size: size, fps: fps, sourceRect: sourceRect)
+                        size: size, fps: fps)
     }
 
-    private func start(filter: SCContentFilter, size: CGSize, fps: Int, sourceRect: CGRect?) async throws {
+    private func start(filter: SCContentFilter, size: CGSize, fps: Int) async throws {
         config.width = Int(size.width)
         config.height = Int(size.height)
-        // Per-tile zoom: capture only the zoomed-in part, at the tile's resolution (sharp).
-        config.sourceRect = sourceRect ?? .null
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
         config.showsCursor = false   // the receiver draws one workspace pointer
         config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -59,48 +80,62 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         if #available(macOS 14.2, *) { config.ignoreShadowsSingleWindow = true }
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
-        lock.withLock { stream = s }
+        lock.withLock { stream = s; health = Health(startedAt: ProcessInfo.processInfo.systemUptime) }
         try await s.startCapture()
     }
 
-    /// Re-size or re-rate without restarting: the window's last frame stays.
-    func update(size: CGSize, fps: Int, sourceRect: CGRect? = nil) async {
-        guard let s = lock.withLock({ stream }) else { return }
+    /// Re-size or re-rate without restarting: the last frame stays.
+    /// Returns true when the stream was reconfigured.
+    @discardableResult
+    func update(size: CGSize, fps: Int) async -> Bool {
+        guard let s = lock.withLock({ stream }) else { return false }
         let newInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
-        let rect = sourceRect ?? .null
-        guard Int(size.width) != config.width || Int(size.height) != config.height || newInterval != config.minimumFrameInterval
-              || rect != config.sourceRect else { return }
+        guard Int(size.width) != config.width || Int(size.height) != config.height || newInterval != config.minimumFrameInterval else { return false }
         config.width = Int(size.width)
         config.height = Int(size.height)
-        config.sourceRect = rect
         config.minimumFrameInterval = newInterval
         try? await s.updateConfiguration(config)
+        return true
     }
+
+    var configuredSize: CGSize { CGSize(width: config.width, height: config.height) }
 
     func stop() async {
         let s = lock.withLock { () -> SCStream? in defer { stream = nil; latest = nil }; return stream }
         try? await s?.stopCapture()
     }
 
-    func latestFrame() -> CVPixelBuffer? { lock.withLock { latest } }
-    /// Frames arrived recently: the window is being captured (a window on
-    /// another Space is, a minimized one isn't), whatever "on screen" says.
-    var isDelivering: Bool { lock.withLock { ProcessInfo.processInfo.systemUptime - lastFrameAt < 2 } }
+    func latestFrame() -> Frame? { lock.withLock { latest } }
+    var healthNow: Health { lock.withLock { health } }
+    /// Complete frames arrived recently: the source is being captured.
+    var isDelivering: Bool { lock.withLock { health.lastCompleteAt.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } ?? false } }
     var hasFrame: Bool { lock.withLock { latest != nil } }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, CMSampleBufferIsValid(sampleBuffer),
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let raw = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
-              let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let current = lock.withLock { () -> Bool in
-            guard self.stream === stream else { return false }
-            latest = pixels
-            frames += 1
-            lastFrameAt = ProcessInfo.processInfo.systemUptime
-            return true
+              let info = attachments.first, let raw = info[.status] as? Int, let status = SCFrameStatus(rawValue: raw) else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        var frame: Frame?
+        if status == .complete, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            frame = Frame(pixels: pixels, content: Self.contentRect(info, pixels: pixels), sourcePoints: Self.sourcePoints(info))
         }
-        if current { onFrame?() }
+        let (current, changed) = lock.withLock { () -> (Bool, Bool) in
+            guard self.stream === stream else { return (false, false) }
+            let changed = health.lastStatus != status
+            health.lastStatus = status
+            health.lastAnyAt = now
+            if let frame {
+                latest = frame
+                health.completeFrames += 1
+                health.lastCompleteAt = now
+                if health.firstCompleteAt == nil { health.firstCompleteAt = now }
+            }
+            return (true, changed)
+        }
+        guard current else { return }
+        if frame != nil { onFrame?() }
+        if changed, status != .complete { onStatus?(status) }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -108,10 +143,33 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         let current = lock.withLock { self.stream === stream }
         if current { onStop?(code) }
     }
+
+    /// The content's place in the buffer, in pixels: `contentRect` (points) x `scaleFactor`,
+    /// clamped to the buffer; the whole buffer when ScreenCaptureKit doesn't say.
+    static func contentRect(_ info: [SCStreamFrameInfo: Any], pixels: CVPixelBuffer) -> CGRect {
+        let bw = CGFloat(CVPixelBufferGetWidth(pixels)), bh = CGFloat(CVPixelBufferGetHeight(pixels))
+        let whole = CGRect(x: 0, y: 0, width: bw, height: bh)
+        guard let dict = info[.contentRect] as? NSDictionary, let r = CGRect(dictionaryRepresentation: dict),
+              r.width > 0, r.height > 0 else { return whole }
+        let factor = CGFloat((info[.scaleFactor] as? NSNumber)?.doubleValue ?? 1)
+        var px = CGRect(x: r.minX * factor, y: r.minY * factor, width: r.width * factor, height: r.height * factor)
+        // A factor that doesn't fit the buffer means the rect was in pixels already.
+        if px.maxX > bw + 2 || px.maxY > bh + 2 { px = r }
+        let clamped = px.intersection(whole)
+        return clamped.width >= 1 && clamped.height >= 1 ? clamped : whole
+    }
+
+    /// The source's real size in points (content size / content scale), when it is known.
+    static func sourcePoints(_ info: [SCStreamFrameInfo: Any]) -> CGSize? {
+        guard let dict = info[.contentRect] as? NSDictionary, let r = CGRect(dictionaryRepresentation: dict),
+              let scale = (info[.contentScale] as? NSNumber)?.doubleValue, scale > 0 else { return nil }
+        return CGSize(width: r.width / scale, height: r.height / scale)
+    }
 }
 
 /// What a tile captures: a window, or a whole display (ScreenCaptureKit objects, read-only here).
 private struct CaptureSource: @unchecked Sendable { let window: SCWindow?; let display: SCDisplay? }
+private struct BackdropJob: @unchecked Sendable { let pixels: CVPixelBuffer; let content: CGRect }
 
 // MARK: - Compositor
 
@@ -128,11 +186,36 @@ final class WorkspaceCompositor {
         var dimmed: Bool
         /// A sheet open on the window: its frame and where it sits, in whole-window points.
         var overlay: Overlay? = nil
+        /// Where the source's content sits in `frame`, in pixels (top-left). Nil: all of it.
+        var content: CGRect? = nil
     }
 
     struct Overlay {
         var frame: CVPixelBuffer
         var rect: CGRect
+        var content: CGRect? = nil
+    }
+
+    /// `pixels`' content region drawn so that it covers `rect` (source points, top-left) after
+    /// `map` (source points -> canvas, top-left), clipped to `clip` (CoreImage canvas coordinates).
+    private func place(_ pixels: CVPixelBuffer, content: CGRect?, covering rect: CGRect, clip: CGRect,
+                       map: (WorkspacePoint) -> WorkspacePoint) -> CIImage {
+        let w = Double(CVPixelBufferGetWidth(pixels)), h = Double(CVPixelBufferGetHeight(pixels))
+        let c = content ?? CGRect(x: 0, y: 0, width: w, height: h)
+        guard c.width > 0, c.height > 0 else { return CIImage.empty() }
+        // Buffer pixel (CoreImage: origin bottom-left) -> source point -> canvas (CoreImage).
+        func toCanvas(_ u: Double, _ v: Double) -> CGPoint {
+            let src = WorkspacePoint(x: rect.minX + (u - c.minX) / c.width * rect.width,
+                                     y: rect.minY + ((h - v) - c.minY) / c.height * rect.height)
+            let q = map(src)
+            return CGPoint(x: q.x, y: size.height - q.y)
+        }
+        let p0 = toCanvas(0, 0), p1 = toCanvas(w, 0), p2 = toCanvas(0, h)
+        let affine = CGAffineTransform(a: (p1.x - p0.x) / w, b: (p1.y - p0.y) / w,
+                                       c: (p2.x - p0.x) / h, d: (p2.y - p0.y) / h, tx: p0.x, ty: p0.y)
+        // Only the content: ScreenCaptureKit's padding never reaches the picture.
+        let ciContent = CGRect(x: c.minX, y: h - c.maxY, width: c.width, height: c.height)
+        return CIImage(cvPixelBuffer: pixels).cropped(to: ciContent).transformed(by: affine).cropped(to: clip)
     }
 
     private let context: CIContext
@@ -178,32 +261,11 @@ final class WorkspaceCompositor {
                 image = placeholder.cropped(to: tileCI).composited(over: image)
                 continue
             }
-            let w = Double(CVPixelBufferGetWidth(frame)), h = Double(CVPixelBufferGetHeight(frame))
-            let fw = t.source.width, fh = t.source.height
-            // Map three buffer corners (CoreImage: origin bottom-left) through
-            // source points (window points, top-left) into the canvas.
-            func toCanvas(_ u: Double, _ v: Double) -> CGPoint {
-                // The buffer holds only the zoomed-in part: offset into whole-window coordinates.
-                let src = WorkspacePoint(x: u / w * fw + t.origin.x, y: (1 - v / h) * fh + t.origin.y)
-                let c = t.canvasPoint(fromSource: src)
-                return CGPoint(x: c.x, y: size.height - c.y)
-            }
-            let p0 = toCanvas(0, 0), p1 = toCanvas(w, 0), p2 = toCanvas(0, h)
-            let affine = CGAffineTransform(a: (p1.x - p0.x) / w, b: (p1.y - p0.y) / w,
-                                           c: (p2.x - p0.x) / h, d: (p2.y - p0.y) / h, tx: p0.x, ty: p0.y)
-            var tile = CIImage(cvPixelBuffer: frame).transformed(by: affine).cropped(to: tileCI)
+            let whole = CGRect(x: 0, y: 0, width: t.source.width, height: t.source.height)
+            var tile = place(frame, content: item.content, covering: whole, clip: tileCI, map: t.canvasPoint(fromSource:))
             if let o = item.overlay {
                 // The sheet, mapped through the same window -> canvas transform (zoom, fit, rotation).
-                let ow = Double(CVPixelBufferGetWidth(o.frame)), oh = Double(CVPixelBufferGetHeight(o.frame))
-                func sheetToCanvas(_ u: Double, _ v: Double) -> CGPoint {
-                    let src = WorkspacePoint(x: o.rect.minX + u / ow * o.rect.width, y: o.rect.minY + (1 - v / oh) * o.rect.height)
-                    let c = t.canvasPoint(fromSource: src)
-                    return CGPoint(x: c.x, y: size.height - c.y)
-                }
-                let q0 = sheetToCanvas(0, 0), q1 = sheetToCanvas(ow, 0), q2 = sheetToCanvas(0, oh)
-                let sheetAffine = CGAffineTransform(a: (q1.x - q0.x) / ow, b: (q1.y - q0.y) / ow,
-                                                    c: (q2.x - q0.x) / oh, d: (q2.y - q0.y) / oh, tx: q0.x, ty: q0.y)
-                tile = CIImage(cvPixelBuffer: o.frame).transformed(by: sheetAffine).cropped(to: tileCI).composited(over: tile)
+                tile = place(o.frame, content: o.content, covering: o.rect, clip: tileCI, map: t.canvasPoint(fromSource:)).composited(over: tile)
             }
             if item.dimmed { tile = dim.cropped(to: tileCI).composited(over: tile) }
             // Letterbox bars match the canvas background: no gray strips beside a fitted window.
@@ -255,6 +317,16 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var sheetFailed = Set<UInt32>()
     /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
+    /// Per pane: restarts so far, when the next may start, when macOS paused it. Reset when the
+    /// pane shows another source or the receiver asks to retry.
+    private struct Recovery { var generation: UInt64 = 0; var attempts = 0; var notBefore: TimeInterval = 0; var suspendedSince: TimeInterval?; var failed = false }
+    private var recovery: [String: Recovery] = [:]
+    /// The view epochs last echoed to the receiver (`workspaceView`).
+    private var echoedViews: [String: Int] = [:]
+    /// Counters for the performance log.
+    private var reconfigurations = 0
+    private var restarts = 0
+    private var lastBackdropAt: [String: TimeInterval] = [:]
     private var tileState: [String: String] = [:]
     private var rejected: [String: String] = [:]
     private var nextGeneration: UInt64 = 1
@@ -304,13 +376,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// A tile streaming this WHOLE window (no zoom): its latest frame is an exact, free still.
-    func liveWholeFrame(_ id: UInt32) -> CVPixelBuffer? {
-        liveLock.withLock { liveWhole[id] }?.latestFrame()
+    func liveWholeFrame(_ id: UInt32) -> (CVPixelBuffer, CGRect)? {
+        liveLock.withLock { liveWhole[id] }?.latestFrame().map { ($0.pixels, $0.content) }
     }
 
     private func updateLiveWhole() {
         var map: [UInt32: WindowTileCapture] = [:]
-        for a in assignments where a.crop == WorkspaceCrop.full { if let c = captures[a.tileID] { map[a.windowID] = c } }
+        // Every pane captures its whole source now: any live frame is an exact still.
+        for a in assignments where a.displayID == nil { if let c = captures[a.tileID] { map[a.windowID] = c } }
         liveLock.withLock { liveWhole = map }
     }
 
@@ -401,19 +474,30 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         dirty = false
         lastComposeAt = now
         let targetingNow = inputLock.withLock { targeting }
+        var drawn: [String: Int] = [:]
         let items = assignments.map { a -> WorkspaceCompositor.Item in
             let capture = captures[a.tileID]
             let frame = capture?.assignmentGeneration == a.assignmentGeneration ? capture?.latestFrame() : nil
             let state = tileState[a.tileID]
             var overlay: WorkspaceCompositor.Overlay?
             if let sheet = sheetCaptures[a.tileID], sheet.assignmentGeneration == a.assignmentGeneration,
-               let pixels = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.windowFrames[a.windowID] {
-                overlay = .init(frame: pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY))
+               let f = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.windowFrames[a.windowID] {
+                overlay = .init(frame: f.pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY), content: f.content)
             }
-            return WorkspaceCompositor.Item(rect: a.rect, transform: targetingNow.transform(for: a), frame: frame,
-                                            sourceSize: .zero, dimmed: state == "offscreen" || state == "closed", overlay: overlay)
+            if frame != nil { drawn[a.tileID] = a.viewEpoch }
+            return WorkspaceCompositor.Item(rect: a.rect, transform: targetingNow.transform(for: a), frame: frame?.pixels,
+                                            sourceSize: .zero, dimmed: state == "offscreen" || state == "closed" || state == "paused",
+                                            overlay: overlay, content: frame?.content)
         }
-        if let buffer = compositor.compose(items) { deliverFrame?(buffer) }
+        if let buffer = compositor.compose(items) {
+            deliverFrame?(buffer)
+            // The receiver holds its instant local zoom until a frame with its latest view is out.
+            let changed = drawn.filter { echoedViews[$0.key] != $0.value }
+            if !changed.isEmpty {
+                echoedViews.merge(changed) { _, new in new }
+                sendMessage?(["type": WireMessage.workspaceView, "tiles": changed])
+            }
+        }
     }
 
     // MARK: Messages from the receiver (admitted session only; MacSender gates)
@@ -444,6 +528,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             case WireMessage.menuPress:
                 guard inputGranted else { return replyMenuPress(obj, ok: false, error: "control") }
                 pressMenu(obj)
+            case WireMessage.workspaceRetry:
+                // Viewing only: starts the pane's capture again now, backoff forgotten.
+                guard let tile = obj["tile"] as? String, assignments.contains(where: { $0.tileID == tile }) else { return }
+                Log.info("workspace: tile=\(tile) retry asked by the receiver")
+                recovery[tile] = nil
+                if let c = captures[tile] { captures[tile] = nil; Self.releaseBudget(1); Task { await c.stop() } }
+                setState(tile, "waiting")
+                ensureCaptures()
+                sendState(force: true)
+            case WireMessage.workspaceBackdropRequest:
+                sendBackdrop(obj)
             default:
                 break
             }
@@ -492,7 +587,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // The frame sizes the tile's picture even off screen. Input to a window
             // that isn't on screen is refused at press/hover time (isTopmost checks
             // the window's own current on-screen bounds).
-            frames[a.windowID] = entry.frame
+            frames[a.windowID] = sourceFrame(a) ?? entry.frame
             if entry.availability == .offscreen {
                 setState(a.tileID, delivering ? "live" : "offscreen")
                 // Chosen on the receiver: bring it back on the Mac without activating its app
@@ -510,6 +605,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
         ensureCaptures()
+        watchCaptures()
         sendState()
     }
 
@@ -546,6 +642,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let sources = WindowAudioSources.of(assignments)
         if sources != lastAudioSources { lastAudioSources = sources; onAudioSources?(sources) }
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
+        for id in Array(recovery.keys) where !assignments.contains(where: { $0.tileID == id }) { recovery[id] = nil }
+        for id in Array(echoedViews.keys) where !assignments.contains(where: { $0.tileID == id }) { echoedViews[id] = nil }
         // Geometry from the catalog right away, so a new tile draws on the next tick.
         let knownFrames = Dictionary(assignments.compactMap { a in
             a.displayID.map { d in displayFrames[d].map { (a.windowID, $0) } } ?? catalog[a.windowID].map { (a.windowID, $0.frame) }
@@ -569,6 +667,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         for (id, capture) in captures {
             let a = assignments.first { $0.tileID == id }
             if a == nil || a?.assignmentGeneration != capture.assignmentGeneration || tileState[id] == "closed" {
+                recovery[id] = nil   // obsolete retries end with the source they were for
                 captures[id] = nil
                 Self.releaseBudget(1)
                 Task { await capture.stop() }
@@ -576,7 +675,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let now = ProcessInfo.processInfo.systemUptime
         for a in assignments where captures[a.tileID] == nil && tileState[a.tileID] != "closed" {
+            if let r = recovery[a.tileID], r.generation != a.assignmentGeneration { recovery[a.tileID] = nil }
+            if let r = recovery[a.tileID], r.failed || now < r.notBefore { continue }
             let source = CaptureSource(window: a.displayID == nil ? snapshot?.scWindows[a.windowID] : nil,
                                        display: a.displayID.flatMap { browser.scDisplay($0) })
             guard source.window != nil || source.display != nil else { setState(a.tileID, "waiting"); continue }
@@ -584,9 +686,35 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let capture = WindowTileCapture(tileID: a.tileID, windowID: a.windowID, assignmentGeneration: a.assignmentGeneration)
             capture.onFrame = { [weak self] in
                 self?.queue.async {
-                    guard let self else { return }
+                    guard let self, self.captures[a.tileID] === capture else { return }
                     self.dirty = true
-                    if self.tileState[a.tileID] == "waiting" || self.tileState[a.tileID] == nil { self.setState(a.tileID, "live"); self.sendState() }
+                    let state = self.tileState[a.tileID]
+                    if state != "live" && state != "closed" && state != "offscreen" {
+                        let h = capture.healthNow
+                        if self.recovery[a.tileID]?.attempts ?? 0 > 0 || state == "paused" {
+                            Log.info("workspace: tile=\(a.tileID) live again (was \(state ?? "starting"), attempts=\(self.recovery[a.tileID]?.attempts ?? 0))")
+                        } else {
+                            Log.info("workspace: tile=\(a.tileID) first frame after \(Int((h.firstCompleteAt ?? h.startedAt) * 1000 - h.startedAt * 1000)) ms")
+                        }
+                        self.recovery[a.tileID] = nil
+                        self.setState(a.tileID, "live")
+                        self.sendState()
+                    }
+                }
+            }
+            capture.onStatus = { [weak self] status in
+                self?.queue.async {
+                    guard let self, self.captures[a.tileID] === capture else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if status == .suspended {
+                        if self.recovery[a.tileID]?.suspendedSince == nil {
+                            Log.info("workspace: tile=\(a.tileID) window=\(a.windowID) paused by macOS (suspended; Stage Manager strip or hidden)")
+                        }
+                        self.recovery[a.tileID, default: Recovery(generation: a.assignmentGeneration)].suspendedSince = self.recovery[a.tileID]?.suspendedSince ?? now
+                    } else {
+                        self.recovery[a.tileID]?.suspendedSince = nil
+                    }
+                    self.watchCaptures()
                 }
             }
             capture.onStop = { [weak self] code in
@@ -599,22 +727,22 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     // errors: one restart on the next refresh, never a loop
                     // that touches other tiles.
                     let gone = a.displayID.map { self.browser.displayEntry($0) == nil } ?? (self.catalog[a.windowID] == nil)
-                    self.setState(a.tileID, gone ? "closed" : "failed")
+                    if gone { self.setState(a.tileID, "closed") } else { self.scheduleRestart(a.tileID, reason: "stopped code=\(code)") }
                     self.sendState()
                 }
             }
             captures[a.tileID] = capture
             setState(a.tileID, "waiting")
             let size = captureSize(for: a)
-            let rect = cropRect(for: a)
             let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
                                                  streamFPS: streamFPS, available: true)
+            Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
             Task { [weak self] in
                 do {
                     if let display = source.display {
-                        try await capture.start(display: display, size: size, fps: fps, sourceRect: rect)
+                        try await capture.start(display: display, size: size, fps: fps)
                     } else if let window = source.window {
-                        try await capture.start(window: window, size: size, fps: fps, sourceRect: rect)
+                        try await capture.start(window: window, size: size, fps: fps)
                     }
                     // Superseded while starting (stopped, replaced): don't leave it running.
                     let current = await self?.isCurrent(capture) ?? false
@@ -626,8 +754,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                         Log.info("workspace: window capture failed to start tile=\(a.tileID) code=\(code)")
                         self.captures[a.tileID] = nil
                         Self.releaseBudget(1)
-                        // -3811: minimized/hidden; retried when it comes back.
-                        self.setState(a.tileID, code == -3811 ? "offscreen" : "failed")
+                        self.scheduleRestart(a.tileID, reason: "start failed code=\(code)")
                         self.sendState()
                     }
                 }
@@ -702,7 +829,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// The sheet at the same pixels per point as its window's capture (sharp when zoomed in too).
     private func sheetCaptureSize(_ sheet: CGSize, for a: WorkspaceTileAssignment) -> CGSize {
-        let windowPoints = (sourceFrame(a)?.width ?? 0) * a.crop.width
+        let windowPoints = sourceFrame(a)?.width ?? 0
         let perPoint = windowPoints > 0 ? captureSize(for: a).width / windowPoints : 2
         func even(_ v: Double) -> Double { max(2, min(4096, (v * perPoint / 2).rounded() * 2)) }
         return CGSize(width: even(sheet.width), height: even(sheet.height))
@@ -715,33 +842,115 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
                                                  streamFPS: streamFPS, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
-            let rect = cropRect(for: a)
-            Task { await capture.update(size: size, fps: max(fps, 1), sourceRect: rect) }
+            Task { [weak self] in
+                if await capture.update(size: size, fps: max(fps, 1)) { self?.queue.async { self?.reconfigurations += 1 } }
+            }
         }
     }
 
-    /// The zoomed-in part of the window in its own points, or nil for the whole window.
-    /// The tile's source in global points: its window's frame, or its display's bounds.
+    /// The tile's source in global points: its window's frame, or its display's bounds. A window's
+    /// size comes from its own frames when the listed one is smaller (Stage Manager's strip
+    /// reports the thumbnail, not the window).
     private func sourceFrame(_ a: WorkspaceTileAssignment) -> CGRect? {
         if let d = a.displayID { return inputLock.withLock { targeting.windowFrames[a.windowID] } ?? CGDisplayBounds(d) }
-        return catalog[a.windowID]?.frame
+        guard let frame = catalog[a.windowID]?.frame else { return nil }
+        if let real = captures[a.tileID]?.latestFrame()?.sourcePoints, real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
+            return CGRect(origin: frame.origin, size: real)
+        }
+        return frame
     }
 
-    private func cropRect(for a: WorkspaceTileAssignment) -> CGRect? {
-        guard a.crop != WorkspaceCrop.full, let frame = sourceFrame(a)?.size else { return nil }
-        return CGRect(x: frame.width * a.crop.x, y: frame.height * a.crop.y,
-                      width: frame.width * a.crop.width, height: frame.height * a.crop.height)
-    }
-
+    /// The whole source, at the pixels the pane draws it with (zoom included), up to its own.
     private func captureSize(for a: WorkspaceTileAssignment) -> CGSize {
-        let tilePx = CGSize(width: a.rect.width * canvas.width, height: a.rect.height * canvas.height)
-        let whole = sourceFrame(a)?.size ?? tilePx
-        // Zoomed in: the captured part is smaller, so it gets more pixels per point (up to the display's own).
-        let frame = CGSize(width: whole.width * a.crop.width, height: whole.height * a.crop.height)
+        guard let frame = sourceFrame(a)?.size, frame.width > 0, frame.height > 0 else {
+            return CGSize(width: max(2, (a.rect.width * canvas.width).rounded()), height: max(2, (a.rect.height * canvas.height).rounded()))
+        }
+        let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
+        let t = TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
+                                     rotation: a.rotation, fit: a.fit, zoom: a.zoom)
         let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
-        let scale = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
-        return WorkspaceCaptureBudget.captureSize(tilePixels: tilePx, window: frame, backingScale: scale,
-                                                  rotation: a.rotation, fit: a.crop != WorkspaceCrop.full ? .fill : a.fit)
+        let backing = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
+        return WorkspaceCaptureSizing.size(source: frame, drawScale: t.scale, backingScale: backing)
+    }
+
+    /// Health of every pane's capture (each refresh and on status changes): live, paused by
+    /// macOS, or stuck and restarted with backoff. Never touches other panes' streams.
+    private func watchCaptures() {
+        let now = ProcessInfo.processInfo.systemUptime
+        var changed = false
+        for a in assignments {
+            guard let c = captures[a.tileID], c.assignmentGeneration == a.assignmentGeneration else { continue }
+            let h = c.healthNow
+            let r = recovery[a.tileID] ?? Recovery()
+            let onStage = a.displayID != nil || (catalog[a.windowID].map { $0.availability == .visible && !$0.inStageStrip } ?? false)
+            let verdict = TileCaptureWatch.verdict(now: now, startedAt: h.startedAt, firstCompleteAt: h.firstCompleteAt,
+                                                   suspendedSince: r.suspendedSince, sourceLooksAvailable: onStage)
+            let state = tileState[a.tileID]
+            switch verdict {
+            case .waiting:
+                break
+            case .live:
+                if state != "live", state != "offscreen", state != "closed", c.hasFrame { setState(a.tileID, "live"); changed = true }
+            case .paused:
+                if state != "paused" { setState(a.tileID, "paused"); changed = true }
+            case .stalled:
+                Log.info("workspace: tile=\(a.tileID) stalled (status=\(h.lastStatus.map { String($0.rawValue) } ?? "none") frames=\(h.completeFrames) after \(Int(now - h.startedAt)) s)")
+                captures[a.tileID] = nil
+                Self.releaseBudget(1)
+                Task { await c.stop() }
+                scheduleRestart(a.tileID, reason: "stalled")
+                changed = true
+            }
+        }
+        if changed { dirty = true; sendState() }
+    }
+
+    /// Restart a pane's capture later (backoff), or give up and say so (the receiver offers Retry).
+    private func scheduleRestart(_ tile: String, reason: String) {
+        var r = recovery[tile] ?? Recovery()
+        r.generation = assignments.first { $0.tileID == tile }?.assignmentGeneration ?? 0
+        r.attempts += 1
+        r.suspendedSince = nil
+        restarts += 1
+        if let delay = TileCaptureWatch.retryDelay(attempt: r.attempts) {
+            r.notBefore = ProcessInfo.processInfo.systemUptime + delay
+            setState(tile, "retrying")
+            Log.info("workspace: tile=\(tile) \(reason): restart #\(r.attempts) in \(delay) s")
+            queue.asyncAfter(deadline: .now() + delay + 0.05) { [weak self] in self?.ensureCaptures(); self?.sendState() }
+        } else {
+            r.failed = true
+            setState(tile, "failed")
+            Log.info("workspace: tile=\(tile) \(reason): gave up after \(r.attempts - 1) restarts")
+        }
+        recovery[tile] = r
+    }
+
+    /// The pane's whole source as a JPEG: the receiver's instant zoom draws it where the live
+    /// picture doesn't reach yet (zooming out, panning). From the pane's own live frame: no
+    /// extra capture. At most every 0.4 s per pane.
+    private func sendBackdrop(_ obj: [String: Any]) {
+        guard let tile = obj["tile"] as? String, let a = assignments.first(where: { $0.tileID == tile }),
+              let c = captures[tile], c.assignmentGeneration == a.assignmentGeneration, let frame = c.latestFrame() else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - (lastBackdropAt[tile] ?? 0) >= 0.4 else { return }
+        lastBackdropAt[tile] = now
+        let width = min(max(obj["max"] as? Int ?? 1024, 160), 1600)
+        let req = obj["req"] as? Int
+        let stale = tileState[tile] == "paused"
+        let job = BackdropJob(pixels: frame.pixels, content: frame.content)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let w = min(width, Int(job.content.width))
+            guard let image = WindowBrowserService.downscale(job.pixels, content: job.content, width: max(w, 2)),
+                  let jpeg = WindowBrowserService.jpeg(image, quality: 0.6) else { return }
+            self?.queue.async {
+                guard let self, self.running else { return }
+                var msg: [String: Any] = ["type": WireMessage.workspaceBackdrop, "tile": tile, "window": Int(a.windowID),
+                                          "gen": Int(a.assignmentGeneration), "jpeg": jpeg.base64EncodedString()]
+                if let req { msg["req"] = req }
+                if stale { msg["stale"] = true }
+                self.sendMessage?(msg)
+            }
+        }
     }
 
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }
@@ -754,8 +963,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 "id": a.tileID, "window": Int(a.windowID), "gen": Int(a.windowGeneration),
                 "state": tileState[a.tileID] ?? "waiting", "app": entry?.appName ?? "", "bundle": a.bundleID,
                 "title": String((entry?.title ?? "").prefix(120)), "follow": a.follow.rawValue,
-                "rotation": a.rotation.rawValue, "fit": a.fit.rawValue, "crop": [a.crop.x, a.crop.y, a.crop.width, a.crop.height],
+                "rotation": a.rotation.rawValue, "fit": a.fit.rawValue, "zoom": a.zoom.wire,
             ]
+            if let r = recovery[a.tileID], r.attempts > 0 { tile["attempt"] = r.attempts }
+            if entry?.inStageStrip == true { tile["strip"] = true }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"

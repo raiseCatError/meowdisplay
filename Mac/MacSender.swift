@@ -5357,7 +5357,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
-             WireMessage.menuRequest, WireMessage.menuPress:
+             WireMessage.menuRequest, WireMessage.menuPress, WireMessage.workspaceRetry, WireMessage.workspaceBackdropRequest:
             // Admitted sessions only (gate above). Window metadata exists only
             // while this receiver is in Window mode on this Mac.
             guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }

@@ -487,45 +487,99 @@ extension WindowWorkspaceTargetingTests {
     }
 }
 
-/// Per-tile zoom: the request's crop, the zoom math and exact input mapping.
+/// Per-pane view: Fit by default, zoom 0.7x-8x around the fingers, navigable pan, exact input.
 final class WorkspaceZoomTests: XCTestCase {
-    func testCropParsesAndClamps() {
-        XCTAssertEqual(WorkspaceCrop.parse(nil), WorkspaceCrop.full)
-        XCTAssertEqual(WorkspaceCrop.parse([0.25, 0.25, 0.5, 0.5]), WorkspaceRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
-        let tiny = WorkspaceCrop.parse([0.99, 0.99, 0.001, 0.001])
-        XCTAssertEqual(tiny.width, WorkspaceCrop.minimumSide, "zoom is capped at 8x")
-        XCTAssertLessThanOrEqual(tiny.maxX, 1)
-        XCTAssertEqual(WorkspaceCrop.parse([Double.nan, 0, 1, 1]), WorkspaceCrop.full)
+    private let window = WorkspaceSize(width: 1600, height: 1000)
+    private let pane = WorkspaceSize(width: 800, height: 800)
+
+    private func transform(_ z: WorkspacePaneZoom?, fit: WorkspaceFit = .fit, rotation: WorkspaceRotation = .none) -> TileContentTransform {
+        TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: pane.width, height: pane.height), source: window,
+                             rotation: rotation, fit: fit, zoom: z ?? .identity)
     }
 
-    func testPinchKeepsTheAnchorUnderTheFingersAndPansWithinTheWindow() throws {
-        let anchor = WorkspacePoint(x: 0.25, y: 0.75)
-        let crop = try XCTUnwrap(WorkspaceZoom.apply(nil, scale: 2, anchor: anchor, pan: WorkspacePoint(x: 0, y: 0)))
-        XCTAssertEqual(crop.width, 0.5, accuracy: 1e-9)
-        // The window point under the anchor (0.25, 0.75) stays under it.
-        XCTAssertEqual(crop.x + anchor.x * crop.width, 0.25, accuracy: 1e-9)
-        XCTAssertEqual(crop.y + anchor.y * crop.height, 0.75, accuracy: 1e-9)
-        let panned = try XCTUnwrap(WorkspaceZoom.apply(crop, scale: 1, anchor: anchor, pan: WorkspacePoint(x: -5, y: 0)))
-        XCTAssertEqual(panned.maxX, 1, accuracy: 1e-9, "never pans past the window's edge")
-        XCTAssertNil(WorkspaceZoom.apply(crop, scale: 0.25, anchor: anchor, pan: WorkspacePoint(x: 0, y: 0)), "back to the whole window")
+    func testZoomParsesAndClampsFromTheWire() {
+        XCTAssertNil(WorkspacePaneZoom(wire: nil))
+        XCTAssertNil(WorkspacePaneZoom(wire: [1, 2]))
+        XCTAssertEqual(WorkspacePaneZoom(wire: [20.0, 0.5, 0.5])?.scale, 8, "8x at most")
+        XCTAssertEqual(WorkspacePaneZoom(wire: [0.1, 0.5, 0.5])?.scale, 0.7, "0.7x at least")
+        XCTAssertEqual(WorkspacePaneZoom(wire: [Double.nan, 0.5, 0.5])?.scale, 1)
+        XCTAssertEqual(WorkspaceFit.resolved(.auto, tile: pane, source: window), .fit, "old \"auto\" panes show the whole window")
     }
 
-    func testZoomedTileMapsInputToTheRightWindowPoint() {
-        // A 1000x500 window, zoomed to its right half, in a 500x500 tile.
-        let t = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: 500, height: 500),
-                                     source: WorkspaceSize(width: 500, height: 500), rotation: .none, fit: .fit,
-                                     origin: WorkspacePoint(x: 500, y: 0))
-        let p = t.sourcePoint(fromCanvas: WorkspacePoint(x: 250, y: 250))
-        XCTAssertEqual(p?.x ?? 0, 750, accuracy: 1e-9)
-        let back = t.canvasPoint(fromSource: WorkspacePoint(x: 750, y: 250))
-        XCTAssertEqual(back.x, 250, accuracy: 1e-9)
+    func testFitShowsTheWholeSourceCentredAndAResizedPaneNeverCrops() {
+        let c = transform(nil).contentRect
+        XCTAssertEqual(c.width, 800, accuracy: 1e-9); XCTAssertEqual(c.height, 500, accuracy: 1e-9)
+        XCTAssertEqual(c.y, 150, accuracy: 1e-9, "centred, letterboxed")
+        for w in [300.0, 1200, 1999] {
+            let t = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: w, height: 600), source: window, rotation: .none, fit: .fit)
+            XCTAssertLessThanOrEqual(t.contentRect.width, w + 1e-9); XCTAssertLessThanOrEqual(t.contentRect.height, 600 + 1e-9)
+        }
+        let fill = transform(nil, fit: .fill).contentRect
+        XCTAssertEqual(fill.height, 800, accuracy: 1e-9, "Fill covers the pane")
+        XCTAssertEqual(fill.width / fill.height, 1.6, accuracy: 1e-9, "never stretched")
+    }
+
+    func testUnderzoomShowsTheWholeSourceAt70PercentCentredAndInputOutsideItSendsNothing() {
+        let t = transform(WorkspacePaneZoom(scale: 0.7, centerX: 0.5, centerY: 0.5))
+        let c = t.contentRect
+        XCTAssertEqual(c.width, 560, accuracy: 1e-9); XCTAssertEqual(c.height, 350, accuracy: 1e-9)
+        XCTAssertEqual(c.midX, 400, accuracy: 1e-9); XCTAssertEqual(c.midY, 400, accuracy: 1e-9)
+        XCTAssertNil(t.sourcePoint(fromCanvas: WorkspacePoint(x: 50, y: 400)), "empty pane space never clicks the Mac")
+        let p = t.sourcePoint(fromCanvas: WorkspacePoint(x: 400, y: 400))
+        XCTAssertEqual(p?.x ?? 0, 800, accuracy: 1e-9); XCTAssertEqual(p?.y ?? 0, 500, accuracy: 1e-9)
+        // Moved by hand: the smaller source can go anywhere inside the pane, never out of it.
+        let moved = transform(WorkspacePaneZoom(scale: 0.7, centerX: -3, centerY: 0.5)).contentRect
+        XCTAssertEqual(moved.maxX, 800, accuracy: 1e-9)
+    }
+
+    func testPinchKeepsTheSourcePointUnderTheFingersAndClampsCleanlyAt8xAnd07x() throws {
+        let from = WorkspacePoint(x: 0.25, y: 0.5), to = WorkspacePoint(x: 0.25, y: 0.5)
+        let z2 = try XCTUnwrap(WorkspaceZoom.pinched(nil, tile: pane, source: window, rotation: .none, fit: .fit, ratio: 2, from: from, to: to))
+        XCTAssertEqual(z2.scale, 2, accuracy: 1e-9)
+        let before = transform(nil).sourcePoint(fromCanvas: WorkspacePoint(x: 200, y: 400))!
+        let after = transform(z2).sourcePoint(fromCanvas: WorkspacePoint(x: 200, y: 400))!
+        XCTAssertEqual(after.x, before.x, accuracy: 1e-6, "the point under the fingers stays there")
+        XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
+        let huge = try XCTUnwrap(WorkspaceZoom.pinched(z2, tile: pane, source: window, rotation: .none, fit: .fit, ratio: 100, from: from, to: to))
+        XCTAssertEqual(huge.scale, 8, "clamped at 8x")
+        let tiny = try XCTUnwrap(WorkspaceZoom.pinched(huge, tile: pane, source: window, rotation: .none, fit: .fit, ratio: 0.0001, from: from, to: to))
+        XCTAssertEqual(tiny.scale, 0.7, "clamped at 0.7x, no overshoot")
+        // Through 1x and back without drift: a pinch that ends where it started is the default view again.
+        var z: WorkspacePaneZoom? = nil
+        for r in [1.3, 2.1, 0.6, 1.7, 0.4, 1.0] {
+            z = WorkspaceZoom.pinched(nil, tile: pane, source: window, rotation: .none, fit: .fit, ratio: r,
+                                      from: WorkspacePoint(x: 0.5, y: 0.5), to: WorkspacePoint(x: 0.5, y: 0.5))
+        }
+        XCTAssertNil(z, "back at 1x, centred")
+    }
+
+    func testPanningAZoomedPaneStopsAtTheSourceEdges() throws {
+        let z = try XCTUnwrap(WorkspaceZoom.pinched(WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5), tile: pane, source: window,
+                                                    rotation: .none, fit: .fit, ratio: 1,
+                                                    from: WorkspacePoint(x: 0.5, y: 0.5), to: WorkspacePoint(x: 30, y: 0.5)))
+        let c = transform(z).contentRect
+        XCTAssertEqual(c.x, 0, accuracy: 1e-6, "no gap at the left edge")
+        XCTAssertNotNil(transform(z).sourcePoint(fromCanvas: WorkspacePoint(x: 1, y: 400)), "every pane pixel shows the window")
+    }
+
+    func testZoomedAndRotatedPanesMapInputBothWays() {
+        for rotation in WorkspaceRotation.allCases {
+            for s in [0.7, 1, 3.5, 8] {
+                let t = transform(WorkspacePaneZoom(scale: s, centerX: 0.3, centerY: 0.6), rotation: rotation)
+                let src = WorkspacePoint(x: 700, y: 420)
+                let q = t.canvasPoint(fromSource: src)
+                guard let back = t.sourcePoint(fromCanvas: q) else { continue }   // may be outside the pane when zoomed in
+                XCTAssertEqual(back.x, src.x, accuracy: 1e-6, "\(rotation) \(s)")
+                XCTAssertEqual(back.y, src.y, accuracy: 1e-6, "\(rotation) \(s)")
+            }
+        }
     }
 
     func testChangingATilesWindowDropsItsZoom() {
         var layout = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "a", source: WorkspaceSource(host: "h", windowID: 1))])
-        layout = layout.zooming("a", to: WorkspaceRect(x: 0, y: 0, width: 0.5, height: 0.5))
-        XCTAssertNotNil(layout.tiles["a"]?.crop)
+        layout = layout.zooming("a", to: WorkspacePaneZoom(scale: 2, centerX: 0.3, centerY: 0.3))
+        XCTAssertNotNil(layout.tiles["a"]?.zoom)
         layout = layout.replacingSource(of: "a", with: WorkspaceSource(host: "h", windowID: 2))
-        XCTAssertNil(layout.tiles["a"]?.crop)
+        XCTAssertNil(layout.tiles["a"]?.zoom)
     }
 }

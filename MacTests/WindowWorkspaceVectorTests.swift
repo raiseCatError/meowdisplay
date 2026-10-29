@@ -75,34 +75,39 @@ final class WindowWorkspaceVectorTests: XCTestCase {
                 capacities.append(["size": [s.width, s.height], "hinge": hingeJSON(hinge), "capacity": WorkspaceGeometry.capacity(for: s, hinge: hinge)])
             }
         }
-        // Transforms: forward points per rotation and fit.
+        // Transforms: forward points per rotation, fit and pane zoom (0.7x-8x, centre kept navigable).
         var transforms: [[String: Any]] = []
+        let zooms: [WorkspacePaneZoom] = [.identity, WorkspacePaneZoom(scale: 0.7, centerX: 0.2, centerY: 0.9),
+                                          WorkspacePaneZoom(scale: 3, centerX: 0.8, centerY: 0.1), WorkspacePaneZoom(scale: 8, centerX: 0.5, centerY: 0.5)]
         for rotation in WorkspaceRotation.allCases {
             for fit in [WorkspaceFit.fit, .fill, .auto] {
-                let t = TileContentTransform(tile: .init(x: 40, y: 20, width: 600, height: 400), source: .init(width: 1600, height: 900),
-                                             rotation: rotation, fit: fit)
-                let pts: [[Double]] = [[0, 0], [1600, 0], [0, 900], [800, 450], [123, 777]]
-                transforms.append(["rotation": rotation.rawValue, "fit": fit.rawValue, "tile": [40, 20, 600, 400], "source": [1600, 900],
-                                   "points": pts, "canvas": pts.map { let c = t.canvasPoint(fromSource: .init(x: $0[0], y: $0[1])); return [c.x, c.y] }])
+                for z in zooms {
+                    let t = TileContentTransform(tile: .init(x: 40, y: 20, width: 600, height: 400), source: .init(width: 1600, height: 900),
+                                                 rotation: rotation, fit: fit, zoom: z)
+                    let pts: [[Double]] = [[0, 0], [1600, 0], [0, 900], [800, 450], [123, 777]]
+                    let c = t.contentRect
+                    transforms.append(["rotation": rotation.rawValue, "fit": fit.rawValue, "tile": [40, 20, 600, 400], "source": [1600, 900],
+                                       "zoom": z.wire, "content": [c.x, c.y, c.width, c.height],
+                                       "points": pts, "canvas": pts.map { let c = t.canvasPoint(fromSource: .init(x: $0[0], y: $0[1])); return [c.x, c.y] }])
+                }
             }
         }
-        // Per-tile zoom: the fill region for a tile shape, then pinch/pan steps from it.
+        // Pinch/pan steps from the default view: each starts where the last ended.
         var zoom: [[String: Any]] = []
-        for (window, tile, rotation) in [((1600.0, 1000.0), (400.0, 300.0), WorkspaceRotation.none),
-                                         ((1600.0, 1000.0), (300.0, 600.0), .none),
-                                         ((1000.0, 1600.0), (500.0, 300.0), .quarter)] {
-            let base = WorkspaceZoom.fillCrop(window: .init(width: window.0, height: window.1), tile: .init(width: tile.0, height: tile.1), rotation: rotation)
-            var crop: WorkspaceRect?
+        for (window, tile, rotation, fit) in [((1600.0, 1000.0), (400.0, 300.0), WorkspaceRotation.none, WorkspaceFit.fit),
+                                              ((1600.0, 1000.0), (300.0, 600.0), .none, .fill),
+                                              ((1000.0, 1600.0), (500.0, 300.0), .quarter, .fit)] {
+            var z: WorkspacePaneZoom?
             var steps: [[String: Any]] = []
-            for (scale, ax, ay, px, py) in [(2.0, 0.25, 0.5, 0.0, 0.0), (1.5, 0.5, 0.5, 0.1, -0.2), (0.2, 0.5, 0.5, 0.0, 0.0), (20.0, 1.0, 0.0, 0.0, 0.0)] {
-                crop = WorkspaceZoom.apply(crop, base: base, scale: scale, anchor: .init(x: ax, y: ay), pan: .init(x: px, y: py))
-                steps.append(["scale": scale, "anchor": [ax, ay], "pan": [px, py],
-                              "crop": crop.map { [$0.x, $0.y, $0.width, $0.height] } ?? NSNull()])
+            for (ratio, fx, fy, tx, ty) in [(2.0, 0.25, 0.5, 0.25, 0.5), (1.5, 0.5, 0.5, 0.6, 0.3), (0.2, 0.5, 0.5, 0.5, 0.5),
+                                            (40.0, 1.0, 0.0, 1.0, 0.0), (1.0, 0.5, 0.5, -3.0, 2.0), (0.01, 0.5, 0.5, 0.5, 0.5)] {
+                z = WorkspaceZoom.pinched(z, tile: .init(width: tile.0, height: tile.1), source: .init(width: window.0, height: window.1),
+                                          rotation: rotation, fit: fit, ratio: ratio, from: .init(x: fx, y: fy), to: .init(x: tx, y: ty))
+                steps.append(["ratio": ratio, "from": [fx, fy], "to": [tx, ty], "zoom": z.map { $0.wire } ?? NSNull()])
             }
-            zoom.append(["window": [window.0, window.1], "tile": [tile.0, tile.1], "rotation": rotation.rawValue,
-                         "base": [base.x, base.y, base.width, base.height], "steps": steps])
+            zoom.append(["window": [window.0, window.1], "tile": [tile.0, tile.1], "rotation": rotation.rawValue, "fit": fit.rawValue, "steps": steps])
         }
-        return ["schema": 2, "layouts": layoutCases, "operations": opCases, "capacities": capacities, "transforms": transforms, "zoom": zoom]
+        return ["schema": 3, "layouts": layoutCases, "operations": opCases, "capacities": capacities, "transforms": transforms, "zoom": zoom]
     }
 
     func testWorkspaceVectorsMatchTheSharedFixture() throws {

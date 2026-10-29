@@ -31,30 +31,17 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     var follow: WorkspaceSource.Follow
     var rotation: WorkspaceRotation
     var fit: WorkspaceFit
-    /// Per-tile zoom: the part of the window this tile shows, normalized to the
-    /// window (whole window by default).
-    var crop = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+    /// This pane's own zoom (0.7x-8x of its fit/fill size) and centre. The whole source is
+    /// always captured; the zoom is applied when composing, never as a capture crop.
+    var zoom = WorkspacePaneZoom.identity
+    /// The receiver's counter for this pane's view: echoed once a frame with it was composed.
+    var viewEpoch = 0
     /// Bumped whenever this tile's window changes: frames, held input and
     /// focus from an older generation are discarded.
     var assignmentGeneration: UInt64
     /// A whole display in this tile (Full Desktop as a tile source). `windowID` is then its
     /// reserved key (`WorkspaceSource.displayKey`), so window-keyed maps never collide.
     var displayID: UInt32? = nil
-}
-
-/// Per-tile zoom from a request: `[x, y, w, h]` normalized to the window.
-/// Anything malformed shows the whole window; zoom is capped at 8x.
-enum WorkspaceCrop {
-    static let full = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
-    /// Zoom is capped at 8x of the tile's fill region by the receiver; this only stops absurd values.
-    static let minimumSide = 1.0 / 64
-
-    static func parse(_ value: Any?) -> WorkspaceRect {
-        guard let a = value as? [Double], a.count == 4, a.allSatisfy(\.isFinite) else { return full }
-        let w = min(max(a[2], minimumSide), 1), h = min(max(a[3], minimumSide), 1)
-        let x = min(max(a[0], 0), 1 - w), y = min(max(a[1], 0), 1 - h)
-        return WorkspaceRect(x: x, y: y, width: w, height: h)
-    }
 }
 
 enum WorkspaceRequestValidator {
@@ -101,6 +88,9 @@ enum WorkspaceRequestValidator {
             }
             let rotation = WorkspaceRotation(degrees: item["rotation"] as? Int ?? 0)
             let fit = (item["fit"] as? String).flatMap(WorkspaceFit.init(rawValue:)) ?? .fit
+            // Older receivers send `crop` (a capture crop); it is ignored: the pane shows the whole source.
+            let zoom = WorkspacePaneZoom(wire: item["zoom"]) ?? .identity
+            let epoch = min(max(item["view"] as? Int ?? 0, 0), Int(Int32.max))
             if let raw = item["display"] {
                 // A whole display: only one this Mac listed, at most once in the layout.
                 guard let displayID = (raw as? Int).flatMap({ UInt32(exactly: $0) }), displays[displayID] != nil else {
@@ -117,7 +107,7 @@ enum WorkspaceRequestValidator {
                 }
                 accepted.append(WorkspaceTileAssignment(
                     tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
-                    rotation: rotation, fit: fit, crop: WorkspaceCrop.parse(item["crop"]), assignmentGeneration: generation,
+                    rotation: rotation, fit: fit, zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation,
                     displayID: displayID))
                 continue
             }
@@ -142,7 +132,7 @@ enum WorkspaceRequestValidator {
             accepted.append(WorkspaceTileAssignment(
                 tileID: id, rect: rect, windowID: entry.windowID, windowGeneration: entry.generation, pid: entry.pid,
                 bundleID: entry.bundleID, follow: follow, rotation: rotation, fit: fit,
-                crop: WorkspaceCrop.parse(item["crop"]), assignmentGeneration: generation))
+                zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation))
         }
         return Result(assignments: accepted, rejected: rejected)
     }
@@ -196,11 +186,8 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     func transform(for a: WorkspaceTileAssignment) -> TileContentTransform? {
         guard let frame = windowFrames[a.windowID], frame.width > 0, frame.height > 0 else { return nil }
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
-        let c = a.crop
-        return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width * c.width, height: frame.height * c.height),
-                                    // A zoomed/panned region has the tile's shape and always fills it.
-                                    rotation: a.rotation, fit: c != WorkspaceCrop.full ? .fill : a.fit,
-                                    origin: WorkspacePoint(x: frame.width * c.x, y: frame.height * c.y))
+        return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
+                                    rotation: a.rotation, fit: a.fit, zoom: a.zoom)
     }
 
     func tile(at p: WorkspacePoint) -> WorkspaceTileAssignment? {
@@ -433,5 +420,63 @@ enum WorkspaceCaptureBudget {
         let s = min(resolved == .fit ? min(sx, sy) : max(sx, sy), backingScale)
         let w = max(Int((window.width * s).rounded()) & ~1, 2), h = max(Int((window.height * s).rounded()) & ~1, 2)
         return CGSize(width: w, height: h)
+    }
+}
+
+/// One pane's capture health: is it live, still starting, paused by macOS, or stuck?
+/// Pure, so the rules are tested; the engine acts on the verdict.
+///
+/// Measured on macOS 27 with Stage Manager on: a window in the side strip delivers one frame
+/// with status `.suspended` and nothing more, while ScreenCaptureKit still lists it on screen
+/// (its frame is the strip thumbnail's). Before this, such a pane said "Waiting…" forever.
+enum TileCaptureWatch {
+    enum Verdict: Equatable { case waiting, live, paused, stalled }
+
+    /// No complete frame this long after starting (and not paused): the stream is stuck.
+    static let firstFrameTimeout: TimeInterval = 4
+    /// Paused although the catalog says the window is on the stage: restart after this long.
+    static let pausedOnStageTimeout: TimeInterval = 6
+    /// Restarts back off; after the last one the pane says it failed and offers Retry.
+    static let backoff: [TimeInterval] = [1, 2, 4, 8, 16]
+
+    static func verdict(now: TimeInterval, startedAt: TimeInterval, firstCompleteAt: TimeInterval?,
+                        suspendedSince: TimeInterval?, sourceLooksAvailable: Bool) -> Verdict {
+        if let since = suspendedSince {
+            // macOS paused it (Stage Manager's strip, a hidden Space). It resumes by itself when the
+            // window is shown; only a pause the catalog can't explain is treated as stuck.
+            return sourceLooksAvailable && now - since >= pausedOnStageTimeout ? .stalled : .paused
+        }
+        // Frames came: the stream works, even if the content is static now (no new frames).
+        if firstCompleteAt != nil { return .live }
+        return now - startedAt >= firstFrameTimeout ? .stalled : .waiting
+    }
+
+    /// Delay before restart number `attempt` (1-based), or nil when it's time to give up.
+    static func retryDelay(attempt: Int) -> TimeInterval? {
+        attempt >= 1 && attempt <= backoff.count ? backoff[attempt - 1] : nil
+    }
+}
+
+/// How many pixels a pane's capture needs: the whole source at the scale the pane draws it,
+/// never above the source's own pixels, in a few fixed steps so zooming reconfigures rarely.
+enum WorkspaceCaptureSizing {
+    /// Shares of the source's own pixels a capture may use.
+    static let steps: [Double] = [1.0 / 8, 1.0 / 6, 1.0 / 4, 1.0 / 3, 1.0 / 2, 2.0 / 3, 1]
+    static let maxSide = 4096.0
+    static let maxPixels = 12_000_000.0
+
+    /// `source`: the source in points. `drawScale`: canvas pixels per source point (zoom included).
+    /// `backingScale`: the source's pixels per point.
+    static func size(source: CGSize, drawScale: Double, backingScale: Double) -> CGSize {
+        guard source.width > 0, source.height > 0, drawScale > 0 else { return CGSize(width: 2, height: 2) }
+        let native = max(backingScale, 1)
+        let wanted = min(drawScale / native, 1)
+        let share = steps.first { $0 >= wanted - 1e-9 } ?? 1
+        var perPoint = native * share
+        // Bounded: a huge window never asks for more than this.
+        perPoint = min(perPoint, maxSide / source.width, maxSide / source.height,
+                       (maxPixels / (source.width * source.height)).squareRoot())
+        func even(_ v: Double) -> Double { max(2, (v / 2).rounded() * 2) }
+        return CGSize(width: even(source.width * perPoint), height: even(source.height * perPoint))
     }
 }

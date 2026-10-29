@@ -255,6 +255,10 @@ enum WireMessage {
     static let workspaceRequest = "workspaceRequest"           // receiver -> Mac: tiles (rect, window, rotation, fit)
     static let workspaceFocus = "workspaceFocus"               // receiver -> Mac: the tile keyboard input goes to
     static let workspaceState = "workspaceState"               // Mac -> receiver: accepted tiles, states, focus
+    static let workspaceView = "workspaceView"                 // Mac -> receiver: {tiles: {id: view epoch}} once a frame with that view went out
+    static let workspaceRetry = "workspaceRetry"               // receiver -> Mac: {tile}: start that pane's capture again now
+    static let workspaceBackdropRequest = "workspaceBackdropRequest" // receiver -> Mac: {tile, max, req}: the pane's whole source as a still
+    static let workspaceBackdrop = "workspaceBackdrop"         // Mac -> receiver: {tile, window, gen, jpeg, req, stale}
     static let windowAction = "windowAction"                   // receiver -> Mac: activate / launch / close (needs control)
     static let appCatalogRequest = "appCatalogRequest"         // receiver -> Mac: every launchable app (any display mode)
     static let appCatalog = "appCatalog"                       // Mac -> receiver: {rev, apps|same}

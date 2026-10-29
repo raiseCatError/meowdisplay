@@ -68,7 +68,7 @@ struct DisplayCatalogEntry: Equatable, Sendable {
 }
 
 /// SCWindow and pixel buffers are immutable snapshots: safe to hand to a capture task.
-private struct StillJob: @unchecked Sendable { let live: CVPixelBuffer?; let window: SCWindow }
+private struct StillJob: @unchecked Sendable { let live: (CVPixelBuffer, CGRect)?; let window: SCWindow }
 
 final class WindowBrowserService: @unchecked Sendable {
     let hostID: String
@@ -96,7 +96,8 @@ final class WindowBrowserService: @unchecked Sendable {
     /// Every new listing, for the Window-mode engine (on this service's queue).
     var onSnapshot: ((WindowCatalogSnapshot) -> Void)?
     /// The latest WHOLE-window frame a tile streams, if any: a free, exact still.
-    var liveFrame: ((UInt32) -> CVPixelBuffer?)?
+    /// A pane's live frame of this window and where its content sits (pixels, top-left).
+    var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
     /// Integration tests only.
     var includeOwnProcessForTesting = false
 
@@ -272,7 +273,7 @@ final class WindowBrowserService: @unchecked Sendable {
             Task { [weak self] in
                 let image: CGImage?
                 let window = job.window
-                if let live = job.live { image = Self.downscale(live, width: width) } else {
+                if let live = job.live { image = Self.downscale(live.0, content: live.1, width: width) } else {
                     let cfg = SCStreamConfiguration()
                     let aspect = window.frame.height / max(window.frame.width, 1)
                     cfg.width = width
@@ -362,8 +363,14 @@ final class WindowBrowserService: @unchecked Sendable {
 
     private static let ciContext = CIContext(options: [.cacheIntermediates: false])
 
-    static func downscale(_ buffer: CVPixelBuffer, width: Int) -> CGImage? {
-        let image = CIImage(cvPixelBuffer: buffer)
+    /// The content region of a captured frame (no padding), `width` pixels wide.
+    static func downscale(_ buffer: CVPixelBuffer, content: CGRect? = nil, width: Int) -> CGImage? {
+        var image = CIImage(cvPixelBuffer: buffer)
+        if let c = content {
+            let h = image.extent.height
+            image = image.cropped(to: CGRect(x: c.minX, y: h - c.maxY, width: c.width, height: c.height))
+            image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+        }
         let s = CGFloat(width) / max(image.extent.width, 1)
         let scaled = image.transformed(by: CGAffineTransform(scaleX: s, y: s))
         return ciContext.createCGImage(scaled, from: scaled.extent.integral)

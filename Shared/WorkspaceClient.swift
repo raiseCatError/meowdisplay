@@ -42,7 +42,9 @@ struct WorkspaceCatalogMessage: Equatable, Sendable {
     }
 }
 
-enum RemoteTileStatus: String, Sendable { case live, waiting, offscreen, closed, failed, limit }
+/// A pane's capture on the Mac. `paused`: macOS paused it (Stage Manager's side strip, a hidden
+/// window); `retrying`: it stalled and the Mac is restarting it; `failed`: gave up (Retry).
+enum RemoteTileStatus: String, Sendable { case live, waiting, offscreen, closed, failed, limit, paused, retrying }
 
 enum RemoteHostFocus: String, Sendable {
     case deliver, noActiveTile, hostFocusElsewhere, otherWindowFocused
@@ -57,6 +59,10 @@ struct RemoteTileItem: Equatable, Sendable {
     var app: String
     var bundleID: String
     var title: String
+    /// Restarts so far while `retrying`.
+    var attempt = 0
+    /// The window sits in Stage Manager's side strip (macOS pauses its picture there).
+    var inStageStrip = false
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -83,10 +89,15 @@ enum WorkspaceEvent: Sendable {
     /// Pane menus (PROTOCOL.md 6.13).
     case menu(AppMenuReply)
     case menuResult(ok: Bool, error: String?)
+    /// Panes whose latest view (epoch) the Mac has composed and sent.
+    case view([String: Int])
+    /// A pane's whole source as a still, for the instant local zoom.
+    case backdrop(tile: String, windowID: UInt32, data: Data, stale: Bool)
     case connected(peerID: String)
     case disconnected
 
     static let maxBase64 = 256 * 1024   // a sharp 640-wide Stage Peek still
+    static let maxBackdropBase64 = 1_600_000   // a pane's whole source, up to 1600 wide
 
     /// Bounded, defensive parsing of one control message; nil for anything else.
     static func parse(type: String, _ obj: [String: Any]) -> WorkspaceEvent? {
@@ -124,7 +135,8 @@ enum WorkspaceEvent: Sendable {
                 guard let id = str(t, "id", 32) else { return nil }
                 return RemoteTileItem(id: id, windowID: u32(t, "window") ?? 0, generation: u64(t, "gen") ?? 0,
                                       status: (t["state"] as? String).flatMap(RemoteTileStatus.init(rawValue:)) ?? .waiting,
-                                      app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "")
+                                      app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
+                                      attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false)
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -159,6 +171,15 @@ enum WorkspaceEvent: Sendable {
             return AppMenuReply.parse(obj).map { .menu($0) }
         case WireMessage.menuResult:
             return .menuResult(ok: obj["ok"] as? Bool ?? false, error: (obj["error"] as? String).map { String($0.prefix(32)) })
+        case WireMessage.workspaceView:
+            let tiles = (obj["tiles"] as? [String: Any] ?? [:]).prefix(WorkspaceLayout.maximumTiles * 2).reduce(into: [String: Int]()) { r, e in
+                if e.key.count <= 32, let v = e.value as? Int { r[e.key] = v }
+            }
+            return .view(tiles)
+        case WireMessage.workspaceBackdrop:
+            guard let tile = str(obj, "tile", 32), let jpeg = obj["jpeg"] as? String, jpeg.count <= maxBackdropBase64,
+                  let data = Data(base64Encoded: jpeg) else { return nil }
+            return .backdrop(tile: tile, windowID: u32(obj, "window") ?? 0, data: data, stale: obj["stale"] as? Bool ?? false)
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
@@ -223,7 +244,8 @@ enum WorkspaceRequests {
     /// Only this host's tiles, at their normalized frames.
     static func workspace(_ layout: WorkspaceLayout, frames: WorkspaceFrames, host: String, focus: String?,
                           generation: (WorkspaceSource) -> UInt64?,
-                          displayID: (WorkspaceSource) -> UInt32? = { _ in nil }) -> [String: Any] {
+                          displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
+                          viewEpoch: (String) -> Int? = { _ in nil }) -> [String: Any] {
         var tiles: [[String: Any]] = []
         for id in layout.orderedTileIDs {
             guard let tile = layout.tiles[id], let source = tile.source, source.host == host,
@@ -239,12 +261,27 @@ enum WorkspaceRequests {
                 t["window"] = Int(source.windowID)
                 if let gen = generation(source) { t["gen"] = Int(gen) }
             }
-            if let c = tile.crop { t["crop"] = [c.x, c.y, c.width, c.height] }
+            if let z = tile.zoom { t["zoom"] = z.wire }
+            if let e = viewEpoch(id) { t["view"] = e }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
         if let focus { m["focus"] = focus }
         return m
+    }
+
+    /// Start a pane's capture again now (it stalled or failed).
+    static func retry(_ tile: String) -> [String: Any] { ["type": WireMessage.workspaceRetry, "tile": tile] }
+
+    /// A pane's whole source as a still (`max` pixels wide at most).
+    static func backdrop(_ tile: String, max: Int, req: Int) -> [String: Any] {
+        ["type": WireMessage.workspaceBackdropRequest, "tile": tile, "max": max, "req": req]
+    }
+
+    /// Brings the real Mac window forward (needs control): the only way to show a window
+    /// Stage Manager keeps in its side strip.
+    static func activateWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
+        ["type": WireMessage.windowAction, "action": "activate", "window": Int(id), "gen": Int(generation)]
     }
 
     static func focus(_ tile: String?) -> [String: Any] {
@@ -419,6 +456,12 @@ final class WorkspaceModel: ObservableObject {
             menus.apply(reply)
         case .menuResult(let ok, let error):
             menus.applyResult(ok: ok, error: error)
+        case .view(let tiles):
+            composedViewEpochs.merge(tiles) { old, new in max(old, new) }
+        case .backdrop(let tile, let window, let data, let stale):
+            guard layout.tiles[tile]?.source?.windowID == window || window == 0,
+                  let image = WorkspaceImageDecoder.image(data, maxSide: 1600) else { return }
+            backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
         case .mode(let window):
             windowMode = window
             if !window { remote = nil }
@@ -469,6 +512,9 @@ final class WorkspaceModel: ObservableObject {
             launchpadOpen = false; launching = []; planner.reset()
             files.setAvailable(false)
             menus.setAvailable(false)
+            // A new session's frames carry no echo of this one's views; stills are re-asked.
+            composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
+            zoomGesture = nil; zoomPreview = nil
         }
     }
 
@@ -560,68 +606,81 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, crop: WorkspaceRect?, base: WorkspaceRect, anchor: WorkspacePoint, rect: WorkspaceRect,
-                              start: WorkspaceRect?)?
+    private var zoomGesture: (tile: String, start: WorkspacePaneZoom?, rect: WorkspaceRect, drawn: WorkspaceRect?)?
 
     /// The instant local zoom of the pane under the fingers (nil when there is none): the receiver
-    /// scales the picture it already has until the Mac's sharp frame arrives. Kept after the
-    /// gesture ends so the view can hold it until then.
+    /// moves the picture it already has (and the pane's whole-source still where that doesn't
+    /// reach) until a Mac frame with the same view arrives. Kept after the gesture ends until then.
     private(set) var zoomPreview: WorkspaceZoomPreview?
 
+    /// Each pane's view counter: bumped when its zoom, fit, rotation or frame changes, sent with
+    /// the request, echoed by the Mac once a frame with that view went out (`workspaceView`).
+    private var viewEpochs: [String: Int] = [:]
+    private var viewSignatures: [String: String] = [:]
+    private var nextViewEpoch = 1
+    private(set) var composedViewEpochs: [String: Int] = [:]
+
+    /// Each pane's whole source as a still (from the Mac), for zooming out and panning instantly.
+    private(set) var backdrops: [String: WorkspaceBackdrop] = [:]
+    private var backdropReq = 0
+    private var backdropAskedAt: [String: Date] = [:]
+
+    /// The pane's newest view has reached the screen (or there is nothing to wait for).
+    func viewComposed(_ tile: String) -> Bool {
+        guard let want = viewEpochs[tile] else { return true }
+        return (composedViewEpochs[tile] ?? 0) >= want
+    }
+
     /// Two-finger pinch/pan in Window mode. Points are normalized to the picture.
-    /// Only the tile under the fingers where the gesture began changes. A pinch zooms that
-    /// tile; a two-finger pan moves a tile that is zoomed or filled (otherwise it stays a
-    /// scroll on the Mac). The tile keeps its shape: zoom and pan never add bars.
+    /// Only the pane under the fingers where the gesture began changes. A pinch zooms it from
+    /// 0.7x to 8x of its Fit (or Fill) size around the fingers; a two-finger pan moves a pane
+    /// that is zoomed or filled (otherwise it stays a scroll on the Mac).
     @discardableResult
     func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double) -> Bool {
         if began || zoomGesture == nil {
             guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
                   let tile = layout.tiles[id], tile.source != nil,
-                  isPinch || tile.crop != nil || effectiveFit(id) == .fill,
-                  let base = fillBase(id, rect: rect) else { zoomGesture = nil; zoomPreview = nil; return false }
-            let anchor = WorkspacePoint(x: min(max((initial.x - rect.x) / max(rect.width, 1e-6), 0), 1),
-                                        y: min(max((initial.y - rect.y) / max(rect.height, 1e-6), 0), 1))
-            zoomGesture = (id, tile.crop, base, Self.unrotate(anchor, tile.rotation), rect, drawnWindowRect(tile, in: rect))
+                  isPinch || tile.zoom != nil || effectiveFit(id) == .fill,
+                  windowSize(tile) != nil else { zoomGesture = nil; zoomPreview = nil; return false }
+            zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect))
             zoomPreview = nil
             if active != id { focus(id) }
+            requestBackdrop(id)
         }
-        guard let g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
-        let pan = Self.unrotate(vector: WorkspacePoint(x: (current.x - initial.x) / max(g.rect.width, 1e-6),
-                                                       y: (current.y - initial.y) / max(g.rect.height, 1e-6)), tile.rotation)
-        let crop = WorkspaceZoom.apply(g.crop, base: g.base, scale: scale, anchor: g.anchor, pan: pan)
-        let next = saved.zooming(g.tile, to: crop)
+        guard let g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
+        let pane = WorkspaceSize(width: g.rect.width * size.width, height: g.rect.height * size.height)
+        func inPane(_ p: WorkspacePoint) -> WorkspacePoint {
+            WorkspacePoint(x: (p.x - g.rect.x) / max(g.rect.width, 1e-6), y: (p.y - g.rect.y) / max(g.rect.height, 1e-6))
+        }
+        let zoom = WorkspaceZoom.pinched(g.start, tile: pane, source: source, rotation: tile.rotation, fit: effectiveFit(g.tile),
+                                         ratio: scale, from: inPane(initial), to: inPane(current))
+        let next = saved.zooming(g.tile, to: zoom)
         if next != saved {
             saved = next
             publish(); scheduleThrottledSend()
         }
-        if let start = g.start, let now = next.tiles[g.tile].flatMap({ drawnWindowRect($0, in: g.rect) }) {
-            zoomPreview = WorkspaceZoomPreview(tile: g.tile, pane: g.rect, from: start, to: now)
+        if let start = g.drawn, let now = next.tiles[g.tile].flatMap({ drawnSourceRect($0, in: g.rect) }) {
+            zoomPreview = WorkspaceZoomPreview(tile: g.tile, pane: g.rect, from: start, to: now, rotation: tile.rotation,
+                                               sourceKey: tile.source?.windowID ?? 0)
         } else {
             zoomPreview = nil
         }
         if ended {
             zoomGesture = nil
             persist()
+            if zoom != nil { requestBackdrop(g.tile, refresh: true) }   // fresh for the next gesture
         }
         return true
     }
 
-    /// Where the pane draws its whole window (picture-normalized; larger than the pane when
-    /// filled or zoomed), as the Mac composes it. Nil for a turned pane or without the window's size.
-    private func drawnWindowRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
-        guard tile.rotation == .none, let w = windowSize(tile), size.width > 0, size.height > 0 else { return nil }
-        if let crop = tile.crop { return WorkspaceZoomPreview.windowRect(crop: crop, content: rect) }
+    /// Where the pane draws its whole source (picture-normalized; larger than the pane when
+    /// filled or zoomed in, smaller when zoomed out), as the Mac composes it.
+    private func drawnSourceRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
+        guard let w = windowSize(tile), size.width > 0, size.height > 0 else { return nil }
         let c = TileContentTransform(tile: WorkspaceRect(x: rect.x * size.width, y: rect.y * size.height,
                                                          width: rect.width * size.width, height: rect.height * size.height),
-                                     source: w, rotation: .none, fit: tile.fit).contentRect
+                                     source: w, rotation: tile.rotation, fit: tile.fit, zoom: tile.zoom ?? .identity).contentRect
         return WorkspaceRect(x: c.x / size.width, y: c.y / size.height, width: c.width / size.width, height: c.height / size.height)
-    }
-
-    /// The pane's fill region in its window (the zoom's 1x), or nil without the window's size.
-    private func fillBase(_ id: String, rect: WorkspaceRect) -> WorkspaceRect? {
-        guard let tile = layout.tiles[id], let w = windowSize(tile) else { return nil }
-        return WorkspaceZoom.fillCrop(window: w, tile: WorkspaceSize(width: rect.width * size.width, height: rect.height * size.height),
-                                      rotation: tile.rotation)
     }
 
     private func windowSize(_ tile: WorkspaceTile) -> WorkspaceSize? {
@@ -629,42 +688,49 @@ final class WorkspaceModel: ObservableObject {
         return WorkspaceSize(width: Double(w.width), height: Double(w.height))
     }
 
-    /// Fit or fill as actually drawn (`.auto` resolved), for menus and gestures.
+    /// Fit (default) or Fill, as drawn.
     func effectiveFit(_ id: String) -> WorkspaceFit {
-        guard let tile = layout.tiles[id] else { return .fit }
-        if tile.crop != nil { return .fill }
-        guard let rect = frames.tiles[id], let w = windowSize(tile) else { return tile.fit == .auto ? .fit : tile.fit }
-        let tilePx = WorkspaceSize(width: rect.width * size.width, height: rect.height * size.height)
-        let src = tile.rotation.isQuarterTurn ? WorkspaceSize(width: w.height, height: w.width) : w
-        return WorkspaceFit.resolved(tile.fit, tile: tilePx, source: src)
+        layout.tiles[id]?.fit == .fill ? .fill : .fit
     }
 
-    /// A point in the (rotated) tile, 0..1, as the same point of the unrotated picture.
-    private static func unrotate(_ p: WorkspacePoint, _ r: WorkspaceRotation) -> WorkspacePoint {
-        switch r {
-        case .none: return p
-        case .quarter: return WorkspacePoint(x: p.y, y: 1 - p.x)
-        case .half: return WorkspacePoint(x: 1 - p.x, y: 1 - p.y)
-        case .threeQuarter: return WorkspacePoint(x: 1 - p.y, y: p.x)
-        }
+    /// Asks the Mac for the pane's whole source (bounded: once a second unless refreshing after a gesture).
+    func requestBackdrop(_ id: String, refresh: Bool = false) {
+        guard windowMode, let tile = layout.tiles[id], tile.source != nil else { return }
+        let now = Date()
+        if !refresh, let at = backdropAskedAt[id], now.timeIntervalSince(at) < 1 { return }
+        backdropAskedAt[id] = now
+        backdropReq = backdropReq >= 1_000_000 ? 1 : backdropReq + 1
+        _ = send(WorkspaceRequests.backdrop(id, max: 1280, req: backdropReq))
     }
 
-    private static func unrotate(vector v: WorkspacePoint, _ r: WorkspaceRotation) -> WorkspacePoint {
-        switch r {
-        case .none: return v
-        case .quarter: return WorkspacePoint(x: v.y, y: -v.x)
-        case .half: return WorkspacePoint(x: -v.x, y: -v.y)
-        case .threeQuarter: return WorkspacePoint(x: -v.y, y: v.x)
+    /// The pane's whole-source still, when it is of the window the pane shows now.
+    func backdrop(_ id: String) -> WorkspaceBackdrop? {
+        guard let b = backdrops[id], b.windowID == layout.tiles[id]?.source?.windowID else { return nil }
+        return b
+    }
+
+    /// Bumps a pane's view epoch when what the Mac must draw for it changed.
+    private func noteViews(_ layout: WorkspaceLayout, frames: WorkspaceFrames) {
+        for (id, tile) in layout.tiles {
+            let r = frames.tiles[id]
+            let z = tile.zoom ?? .identity
+            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)"
+            if viewSignatures[id] != sig {
+                viewSignatures[id] = sig
+                viewEpochs[id] = nextViewEpoch
+                nextViewEpoch = nextViewEpoch >= Int(Int32.max) ? 1 : nextViewEpoch + 1
+            }
         }
+        for id in Array(viewEpochs.keys) where layout.tiles[id] == nil { viewEpochs[id] = nil; viewSignatures[id] = nil }
     }
 
     func resetZoom(_ id: String) { edit { $0.zooming(id, to: nil) } }
 
-    /// Two-finger double-tap: this pane's whole view back to default (zoom, pan, rotation, fit). Other panes untouched.
+    /// Two-finger double-tap: this pane back to 1x Fit, centred, no rotation. Other panes untouched.
     func resetView(_ id: String) {
         edit { l in
             guard var tile = l.tiles[id] else { return l }
-            tile.crop = nil; tile.rotation = .none; tile.fit = .auto
+            tile.zoom = nil; tile.rotation = .none; tile.fit = .fit
             var copy = l
             copy.tiles[id] = tile
             return copy
@@ -675,6 +741,15 @@ final class WorkspaceModel: ObservableObject {
     func resetView(at p: WorkspacePoint) {
         guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key, layout.tiles[id]?.source != nil else { return }
         resetView(id)
+    }
+
+    /// A pane whose capture failed (or stalled): ask the Mac to start it again now.
+    func retryTile(_ id: String) { _ = send(WorkspaceRequests.retry(id)) }
+
+    /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
+    func showOnMac(_ id: String) {
+        guard let source = layout.tiles[id]?.source, !source.isDisplay, let gen = generation(source) else { return }
+        _ = send(WorkspaceRequests.activateWindow(source.windowID, generation: gen))
     }
 
     /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).
@@ -1167,9 +1242,12 @@ final class WorkspaceModel: ObservableObject {
         guard catalog != nil else { awaitingCatalogToSend = true; requestCatalog(); return }
         var sendable = layout
         for id in missing { sendable = sendable.replacingSource(of: id, with: nil) }
-        _ = send(WorkspaceRequests.workspace(sendable, frames: WorkspaceGeometry.frames(for: sendable, in: size, hinge: hinge),
+        let sendFrames = WorkspaceGeometry.frames(for: sendable, in: size, hinge: hinge)
+        noteViews(sendable, frames: sendFrames)
+        _ = send(WorkspaceRequests.workspace(sendable, frames: sendFrames,
                                              host: host, focus: active, generation: generation,
-                                             displayID: { [weak self] in self?.display(for: $0)?.id }))
+                                             displayID: { [weak self] in self?.display(for: $0)?.id },
+                                             viewEpoch: { [weak self] in self?.viewEpochs[$0] }))
     }
 
     private func persist() {

@@ -413,7 +413,7 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertEqual(Set(r.orderedTileIDs), ["a", "b"], "duplicate and unknown tiles dropped")
         XCTAssertEqual(r.tiles["a"]?.rotation, WorkspaceRotation.none, "45° is not a tile rotation")
         XCTAssertEqual(r.tiles["b"]?.rotation, .threeQuarter)
-        XCTAssertEqual(r.tiles["b"]?.fit, .auto, "unknown fit falls back to automatic")
+        XCTAssertEqual(r.tiles["b"]?.fit, .fit, "unknown fit falls back to Fit")
         XCTAssertNil(r.tiles["b"]?.source, "a tile without host+window has no source")
         XCTAssertNil(r.maximized)
         assertTiling(WorkspaceGeometry.frames(for: r, in: .init(width: 1000, height: 800)))
@@ -429,16 +429,17 @@ final class WindowWorkspaceTests: XCTestCase {
 
     // MARK: Fill, zoom shape, tabs, window drops
 
-    func testAutoFitFillsWhenLittleIsHiddenAndZoomKeepsTheTileShape() {
-        XCTAssertEqual(WorkspaceFit.resolved(.auto, tile: .init(width: 430, height: 300), source: .init(width: 1600, height: 1000)), .fill)
-        XCTAssertEqual(WorkspaceFit.resolved(.auto, tile: .init(width: 430, height: 930), source: .init(width: 1600, height: 1000)), .fit)
+    func testPanesDefaultToFitAndKeepTheirZoomThroughASave() {
+        XCTAssertEqual(WorkspaceTile(id: "a").fit, .fit, "new panes show the whole window")
         let t = TileContentTransform(tile: .init(x: 0, y: 0, width: 430, height: 300), source: .init(width: 1600, height: 1000), rotation: .none, fit: .auto)
-        XCTAssertEqual(t.visibleRect, WorkspaceRect(x: 0, y: 0, width: 430, height: 300), "auto fill: no bars")
-        let base = WorkspaceZoom.fillCrop(window: .init(width: 1600, height: 1000), tile: .init(width: 300, height: 600), rotation: .none)
-        let zoomed = try! XCTUnwrap(WorkspaceZoom.apply(nil, base: base, scale: 2, anchor: .init(x: 0.5, y: 0.5), pan: .init(x: 0, y: 0)))
-        XCTAssertEqual((zoomed.width * 1600) / (zoomed.height * 1000), 0.5, accuracy: 1e-9, "the tile's shape: fills it with no bars")
-        XCTAssertNil(WorkspaceZoom.apply(zoomed, base: base, scale: 0.1, anchor: .init(x: 0.5, y: 0.5), pan: .init(x: 0, y: 0)),
-                     "zooming out stops at the fill view (default)")
+        XCTAssertEqual(t.contentRect.width, 430, accuracy: 1e-9, "old \"auto\" panes are Fit: the whole window")
+        XCTAssertLessThan(t.contentRect.height, 300)
+        var l = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "a", source: WorkspaceSource(host: "m", windowID: 1))])
+        l = l.zooming("a", to: WorkspacePaneZoom(scale: 2.5, centerX: 0.3, centerY: 0.7))
+        let back = WorkspaceLayoutRecord(l).encoded().flatMap(WorkspaceLayoutRecord.decode)
+        XCTAssertEqual(back?.tiles["a"]?.zoom, WorkspacePaneZoom(scale: 2.5, centerX: 0.3, centerY: 0.7), "zoom survives a save and a reconnect")
+        let old = #"{"schema":2,"root":{"tile":"a"},"tiles":[{"id":"a","host":"m","window":1,"fit":"auto"}]}"#
+        XCTAssertEqual(WorkspaceLayoutRecord.decode(Data(old.utf8))?.tiles["a"]?.fit, .fit)
     }
 
     func testTabsAddSwitchRemoveAndOneWindowLivesInOnePane() {

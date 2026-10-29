@@ -94,13 +94,18 @@ struct WindowCatalogEntry: Equatable, Sendable {
     var frame: CGRect
     var availability: WindowAvailability
     var isActive: Bool
+    /// In Stage Manager's side strip: macOS shows a thumbnail and pauses capture of it.
+    /// `frame` is then the real window's (from Accessibility), not the thumbnail's.
+    var inStageStrip = false
 
     var wire: [String: Any] {
-        [
+        var m: [String: Any] = [
             "id": Int(windowID), "gen": Int(generation), "bundle": bundleID, "app": appName,
             "title": String(title.prefix(160)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
             "state": availability.rawValue, "active": isActive,
         ]
+        if inStageStrip { m["strip"] = true }
+        return m
     }
 }
 
@@ -258,10 +263,18 @@ enum WindowCatalogBuilder {
             guard WindowCatalogPolicy.exclusion(for: candidate, ownBundleIDs: ownBundles, ownPID: ownPID) == nil,
                   let bundle = candidate.bundleID else { continue }
             let gen = ledger.generation(windowID: window.windowID, pid: candidate.pid)
+            var frame = candidate.frame
+            var inStrip = false
+            if candidate.isOnScreen, StageManagerWindows.looksLikeThumbnail(frame), StageManagerWindows.isEnabled(),
+               let real = StageManagerWindows.realFrame(pid: candidate.pid, title: candidate.title ?? ""),
+               real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
+                frame = real
+                inStrip = true
+            }
             entries.append(WindowCatalogEntry(
                 windowID: window.windowID, generation: gen, pid: candidate.pid, bundleID: bundle,
-                appName: candidate.appName ?? bundle, title: candidate.title ?? "", frame: candidate.frame,
-                availability: WindowCatalogPolicy.availability(candidate), isActive: candidate.isActive))
+                appName: candidate.appName ?? bundle, title: candidate.title ?? "", frame: frame,
+                availability: WindowCatalogPolicy.availability(candidate), isActive: candidate.isActive, inStageStrip: inStrip))
             scByID[window.windowID] = window
             windowPIDs.insert(candidate.pid)
         }
@@ -330,5 +343,71 @@ enum WindowCatalogBuilder {
             }
         }
         return result.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
+    }
+}
+
+
+/// Stage Manager draws windows outside the current stage as thumbnails in its side strip, and
+/// ScreenCaptureKit and CGWindowList then report the thumbnail's frame (measured on macOS 27:
+/// a 1554x993 Zed window at (214,30) listed as 176x166 at (-238,180)). macOS also pauses capture
+/// of those windows. Accessibility still reports the real frame. Reads settings, never changes them.
+enum StageManagerWindows {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var enabledCache: (at: TimeInterval, value: Bool)?
+    nonisolated(unsafe) private static var frames: [String: (at: TimeInterval, frame: CGRect?)] = [:]
+
+    /// Thumbnails in the strip are small (about 200 points at most).
+    static func looksLikeThumbnail(_ frame: CGRect) -> Bool { frame.width <= 320 && frame.height <= 320 }
+
+    static func isEnabled() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let c = lock.withLock({ enabledCache }), now - c.at < 3 { return c.value }
+        let value = (CFPreferencesCopyAppValue("GloballyEnabled" as CFString, "com.apple.WindowManager" as CFString) as? Bool) ?? false
+        lock.withLock { enabledCache = (now, value) }
+        return value
+    }
+
+    /// The real frame of the app's window with this title, cached for 2 s. Accessibility titles
+    /// can carry more than the window's (Chrome adds " - High memory usage…"): an exact match
+    /// first, then a unique prefix match, then the app's only window.
+    static func realFrame(pid: Int32, title: String) -> CGRect? {
+        guard AXIsProcessTrusted() else { return nil }
+        let key = "\(pid)|\(title)"
+        let now = ProcessInfo.processInfo.systemUptime
+        if let c = lock.withLock({ frames[key] }), now - c.at < 2 { return c.frame }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        var value: CFTypeRef?
+        var all: [(title: String, frame: CGRect)] = []
+        if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success, let windows = value as? [AXUIElement] {
+            for w in windows.prefix(64) {
+                var t: CFTypeRef?, p: CFTypeRef?, s: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &p) == .success,
+                      AXUIElementCopyAttributeValue(w, kAXSizeAttribute as CFString, &s) == .success,
+                      let p, let s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { continue }
+                var origin = CGPoint.zero, size = CGSize.zero
+                AXValueGetValue(p as! AXValue, .cgPoint, &origin)   // swiftlint:disable:this force_cast
+                AXValueGetValue(s as! AXValue, .cgSize, &size)      // swiftlint:disable:this force_cast
+                AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &t)
+                if size.width > 0, size.height > 0 { all.append(((t as? String) ?? "", CGRect(origin: origin, size: size))) }
+            }
+        }
+        let frame = matchingFrame(title: title, in: all)
+        lock.withLock {
+            frames[key] = (now, frame)
+            if frames.count > 256 { frames = frames.filter { now - $0.value.at < 2 } }
+        }
+        return frame
+    }
+
+    /// Pure: which Accessibility window is the listed one.
+    static func matchingFrame(title: String, in windows: [(title: String, frame: CGRect)]) -> CGRect? {
+        let exact = windows.filter { $0.title == title }
+        if exact.count == 1 { return exact[0].frame }
+        if exact.isEmpty, !title.isEmpty {
+            let prefixed = windows.filter { $0.title.hasPrefix(title) }
+            if prefixed.count == 1 { return prefixed[0].frame }
+        }
+        return windows.count == 1 ? windows[0].frame : nil
     }
 }

@@ -172,8 +172,13 @@ struct WorkspaceChromeView: View {
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
         case .offscreen: return "\(app) is minimized or hidden on the Mac"
         case .closed: return "Closed on Mac. Tap to choose another window."
-        case .failed: return "Can't show this window right now"
+        case .failed: return "The Mac stopped sending \(remote.app.isEmpty ? "this window" : remote.app). Tap Retry."
         case .limit: return "Paused: too many windows at once"
+        case .paused:
+            return remote.inStageStrip
+                ? "\(app) is in Stage Manager's side strip, so macOS pauses its picture. Show it on the Mac, or put it in the same stage."
+                : "macOS paused \(app)'s picture. It comes back when the window is shown on the Mac."
+        case .retrying: return "Reconnecting to \(remote.app.isEmpty ? "the window" : remote.app)… (try \(remote.attempt))"
         }
     }
 
@@ -225,6 +230,23 @@ struct WorkspaceChromeView: View {
                             .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
+                    if let s = model.tileState(id)?.status, s == .failed || s == .retrying {
+                        Button { model.retryTile(id) } label: {
+                            Label("Retry", systemImage: "arrow.clockwise").font(.callout.weight(.semibold))
+                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(workspaceChip, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed {
+                        // Explicit only: switching Stage Manager's stage brings that app forward on the Mac.
+                        Button { model.showOnMac(id) } label: {
+                            Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(workspaceChip, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                     if model.tileState(id)?.status == .closed, inputAllowed, let bundle = tile.source?.bundleID {
                         // The app may reopen a window (needs control; never automatic).
                         Button { model.launch(bundle) } label: {
@@ -365,7 +387,7 @@ struct WorkspaceChromeView: View {
                     model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
                 model.toggleFit(m.tile)
             }
-            if tile.crop != nil || tile.rotation != .none || tile.fit != .auto {
+            if tile.zoom != nil || tile.rotation != .none || tile.fit == .fill {
                 menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
             }
             menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
