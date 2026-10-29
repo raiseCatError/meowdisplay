@@ -21,6 +21,11 @@ enum RemoteFilesPolicy {
         defaults.bool(forKey: enabledKey)
     }
 
+    /// Bumped whenever the owner flips the Files switch: approvals given before don't carry over.
+    static let epochKey = "remoteFilesEpoch"
+    static func epoch(defaults: UserDefaults = .standard) -> Int { defaults.integer(forKey: epochKey) }
+    static func bumpEpoch(defaults: UserDefaults = .standard) { defaults.set(epoch(defaults: defaults) &+ 1, forKey: epochKey) }
+
     /// A folder the owner may approve: inside their home folder (never ~/Library) or on a
     /// mounted volume, and never a system location, another user's home or `/Users` itself.
     static func isAllowedRoot(_ url: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {

@@ -295,6 +295,10 @@ final class DeviceSession: ObservableObject, Identifiable {
     // Never itself grants anything; see `SenderController.
     // handleInputControlRequested` for the only path that actually grants.
     @Published var sessionInputGranted = false
+    /// Remote Finder: the owner chose "Allow for This Session" for this device's session (while
+    /// the Files switch stayed as it was: `RemoteFilesPolicy.epoch`). A transport swap within it
+    /// (hotspot TCP, cable) doesn't ask again; a new session, or turning Files off and on, does.
+    var filesAllowedEpoch: Int?
     // This session's control-request dedup/cooldown/timeout — MainActor-
     // confined (unlike the grant bit) since it's only ever touched from
     // `SenderController`'s consent-flow methods, all MainActor.
@@ -2707,7 +2711,12 @@ final class SenderController: ObservableObject {
         sender.onFilesConsentRequest = { [weak self, weak session] generation in
             // Remote Finder: the Mac owner approves browsing once per session, for this connection.
             guard let self, let session, self.owns(session) else { return }
+            if session.filesAllowedEpoch == RemoteFilesPolicy.epoch() {
+                session.sender.resolveFilesConsent(true, generation: generation)
+                return
+            }
             SecurityPresentationCoordinator.presentFilesConsent(name: session.name, sessionID: session.id) { [weak session] allowed in
+                if allowed { session?.filesAllowedEpoch = RemoteFilesPolicy.epoch() }
                 session?.sender.resolveFilesConsent(allowed, generation: generation)
             }
         }

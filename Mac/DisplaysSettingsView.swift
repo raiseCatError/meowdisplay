@@ -117,6 +117,7 @@ private struct RemoteFilesSettingsSection: View {
     var body: some View {
         Section {
             Toggle("Let devices browse approved folders", isOn: $enabled)
+                .onChange(of: enabled) { _ in RemoteFilesPolicy.bumpEpoch() }
             if enabled {
                 ForEach(roots) { root in
                     HStack {

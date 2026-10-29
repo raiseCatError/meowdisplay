@@ -255,7 +255,9 @@ fun WorkspaceChrome(
 
         // The focused pane's app menus, as a bar under its label (control only).
         val activeSource = ui.active?.let { ui.layout.tiles[it]?.source }
-        LaunchedEffect(ui.active, activeSource?.bundleID, activeSource?.isDisplay, inputAllowed, ui.windowMode) {
+        // `available` too: after a reconnect the same pane and app need their menus asked for again.
+        val menusAvailable = controller.menus.ui.collectAsState().value.available
+        LaunchedEffect(ui.active, activeSource?.bundleID, activeSource?.isDisplay, inputAllowed, ui.windowMode, menusAvailable) {
             controller.menus.sync(ui.active, activeSource?.takeIf { !it.isDisplay }?.bundleID, inputAllowed && ui.windowMode)
         }
         val activeRect = ui.active?.let { frames.tiles[it] }?.let { transform.viewRect(it) }

@@ -145,7 +145,8 @@ struct WorkspaceChromeView: View {
     /// What decides whose menus the bar shows: the focused pane, its app, and control.
     private var menuKey: String {
         let source = model.active.flatMap { model.layout.tiles[$0]?.source }
-        return "\(model.active ?? "")|\(source?.isDisplay == false ? source?.bundleID ?? "" : "")|\(inputAllowed)|\(model.windowMode)"
+        // `available` too: after a reconnect the same pane and app need their menus asked for again.
+        return "\(model.active ?? "")|\(source?.isDisplay == false ? source?.bundleID ?? "" : "")|\(inputAllowed)|\(model.windowMode)|\(model.menus.available)"
     }
 
     private func syncMenus() {
