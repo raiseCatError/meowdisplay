@@ -26,21 +26,33 @@ object WorkspaceWire {
     const val WORKSPACE_FOCUS = "workspaceFocus"
     const val WORKSPACE_STATE = "workspaceState"
     const val WINDOW_ACTION = "windowAction"
+    const val APP_CATALOG_REQUEST = "appCatalogRequest"
+    const val APP_CATALOG = "appCatalog"
+    const val APP_LAUNCH = "appLaunch"
+    const val APP_LAUNCH_RESULT = "appLaunchResult"
+    const val DISPLAY_THUMBNAIL = "displayThumbnail"
+    const val MAX_MAC_APPS = 900
 
     /** Bounds on what the receiver keeps from the Mac (sizes are on the wire already bounded by the Mac). */
     const val MAX_WINDOWS = 120
     const val MAX_APPS = 60
     const val MAX_INSTALLED = 150
-    const val MAX_THUMBNAIL_BASE64 = 96 * 1024
+    const val MAX_THUMBNAIL_BASE64 = 256 * 1024   // a sharp 640-wide Stage Peek still
 
     fun catalogRequest(installed: Boolean = false) = buildJsonObject { put("type", CATALOG_REQUEST); if (installed) put("installed", true) }
 
-    fun thumbnailRequest(ids: List<Long>, maxWidth: Int, icons: List<String> = emptyList()) = buildJsonObject {
+    fun thumbnailRequest(ids: List<Long>, maxWidth: Int, icons: List<String> = emptyList(), displays: List<Long> = emptyList()) = buildJsonObject {
         put("type", THUMBNAIL_REQUEST)
         put("ids", buildJsonArray { ids.take(24).forEach { add(JsonPrimitive(it)) } })
         put("max", maxWidth)
-        if (icons.isNotEmpty()) put("icons", buildJsonArray { icons.take(32).forEach { add(JsonPrimitive(it)) } })
+        if (icons.isNotEmpty()) put("icons", buildJsonArray { icons.take(48).forEach { add(JsonPrimitive(it)) } })
+        if (displays.isNotEmpty()) put("displays", buildJsonArray { displays.take(8).forEach { add(JsonPrimitive(it)) } })
     }
+
+    /** Every launchable Mac app; `rev` lets the Mac answer "same". Read-only, any display mode. */
+    fun appCatalogRequest(revision: Int?) = buildJsonObject { put("type", APP_CATALOG_REQUEST); revision?.let { put("rev", it) } }
+    /** Opens an app on the Mac without activating it. The Mac refuses it without control. */
+    fun appLaunch(bundleID: String) = buildJsonObject { put("type", APP_LAUNCH); put("bundle", bundleID) }
 
     /** The tiles this host shows, at their normalized frames. Tiles of other hosts are not sent here. */
     fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?) = buildJsonObject {
@@ -70,6 +82,8 @@ object WorkspaceWire {
 
     fun activate(windowID: Long, generation: Long?) = action("activate") { put("window", windowID); generation?.let { put("gen", it) } }
     fun launch(bundleID: String) = action("launch") { put("bundle", bundleID) }
+    /** Minimizes the real Mac window. Only ever from its own explicit action. */
+    fun minimizeRemoteWindow(windowID: Long, generation: Long) = action("minimize") { put("window", windowID); put("gen", generation) }
     /** Closes the real Mac window. Only ever from an explicit, separate action. */
     fun closeRemoteWindow(windowID: Long, generation: Long) = action("close") { put("window", windowID); put("gen", generation) }
 
@@ -90,7 +104,7 @@ data class CatalogWindow(
 data class CatalogApp(val bundleID: String, val name: String, val hasWindows: Boolean)
 data class InstalledApp(val bundleID: String, val name: String)
 
-data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, val apps: List<CatalogApp>, val installed: List<InstalledApp>, val unavailable: Boolean, val starting: Boolean = false) {
+data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, val apps: List<CatalogApp>, val installed: List<InstalledApp>, val unavailable: Boolean, val starting: Boolean = false, val displays: List<CatalogDisplay> = emptyList()) {
     /** Windows grouped by app, apps in catalog order. */
     val byApp: List<Pair<String, List<CatalogWindow>>> get() = windows.groupBy { it.bundleID }.map { (_, w) -> w.first().app to w }
 
@@ -126,8 +140,12 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
                 InstalledApp(a.str("bundle") ?: return@mapNotNull null, a.str("name")?.take(80) ?: "")
             }
             // "starting": Window mode is still starting on the Mac. It isn't a listing failure; the picker asks again.
+            val displays = obj.arrayOrEmpty("displays").objects().take(8).mapNotNull { d ->
+                CatalogDisplay(d.long("id") ?: return@mapNotNull null, d.str("name")?.take(80) ?: "Display", d.int("w") ?: 0, d.int("h") ?: 0,
+                    d.bool("main") == true, d.bool("virtual") == true)
+            }
             val error = obj.str("error")
-            return WindowCatalog(obj.str("host"), windows, apps, installed, error != null && error != "starting", error == "starting")
+            return WindowCatalog(obj.str("host"), windows, apps, installed, error != null && error != "starting", error == "starting", displays)
         }
     }
 }
@@ -164,14 +182,42 @@ data class WorkspaceState(
     }
 }
 
-data class WindowThumbnail(val windowID: Long, val generation: Long, val jpegBase64: String?) {
+data class WindowThumbnail(val windowID: Long, val generation: Long, val jpegBase64: String?, val stale: Boolean = false) {
     companion object {
         fun parse(obj: JsonObject): WindowThumbnail? {
             val id = obj.long("id") ?: return null
             val jpeg = obj.str("jpeg")?.takeIf { it.length <= WorkspaceWire.MAX_THUMBNAIL_BASE64 }
-            return WindowThumbnail(id, obj.long("gen") ?: 0, jpeg)
+            return WindowThumbnail(id, obj.long("gen") ?: 0, jpeg, obj.bool("stale") == true)
         }
     }
+}
+
+data class DisplayThumbnail(val displayID: Long, val jpegBase64: String) {
+    companion object {
+        fun parse(obj: JsonObject): DisplayThumbnail? {
+            val jpeg = obj.str("jpeg")?.takeIf { it.length <= WorkspaceWire.MAX_THUMBNAIL_BASE64 } ?: return null
+            return DisplayThumbnail(obj.long("id") ?: return null, jpeg)
+        }
+    }
+}
+
+/** `apps` null: the receiver's revision is current. */
+data class AppCatalogMessage(val revision: Int, val apps: List<MacApp>?) {
+    companion object {
+        fun parse(obj: JsonObject): AppCatalogMessage? {
+            val rev = obj.int("rev") ?: return null
+            if (obj.bool("same") == true) return AppCatalogMessage(rev, null)
+            val apps = obj.arrayOrEmpty("apps").objects().take(WorkspaceWire.MAX_MAC_APPS).mapNotNull { a ->
+                val b = a.str("bundle")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                MacApp(b, a.str("name")?.take(80) ?: b, a.bool("running") == true, a.int("windows") ?: 0, a.long("used"))
+            }
+            return AppCatalogMessage(rev, apps)
+        }
+    }
+}
+
+data class AppLaunchResult(val bundleID: String, val ok: Boolean) {
+    companion object { fun parse(obj: JsonObject): AppLaunchResult? = AppLaunchResult(obj.str("bundle") ?: return null, obj.bool("ok") == true) }
 }
 
 data class AppIcon(val bundleID: String, val pngBase64: String) {
