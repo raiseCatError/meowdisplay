@@ -1,5 +1,6 @@
 package com.raisecaterror.meowdisplay.core.session
 
+import com.raisecaterror.meowdisplay.core.wire.ControlChunkAssembler
 import com.raisecaterror.meowdisplay.core.video.AccessUnit
 import com.raisecaterror.meowdisplay.core.video.DecodableSample
 import com.raisecaterror.meowdisplay.core.video.ParameterSetTracker
@@ -546,8 +547,19 @@ class ReceiverSession(
 
     // MARK: - Incoming
 
+    /** Large control messages arriving in parts (PROTOCOL.md 6.14), for the current link. */
+    private val chunks = ControlChunkAssembler()
+
     private fun handle(from: MediaLink, message: SenderMessage) {
         when (message) {
+            is SenderMessage.Chunk -> when (val r = chunks.add(message.body, now())) {
+                is ControlChunkAssembler.Outcome.Complete ->
+                    // Never a chunk inside a chunk.
+                    SenderMessage.parse(r.text)?.takeIf { it !is SenderMessage.Chunk }?.let { handle(from, it) }
+                // Abandoned and forgotten; the feature waiting for it times out and offers Retry.
+                is ControlChunkAssembler.Outcome.Dropped -> Unit
+                ControlChunkAssembler.Outcome.Pending -> Unit
+            }
             is SenderMessage.Welcome -> {
                 macPV = message.pv
                 macFeatures = message.features
@@ -790,6 +802,7 @@ class ReceiverSession(
     private fun closeCurrent(reason: SessionLossReason) {
         val closing = link ?: return
         link = null
+        chunks.reset()
         closing.close()
         admission.beginConnection()
         // The Mac releases held input on session loss; a reconnect starts clean.

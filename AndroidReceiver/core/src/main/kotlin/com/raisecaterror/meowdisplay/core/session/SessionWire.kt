@@ -1,5 +1,6 @@
 package com.raisecaterror.meowdisplay.core.session
 
+import com.raisecaterror.meowdisplay.core.wire.ControlChunkWire
 import com.raisecaterror.meowdisplay.core.crypto.utf8
 import com.raisecaterror.meowdisplay.core.pairing.PairingProtocol
 import kotlinx.serialization.json.Json
@@ -99,6 +100,8 @@ object ReceiverMessages {
         // Older Macs read only mirror/extend here; Window is asked for with displayModeRequest instead.
         fields.requestedMode?.takeIf { it != DisplayMode.Window }?.let { put("requestedMode", it.wire) }
         fields.windowWorkspace?.let { put("ws", it) }
+        // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
+        put(ControlChunkWire.HELLO_FIELD, ControlChunkWire.VERSION)
         put("trayEnabled", fields.trayEnabled)
         put("keyboardButtonEnabled", fields.keyboardButtonEnabled)
         if (fields.maxEncodeWide != null && fields.maxEncodeHigh != null) {
@@ -160,6 +163,9 @@ sealed interface SenderMessage {
 
     data object InputReset : SenderMessage
     data object Closing : SenderMessage
+
+    /** One part of a message too long for one control frame (PROTOCOL.md 6.14). */
+    class Chunk(val body: JsonObject) : SenderMessage
 
     /** A type this core leaves to the app (cursor sprite, UI preferences, ...). */
     data class Other(val type: String, val body: JsonObject) : SenderMessage
@@ -233,6 +239,7 @@ sealed interface SenderMessage {
                 }
                 "inputReset" -> InputReset
                 "closing" -> Closing
+                ControlChunkWire.TYPE -> Chunk(obj)
                 else -> Other(type, obj)
             }
         }

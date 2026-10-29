@@ -2664,6 +2664,9 @@ final class StreamReceiver: ObservableObject {
     // above; ping and the watchdog need nothing else from the host.
 
     /// JSON on the video channel (pong, ping liveness) — payloads starting '{'.
+    /// `queue` only: large control messages arriving in parts (PROTOCOL.md 6.14).
+    private var chunkAssembler = ControlChunkAssembler()
+
     private func handleVideoChannelJSON(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
@@ -2677,6 +2680,17 @@ final class StreamReceiver: ObservableObject {
         // Sendable pipeline actor directly rather than through `self.pipeline`.
         let pipeline = self.pipeline
         switch type {
+        case ControlChunkWire.type:
+            // A message too long for one control frame, in parts (PROTOCOL.md 6.14).
+            switch chunkAssembler.add(obj, now: ProcessInfo.processInfo.systemUptime) {
+            case .pending: break
+            case .complete(let whole):
+                // Never a chunk inside a chunk.
+                guard (try? JSONSerialization.jsonObject(with: whole) as? [String: Any])?["type"] as? String != ControlChunkWire.type else { return }
+                handleVideoChannelJSON(whole)
+            case .dropped(let why):
+                Log.info("control chunk dropped: \(why)")
+            }
         case "pong":
             guard let t1 = obj["t"] as? Double, let mt = obj["mt"] as? Double else { return }
             let t2 = nowMs
@@ -3009,6 +3023,8 @@ final class StreamReceiver: ObservableObject {
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
             // This receiver can arrange Mac windows (PROTOCOL.md 6.10); older Macs ignore it.
             WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
+            // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
+            ControlChunkWire.helloField: ControlChunkWire.version,
         ]
         // Sent only inside the authenticated session, never in Bonjour TXT:
         // the mode this device asked for with its own Connect (pv 21). The

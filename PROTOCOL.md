@@ -382,7 +382,8 @@ Consequences that are **normative for senders**:
   starts with anything but `{`, or contains a NUL byte. The largest
   official control message, the base64 cursor sprite (`cursorImg`), caps
   its PNG at 24000 bytes precisely to stay under this limit after base64
-  expansion.
+  expansion. A longer message goes in parts to a receiver that reassembles
+  them (section 6.14), never as one frame.
 * A sender MUST NOT emit a video frame that satisfies the JSON test (this
   cannot happen with well-formed Annex B payloads).
 
@@ -1523,6 +1524,44 @@ frontmost app.
   comes to the front first, then the item gets the Accessibility press action.
 * **`menuResult`** (sender to receiver): `{"type":"menuResult","ok":true,"req":4}`, or
   `ok:false` with `error` `control`, `notFound` or `changed`.
+
+### 6.14 Large control messages (`hello.chunks`, `chunk`)
+
+Section 4 caps every control frame below 32768 bytes, and receivers drop a
+longer one. Some Mac answers are longer: a Remote Finder preview (6.12), a
+window or display still and a pane's whole-source still (6.10). A receiver
+that reassembles parts says so in its hello:
+
+```json
+{ "type": "hello", "chunks": 1, ... }
+```
+
+To such a receiver the Mac sends a control message of 32000 bytes or more
+(its UTF-8 JSON) as ordered parts on the same channel; to any other receiver
+it doesn't send it at all (it would be dropped). Each part is an ordinary
+control message well under the limit:
+
+```json
+{ "type": "chunk", "id": 17, "i": 0, "n": 24, "len": 520113, "sha": "3f0c…16 hex", "d": "<base64 of ≤ 22000 bytes>" }
+{ "type": "chunk", "id": 17, "i": 1, "n": 24, "d": "…" }
+```
+
+* `id` names one message (the Mac's counter); `i` counts from 0 to `n - 1`.
+  Only part 0 carries `len` (the whole message's byte length) and `sha`
+  (the first 16 hex digits of its SHA-256).
+* The concatenated `d` bytes are the original JSON message, which the
+  receiver handles exactly as if it had arrived in one frame. A reassembled
+  message is never itself a `chunk`.
+* Other control messages may come between the parts of one message, and
+  parts of up to 4 messages may interleave; the parts of one message arrive
+  in order.
+
+The receiver bounds what it holds and abandons a message, silently, on: a
+missing or repeated part, `len` above 4 MiB, more bytes than `len`, a
+digest mismatch, a part 0 that isn't valid, or no part for 15 seconds. A
+fifth message in progress evicts the oldest. An abandoned message is simply
+lost: every feature that asks for one of these answers already times out
+and can ask again. Vectors: `fixtures/receiver-protocol/control-chunks.json`.
 
 ## 7. Coordinate spaces and units
 

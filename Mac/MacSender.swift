@@ -94,6 +94,9 @@ struct PhoneInfo: Decodable {
     /// Window workspaces version (PROTOCOL.md 6.10); absent = not supported.
     let ws: Int?
     var supportsWindowWorkspace: Bool { (ws ?? 0) >= WindowWorkspaceWire.version }
+    /// Reassembles control messages sent in parts (PROTOCOL.md 6.14); absent = not supported.
+    let chunks: Int?
+    var supportsControlChunks: Bool { (chunks ?? 0) >= ControlChunkWire.version }
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
@@ -6630,9 +6633,32 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendJSONObject(_ object: [String: Any], channel: TransportChannel = .control) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object),
-              let json = String(data: data, encoding: .utf8) else { return }
-        sendJSONFrame(json, channel: channel)
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guard data.count >= ControlChunkWire.threshold else {
+            guard let json = String(data: data, encoding: .utf8) else { return }
+            return sendJSONFrame(json, channel: channel)
+        }
+        // Too long for one control frame (PROTOCOL.md 4): every receiver would drop it. Sent in
+        // parts to a receiver that reassembles them (6.14). Only previews, stills and backdrops
+        // get this big, and they are all sent from `queue`, where `lastHello` lives.
+        let type = object["type"] as? String ?? "?"
+        guard lastHello?.supportsControlChunks == true,
+              let parts = ControlChunkWire.split(data, id: nextControlChunkID()) else {
+            Log.info("control: \(type) of \(data.count) bytes not sent (receiver can't take it in parts)")
+            return
+        }
+        for part in parts {
+            guard let partData = try? JSONSerialization.data(withJSONObject: part),
+                  let json = String(data: partData, encoding: .utf8) else { return }
+            sendJSONFrame(json, channel: channel)
+        }
+    }
+
+    /// `queue` only.
+    private var controlChunkID = 0
+    private func nextControlChunkID() -> Int {
+        controlChunkID = controlChunkID >= 1_000_000_000 ? 1 : controlChunkID + 1
+        return controlChunkID
     }
 
     /// CR2 fix: unlike `sendFramed` below (verified — every call site already
