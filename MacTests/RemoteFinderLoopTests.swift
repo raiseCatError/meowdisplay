@@ -258,6 +258,46 @@ final class RemoteFinderLoopTests: XCTestCase {
         XCTAssertNil(model.export, "nothing is handed on")
     }
 
+    /// A damaged range fails the download; Retry resumes after the last range that matched its digest.
+    func testRetryResumesAfterTheLastVerifiedRange() async throws {
+        let q = RemoteTransferQueue()
+        var sent: [[String: Any]] = []
+        var r = 0
+        q.send = { sent.append($0); return true }
+        q.nextRequestID = { r += 1; return r }
+        let bytes = Data((0..<600_000).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        func reply(_ o: [String: Any]) { _ = q.apply(RemoteFilesReply.parse(o)!) }
+        func answerReads(corruptFrom: Int64?) {
+            for m in sent where m["op"] as? String == "read" {
+                let o = (m["o"] as! NSNumber).int64Value, n = m["n"] as! Int
+                var range = bytes.subdata(in: Int(o)..<Int(o) + n)
+                let sha = SHA256.hash(data: range).prefix(8).map { String(format: "%02x", $0) }.joined()
+                if let c = corruptFrom, o >= c { range[range.startIndex] ^= 0xFF }
+                var i = 0
+                while i < range.count {
+                    let j = min(i + 22_000, range.count)
+                    reply(["op": "data", "x": 7, "o": o + Int64(i), "d": range.subdata(in: i..<j).base64EncodedString()])
+                    i = j
+                }
+                reply(["op": "read", "x": 7, "o": o, "n": n, "sha": sha, "ok": true])
+            }
+            sent.removeAll()
+        }
+        let id = q.download(root: "r1", path: ["a.bin"], name: "a.bin", size: 600_000, purpose: .save)
+        reply(["op": "download", "req": sent.last!["req"] as! Int, "ok": true, "x": 7, "size": 600_000, "mod": 1])
+        answerReads(corruptFrom: 524_288)
+        XCTAssertEqual(q.items.first?.state, .failed("digest"))
+        q.retry(id)
+        XCTAssertEqual(q.items.first?.transferred, 524_288, "the verified first range is kept")
+        reply(["op": "download", "req": sent.last!["req"] as! Int, "ok": true, "x": 7, "size": 600_000, "mod": 1])
+        XCTAssertEqual(sent.first { $0["op"] as? String == "read" }?["o"] as? Int64 ?? (sent.first { $0["op"] as? String == "read" }?["o"] as? NSNumber)?.int64Value, 524_288)
+        answerReads(corruptFrom: nil)
+        XCTAssertEqual(q.items.first?.state, .done)
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(q.items.first?.localURL)), bytes)
+        q.purgeViewCache()
+        try? FileManager.default.removeItem(at: q.items.first!.localURL!.deletingLastPathComponent())
+    }
+
     func testSortingAndFilters() {
         func e(_ n: String, dir: Bool = false, size: Int? = nil, kind: RemoteFileKind = .file, days: Double = 0) -> RemoteFileEntry {
             RemoteFileEntry(name: n, isDirectory: dir, kind: dir ? .folder : kind, size: size, modified: Date(timeIntervalSince1970: days * 86_400))

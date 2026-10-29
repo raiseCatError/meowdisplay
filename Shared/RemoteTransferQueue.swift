@@ -72,6 +72,8 @@ final class RemoteTransferQueue: ObservableObject {
         var source: FileHandle?
         var scoped: URL?
         var nextRead: Int64 = 0
+        /// Download: bytes from the start whose ranges matched their digests (Retry resumes here).
+        var verified: Int64 = 0
         var rangesOut: [(o: Int64, n: Int, hasher: SHA256)] = []
         /// Bytes of the first range in `rangesOut` written so far.
         var rangesOutWritten = 0
@@ -148,9 +150,11 @@ final class RemoteTransferQueue: ObservableObject {
         job.scoped = old?.scoped
         job.mod = old?.mod
         job.version = old?.version
-        // A download resumes where it stopped if the Mac's file is the same version.
+        // A download resumes after its last verified range if the Mac's file is the same version.
         if case .download = items[i].direction, let path = items[i].localURL ?? partialURL(id), FileManager.default.fileExists(atPath: path.path) {
-            job.nextRead = items[i].transferred
+            job.nextRead = old?.verified ?? 0
+            job.verified = job.nextRead
+            items[i].transferred = job.nextRead
         } else {
             items[i].transferred = 0
         }
@@ -334,7 +338,7 @@ final class RemoteTransferQueue: ObservableObject {
         guard let i = index(id), items[i].state == .running else { return true }
         guard r.ok, let x = r.x, let size = r.size else { fail(id, r.error ?? "failed"); return true }
         // Resuming: only the same version continues; anything else starts over.
-        if let v = job.version, (v.size != size || v.mod != r.mod) { job.nextRead = 0; items[i].transferred = 0 }
+        if let v = job.version, (v.size != size || v.mod != r.mod) { job.nextRead = 0; job.verified = 0; items[i].transferred = 0 }
         job.version = (size, r.mod)
         job.x = x
         items[i].size = size
@@ -342,7 +346,7 @@ final class RemoteTransferQueue: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             if job.nextRead == 0 || !FileManager.default.fileExists(atPath: url.path) {
-                job.nextRead = 0; items[i].transferred = 0
+                job.nextRead = 0; job.verified = 0; items[i].transferred = 0
                 #if os(iOS)
                 FileManager.default.createFile(atPath: url.path, contents: nil,
                                                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
@@ -391,6 +395,7 @@ final class RemoteTransferQueue: ObservableObject {
         guard digest == r.sha else { fail(id, "digest"); return true }
         job.rangesOut.removeFirst()
         job.rangesOutWritten = 0
+        job.verified = range.o + Int64(range.n)
         guard let i = index(id) else { return true }
         if items[i].transferred >= items[i].size, job.rangesOut.isEmpty { finishDownload(id) } else { requestRanges(id) }
         return true
