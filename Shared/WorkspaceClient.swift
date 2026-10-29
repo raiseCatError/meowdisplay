@@ -75,7 +75,7 @@ enum WorkspaceEvent: Sendable {
     case connected(peerID: String)
     case disconnected
 
-    static let maxBase64 = 96 * 1024
+    static let maxBase64 = 256 * 1024   // a sharp 640-wide Stage Peek still
 
     /// Bounded, defensive parsing of one control message; nil for anything else.
     static func parse(type: String, _ obj: [String: Any]) -> WorkspaceEvent? {
@@ -236,6 +236,8 @@ final class WorkspaceModel: ObservableObject {
     /// catalog and thumbnails fresh. Read-only requests; never a layout,
     /// capture or focus change.
     @Published var stagePeekOpen = false { didSet { if stagePeekOpen, !oldValue { startRefreshing() } } }
+    /// The Stage Peek bar was used in Mirror/Extend: open the peek once Window mode lists windows.
+    @Published var openStagePeekWhenReady = false
     @Published var railEdge: WorkspaceRailEdge { didSet { defaults.set(railEdge.rawValue, forKey: Self.railKey) } }
     @Published var arranging = false
     @Published private(set) var hovered: String?
@@ -305,7 +307,7 @@ final class WorkspaceModel: ObservableObject {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
             }
         case .thumbnail(let id, _, let data):
-            guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 320) else { return }
+            guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 640) else { return }
             thumbAge[id] = Date()
             thumbnails[id] = image
             if thumbnails.count > 48, let oldest = thumbAge.min(by: { $0.value < $1.value })?.key {
@@ -358,7 +360,7 @@ final class WorkspaceModel: ObservableObject {
         let wantedIcons = c.apps.map(\.bundleID).filter { icons[$0] == nil }
         guard !ids.isEmpty || !wantedIcons.isEmpty else { return }
         // Stage Peek shows larger cards (its expanded browser): the sender's maximum.
-        _ = send(WorkspaceRequests.thumbnails(Array(ids.prefix(24)), maxWidth: stagePeekOpen ? 320 : 240, icons: wantedIcons))
+        _ = send(WorkspaceRequests.thumbnails(Array(ids.prefix(24)), maxWidth: stagePeekOpen ? 640 : 240, icons: wantedIcons))
     }
 
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: inputAllowed())) }
@@ -398,6 +400,7 @@ final class WorkspaceModel: ObservableObject {
             let anchor = WorkspacePoint(x: min(max((initial.x - content.x) / max(content.width, 1e-6), 0), 1),
                                         y: min(max((initial.y - content.y) / max(content.height, 1e-6), 0), 1))
             zoomGesture = (id, tile.crop, anchor, content)
+            if active != id { focus(id) }
         }
         guard let g = zoomGesture else { return false }
         let pan = WorkspacePoint(x: (current.x - initial.x) / max(g.rect.width, 1e-6),
@@ -406,7 +409,7 @@ final class WorkspaceModel: ObservableObject {
         let next = saved.zooming(g.tile, to: crop)
         if next != saved {
             saved = next
-            publish(); scheduleSend()
+            publish(); scheduleThrottledSend()
         }
         if ended {
             zoomGesture = nil
@@ -416,6 +419,13 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func resetZoom(_ id: String) { edit { $0.zooming(id, to: nil) } }
+
+    /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).
+    func selectTile(at p: WorkspacePoint) {
+        guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key,
+              layout.tiles[id]?.source != nil, active != id else { return }
+        focus(id)
+    }
 
     /// Where the window's picture sits inside a tile (normalized to the canvas), for a fitted window.
     private func contentRect(of id: String, in tile: WorkspaceRect) -> WorkspaceRect {
@@ -578,6 +588,21 @@ final class WorkspaceModel: ObservableObject {
     }
 
     // MARK: Sending
+
+    private var throttledSendPending = false
+
+    /// Continuous changes (a pinch): send at a steady ~30/s while they keep coming,
+    /// instead of waiting for them to stop.
+    private func scheduleThrottledSend() {
+        guard !throttledSendPending else { return }
+        throttledSendPending = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 33_000_000)
+            guard let self else { return }
+            self.throttledSendPending = false
+            self.sendNow()
+        }
+    }
 
     private func scheduleSend(immediately: Bool = false) {
         sendTask?.cancel()

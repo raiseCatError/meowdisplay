@@ -10,8 +10,11 @@ final class StagePeekTests: XCTestCase {
     private let ids: [UInt32] = [101, 102, 103, 104, 105, 106]
     private let phone = CGRect(x: 0, y: 47, width: 393, height: 771)   // iPhone portrait safe area
 
-    private func machine(current: UInt32 = 103) -> StagePeekMachine {
+    /// The scrub tests below were written for the classic (scrub-wheel) direction;
+    /// natural scrolling, the default, has its own test.
+    private func machine(current: UInt32 = 103, natural: Bool = false) -> StagePeekMachine {
         var m = StagePeekMachine()
+        m.naturalScrolling = natural
         m.setItems(ids, current: current)
         return m
     }
@@ -46,21 +49,51 @@ final class StagePeekTests: XCTestCase {
         XCTAssertEqual(m.phase, .closed)
     }
 
-    func testASwipeFromTheEdgeNeitherOpensNorReachesTheMac() {
+    func testAnInwardFlickFromTheEdgeOpensAndNeverReachesTheMac() {
         var m = machine()
         XCTAssertTrue(m.touchBegan(id: 1, at: CGPoint(x: 8, y: 400), time: 0, onStrip: true), "owned: never forwarded")
-        XCTAssertEqual(m.touchMoved(id: 1, to: CGPoint(x: 40, y: 400), time: 0.1, edge: .left), [])
-        XCTAssertEqual(m.poll(now: 1), [])
-        XCTAssertEqual(m.phase, .closed)
-        XCTAssertEqual(m.touchEnded(id: 1, at: CGPoint(x: 60, y: 400), time: 0.2, cardAt: { _ in 0 }), [])
+        XCTAssertEqual(m.touchMoved(id: 1, to: CGPoint(x: 40, y: 400), time: 0.1, edge: .left), [.opened, .haptic(.activate)])
+        XCTAssertEqual(m.phase, .open)
+        XCTAssertEqual(m.touchEnded(id: 1, at: CGPoint(x: 60, y: 400), time: 0.2, cardAt: { _ in 0 }), [],
+                       "lifting never selects")
+        XCTAssertEqual(m.phase, .open)
     }
 
-    func testLiftingBeforeTheHoldOpensNothing() {
+    func testAVerticalSwipeOnTheEdgeOpensNothing() {
         var m = machine()
         _ = m.touchBegan(id: 1, at: CGPoint(x: 8, y: 400), time: 0, onStrip: true)
-        XCTAssertEqual(m.touchEnded(id: 1, at: CGPoint(x: 8, y: 400), time: 0.1, cardAt: { _ in 0 }), [])
-        XCTAssertEqual(m.poll(now: 1), [])
+        XCTAssertEqual(m.touchMoved(id: 1, to: CGPoint(x: 10, y: 460), time: 0.1, edge: .left), [])
         XCTAssertEqual(m.phase, .closed)
+    }
+
+    func testATapOnTheEdgeBarOpens() {
+        var m = machine()
+        _ = m.touchBegan(id: 1, at: CGPoint(x: 8, y: 400), time: 0, onStrip: true)
+        XCTAssertEqual(m.touchEnded(id: 1, at: CGPoint(x: 8, y: 400), time: 0.1, cardAt: { _ in 0 }), [.opened, .haptic(.activate)])
+        XCTAssertEqual(m.phase, .open)
+    }
+
+    func testNaturalScrollingSwipeUpRevealsTheWindowsBelow() {
+        var m = machine(natural: true)
+        _ = m.openDirectly()
+        let before = m.highlightedID
+        _ = m.touchBegan(id: 2, at: CGPoint(x: 120, y: 500), time: 1, onStrip: false)
+        _ = m.touchMoved(id: 2, to: CGPoint(x: 120, y: 500 - StagePeekConfig.scrubPitch * 2), time: 1.2, edge: .left)
+        XCTAssertEqual(m.highlightedID, 105, "swipe up two windows: the highlight moves down the stack")
+        XCTAssertNotEqual(before, m.highlightedID)
+    }
+
+    func testAFlickWhileOpenExpandsThenCompacts() {
+        var m = machine()
+        _ = m.openDirectly()
+        _ = m.touchBegan(id: 2, at: CGPoint(x: 120, y: 500), time: 1, onStrip: false)
+        XCTAssertEqual(m.touchMoved(id: 2, to: CGPoint(x: 200, y: 505), time: 1.1, edge: .left), [.haptic(.select)])
+        XCTAssertTrue(m.expanded)
+        _ = m.touchEnded(id: 2, at: CGPoint(x: 200, y: 505), time: 1.2, cardAt: { _ in nil })
+        _ = m.touchBegan(id: 3, at: CGPoint(x: 200, y: 500), time: 2, onStrip: false)
+        XCTAssertEqual(m.touchMoved(id: 3, to: CGPoint(x: 120, y: 500), time: 2.1, edge: .left), [.haptic(.select)])
+        XCTAssertFalse(m.expanded)
+        XCTAssertEqual(m.phase, .open)
     }
 
     func testAnEmptyCatalogNeverOpens() {
@@ -139,7 +172,7 @@ final class StagePeekTests: XCTestCase {
         XCTAssertEqual(m.phase, .closed)
     }
 
-    func testTapOnATiltedNeighbourSelectsExactlyThatWindow() {
+    func testTapOnANeighbourSelectsExactlyThatWindow() {
         var m = machine()
         _ = opened(&m)
         _ = m.touchEnded(id: 1, at: CGPoint(x: 8, y: 430), time: 0.5, cardAt: cardAt(m))
@@ -147,7 +180,6 @@ final class StagePeekTests: XCTestCase {
         let focus = all.first { $0.highlighted }!
         let below = all.first { $0.index == focus.index + 1 }!
         let above = all.first { $0.index == focus.index - 1 }!
-        XCTAssertNotEqual(below.tilt, 0)
         // Points on the neighbours' visible parts, outside the front card.
         let belowPoint = CGPoint(x: below.center.x, y: below.center.y + below.size.height * 0.4)
         let abovePoint = CGPoint(x: above.center.x, y: above.center.y - above.size.height * 0.4)
@@ -158,7 +190,8 @@ final class StagePeekTests: XCTestCase {
     }
 
     func testWhereCardsOverlapTheFrontOneWins() {
-        let all = StagePeekLayout.cards(aspects: [1.5, 1.5, 1.5], position: 1, expansion: 0, edge: .left,
+        // Cards overlap in the expanded (Cover Flow) stack; compact Dock cards never do.
+        let all = StagePeekLayout.cards(aspects: [1.5, 1.5, 1.5], position: 1, expansion: 1, edge: .left,
                                         safe: phone, isPad: false, reduceMotion: false)
         let focus = all.first { $0.highlighted }!
         let below = all.first { $0.index == 2 }!
@@ -284,13 +317,27 @@ final class StagePeekTests: XCTestCase {
             let focus = all.first { $0.highlighted }!
             XCTAssertEqual(focus.tilt, 0)
             XCTAssertEqual(all.last, focus, "drawn last: in front")
+            // Compact is Dock magnification: smaller, upright, edge-aligned, never overlapping.
+            let byIndex = all.sorted { $0.index < $1.index }
             for c in all where c != focus {
                 XCTAssertLessThan(c.size.width, focus.size.width)
-                XCTAssertNotEqual(c.tilt, 0)
-                XCTAssertEqual(c.index < focus.index, c.tilt > 0, "cards above tip their top away")
+                XCTAssertEqual(c.tilt, 0, "compact cards stay upright")
+                XCTAssertEqual(c.center.x - c.size.width / 2, safe.minX + 16, accuracy: 0.5, "left-aligned to the edge")
             }
-            XCTAssertGreaterThanOrEqual(focus.center.x - focus.size.width / 2, safe.minX, "inside the safe area")
+            for (a, b) in zip(byIndex, byIndex.dropFirst()) {
+                XCTAssertLessThanOrEqual(a.center.y + a.size.height / 2, b.center.y - b.size.height / 2 + 0.5, "no overlap")
+            }
+            XCTAssertGreaterThan(focus.center.x - focus.size.width / 2, safe.minX + 16, "the highlighted card pops out")
             XCTAssertLessThan(focus.center.x + focus.size.width / 2, safe.midX + 1, "compact: hugs the edge, the Mac stays visible")
+            // Expanded is the layered Cover Flow stack.
+            let flow = StagePeekLayout.cards(aspects: ids.map { _ in 1.6 }, position: 2, expansion: 1, edge: .left,
+                                             safe: safe, isPad: safe.width > 1000, reduceMotion: false)
+            let flowFocus = flow.first { $0.highlighted }!
+            XCTAssertEqual(flowFocus.tilt, 0)
+            for c in flow where c != flowFocus {
+                XCTAssertNotEqual(c.tilt, 0)
+                XCTAssertEqual(c.index < flowFocus.index, c.tilt > 0, "cards above tip their top away")
+            }
         }
     }
 

@@ -313,6 +313,8 @@ struct ReceiverScreen: View {
                                                                  current: WorkspacePoint(x: current.x, y: current.y),
                                                                  scale: Double(scale)) }
                                        : nil,
+                                   onWorkspaceTouch: model.workspace.windowMode
+                                       ? { p in model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -418,6 +420,17 @@ struct ReceiverScreen: View {
                             .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
                             .transition(.opacity)
                     }
+                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
+                       !model.workspace.windowMode, !model.workspace.overviewOpen {
+                        // Mirror/Extend: the same edge bar. Using it switches to Window mode and opens the peek
+                        // once the Mac lists its windows (window titles are only shared in Window mode).
+                        StagePeekDesktopBar(edge: controlStore.preferences.stagePeekEdge, hapticsEnabled: controlStore.preferences.hapticsEnabled) {
+                            model.workspace.openStagePeekWhenReady = true
+                            _ = model.receiver.requestWindowMode()
+                        }
+                        .frame(width: canvas.width, height: canvas.height)
+                        .position(x: canvas.midX, y: canvas.midY)
+                    }
                     if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.windowMode {
                         // Window mode only: in Mirror/Extend the edge belongs to the Mac (its own
                         // Stage Manager). Above the controls; only the edge strip takes touches until it opens.
@@ -433,7 +446,9 @@ struct ReceiverScreen: View {
                                        + ControlReservedRegion.frames(of: .division, in: reservedRegions))
                                 .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
-                            onFullDesktop: { _ = model.receiver.requestDisplayMode(model.receiver.confirmedDisplayMode ?? .extend) })
+                            naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                            // Full Desktop from Window mode shows Mirror (the whole Mac screen as it is).
+                            onFullDesktop: { _ = model.receiver.requestDisplayMode(.mirror) })
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
                        !showSettings, !model.workspace.overviewOpen {
@@ -2040,6 +2055,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// Window mode's per-tile pinch/pan: (began, ended, isPinch, initial, current, scale) with
     /// points normalized to the picture; returns whether a tile took the gesture.
     var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
+    /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
+    var onWorkspaceTouch: ((CGPoint) -> Void)?
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
     /// See `VideoView.onBlockedInputAttempt`.
@@ -2067,6 +2084,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setAllowInput(allowInput)
         view.setLocalNavigationAllowed(allowLocalViewNavigation)
         view.setWorkspacePinch(onWorkspacePinch)
+        view.workspaceTouch = onWorkspaceTouch
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -2206,6 +2224,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setAllowInput(allowInput)
         uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
         uiView.setWorkspacePinch(onWorkspacePinch)
+        uiView.workspaceTouch = onWorkspaceTouch
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -2663,6 +2682,7 @@ struct VideoLayerView: UIViewRepresentable {
         fileprivate var remoteInputAllowed: Bool { allowsInput }
 
         private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
+        var workspaceTouch: ((CGPoint) -> Void)?
         /// The current two-finger gesture belongs to a tile (decided when it begins).
         private var workspaceGestureOwned = false
 
@@ -4128,6 +4148,13 @@ struct VideoLayerView: UIViewRepresentable {
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
             let touches = touches.subtracting(pointer)
             guard !touches.isEmpty else { return }
+            if let workspaceTouch, let first = touches.first {
+                let base = unzoomedBaseTransform().displayedRect
+                if base.width > 0, base.height > 0 {
+                    let p = first.location(in: self)
+                    workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height))
+                }
+            }
             trackBlockedSequence(touches, began: true, ended: false)
             if moveViewActive {
                 onActivityBegan?()

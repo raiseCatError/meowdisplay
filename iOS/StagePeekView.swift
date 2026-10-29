@@ -22,10 +22,12 @@ struct StagePeekOverlay: View {
     /// Controls and hinges the strip must stay clear of, in overlay coordinates.
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
+    var naturalScrolling = true
     /// The Full Desktop card: leave Window mode for the whole Mac screen.
     let onFullDesktop: () -> Void
 
     @State private var machine = StagePeekMachine()
+    @State private var query = ""
     @State private var stripDown = false
     @State private var openDown = false
     @State private var openTouch = 0
@@ -36,7 +38,7 @@ struct StagePeekOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    private var windows: [CatalogWindowItem] { model.catalog?.windows ?? [] }
+    private var windows: [CatalogWindowItem] { model.catalog?.search(query) ?? [] }
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     var body: some View {
@@ -56,6 +58,10 @@ struct StagePeekOverlay: View {
                 }
                 toolbar(cards: cards)
                     .transition(.opacity)
+                searchField
+                    .transition(.opacity)
+                appStrip
+                    .transition(.opacity)
             }
             if !machine.ids.isEmpty, !model.overviewOpen,
                let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
@@ -66,8 +72,10 @@ struct StagePeekOverlay: View {
         .coordinateSpace(name: "stagePeek")
         .accessibilityAction(.escape) { finish(machine.dismiss()) }
         .position(x: frame.midX, y: frame.midY)
-        .onAppear { syncItems() }
+        .onAppear { machine.naturalScrolling = naturalScrolling; syncItems() }
+        .onChange(of: naturalScrolling) { machine.naturalScrolling = $0 }
         .onChange(of: windows) { _ in syncItems() }
+        .onChange(of: machine.isVisible) { visible in if !visible { query = "" } }
         .onChange(of: model.currentWindowID) { _ in syncItems() }
         .onChange(of: model.available) { available in if !available { cancelAll() } }
         .onChange(of: model.windowMode) { window in if !window { cancelAll() } }
@@ -143,6 +151,14 @@ struct StagePeekOverlay: View {
             } else {
                 Image(systemName: "macwindow").font(.title2).foregroundStyle(Color.white.opacity(0.6))
             }
+            if let icon, thumbnail != nil {
+                // The app's icon at the card's bottom-left, like Stage Manager.
+                Image(decorative: icon, scale: 1).resizable()
+                    .frame(width: isPad ? 30 : 24, height: isPad ? 30 : 24)
+                    .shadow(color: .black.opacity(0.5), radius: 3)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(6)
+            }
             if window?.minimized == true {
                 Text("Minimized").font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -169,10 +185,89 @@ struct StagePeekOverlay: View {
         .accessibilityAction { finish(machine.select(index: card.index)) }
     }
 
+    /// Pinned under the search field, only as wide as the peek's column: the Mac's apps with
+    /// windows. A tap shows just that app's windows (tap again for all). Browsing never
+    /// opens or activates anything on the Mac.
+    private var appStrip: some View {
+        let width = min(isPad ? 360 : 300, safe.width - 24)
+        let apps = (model.catalog?.apps ?? []).filter(\.hasWindows)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(apps, id: \.bundleID) { app in
+                    let selected = query == app.name
+                    Button {
+                        haptics.play(.tick, enabled: hapticsEnabled)
+                        query = selected ? "" : app.name
+                    } label: {
+                        Group {
+                            if let icon = model.icons[app.bundleID] {
+                                Image(decorative: icon, scale: 1).resizable()
+                            } else {
+                                Image(systemName: "app.fill").resizable().foregroundStyle(Color.white.opacity(0.5))
+                            }
+                        }
+                        .frame(width: 34, height: 34)
+                        .padding(3)
+                        .background(selected ? stagePeekAccent.opacity(0.35) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(app.name)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+        }
+        .frame(width: width, height: 48)
+        .background(reduceTransparency ? AnyShapeStyle(Color(white: 0.12).opacity(0.92)) : AnyShapeStyle(.regularMaterial),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .environment(\.colorScheme, .dark)
+        .position(x: edge == .left ? safe.minX + 12 + width / 2 : safe.maxX - 12 - width / 2, y: safe.minY + 26 + 46)
+        .accessibilityIdentifier("stagePeekApps")
+        .zIndex(30)
+    }
+
+    /// Pinned at the top of the peek's column: filters windows by app or title.
+    private var searchField: some View {
+        let width = min(isPad ? 360 : 300, safe.width - 24)
+        return HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search windows and apps", text: $query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !query.isEmpty {
+                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .accessibilityLabel("Clear Search")
+            }
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(reduceTransparency ? AnyShapeStyle(Color(white: 0.12).opacity(0.92)) : AnyShapeStyle(.regularMaterial),
+                    in: Capsule())
+        .environment(\.colorScheme, .dark)
+        .frame(width: width)
+        .position(x: edge == .left ? safe.minX + 12 + width / 2 : safe.maxX - 12 - width / 2, y: safe.minY + 26)
+        .accessibilityIdentifier("stagePeekSearch")
+        .zIndex(30)
+    }
+
+    private static func titleFits(focus: StagePeekCard, width: CGFloat, safe: CGRect, edge: StagePeekEdge) -> Bool {
+        edge == .left ? focus.center.x + focus.size.width / 2 + 12 + width <= safe.maxX
+                      : focus.center.x - focus.size.width / 2 - 12 - width >= safe.minX
+    }
+
+    private static func titleX(focus: StagePeekCard, width: CGFloat, safe: CGRect, edge: StagePeekEdge) -> CGFloat {
+        guard titleFits(focus: focus, width: width, safe: safe, edge: edge) else {
+            return min(max(focus.center.x, safe.minX + width / 2), safe.maxX - width / 2)
+        }
+        return edge == .left ? focus.center.x + focus.size.width / 2 + 12 + width / 2
+                             : focus.center.x - focus.size.width / 2 - 12 - width / 2
+    }
+
     private func title(for focus: StagePeekCard) -> some View {
         let window = window(at: focus.index)
         let icon = window.flatMap { model.icons[$0.bundleID] }
-        let width = min(max(focus.size.width + 48, 200), safe.width - 24)
+        let width = min(200, safe.width - 24)
         return HStack(spacing: 8) {
             if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
             VStack(alignment: .leading, spacing: 1) {
@@ -192,8 +287,10 @@ struct StagePeekOverlay: View {
         .environment(\.colorScheme, .dark)
         .frame(maxWidth: width)
         .fixedSize(horizontal: false, vertical: true)
-        .position(x: min(max(focus.center.x, safe.minX + width / 2), safe.maxX - width / 2),
-                  y: min(focus.center.y + focus.size.height / 2 + 24, safe.maxY - 72))
+        // Beside the selected card (never over the next card below); under it only when there's no room.
+        .position(x: Self.titleX(focus: focus, width: width, safe: safe, edge: edge),
+                  y: Self.titleFits(focus: focus, width: width, safe: safe, edge: edge)
+                      ? focus.center.y : min(focus.center.y + focus.size.height / 2 + 30, safe.maxY - 72))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .zIndex(10)
@@ -404,6 +501,12 @@ struct StagePeekOverlay: View {
         // Full Desktop first (top of the stack), then the Mac's windows.
         let ids = windows.map(\.id)
         machine.setItems(ids.isEmpty ? [] : [StagePeekMachine.fullDesktopID] + ids, current: model.currentWindowID)
+        // Came from the bar in Mirror/Extend: open as soon as the windows are listed.
+        if model.openStagePeekWhenReady, model.windowMode, !ids.isEmpty, !machine.isVisible {
+            model.openStagePeekWhenReady = false
+            model.stagePeekOpen = true
+            finish(machine.openDirectly())
+        }
     }
 
     private func cancelAll() {
@@ -442,5 +545,43 @@ final class StagePeekHaptics {
         case .select:
             medium.impactOccurred()
         }
+    }
+}
+
+
+/// The Stage Peek edge bar in Mirror/Extend: a tap, flick or hold switches to Window mode
+/// and opens the peek there. Only the thin strip takes touches; the rest passes through.
+struct StagePeekDesktopBar: View {
+    let edge: StagePeekEdge
+    let hapticsEnabled: Bool
+    let onOpen: () -> Void
+    @State private var haptics = StagePeekHaptics()
+
+    var body: some View {
+        GeometryReader { geo in
+            let height = min(geo.size.height * 0.4, 320)
+            Capsule().fill(Color.white.opacity(0.42))
+                .frame(width: 4, height: 40)
+                .shadow(color: .black.opacity(0.35), radius: 2)
+                .frame(width: 28, height: height)
+                .contentShape(Rectangle())
+                .onTapGesture { open() }
+                .gesture(DragGesture(minimumDistance: 8).onEnded { v in
+                    let inward = edge == .left ? v.translation.width : -v.translation.width
+                    if inward > abs(v.translation.height) { open() }
+                })
+                .onLongPressGesture(minimumDuration: StagePeekConfig.holdDelay) { open() }
+                .position(x: edge == .left ? 14 : geo.size.width - 14, y: geo.size.height / 2)
+                .accessibilityElement()
+                .accessibilityLabel("Stage Peek")
+                .accessibilityHint("Switches to Window mode and shows your Mac windows.")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { open() }
+        }
+    }
+
+    private func open() {
+        haptics.play(.activate, enabled: hapticsEnabled)
+        onOpen()
     }
 }

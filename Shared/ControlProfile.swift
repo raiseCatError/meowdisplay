@@ -877,6 +877,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var windowSwitcher = WindowSwitcherStyle.stagePeek
     /// The edge Stage Peek opens from.
     var stagePeekEdge = StagePeekEdge.left
+    /// Natural scrolling in Stage Peek: swipe up and the stack moves up to show the
+    /// windows below (like a feed). Off: the older scrub-wheel direction.
+    var stagePeekNaturalScrolling = true
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults on (schema 16).
@@ -1028,6 +1031,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Absent (schema < 20): Stage Peek from the left edge.
         windowSwitcher = try value(.windowSwitcher, fallback.windowSwitcher)
         stagePeekEdge = try value(.stagePeekEdge, fallback.stagePeekEdge)
+        stagePeekNaturalScrolling = try value(.stagePeekNaturalScrolling, fallback.stagePeekNaturalScrolling)
         profiles = try value(.profiles, fallback.profiles)
         // Absent (schema < 6) means "written before the Function Tray
         // existed" — default to ON with canonical Undo/Redo profiles,

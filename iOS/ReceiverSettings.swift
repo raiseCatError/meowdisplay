@@ -884,6 +884,8 @@ private struct ControlSettingsPage: View {
                         ForEach(StagePeekEdge.allCases) { Text($0.title).tag($0) }
                     }
                     .accessibilityIdentifier("stagePeekEdgePicker")
+                    Toggle("Natural Scrolling", isOn: preferenceBinding(controlStore, \.stagePeekNaturalScrolling))
+                        .accessibilityIdentifier("stagePeekNaturalScrolling")
                 }
             } header: {
                 Text("Window Switcher")

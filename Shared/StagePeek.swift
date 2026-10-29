@@ -54,6 +54,8 @@ enum StagePeekConfig {
     static let holdSlop: CGFloat = 10
     /// Vertical finger travel per window while scrubbing.
     static let scrubPitch: CGFloat = 52
+    /// Sideways travel that counts as a flick between compact and expanded.
+    static let flickDistance: CGFloat = 44
     /// Inward travel before the expanded browser starts to grow, and the
     /// travel at which it is fully expanded.
     static let expandStart: CGFloat = 56
@@ -93,6 +95,9 @@ struct StagePeekMachine: Equatable {
     /// The first card in Window mode: back to the whole Mac screen. Never a
     /// window ID (CGWindowIDs start at 1).
     static let fullDesktopID: UInt32 = 0
+
+    /// Swipe up moves the stack up, revealing the windows below (the default).
+    var naturalScrolling = true
 
     private(set) var phase = Phase.closed
     private(set) var ids: [UInt32] = []
@@ -172,16 +177,30 @@ struct StagePeekMachine: Equatable {
         guard id == touchID, let start else { return [] }
         switch phase {
         case .arming:
-            if hypot(point.x - start.point.x, point.y - start.point.y) > StagePeekConfig.holdSlop {
-                // A swipe from the edge, not a hold: nothing opens, and the
-                // touch stays Stage Peek's until it lifts.
+            let dx = point.x - start.point.x, dy = point.y - start.point.y
+            if hypot(dx, dy) > StagePeekConfig.holdSlop {
+                // The touch stays Stage Peek's until it lifts either way.
                 consumed.insert(id)
                 resetTouch()
                 phase = .closed
+                // A flick inward from the edge opens the peek (it stays open; nothing is chosen).
+                let inward = edge == .left ? dx : -dx
+                if inward > abs(dy) { return openDirectly() }
             }
             return []
         case .open:
             guard tapCandidate else { return [] }
+            // A sideways flick while open: inward expands, outward compacts (or closes when compact).
+            let dx = point.x - start.point.x, dy = point.y - start.point.y
+            if abs(dx) > StagePeekConfig.flickDistance, abs(dx) > abs(dy) * 1.5 {
+                consumed.insert(id)
+                resetTouch()
+                let inward = edge == .left ? dx : -dx
+                if inward > 0 { expand(); return [.haptic(.select)] }
+                if expanded { compact(); return [.haptic(.select)] }
+                closeAll()
+                return [.dismissed]
+            }
             guard hypot(point.x - start.point.x, point.y - start.point.y) > StagePeekConfig.tapSlop else { return [] }
             tapCandidate = false
             phase = .scrubbing
@@ -200,10 +219,12 @@ struct StagePeekMachine: Equatable {
         guard id == touchID else { return [] }
         switch phase {
         case .arming:
-            // Lifted before the hold completed: nothing opens.
+            // A quick tap on the edge bar opens the peek (accessible entry); a longer
+            // press that lifts before the hold completes opens nothing.
+            let wasTap = start.map { time - $0.time <= StagePeekConfig.tapMaxDuration } ?? false
             resetTouch()
             phase = .closed
-            return []
+            return wasTap ? openDirectly() : []
         case .scrubbing:
             settleAfterLift()
             resetTouch()   // the next touch is a fresh tap candidate
@@ -316,7 +337,8 @@ struct StagePeekMachine: Equatable {
     private mutating func scrub(to point: CGPoint, time: TimeInterval, edge: StagePeekEdge) -> [StagePeekEffect] {
         guard let anchor, !ids.isEmpty else { return [] }
         var out: [StagePeekEffect] = []
-        let raw = anchor.position + Double(point.y - anchor.point.y) / Double(StagePeekConfig.scrubPitch)
+        let travel = Double(point.y - anchor.point.y) / Double(StagePeekConfig.scrubPitch)
+        let raw = anchor.position + (naturalScrolling ? -travel : travel)
         let maxIndex = Double(ids.count - 1)
         let overrun = raw < 0 ? -raw : (raw > maxIndex ? raw - maxIndex : 0)
         position = clampPosition(raw)
@@ -445,24 +467,49 @@ enum StagePeekLayout {
         let centerX = lerp(compactX, safe.midX)
         // Room for the title under the highlighted card.
         let centerY = safe.midY - 18
+        // Compact (e = 0) is Dock magnification: the highlighted card full size and popped out,
+        // the rest shrinking smoothly with distance, upright, edge-aligned and not overlapping.
+        // Expanded (e = 1) is the layered Cover Flow stack. Positions blend between the two.
+        let gap: CGFloat = 8
+        func dockScale(_ u: Double) -> CGFloat { CGFloat(0.56 + 0.44 * exp(-u * u / 0.7)) }
+        func dockHeight(_ i: Int) -> CGFloat { cardSize(i).height * dockScale(abs(Double(i) - position)) }
+        // Dock centres: stack outward from the (continuous) position so scrubbing glides.
+        var dockY = [CGFloat](repeating: 0, count: aspects.count)
+        let base = min(max(Int(position.rounded(.down)), 0), aspects.count - 1)
+        let frac = CGFloat(position - Double(base))
+        dockY[base] = 0
+        if base + 1 < aspects.count { dockY[base + 1] = dockHeight(base) / 2 + gap + dockHeight(base + 1) / 2 }
+        if base + 2 <= aspects.count - 1 {
+            for i in (base + 2)..<aspects.count { dockY[i] = dockY[i - 1] + dockHeight(i - 1) / 2 + gap + dockHeight(i) / 2 }
+        }
+        if base > 0 { for i in stride(from: base - 1, through: 0, by: -1) { dockY[i] = dockY[i + 1] - dockHeight(i + 1) / 2 - gap - dockHeight(i) / 2 } }
+        let shift = base + 1 < aspects.count ? frac * (dockY[base + 1] - dockY[base]) : 0
         var out: [StagePeekCard] = []
         for i in aspects.indices {
             let k = Double(i) - position
             let u = abs(k)
-            guard u <= 4.5 else { continue }
+            guard u <= (e > 0.5 ? 4.5 : 6.5) else { continue }
             let near = min(u, 1), far = max(0, min(u, 3) - 1)
-            let scale = CGFloat(1 - 0.16 * near - 0.07 * far)
-            let step = CGFloat(u <= 1 ? u * 0.58 : 0.58 + (u - 1) * 0.30)
-            let offset = (k < 0 ? -1 : 1) * step * focusSize.height
-            let tiltMagnitude = reduceMotion ? 0 : min(16 * near + 3 * far, 22)
             let size = cardSize(i)
+            // Cover Flow (expanded).
+            let flowScale = CGFloat(1 - 0.16 * near - 0.07 * far)
+            let step = CGFloat(u <= 1 ? u * 0.58 : 0.58 + (u - 1) * 0.30)
+            let flowY = centerY + (k < 0 ? -1 : 1) * step * focusSize.height
+            let flowTilt = reduceMotion ? 0 : min(16 * near + 3 * far, 22)
+            // Dock (compact).
+            let ds = dockScale(u)
+            let dw = size.width * ds
+            let pop = CGFloat(10 * pow(max(0, 1 - u), 2))   // only the highlighted card pops out
+            let dockX = edge == .left ? safe.minX + margin + dw / 2 + pop : safe.maxX - margin - dw / 2 - pop
+            let dy = centerY + dockY[i] - shift
+            let scale = lerp(ds, flowScale)
             out.append(StagePeekCard(
                 index: i,
-                center: CGPoint(x: centerX, y: centerY + offset),
+                center: CGPoint(x: lerp(dockX, safe.midX), y: lerp(dy, flowY)),
                 size: CGSize(width: size.width * scale, height: size.height * scale),
-                tilt: k < 0 ? tiltMagnitude : -tiltMagnitude,
+                tilt: Double(e) * (k < 0 ? flowTilt : -flowTilt),
                 z: -u,
-                opacity: u > 3.5 ? max(0, 1 - (u - 3.5)) : 1,
+                opacity: u > 3.5 && e > 0.5 ? max(0, 1 - (u - 3.5)) : 1,
                 highlighted: i == focus && u < 0.5))
         }
         return out.sorted { $0.z < $1.z }

@@ -377,7 +377,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 refresh(sendCatalog: true, includeInstalled: wantsInstalled)
             case WireMessage.windowThumbnailRequest:
                 let ids = (obj["ids"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
-                let maxWidth = min(max(obj["max"] as? Int ?? 240, 64), 320)
+                let maxWidth = min(max(obj["max"] as? Int ?? 240, 64), 640)   // Stage Peek asks for sharp stills
                 sendThumbnails(ids: Array(ids.prefix(24)), maxWidth: maxWidth)
                 if let bundles = obj["icons"] as? [String] { sendIcons(Array(bundles.prefix(32))) }
             case WireMessage.workspaceRequest:
