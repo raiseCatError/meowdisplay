@@ -939,9 +939,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let stale = tileState[tile] == "paused"
         let job = BackdropJob(pixels: frame.pixels, content: frame.content)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let w = min(width, Int(job.content.width))
-            guard let image = WindowBrowserService.downscale(job.pixels, content: job.content, width: max(w, 2)),
-                  let jpeg = WindowBrowserService.jpeg(image, quality: 0.6) else { return }
+            guard let jpeg = Self.backdropJPEG(job, width: min(width, Int(job.content.width))) else { return }
             self?.queue.async {
                 guard let self, self.running else { return }
                 var msg: [String: Any] = ["type": WireMessage.workspaceBackdrop, "tile": tile, "window": Int(a.windowID),
@@ -951,6 +949,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 self.sendMessage?(msg)
             }
         }
+    }
+
+    /// The still, re-encoded smaller until its base64 fits the wire limit (a busy 1600-wide window
+    /// can exceed it at the first quality); nil if even the smallest try doesn't fit.
+    private static func backdropJPEG(_ job: BackdropJob, width: Int) -> Data? {
+        for (scale, quality) in [(1.0, 0.6), (1.0, 0.45), (0.7, 0.45), (0.5, 0.4)] {
+            let w = max(Int(Double(width) * scale), 2)
+            guard let image = WindowBrowserService.downscale(job.pixels, content: job.content, width: w),
+                  let jpeg = WindowBrowserService.jpeg(image, quality: quality) else { return nil }
+            if (jpeg.count + 2) / 3 * 4 <= WorkspaceBackdrop.maxBase64 { return jpeg }
+        }
+        return nil
     }
 
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }

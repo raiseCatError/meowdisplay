@@ -97,7 +97,7 @@ enum WorkspaceEvent: Sendable {
     case disconnected
 
     static let maxBase64 = 256 * 1024   // a sharp 640-wide Stage Peek still
-    static let maxBackdropBase64 = 1_600_000   // a pane's whole source, up to 1600 wide
+    static let maxBackdropBase64 = WorkspaceBackdrop.maxBase64   // a pane's whole source, up to 1600 wide
 
     /// Bounded, defensive parsing of one control message; nil for anything else.
     static func parse(type: String, _ obj: [String: Any]) -> WorkspaceEvent? {
@@ -625,6 +625,12 @@ final class WorkspaceModel: ObservableObject {
     private var backdropReq = 0
     private var backdropAskedAt: [String: Date] = [:]
 
+    /// The instant zoom to draw now (after a gesture: until the Mac's frame with its view is out).
+    func liveZoom() -> WorkspaceLiveZoom? {
+        guard let p = zoomPreview else { return nil }
+        return WorkspaceLiveZoom(preview: p, backdrop: backdrop(p.tile)?.image, composed: zoomGesture == nil && viewComposed(p.tile))
+    }
+
     /// The pane's newest view has reached the screen (or there is nothing to wait for).
     func viewComposed(_ tile: String) -> Bool {
         guard let want = viewEpochs[tile] else { return true }
@@ -668,6 +674,8 @@ final class WorkspaceModel: ObservableObject {
         if ended {
             zoomGesture = nil
             persist()
+            // The final view goes now (its epoch is what the preview waits for), not on the next tick.
+            sendNow()
             if zoom != nil { requestBackdrop(g.tile, refresh: true) }   // fresh for the next gesture
         }
         return true

@@ -160,6 +160,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
     static let searchBudget: TimeInterval = 2.5
     static let textPreviewBytes = 32 * 1024
     static let maxPreviewSide = 1024
+    static let maxPreviewBase64 = 700_000
     static let maxThumbNames = 48
     static let maxThumbSide = 256
 
@@ -398,11 +399,16 @@ final class RemoteFileBrowser: @unchecked Sendable {
             QLThumbnailGenerator.shared.cancel(request)
             return nil
         }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return (data as Data, image.width, image.height)
+        // Lower quality until the base64 fits well inside the 1 MiB control-message limit
+        // (QUIC drops a connection that sends more; a noisy 1024-sided photo can get close).
+        for quality in [0.72, 0.5, 0.35] {
+            let data = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+            if (data.length + 2) / 3 * 4 <= Self.maxPreviewBase64 { return (data as Data, image.width, image.height) }
+        }
+        return nil
     }
 
     // MARK: Thumbnails (grid view)

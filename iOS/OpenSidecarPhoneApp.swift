@@ -320,7 +320,7 @@ struct ReceiverScreen: View {
                                            model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
                                            model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
                                        } : nil,
-                                   workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.zoomPreview } : nil,
+                                   workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
                                    onWorkspaceViewReset: model.workspace.windowMode
                                        ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
@@ -2062,7 +2062,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
     var onWorkspaceTouch: ((CGPoint) -> Void)?
     /// Window mode: the instant local zoom of the pane under the fingers, read after each pinch step.
-    var workspaceZoomPreview: (() -> WorkspaceZoomPreview?)?
+    var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
     /// Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture).
     var onWorkspaceViewReset: ((CGPoint) -> Void)?
     var invertVerticalScroll = true
@@ -2695,7 +2695,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
         var workspaceTouch: ((CGPoint) -> Void)?
-        var workspaceZoomPreview: (() -> WorkspaceZoomPreview?)?
+        var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
         var workspaceViewReset: ((CGPoint) -> Void)?
         /// The current two-finger gesture belongs to a tile (decided when it begins).
         private var workspaceGestureOwned = false
@@ -2703,6 +2703,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// shown until the Mac's sharp frame has arrived.
         private var zoomPreviewClip: UIView?
         private var zoomPreviewStill: UIView?
+        private var zoomPreviewBackdrop: UIImageView?
         private var zoomPreviewFade: DispatchWorkItem?
         /// Window mode: a two-finger tap's right-click waits this long, so a two-finger
         /// double-tap resets the pane instead of right-clicking the Mac twice.
@@ -2758,37 +2759,53 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
-        /// Hybrid zoom: the pane follows the fingers at once by scaling a still of the picture it
-        /// showed when the gesture began; the Mac's sharp frames take over shortly after the end.
+        /// Instant zoom: the pane follows the fingers at once. The picture it showed when the gesture
+        /// began moves with them; where that picture doesn't reach (zooming out, panning past it) the
+        /// pane's whole-source still from the Mac shows instead of black. The live video takes over
+        /// once the Mac says a frame with this view is out.
         private func updateZoomPreview(base: CGRect, began: Bool, ended: Bool) {
             zoomPreviewFade?.cancel()
             zoomPreviewFade = nil
             if began { removeZoomPreview(animated: false) }
-            guard let p = workspaceZoomPreview?() else {
+            guard let live = workspaceZoomPreview?() else {
                 if ended { removeZoomPreview(animated: true) }
                 return
             }
-            let pane = CGRect(x: base.minX + p.pane.x * base.width, y: base.minY + p.pane.y * base.height,
-                              width: p.pane.width * base.width, height: p.pane.height * base.height)
+            let p = live.preview
+            func view(_ r: WorkspaceRect) -> CGRect {
+                CGRect(x: base.minX + r.x * base.width, y: base.minY + r.y * base.height, width: r.width * base.width, height: r.height * base.height)
+            }
+            let pane = view(p.pane)
             if zoomPreviewClip == nil {
                 // The still is taken before the Mac has had time to change the picture, and holds
-                // only this pane (zooming back out never shows a neighbour's picture).
+                // only this pane's source (zooming back out never shows a neighbour's picture).
                 guard let snapshot = snapshotView(afterScreenUpdates: false) else { return }
                 let clip = UIView(frame: pane)
                 clip.clipsToBounds = true
-                clip.backgroundColor = .black
+                clip.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.08, alpha: 1)   // the Mac's pane background
                 clip.isUserInteractionEnabled = false
+                let backdrop = UIImageView()
+                backdrop.isUserInteractionEnabled = false
+                backdrop.contentMode = .scaleToFill
+                clip.addSubview(backdrop)
                 let still = UIView()
                 still.clipsToBounds = true
                 still.isUserInteractionEnabled = false
                 still.layer.anchorPoint = .zero
                 still.bounds = CGRect(origin: .zero, size: pane.size)
                 snapshot.frame = CGRect(origin: CGPoint(x: -pane.minX, y: -pane.minY), size: bounds.size)
+                // Only the part that showed the source: letterbox bars never cover the still below.
+                let shown = view(p.from).intersection(pane).offsetBy(dx: -pane.minX, dy: -pane.minY)
+                let mask = CALayer()
+                mask.backgroundColor = UIColor.black.cgColor
+                mask.frame = shown.isNull ? .zero : shown
+                still.layer.mask = mask
                 still.addSubview(snapshot)
                 clip.addSubview(still)
                 addSubview(clip)
                 zoomPreviewClip = clip
                 zoomPreviewStill = still
+                zoomPreviewBackdrop = backdrop
             }
             guard let clip = zoomPreviewClip, let still = zoomPreviewStill else { return }
             // In view points the picture moves by v' = scale * v + t; the still's (0,0) is the pane's corner.
@@ -2798,15 +2815,45 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.setDisableActions(true)
             clip.alpha = 1
             clip.frame = pane
+            if let backdrop = zoomPreviewBackdrop {
+                if let image = live.backdrop {
+                    if backdrop.image?.cgImage !== image { backdrop.image = UIImage(cgImage: image) }
+                    // The whole source where it is drawn now, turned like the pane.
+                    let target = view(p.source).offsetBy(dx: -pane.minX, dy: -pane.minY)
+                    let turned = p.rotation.isQuarterTurn
+                    backdrop.transform = .identity
+                    backdrop.bounds = CGRect(x: 0, y: 0, width: turned ? target.height : target.width, height: turned ? target.width : target.height)
+                    backdrop.center = CGPoint(x: target.midX, y: target.midY)
+                    backdrop.transform = CGAffineTransform(rotationAngle: CGFloat(p.rotation.rawValue) * .pi / 180)
+                    backdrop.isHidden = false
+                } else {
+                    backdrop.isHidden = true
+                }
+            }
             still.transform = CGAffineTransform(scaleX: p.scaleX, y: p.scaleY)
             still.layer.position = CGPoint(x: p.scaleX * pane.minX + tx - pane.minX, y: p.scaleY * pane.minY + ty - pane.minY)
             CATransaction.commit()
-            if ended {
-                // Long enough for the last crop to reach the Mac and its frame to come back.
-                let work = DispatchWorkItem { [weak self] in self?.removeZoomPreview(animated: true) }
-                zoomPreviewFade = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+            if ended { awaitComposedFrame(base: base, deadline: CACurrentMediaTime() + 1.5) }
+        }
+
+        /// After the fingers lift: keep the preview until the Mac's frame with the final view is out
+        /// (plus a frame or two for it to arrive and decode), then fade to the live video. Bounded.
+        private func awaitComposedFrame(base: CGRect, deadline: CFTimeInterval) {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.zoomPreviewClip != nil else { return }
+                let live = self.workspaceZoomPreview?()
+                if live?.composed ?? true || CACurrentMediaTime() > deadline {
+                    let settle = DispatchWorkItem { [weak self] in self?.removeZoomPreview(animated: true) }
+                    self.zoomPreviewFade = settle
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.07, execute: settle)
+                } else {
+                    // A late still still fills in while waiting.
+                    if live?.backdrop != nil, self.zoomPreviewBackdrop?.isHidden == true { self.updateZoomPreview(base: base, began: false, ended: false) }
+                    self.awaitComposedFrame(base: base, deadline: deadline)
+                }
             }
+            zoomPreviewFade = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.033, execute: work)
         }
 
         private func removeZoomPreview(animated: Bool) {
@@ -2815,8 +2862,9 @@ struct VideoLayerView: UIViewRepresentable {
             guard let clip = zoomPreviewClip else { return }
             zoomPreviewClip = nil
             zoomPreviewStill = nil
+            zoomPreviewBackdrop = nil
             guard animated, !UIAccessibility.isReduceMotionEnabled else { clip.removeFromSuperview(); return }
-            UIView.animate(withDuration: 0.15, animations: { clip.alpha = 0 }, completion: { _ in clip.removeFromSuperview() })
+            UIView.animate(withDuration: 0.12, animations: { clip.alpha = 0 }, completion: { _ in clip.removeFromSuperview() })
         }
 
         func setLocalNavigationAllowed(_ allowed: Bool) {

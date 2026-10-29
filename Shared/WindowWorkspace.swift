@@ -348,6 +348,8 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
     var scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double
     /// Where the whole (rotated) source is drawn now: the whole-source still goes here.
     var source: WorkspaceRect
+    /// Where it was drawn when the gesture began (the moved picture shows only this part).
+    var from: WorkspaceRect
     var rotation: WorkspaceRotation
     /// The window (or display key) the still must be of.
     var sourceKey: UInt32
@@ -363,6 +365,7 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
         offsetX = new.x - scaleX * old.x
         offsetY = new.y - scaleY * old.y
         source = new
+        from = old
         self.rotation = rotation
         self.sourceKey = sourceKey
     }
@@ -372,8 +375,20 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
     }
 }
 
+/// What the receiver's video view draws for an instant zoom: the moved picture, the pane's
+/// whole-source still under it, and whether the Mac's frame with this view is out yet.
+struct WorkspaceLiveZoom: @unchecked Sendable {
+    var preview: WorkspaceZoomPreview
+    var backdrop: CGImage?
+    var composed: Bool
+}
+
 /// A pane's whole source as a still (from the Mac's live capture of it).
 struct WorkspaceBackdrop: @unchecked Sendable {
+    /// Largest still on the wire (base64): well inside the 1 MiB control-message limit (QUIC
+    /// drops a connection that sends more), so the Mac re-encodes smaller until it fits.
+    static let maxBase64 = 700_000
+
     var windowID: UInt32
     var image: CGImage
     /// From before macOS paused the window.
