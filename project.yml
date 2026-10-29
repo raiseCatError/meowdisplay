@@ -256,6 +256,17 @@ targets:
       - Mac/WindowCatalog.swift
       - Mac/WindowWorkspaceTargeting.swift
       - Mac/WindowWorkspaceEngine.swift
+      # Mac-side input revocation end to end (MacSenderInputRevocationTests):
+      # the real MacSender and InputInjector, plus what MacSender links.
+      - Mac/MacSender.swift
+      - Mac/InputInjector.swift
+      - Mac/AudioCaptureEncoder.swift
+      - Mac/InteractiveWakePromotion.swift
+      - Mac/SystemGestureInvoker.swift
+      - Mac/Usbmux.swift
+      - Mac/VirtualDisplay.swift
+      - Mac/PowerLifecycleLogger.swift
+      - Mac/TestPatternWindow.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift

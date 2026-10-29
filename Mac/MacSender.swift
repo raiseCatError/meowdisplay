@@ -815,6 +815,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
     private var inputInjector: InputInjector?
+    /// Where every injector this sender creates posts its events: the HID
+    /// event tap, except in the DEBUG input test harness.
+    private var inputEventSink: SyntheticEventSink = HIDEventTapSink()
+    #if DEBUG
+    /// Input test harness: every control message this sender writes.
+    private var sentControlObserverForTesting: (@Sendable (String) -> Void)?
+    #endif
     /// Window mode only: this receiver's window workspace (queue-confined reference).
     private var workspaceEngine: WindowWorkspaceEngine?
     // Lock-guarded mirror of `sessionAuthorization`'s input grant for
@@ -2211,7 +2218,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vdID) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
@@ -2384,7 +2391,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
             if let targetID = InputTargetResolver.displayID(
                 mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
             }
             if UserDefaults.standard.bool(forKey: "testPattern") {
                 let id = vd.displayID
@@ -3690,7 +3697,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             mirrorDisplayID: display.displayID,
             virtualDisplayID: nil
         ) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
@@ -4875,6 +4882,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func handleControl(_ payload: Data, from conn: NWConnection) {
         guard transportController.currentConnection === conn else { return }
+        handleCurrentConnectionControl(payload)
+    }
+
+    /// A control message read off the live connection (`queue` only).
+    private func handleCurrentConnectionControl(_ payload: Data) {
         lastReceived = Date()
         guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
               let type = obj["type"] as? String else {
@@ -6491,6 +6503,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `queue` itself when needed instead of this method touching
     /// `currentConnection`/`isReady` directly — see its doc comment.
     private func sendJSONFrame(_ json: String, channel: TransportChannel = .control) {
+        #if DEBUG
+        sentControlObserverForTesting?(json)
+        #endif
         let frame = QUICFrameAssembler.frame(Data(json.utf8))
         transportController.sendFromAnyContext(channel: channel, content: frame) { _ in }
     }
@@ -6857,7 +6872,7 @@ extension MacSender {
         workspaceEngine = engine
         // Input is mapped per tile to the window under it; the display id is
         // only the fallback for releases.
-        inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant)
+        inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         inputInjector?.setTargetMapper(engine)
         engine.start()
     }
@@ -6917,3 +6932,69 @@ extension MacSender {
         }
     }
 }
+
+#if DEBUG
+// MARK: - Input test harness
+//
+// Lets `MacSenderInputRevocationTests` drive this sender's real control
+// gate, input grant, revocation and connection bookkeeping with no network,
+// ScreenCaptureKit or stores. The test plays the receiver, and the injector
+// posts into the test's sink instead of the HID event tap. Only the hello's
+// identity proof is stood in for; it has its own tests
+// (`SenderSessionAuthorizationTests`).
+extension MacSender {
+    enum InputHarnessError: Error { case helloRejected, notAdmitted }
+
+    /// A new connection, verified for the device in `helloJSON` and admitted,
+    /// with capture running. Returns its generation. As on a real redial,
+    /// whatever the previous connection held is released and its grant is gone.
+    func admitConnectionForTesting(helloJSON: Data, pinnedSPKI: Data,
+                                   eventSink: SyntheticEventSink,
+                                   sent: @escaping @Sendable (String) -> Void) async throws -> UInt64 {
+        try await onQueue { sender in
+            sender.inputEventSink = eventSink
+            sender.sentControlObserverForTesting = sent
+            let generation = sender.authenticatedSession.beginTransport()
+            sender.activeConnectionGeneration = generation
+            sender.connectionAuthorityEnded(dropped: sender.sessionAuthorization.transportBegan(generation: generation))
+            let info = try JSONDecoder().decode(PhoneInfo.self, from: helloJSON)
+            let outcome = sender.sessionAuthorization.acceptHello(
+                generation: generation, intendedPeerID: sender.transport.tls.peerID, claimedPeerID: info.id,
+                authenticatedSPKI: pinnedSPKI, currentPinnedSPKI: pinnedSPKI,
+                receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                needsSenderApproval: false)
+            if case .rejected = outcome { throw InputHarnessError.helloRejected }
+            _ = sender.authenticatedSession.markApplicationReady(generation: generation)
+            sender.lastHello = info
+            sender.sessionAuthorization.receiverResponded(.accepted, generation: generation)
+            guard sender.sessionAuthorization.isAdmitted(generation: generation) else {
+                throw InputHarnessError.notAdmitted
+            }
+            _ = sender.updateCaptureState { $0.captureStarted() }
+            if sender.inputInjector == nil {
+                sender.inputInjector = InputInjector(displayID: CGMainDisplayID(),
+                                                     sessionInputGrant: sender.sessionInputGrant,
+                                                     eventSink: eventSink)
+            }
+            return generation
+        }
+    }
+
+    /// A control message from the receiver on the live connection.
+    func receiveControlForTesting(_ payload: Data) async throws {
+        try await onQueue { $0.handleCurrentConnectionControl(payload) }
+    }
+
+    /// The live connection ended (the receiver's control stream hit EOF).
+    func loseConnectionForTesting() async throws {
+        try await onQueue { $0.invalidateApplicationSession(reason: "controlEOF") }
+    }
+
+    /// Waits for everything already queued on the sender queue.
+    func settleForTesting() async throws {
+        try await onQueue { _ in }
+    }
+
+    var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
+}
+#endif

@@ -19,11 +19,23 @@ private enum SystemClickMetrics {
     }()
 }
 
+/// Where `InputInjector`'s synthetic events go. The app always posts to the
+/// HID event tap; tests record them instead, so grant and revocation paths
+/// can be checked end to end without moving the real pointer or typing.
+protocol SyntheticEventSink: Sendable {
+    func post(_ event: CGEvent)
+}
+
+struct HIDEventTapSink: SyntheticEventSink {
+    func post(_ event: CGEvent) { event.post(tap: .cghidEventTap) }
+}
+
 /// Turns normalized touch coordinates from the phone into mouse events on a
 /// target display. Touch semantics: finger down = left button down, finger
 /// move = drag, finger up = button up — i.e. the phone acts as a touchscreen.
 final class InputInjector {
 
+    private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
     // This session's ephemeral input grant (per-device-session milestone) —
     // shared with the owning `MacSender`'s own control-message-level gate so
@@ -101,9 +113,11 @@ final class InputInjector {
         targetMapper?.keyboardTargetReady() ?? true
     }
 
-    init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox) {
+    init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox,
+         eventSink: SyntheticEventSink = HIDEventTapSink()) {
         self.displayID = displayID
         self.sessionInputGrant = sessionInputGrant
+        self.eventSink = eventSink
     }
 
     /// Release every synthetic contact when capture is paused, torn down,
@@ -127,7 +141,7 @@ final class InputInjector {
                 mouseButton: .left
             ) {
                 event.setIntegerValueField(.mouseEventClickState, value: 0)
-                event.post(tap: .cghidEventTap)
+                eventSink.post(event)
             }
             isDown = false
         }
@@ -142,7 +156,7 @@ final class InputInjector {
             if let event = CGEvent(mouseEventSource: source, mouseType: type,
                                    mouseCursorPosition: point, mouseButton: button) {
                 event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
-                event.post(tap: .cghidEventTap)
+                eventSink.post(event)
                 pointerHeldButton = nil
             }
         }
@@ -243,7 +257,7 @@ final class InputInjector {
         // synthetic event (e.g. a system-gesture keyboard shortcut) —
         // always state explicitly what this click intentionally carries.
         event.flags = heldModifiers.flags
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
     }
 
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
@@ -261,7 +275,7 @@ final class InputInjector {
             if pointerHeldButton == nil, !isDown, abs(here.x - p.x) > 1 || abs(here.y - p.y) > 1,
                let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) {
                 move.flags = heldModifiers.flags
-                move.post(tap: .cghidEventTap)
+                eventSink.post(move)
             }
             let v = mapper.scrollVector(dx: dx, dy: dy)
             whole = scrollRemainder.take(dxPoints: v.dx, dyPoints: v.dy)
@@ -277,7 +291,7 @@ final class InputInjector {
                                   wheel2: whole.dx,
                                   wheel3: 0) else { return }
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
     }
 
     // MARK: - Pointer / click gestures (M7)
@@ -337,7 +351,7 @@ final class InputInjector {
             event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
         }
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
     }
 
     /// Presses `button` down at the Mac's *current* cursor position —
@@ -370,7 +384,7 @@ final class InputInjector {
         // Control down), which a left-unset `.flags` would otherwise
         // silently inherit and macOS could read as a Control-click.
         event.flags = heldModifiers.flags
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
         pointerHeldButton = cgButton
         pointerHeldClickCount = clickState
     }
@@ -393,7 +407,7 @@ final class InputInjector {
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
         pointerHeldButton = nil
     }
 
@@ -488,7 +502,7 @@ final class InputInjector {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown) else { return }
         event.flags = flags
         if autorepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-        event.post(tap: .cghidEventTap)
+        eventSink.post(event)
     }
 
     /// Attaching the Unicode string to both the key-down and key-up events is
@@ -521,8 +535,8 @@ final class InputInjector {
         up.flags = KeyboardTextFlags.committed
         down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
         up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        eventSink.post(down)
+        eventSink.post(up)
     }
 
     /// The control-message gate is duplicated here under the input lock so an
@@ -623,7 +637,7 @@ final class InputInjector {
         ev.setIntegerValueField(.tabletProximityEventCapabilityMask, value: capabilityMask)
         ev.setIntegerValueField(.tabletProximityEventEnterProximity, value: entering ? 1 : 0)
         ev.flags = .maskNonCoalesced
-        ev.post(tap: .cghidEventTap)
+        eventSink.post(ev)
     }
 
     private enum PointPhase { case down, drag, up, hover }
@@ -664,7 +678,7 @@ final class InputInjector {
             break
         }
         ev.flags = .maskNonCoalesced
-        ev.post(tap: .cghidEventTap)
+        eventSink.post(ev)
     }
 
     private func penClickStateForMouseDown(at point: CGPoint) -> Int {
