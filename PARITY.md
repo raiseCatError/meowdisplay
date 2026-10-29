@@ -17,7 +17,7 @@ Updated 2026-10-28 on `feature/android-secure-core`. Words follow [TERMINOLOGY.m
 | Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android: unit-tested; Tailscale off-LAN not yet seen on a phone |
 | Add Remote Mac: Pair over Remote, and an address for a paired Mac | Yes | Yes | Yes | Android: one Address field; the Mac must have Pair over Remote open for new pairs |
 | Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac |
-| Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; unit-tested only |
+| Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; seen working on a phone over LTE + Tailscale. A local Wi-Fi session that loses Wi-Fi doesn't move to Remote by itself: tap Connect |
 | Route shown in the performance overlay | Yes | Yes | — | iOS shows its transport tag. Android shows Remote (Tailscale) on a remote session and nothing on a local one; it names Tailscale only when a VPN network covers the Mac's address |
 | How to Connect on the home screen | Yes | Yes | — | |
 | Settings & Help from the home screen | Yes | Yes | Yes | |
