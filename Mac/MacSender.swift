@@ -4470,8 +4470,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // MacSenderTransportController.resetForRedial.
         if transportController.isQUICApplicationReady {
             // A live QUIC session was lost (EOF, watchdog, receive error):
-            // the redial below is its single QUIC recovery attempt.
-            protocolSelector.liveQUICLost()
+            // the redial below is its single QUIC recovery attempt — unless
+            // it died within seconds of its hello, which means this path
+            // handshakes QUIC but cannot carry it (Auto: TCP from now on).
+            let age = transportController.quicApplicationReadyAge
+            let action = protocolSelector.liveQUICLost(age: age, preference: networkPreference)
+            if action == .fallbackToTCP, case .tcp(let endpoint, let tls) = transport {
+                QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+                Log.info("quic: live session to \(endpointName) died \(String(format: "%.1f", age ?? -1))s after hello"
+                    + " — secure TCP for the rest of this session"
+                    + " (QUIC cooldown \(Int(QUICCooldownStore.defaultDuration / 60))min)")
+            }
         }
         let generation = transportController.resetForRedial()
         pipelineState.resetPendingSendsForNewTransport()
@@ -4989,6 +4998,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if case .tcp = transport, let established = transportController.activeNetworkProtocol {
                     if established == .quic { transportController.markQUICApplicationReady() }
                     protocolSelector.established(established, preference: networkPreference)
+                    if established == .quic, transportController.currentPathReceiverIsGateway {
+                        moveOffQUICBecauseReceiverHostsNetwork()
+                    }
                 }
                 // Pinned mutual-TLS (checked above) + this application
                 // handshake together are exactly "the expected paired peer
@@ -6748,6 +6760,19 @@ extension MacSender: MacSenderTransportDelegate {
         (transport, peerAddrs)
     }
 
+    /// The receiver is this Mac's gateway (it shares its Personal Hotspot
+    /// with the Mac). QUIC to a hotspot host handshakes and then stops
+    /// delivering data, so Auto moves the session to secure TCP right after
+    /// hello through the ordinary hot transport swap (input cancelled,
+    /// re-authentication, re-admission). Explicit QUIC is left alone.
+    private func moveOffQUICBecauseReceiverHostsNetwork() {
+        guard case .tcp(let endpoint, let tls) = transport,
+              protocolSelector.receiverHostsNetwork(preference: networkPreference, current: .quic) else { return }
+        QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+        Log.info("quic: \(endpointName) hosts this Mac's network (Personal Hotspot) — moving to secure TCP")
+        switchTransport(to: transport)
+    }
+
     func transportCableUpgradeAllowed() -> Bool {
         networkPreference != .quic
     }
@@ -6760,7 +6785,7 @@ extension MacSender: MacSenderTransportDelegate {
     func transportQUICFailed(_ failure: QUICTransportFailure) {
         guard !stopped, case .tcp(let endpoint, let tls) = transport else { return }
         let action = protocolSelector.quicFailed(failure.failureClass, preference: networkPreference,
-                                                 established: failure.established)
+                                                 established: failure.established, liveAge: failure.liveAge)
         Log.info("quic: policy class=\(failure.failureClass.rawValue) established=\(failure.established)"
             + " preference=\(networkPreference.rawValue) action=\(action)")
         switch action {

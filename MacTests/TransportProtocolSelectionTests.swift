@@ -148,6 +148,105 @@ final class TransportProtocolSelectionTests: XCTestCase {
         XCTAssertEqual(selector.sticky, .quic)
     }
 
+    // MARK: - Personal Hotspot regression (QUIC handshakes, then carries nothing)
+
+    /// The field failure (Mac on an iPhone's Personal Hotspot, 2026-10-29):
+    /// every QUIC session reached hello, then went silent and was lost ~7s
+    /// later. The old policy retried QUIC after each loss, forever. An early
+    /// live loss now ends QUIC for the logical session under Auto.
+    func testEarlyLiveLossFallsBackToTCPUnderAuto() {
+        var selector = TransportProtocolSelector()
+        XCTAssertEqual(selector.decide(inputs(.auto)), .quic)
+        selector.established(.quic, preference: .auto)
+        XCTAssertEqual(selector.liveQUICLost(age: 7, preference: .auto), .fallbackToTCP)
+        XCTAssertFalse(selector.inLiveRecovery)
+        for _ in 0..<5 {
+            XCTAssertEqual(selector.decide(inputs(.auto)), .tcp)
+            selector.established(.tcp, preference: .auto)
+        }
+    }
+
+    func testLateLiveLossKeepsTheSingleQUICRecoveryAttempt() {
+        var selector = TransportProtocolSelector()
+        selector.established(.quic, preference: .auto)
+        XCTAssertEqual(selector.liveQUICLost(age: 600, preference: .auto), .retryQUIC)
+        XCTAssertTrue(selector.inLiveRecovery)
+        XCTAssertEqual(selector.decide(inputs(.auto)), .quic)
+        // The recovery session also dies right after hello: TCP now.
+        selector.established(.quic, preference: .auto)
+        XCTAssertEqual(selector.liveQUICLost(age: 3, preference: .auto), .fallbackToTCP)
+        XCTAssertEqual(selector.decide(inputs(.auto)), .tcp)
+    }
+
+    func testEarlyStreamFailureFallsBackButSecurityStillStops() {
+        var selector = TransportProtocolSelector()
+        selector.established(.quic, preference: .auto)
+        XCTAssertEqual(selector.quicFailed(.indeterminate, preference: .auto, established: true, liveAge: 6.5),
+                       .fallbackToTCP)
+        XCTAssertEqual(selector.decide(inputs(.auto)), .tcp)
+        var secure = TransportProtocolSelector()
+        secure.established(.quic, preference: .auto)
+        XCTAssertEqual(secure.quicFailed(.security, preference: .auto, established: true, liveAge: 1),
+                       .stop(.security))
+    }
+
+    func testExplicitQUICNeverFallsBackOnEarlyLoss() {
+        var selector = TransportProtocolSelector()
+        selector.established(.quic, preference: .quic)
+        XCTAssertEqual(selector.liveQUICLost(age: 2, preference: .quic), .retryQUIC)
+        XCTAssertEqual(selector.quicFailed(.indeterminate, preference: .quic, established: true, liveAge: 2),
+                       .retryQUIC)
+        XCTAssertEqual(selector.decide(inputs(.quic)), .quic)
+    }
+
+    func testEarlyLossWindowBounds() {
+        XCTAssertFalse(TransportProtocolSelector.isEarlyLiveLoss(age: nil))
+        XCTAssertFalse(TransportProtocolSelector.isEarlyLiveLoss(age: -1))
+        XCTAssertTrue(TransportProtocolSelector.isEarlyLiveLoss(age: 0))
+        XCTAssertTrue(TransportProtocolSelector.isEarlyLiveLoss(age: 19.9))
+        XCTAssertFalse(TransportProtocolSelector.isEarlyLiveLoss(age: TransportProtocolSelector.earlyLiveLossWindow))
+    }
+
+    func testReceiverHostingTheNetworkMovesAutoToTCPOnly() {
+        var auto = TransportProtocolSelector()
+        auto.established(.quic, preference: .auto)
+        XCTAssertTrue(auto.receiverHostsNetwork(preference: .auto, current: .quic))
+        XCTAssertEqual(auto.decide(inputs(.auto)), .tcp)
+        var tcpAlready = TransportProtocolSelector()
+        XCTAssertFalse(tcpAlready.receiverHostsNetwork(preference: .auto, current: .tcp))
+        XCTAssertEqual(tcpAlready.decide(inputs(.auto)), .tcp)
+        var explicit = TransportProtocolSelector()
+        explicit.established(.quic, preference: .quic)
+        XCTAssertFalse(explicit.receiverHostsNetwork(preference: .quic, current: .quic))
+        XCTAssertEqual(explicit.decide(inputs(.quic)), .quic)
+    }
+
+    /// The exact addresses from the field: an IPv6-only (464XLAT) hotspot
+    /// whose gateway is the iPhone's link-local address, and a classic IPv4
+    /// hotspot (172.20.10.1). A LAN receiver is never the gateway.
+    func testReceiverIsGatewayOnBothHotspotShapes() {
+        let iphoneLL = NWEndpoint.hostPort(host: NWEndpoint.Host("fe80::18fa:b7ff:febe:7064%en0"), port: 9001)
+        let routerLL = NWEndpoint.hostPort(host: NWEndpoint.Host("fe80::18fa:b7ff:febe:7064%en0"), port: 0)
+        let clatGateway = NWEndpoint.hostPort(host: NWEndpoint.Host("192.0.0.1"), port: 0)
+        XCTAssertTrue(NetworkHostDetector.receiverIsGateway(remote: iphoneLL, gateways: [clatGateway, routerLL]))
+
+        let classic = NWEndpoint.hostPort(host: NWEndpoint.Host("172.20.10.1"), port: 9001)
+        XCTAssertTrue(NetworkHostDetector.receiverIsGateway(
+            remote: classic, gateways: [.hostPort(host: "172.20.10.1", port: 0)]))
+
+        let lanPhone = NWEndpoint.hostPort(host: NWEndpoint.Host("192.168.1.23"), port: 9001)
+        XCTAssertFalse(NetworkHostDetector.receiverIsGateway(
+            remote: lanPhone, gateways: [.hostPort(host: "192.168.1.1", port: 0)]))
+        XCTAssertFalse(NetworkHostDetector.receiverIsGateway(remote: lanPhone, gateways: []))
+        XCTAssertFalse(NetworkHostDetector.receiverIsGateway(
+            remote: .service(name: "x", type: "_opensidecar._tcp", domain: "local.", interface: nil),
+            gateways: [.hostPort(host: "192.168.1.1", port: 0)]))
+        // Same address written differently (expanded form, other scope).
+        XCTAssertEqual(
+            NetworkHostDetector.addressKey(.hostPort(host: .name("fe80:0:0:0:18fa:b7ff:febe:7064%en5", nil), port: 1)),
+            NetworkHostDetector.addressKey(routerLL))
+    }
+
     /// No metric-driven switching exists: once committed, repeated decisions
     /// with any inputs never flip protocol inside the logical session.
     func testCommittedProtocolNeverThrashes() {

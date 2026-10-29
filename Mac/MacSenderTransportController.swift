@@ -115,6 +115,22 @@ final class MacSenderTransportController: @unchecked Sendable {
         return quicSession.isApplicationReady
     }
 
+    /// Seconds since the live QUIC session's hello (nil when there is none).
+    var quicApplicationReadyAge: TimeInterval? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let quicSession, quicSession.control === connection,
+              let readyAt = quicSession.applicationReadyAt else { return nil }
+        return Date().timeIntervalSince(readyAt)
+    }
+
+    /// True when the live connection's far end is the path's gateway: the
+    /// receiver hosts this Mac's network (Personal Hotspot).
+    var currentPathReceiverIsGateway: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let path = connection?.currentPath else { return false }
+        return NetworkHostDetector.receiverIsGateway(remote: path.remoteEndpoint, gateways: path.gateways)
+    }
+
     // MARK: - Dial-generation / connection mechanics used by MacSender's
     // still-owned dial code (connectTCP/connectUSB/switchTransport/
     // scheduleReconnect/reportTrustFailure/hello security checks)
@@ -276,8 +292,13 @@ final class MacSenderTransportController: @unchecked Sendable {
         // `.wifi`; keep the existing wired-upgrade probe eligible there.
         currentPathUsesWiFi = path.usesInterfaceType(.wifi) || route == .awdl
 
+        let gatewayHost = NetworkHostDetector.receiverIsGateway(remote: path.remoteEndpoint, gateways: path.gateways)
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
-            + " route=\(route.rawValue) direct=\(currentPathDirectLink)")
+            + " route=\(route.rawValue) direct=\(currentPathDirectLink)"
+            + " local=\(path.localEndpoint.map { "\($0)" } ?? "?") remote=\(path.remoteEndpoint.map { "\($0)" } ?? "?")"
+            + " gateways=\(path.gateways.map { "\($0)" }.joined(separator: ","))"
+            + " expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
+            + (gatewayHost ? " receiverHostsNetwork=true" : ""))
         currentRoute = route
         let sink = statusSink
         Task { @MainActor in sink.publishTransportPath(route) }
@@ -850,6 +871,7 @@ extension MacSenderTransportController {
         // plain POSIX error) is never "unreachable" and never a fallback.
         let failureClass = QUICFailureClassifier.refine(failureClass, peerVerified: session.peerVerifiedAt != nil)
         let established = session.isApplicationReady
+        let liveAge = session.applicationReadyAt.map { Date().timeIntervalSince($0) }
         Log.info("quic: failure class=\(failureClass.rawValue) established=\(established) \(detail)"
             + (error.map { " error=\($0)" } ?? "")
             + (applicationError.map { " appError=\($0)" } ?? ""))
@@ -859,7 +881,8 @@ extension MacSenderTransportController {
             connectionReady = false
         }
         delegate?.transportQUICFailed(QUICTransportFailure(
-            error: error, failureClass: failureClass, established: established, detail: detail))
+            error: error, failureClass: failureClass, established: established, detail: detail,
+            liveAge: liveAge))
     }
 }
 
