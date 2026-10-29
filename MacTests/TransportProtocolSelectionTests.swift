@@ -241,6 +241,15 @@ final class TransportProtocolSelectionTests: XCTestCase {
         XCTAssertFalse(NetworkHostDetector.receiverIsGateway(
             remote: .service(name: "x", type: "_opensidecar._tcp", domain: "local.", interface: nil),
             gateways: [.hostPort(host: "192.168.1.1", port: 0)]))
+        // The gateway exactly as NWPath reported it on the hotspot: the
+        // kernel's embedded interface index (0x000c = en0) in bytes 2–3.
+        let kameBytes: [UInt8] = [0xfe, 0x80, 0x00, 0x0c, 0, 0, 0, 0, 0x18, 0xfa, 0xb7, 0xff, 0xfe, 0xbe, 0x70, 0x64]
+        let kameGateway = NWEndpoint.hostPort(host: .ipv6(IPv6Address(Data(kameBytes))!), port: 0)
+        XCTAssertTrue(NetworkHostDetector.receiverIsGateway(remote: iphoneLL, gateways: [clatGateway, kameGateway]))
+        // A global address keeps every byte: 2409:40f0:… must not collapse.
+        let global = NWEndpoint.hostPort(host: NWEndpoint.Host("2409:40f0:4420:2e87:4a5:f005:43ce:a6bb"), port: 9001)
+        let otherGlobal = NWEndpoint.hostPort(host: NWEndpoint.Host("2409:0000:4420:2e87:4a5:f005:43ce:a6bb"), port: 0)
+        XCTAssertFalse(NetworkHostDetector.receiverIsGateway(remote: global, gateways: [otherGlobal]))
         // Same address written differently (expanded form, other scope).
         XCTAssertEqual(
             NetworkHostDetector.addressKey(.hostPort(host: .name("fe80:0:0:0:18fa:b7ff:febe:7064%en5", nil), port: 1)),

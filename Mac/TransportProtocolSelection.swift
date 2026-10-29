@@ -372,16 +372,28 @@ enum NetworkHostDetector {
         case .ipv4(let address):
             return address.rawValue
         case .ipv6(let address):
-            return address.rawValue
+            return withoutEmbeddedScope(address.rawValue)
         case .name(let name, _):
             var bare = name.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             if let scope = bare.firstIndex(of: "%") { bare = String(bare[..<scope]) }
             if let v4 = IPv4Address(bare) { return v4.rawValue }
-            if let v6 = IPv6Address(bare) { return v6.rawValue }
+            if let v6 = IPv6Address(bare) { return withoutEmbeddedScope(v6.rawValue) }
             return nil
         @unknown default:
             return nil
         }
+    }
+
+    /// The kernel hands out a link-local gateway with its interface index
+    /// embedded in bytes 2–3 (BSD's KAME form: fe80:c::… for en0 = index
+    /// 12), while a connection's remote endpoint carries zeros there. Both
+    /// mean the same address, so those bytes never take part in the match.
+    private static func withoutEmbeddedScope(_ raw: Data) -> Data {
+        var bytes = [UInt8](raw)
+        guard bytes.count == 16, bytes[0] == 0xfe, bytes[1] & 0xc0 == 0x80 else { return raw }
+        bytes[2] = 0
+        bytes[3] = 0
+        return Data(bytes)
     }
 }
 
