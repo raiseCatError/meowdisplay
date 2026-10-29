@@ -442,6 +442,16 @@ final class WorkspaceModel: ObservableObject {
         closeOverview()
         if !windowMode { requestWindowMode() }
         let landscape = size.width >= size.height
+        // One window, one tile: choosing a window that's already showing selects its tile,
+        // or swaps the two tiles when replacing another one.
+        if let existing = layout.orderedTileIDs.first(where: { layout.tiles[$0]?.source?.host == host && layout.tiles[$0]?.source?.windowID == w.id }) {
+            let target = replacing ?? (asNewTile ? nil : active)
+            if let target, target != existing, let other = layout.tiles[target]?.source, layout.tiles[existing] != nil {
+                edit { l in l.replacingSource(of: target, with: source).replacingSource(of: existing, with: other) }
+            }
+            focus(target ?? existing)
+            return
+        }
         edit { l in
             let target = replacing ?? (asNewTile ? nil : (active ?? (l.orderedTileIDs.count == 1 ? l.orderedTileIDs.first : nil)))
             if let target, l.tiles[target] != nil { return l.replacingSource(of: target, with: source) }

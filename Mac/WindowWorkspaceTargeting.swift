@@ -84,6 +84,8 @@ enum WorkspaceRequestValidator {
                 rejected[id] = "unavailable"
                 continue
             }
+            // One window, one tile: a second tile asking for it stays empty.
+            guard !accepted.contains(where: { $0.windowID == entry.windowID }) else { rejected[id] = "duplicateWindow"; continue }
             let follow = (item["follow"] as? String).flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window
             let rotation = WorkspaceRotation(degrees: item["rotation"] as? Int ?? 0)
             let fit = (item["fit"] as? String).flatMap(WorkspaceFit.init(rawValue:)) ?? .fit

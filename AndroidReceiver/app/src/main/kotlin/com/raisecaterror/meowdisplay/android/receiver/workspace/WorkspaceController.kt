@@ -337,6 +337,18 @@ class WorkspaceController(
         closeOverview()
         state.update { it.copy(railExpanded = false, stagePeekOpen = false) }
         if (!state.value.windowMode) media.session.requestDisplayMode(DisplayMode.Window)
+        // One window, one tile: choosing a window that's already showing selects its tile,
+        // or swaps the two tiles when replacing another one.
+        val current = state.value.layout
+        current.orderedTileIDs.firstOrNull { current.tiles[it]?.source?.let { s -> s.host == host && s.windowID == window.id } == true }?.let { existing ->
+            val target = replacing ?: if (asNewTile) null else state.value.active
+            val other = target?.let { current.tiles[it]?.source }
+            if (target != null && target != existing && other != null) {
+                edit { it.replacingSource(target, source).replacingSource(existing, other) }
+            }
+            focus(target ?: existing)
+            return
+        }
         edit { layout ->
             val target = replacing ?: if (asNewTile) null else (state.value.active ?: layout.orderedTileIDs.singleOrNull())
             when {

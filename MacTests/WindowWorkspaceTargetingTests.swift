@@ -97,6 +97,17 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(r.assignments[0].pid, 100, "owner comes from the Mac's catalog, not the request")
     }
 
+    func testOneWindowShowsInOneTileOnly() {
+        let catalog: [UInt32: WindowCatalogEntry] = [10: entry(10, gen: 5)]
+        var next: UInt64 = 1
+        let r = WorkspaceRequestValidator.validate(tiles: [
+            ["id": "a", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "window": 10, "gen": 5],
+            ["id": "b", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0, "window": 10, "gen": 5],
+        ], catalog: catalog, hostID: "mac-a", canvasPixels: CGSize(width: 2000, height: 1000), previous: [:], nextGeneration: &next)
+        XCTAssertEqual(r.assignments.map(\.tileID), ["a"])
+        XCTAssertEqual(r.rejected["b"], "duplicateWindow")
+    }
+
     func testTileLimitAndGenerationsAcrossRequests() {
         var catalog: [UInt32: WindowCatalogEntry] = [:]
         for i in 0..<12 { catalog[UInt32(i)] = entry(UInt32(i)) }

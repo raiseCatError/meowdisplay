@@ -166,7 +166,8 @@ final class WorkspaceCompositor {
                                            c: (p2.x - p0.x) / h, d: (p2.y - p0.y) / h, tx: p0.x, ty: p0.y)
             var tile = CIImage(cvPixelBuffer: frame).transformed(by: affine).cropped(to: tileCI)
             if item.dimmed { tile = dim.cropped(to: tileCI).composited(over: tile) }
-            image = tile.composited(over: placeholder.cropped(to: tileCI)).composited(over: image)
+            // Letterbox bars match the canvas background: no gray strips beside a fitted window.
+            image = tile.composited(over: background.cropped(to: tileCI)).composited(over: image)
         }
         // Wait for the GPU: `render(_:to:)` on a Metal context returns before
         // the draw lands, and the encoder (or any CPU reader) would then see
@@ -394,6 +395,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Catalog
 
+    /// Assignment generations whose minimized/hidden window was already restored once.
+    private var restoreAttempted = Set<UInt64>()
     private var refreshInFlight = false
     private var refreshQueued: (catalog: Bool, installed: Bool)?
 
@@ -453,6 +456,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             frames[a.windowID] = entry.frame
             if entry.availability == .offscreen {
                 setState(a.tileID, delivering ? "live" : "offscreen")
+                // Chosen on the receiver: bring it back on the Mac without activating its app
+                // (ScreenCaptureKit can't capture a minimized window). Once per assignment.
+                if !delivering, restoreAttempted.insert(a.assignmentGeneration).inserted {
+                    let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
+                    DispatchQueue.main.async { Self.restoreQuietly(pid: pid, frame: frame, title: title) }
+                    refreshSoon()
+                }
             } else if tileState[a.tileID] == "offscreen" || tileState[a.tileID] == "closed" {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
@@ -933,6 +943,35 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// Only an unambiguous match: one AX window with this frame (and title).
+    /// Unhides the app (without activating it) and un-minimizes the one matching window.
+    static func restoreQuietly(pid: Int32, frame: CGRect, title: String) {
+        if let app = NSRunningApplication(processIdentifier: pid), app.isHidden {
+            app.unhide()
+            Log.info("workspace: unhid app pid=\(pid) for a tile")
+        }
+        guard AXIsProcessTrusted() else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return }
+        let minimized = windows.filter { w in
+            var m: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(w, kAXMinimizedAttribute as CFString, &m) == .success, (m as? Bool) == true else { return false }
+            var t: CFTypeRef?
+            AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &t)
+            return title.isEmpty || (t as? String) == title
+        }
+        // Prefer the exact frame; a single minimized candidate is unambiguous.
+        let byFrame = minimized.filter { w in axFrame(w).map { framesMatch($0, frame) } ?? false }
+        guard let window = byFrame.count == 1 ? byFrame.first : (minimized.count == 1 ? minimized.first : nil) else {
+            Log.info("workspace: restore skipped, \(minimized.count) minimized candidates")
+            return
+        }
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        Log.info("workspace: restored a minimized window pid=\(pid) for a tile")
+    }
+
     static func pressClose(pid: Int32, frame: CGRect, title: String) {
         guard AXIsProcessTrusted() else { return }
         let app = AXUIElementCreateApplication(pid)

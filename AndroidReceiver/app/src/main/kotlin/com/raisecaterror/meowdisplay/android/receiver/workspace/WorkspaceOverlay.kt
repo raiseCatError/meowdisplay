@@ -165,6 +165,7 @@ fun WorkspaceChrome(
                 }
                 if (multi || ui.arranging) {
                     var menu by remember { mutableStateOf(false) }
+                    var moved by remember { mutableStateOf(false) }
                     var pill by remember { mutableStateOf(IntSize.Zero) }
                     val name = remote?.app?.ifEmpty { null } ?: ui.catalog?.windows?.firstOrNull { it.id == tile.source?.windowID }?.app ?: "Window"
                     // Where the pill would sit; if the rail handle or a control is there, it moves down below it.
@@ -178,19 +179,22 @@ fun WorkspaceChrome(
                             .background(if (active) Accent.copy(alpha = 0.9f) else Chip, RoundedCornerShape(14.dp))
                             .pointerInput(id) {
                                 detectDragGesturesAfterLongPress(
-                                    onDragStart = { dragging = id; dragPoint = CGPoint(r.minX + it.x / density, r.minY + it.y / density) },
-                                    onDrag = { change, amount -> change.consume(); dragPoint = dragPoint?.let { CGPoint(it.x + amount.x / density, it.y + amount.y / density) } },
+                                    onDragStart = { moved = false; dragging = id; dragPoint = CGPoint(r.minX + it.x / density, r.minY + it.y / density) },
+                                    onDrag = { change, amount -> change.consume(); if (amount.getDistance() > 0.5f) moved = true; dragPoint = dragPoint?.let { CGPoint(it.x + amount.x / density, it.y + amount.y / density) } },
                                     onDragEnd = {
                                         val p = dragPoint; val d = dragging
                                         if (p != null && d != null) transform.remotePoint(p)?.let { n ->
                                             WGeometry.dropTarget(WPoint(n.x, n.y), frames, workspaceSize, null, canSplit = true)?.let { controller.move(d, it) }
                                         }
                                         dragging = null; dragPoint = null
+                                        // Held without moving: the tile's actions.
+                                        if (!moved) menu = true
                                     },
                                     onDragCancel = { dragging = null; dragPoint = null },
                                 )
                             }
-                            .clickable { menu = true }
+                            // A tap selects the tile and types there; hold for its actions.
+                            .clickable { controller.focus(id) }
                             .semantics { contentDescription = "$name tile options" + if (active) ", typing goes here" else "" }
                             .onSizeChanged { pill = it }
                             .padding(horizontal = 10.dp, vertical = 5.dp),
@@ -199,7 +203,6 @@ fun WorkspaceChrome(
                         tile.source?.bundleID?.let { icons[it] }?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
                         Text(name, color = if (active) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Type Here") }, onClick = { menu = false; controller.focus(id) })
                             DropdownMenuItem(text = { Text("Change Window…") }, onClick = { menu = false; controller.openOverview(replacing = id) })
                             DropdownMenuItem(text = { Text("Rotate") }, onClick = { menu = false; controller.rotate(id) })
                             DropdownMenuItem(text = { Text(if (tile.fit == WFit.Fill) "Show Whole Window" else "Fill Tile") }, onClick = { menu = false; controller.toggleFit(id) })

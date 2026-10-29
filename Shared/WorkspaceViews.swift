@@ -168,7 +168,6 @@ struct WorkspaceChromeView: View {
         let remoteName = model.tileState(id)?.app ?? ""
         let name = !remoteName.isEmpty ? remoteName : (model.catalog?.windows.first { $0.id == tile.source?.windowID }?.app ?? "Window")
         return Menu {
-            Button("Type Here") { model.focus(id) }
             Button("Change Window…") { model.openOverview(replacing: id) }
             Button("Rotate") { model.rotate(id) }
             Button(tile.fit == .fill ? "Show Whole Window" : "Fill Tile") { model.toggleFit(id) }
@@ -186,6 +185,9 @@ struct WorkspaceChromeView: View {
             .foregroundStyle(active ? Color.black : Color.white)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(active ? workspaceAccent.opacity(0.9) : workspaceChip, in: Capsule())
+        } primaryAction: {
+            // A tap selects the tile and types there; hold for the tile's actions.
+            model.focus(id)
         }
         .padding(6)
         .accessibilityLabel("\(name) tile options" + (active ? ", typing goes here" : ""))
