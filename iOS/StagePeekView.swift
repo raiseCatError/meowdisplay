@@ -165,8 +165,14 @@ struct StagePeekOverlay: View {
                 .frame(width: min(frame.width, (isPad ? 520 : 380) + e * frame.width))
                 .frame(maxWidth: .infinity, alignment: edge == .left ? .leading : .trailing)
             if e > 0 {
-                // A light scrim for legibility, never a frosted panel: the Mac stays visible.
-                Color.black.opacity((reduceTransparency ? 0.66 : 0.46) * e)
+                // Expanded: a light blur of the Mac picture behind the gallery (the cards stay
+                // sharp above it), plus a soft dim for legibility. Reduce Transparency: dim only.
+                if reduceTransparency {
+                    Color.black.opacity(0.66 * e)
+                } else {
+                    Rectangle().fill(.thinMaterial).environment(\.colorScheme, .dark).opacity(0.9 * e)
+                    Color.black.opacity(0.18 * e)
+                }
             }
         }
         .frame(width: frame.width, height: frame.height)
