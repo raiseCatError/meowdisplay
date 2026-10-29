@@ -37,6 +37,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -105,6 +107,7 @@ fun DemoScreen(runtime: DemoRuntime, onExit: () -> Unit, onOpenSettings: () -> U
         // bottom in portrait; the keyboard's key row, Stage Peek's stack and the window labels of side-by-side
         // tiles take the top centre; the window chooser has its title on the left.
         val window = LocalWindowInfo.current.containerSize
+        val density = LocalDensity.current.density
         val keyboardUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
         val badgeCentred = when {
             keyboardUp || workspaceUi.stagePeekOpen || workspaceUi.railExpanded -> false
@@ -115,7 +118,12 @@ fun DemoScreen(runtime: DemoRuntime, onExit: () -> Unit, onOpenSettings: () -> U
         DemoBadgeBar(
             onGuide = { showGuide = true }, onExit = onExit,
             modifier = Modifier.align(if (badgeCentred) Alignment.TopCenter else Alignment.TopStart)
-                .windowInsetsPadding(WindowInsets.displayCutout).padding(10.dp),
+                .windowInsetsPadding(WindowInsets.displayCutout).padding(10.dp)
+                // Stage Peek and Remote Finder keep clear of it.
+                .onGloballyPositioned { c ->
+                    val b = c.boundsInRoot(); val d = density.toDouble()
+                    runtime.workspace.hostChrome.value = listOf(com.raisecaterror.meowdisplay.core.controls.CGRect(b.left / d, b.top / d, b.width / d, b.height / d))
+                },
         )
         chip?.let { current ->
             val (label, text) = when (current) {

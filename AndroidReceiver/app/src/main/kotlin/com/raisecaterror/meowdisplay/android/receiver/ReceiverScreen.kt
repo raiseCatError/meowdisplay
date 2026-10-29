@@ -9,6 +9,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.WHinge
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.android.receiver.workspace.RemoteFinderOverlay
 import com.raisecaterror.meowdisplay.android.receiver.workspace.StagePeekOverlay
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowModePrompt
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowOverview
@@ -347,7 +348,7 @@ fun ReceiverScreen(
                     edge = prefs.stagePeekEdge,
                     frame = peekFrame,
                     safe = peekSafe,
-                    avoiding = (occupied + folds).map { it.offsetBy(-peekFrame.minX, -peekFrame.minY) },
+                    avoiding = (occupied + folds + workspace.hostChrome.value).map { it.offsetBy(-peekFrame.minX, -peekFrame.minY) },
                     hapticsEnabled = prefs.hapticsEnabled,
                     isExpanded = window.expanded,
                     inputAllowed = state.inputAllowed,
@@ -402,6 +403,13 @@ fun ReceiverScreen(
             )
         }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
+        // Remote Finder (Finder in the Stage Peek carousel): over everything, the picture unchanged.
+        workspace?.let {
+            // Below any chrome the host draws at the top (the demo's badge).
+            val top = maxOf(insets.top, it.hostChrome.value.filter { c -> c.minY < insets.top + 80 }.maxOfOrNull { c -> c.maxY + 6 } ?: 0.0)
+            RemoteFinderOverlay(it, macName, CGRect(insets.leading, top, widthDp - insets.leading - insets.trailing, heightDp - top - insets.bottom),
+                state.inputAllowed)
+        }
     }
 }
 

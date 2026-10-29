@@ -93,7 +93,7 @@ struct RemoteFinderView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if files.access == .ready, files.location != .locations {
+            if files.access == .ready, case .folder = files.location {
                 Picker("View", selection: $files.style) {
                     Image(systemName: "list.bullet").tag(RemoteFilesModel.Style.list).accessibilityLabel("List")
                     Image(systemName: "square.grid.2x2").tag(RemoteFilesModel.Style.grid).accessibilityLabel("Icons")
@@ -399,13 +399,19 @@ private struct RemoteFinderApps: View {
     @ObservedObject var workspace: WorkspaceModel
     let inputAllowed: Bool
 
+    /// The running apps from the window list until the Mac's full app list arrives.
+    private var apps: [MacAppItem] {
+        if !workspace.apps.isEmpty { return workspace.apps }
+        return (workspace.catalog?.apps ?? []).map { MacAppItem(bundleID: $0.bundleID, name: $0.name, running: true, windowCount: 0, lastUsed: nil) }
+    }
+
     var body: some View {
         ScrollView {
-            if workspace.apps.isEmpty {
+            if apps.isEmpty {
                 ProgressView().padding(30)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 88, maximum: 120), spacing: 12)], spacing: 16) {
-                ForEach(workspace.apps) { app in
+                ForEach(apps) { app in
                     Button { workspace.launch(app.bundleID) } label: {
                         VStack(spacing: 6) {
                             if let icon = workspace.icons[app.bundleID] {

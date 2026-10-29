@@ -252,6 +252,14 @@ fun StagePeekOverlay(
     LaunchedEffect(windowFocused) { if (!windowFocused && !host.searchFocused) host.cancelAll() }
     LaunchedEffect(visible) { if (!visible) { host.query = ""; focusManager.clearFocus(); host.searchFocused = false } }
     LaunchedEffect(host.launchpad) { controller.setLaunchpadOpen(host.launchpad) }
+    // Remote Finder's "Finder Windows": the peek opens on Finder's windows.
+    val peekApp = controller.peekAppRequest.value
+    LaunchedEffect(peekApp) {
+        val b = peekApp ?: return@LaunchedEffect
+        controller.peekAppRequest.value = null
+        host.openApp(dockApps.firstOrNull { it.bundleID == b } ?: MacApp(b, "Finder", true, 0))
+        if (!machine.expanded) host.expand()
+    }
     DisposableEffect(host) {
         onDispose {
             host.cancelAll()
@@ -319,10 +327,13 @@ fun StagePeekOverlay(
                 }
             }
             if (shownExpansion > 0.001) {
+                // The top controls step down below chrome already at the top (the demo's badge); the gallery follows.
+                val controlsShift = ((avoiding.filter { it.minY < safe.minY + 80 && it.maxX > safe.minX && it.minX < safe.maxX }
+                    .maxOfOrNull { it.maxY + 8 } ?: 0.0) - (safe.minY + 12)).coerceAtLeast(0.0)
                 Gallery(
                     controller, ui, host, allWindows, displays, thumbnails, displayStills, icons, inputAllowed, safe,
                     Modifier.graphicsLayer { alpha = if (dragging) 0f else shownExpansion.toFloat() },
-                    enabled = machine.expanded,
+                    enabled = machine.expanded, topExtra = controlsShift,
                 )
             }
             if (!dragging) {
@@ -621,7 +632,7 @@ private fun DragPreview(w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap
 private fun Gallery(
     controller: WorkspaceController, ui: WorkspaceUi, host: StagePeekHost, allWindows: List<CatalogWindow>, displays: List<CatalogDisplay>,
     thumbnails: Map<Long, ImageBitmap>, displayStills: Map<Long, ImageBitmap>, icons: Map<String, ImageBitmap>,
-    inputAllowed: Boolean, safe: CGRect, modifier: Modifier, enabled: Boolean,
+    inputAllowed: Boolean, safe: CGRect, modifier: Modifier, enabled: Boolean, topExtra: Double = 0.0,
 ) {
     val d = LocalDensity.current.density
     val columns = if (safe.width - 40 >= 2 * 176 + 14) 2 else 1
@@ -649,7 +660,7 @@ private fun Gallery(
             .padding(horizontal = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(TOP_CONTROLS.dp)) }
+        item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height((TOP_CONTROLS + topExtra).dp)) }
         fun windowCards(list: List<CatalogWindow>) = items(list, key = { "w" + it.id }) { w ->
             GalleryCard(controller, host, w, thumbnails[w.id], icons[w.bundleID], inTile = w.id in tiled, current = ui.windowMode && ui.currentWindowID == w.id)
         }
@@ -678,6 +689,21 @@ private fun Gallery(
                 if (results.windows.isEmpty()) item(span = { GridItemSpan(columns) }) {
                     EmptyText(if (results.apps.isEmpty()) "No apps or windows match “$query”." else "No open windows match.")
                 } else windowCards(results.windows)
+                if (controller.files.ui.value.available) {
+                    item(span = { GridItemSpan(columns) }) { SectionTitle("Files") }
+                    item(span = { GridItemSpan(columns) }) {
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Glass)
+                                .clickable { controller.files.open(query) }.padding(12.dp)
+                                .semantics { contentDescription = "Search files on the Mac for $query" },
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text("📁", fontSize = 20.sp)
+                            Text("Search files on the Mac for “$query”", color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                            Text("›", color = Color.White.copy(alpha = 0.5f), fontSize = 18.sp)
+                        }
+                    }
+                }
             }
             filter != null -> {
                 val list = allWindows.filter { it.bundleID == filter.bundleID }
@@ -1152,6 +1178,12 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     /** A carousel app: just its windows (tap again for all). An app with no window opens the gallery on its empty state. */
     fun tapApp(app: MacApp, forceFilter: Boolean = false) {
         haptics(StagePeekHaptic.Tick)
+        // Finder opens a Finder-like browser here, backed by the Mac (its windows stay one tap away).
+        if (app.bundleID in FINDER_BUNDLE_IDS && controller.files.ui.value.available && !forceFilter) {
+            controller.finderBundle = app.bundleID
+            controller.files.open()
+            return
+        }
         val clearing = appFilter == app.bundleID && !forceFilter
         appFilter = if (clearing) null else app.bundleID
         val hasWindows = controller.ui.value.catalog?.windows?.any { it.bundleID == app.bundleID } == true

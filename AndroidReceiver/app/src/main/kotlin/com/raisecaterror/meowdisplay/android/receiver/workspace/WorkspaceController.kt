@@ -23,6 +23,10 @@ import com.raisecaterror.meowdisplay.core.workspace.CatalogDisplay
 import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
 import com.raisecaterror.meowdisplay.core.workspace.DisplayThumbnail
 import com.raisecaterror.meowdisplay.core.workspace.MacApp
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesModel
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesReply
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesStyle
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesWire
 import com.raisecaterror.meowdisplay.core.workspace.ThumbnailRequestPlanner
 import com.raisecaterror.meowdisplay.core.workspace.WAdaptation
 import com.raisecaterror.meowdisplay.core.workspace.WDivider
@@ -203,12 +207,24 @@ class WorkspaceController(
 
     private val inputAllowed: Boolean get() = media.ui.value.input == InputWireState.Allowed
 
+    /** Remote Finder: the Mac's approved folders, browsed here (Finder in the carousel opens it). */
+    val files = RemoteFilesModel(
+        send = { media.session.sendWorkspace(it) },
+        inputAllowed = { inputAllowed },
+        scheduler = { ms, block -> val r = Runnable(block); main.postDelayed(r, ms); { main.removeCallbacks(r) } },
+        style = runCatching { RemoteFilesStyle.valueOf(prefs.getString(FILES_STYLE, null) ?: "") }.getOrDefault(RemoteFilesStyle.List),
+        onStyle = { prefs.edit().putString(FILES_STYLE, it.name).apply() },
+    )
+
     // MARK: Session
 
     fun onSessionEvent(event: SessionEvent) {
         when (event) {
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
-            is SessionEvent.MacFeatures -> state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
+            is SessionEvent.MacFeatures -> {
+                state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
+                files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
+            }
             is SessionEvent.DisplayModeConfirmed -> {
                 val window = event.mode == DisplayMode.Window
                 if (!window) fullDisplayMode = event.mode
@@ -220,6 +236,7 @@ class WorkspaceController(
                 main.removeCallbacks(sendRunnable)
                 fullDisplayMode = DisplayMode.Extend
                 planner.reset()
+                files.setAvailable(false)
                 state.update {
                     it.copy(windowMode = false, remote = null, available = false, arranging = false, stagePeekOpen = false,
                         launchpadOpen = false, launching = emptySet(), drag = null)
@@ -247,6 +264,7 @@ class WorkspaceController(
                     m.apps?.let { list -> state.update { it.copy(apps = WorkspaceSearch.carouselOrder(list)) } }
                     requestIcons()
                 }
+                RemoteFilesWire.REPLY -> RemoteFilesReply.parse(event.body)?.let(files::apply)
                 WorkspaceWire.APP_LAUNCH_RESULT -> AppLaunchResult.parse(event.body)?.let { r ->
                     if (!r.ok) state.update { it.copy(launching = it.launching - r.bundleID, launchFailed = r.bundleID) }
                     requestCatalog()
@@ -343,6 +361,17 @@ class WorkspaceController(
      * size is checked first (a small file can declare a huge image), larger
      * ones are downsampled, and a failed decode is dropped.
      */
+    /** A Remote Finder still or preview, decoded with the same bounds as window stills. */
+    fun decodeStill(base64: String, maxSide: Int): ImageBitmap? = decodeBounded(base64, maxSide)?.asImageBitmap()
+
+    /** Stage Peek should open on this app's windows (Remote Finder's "Finder Windows"). UI only. */
+    val peekAppRequest = androidx.compose.runtime.mutableStateOf<String?>(null)
+    /** Chrome the host draws over the receiver (the demo's badge), in window dp: overlays keep clear of it. UI only. */
+    val hostChrome = androidx.compose.runtime.mutableStateOf<List<CGRect>>(emptyList())
+
+    /** The app whose tap opened Remote Finder (Finder, or the demo's file browser). */
+    var finderBundle = "com.apple.finder"
+
     private fun decodeBounded(base64: String, maxSide: Int): android.graphics.Bitmap? {
         val bytes = runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull() ?: return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -993,6 +1022,7 @@ class WorkspaceController(
         const val LAYOUT = "layout."
         const val SAVED = "savedLayouts."
         const val RAIL_EDGE = "railEdge"
+        const val FILES_STYLE = "files.style"
         const val MAX_THUMBS = 72
         const val MAX_ICONS = 400
         const val MAX_THUMB_SIDE = 640

@@ -12,6 +12,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WPoint
 import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.WRotation
 import com.raisecaterror.meowdisplay.core.workspace.WSize
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesWire
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -168,6 +169,9 @@ class DemoMac(
                 publish()
             }
             WorkspaceWire.WINDOW_ACTION -> if (admitted && inputGranted && windowModeOffered) windowAction(obj)
+            RemoteFilesWire.REQUEST -> if (admitted && windowModeOffered) {
+                DemoFiles.answer(obj, inputGranted) { name -> show(DemoFeedback.Local("Opened $name on the demo Mac")) }.forEach(::send)
+            }
             else -> Unit // kf, stats, keyboardState, closing, sleeping, smartTouchProbe: nothing to do
         }
     }
@@ -188,7 +192,9 @@ class DemoMac(
                 put("type", "welcome")
                 put("pv", WireProtocol.VERSION)
                 put("min", 1)
-                put("features", buildJsonArray { if (receiverSpeaksWorkspace) add(JsonPrimitive(WorkspaceWire.WELCOME_FEATURE)) })
+                put("features", buildJsonArray {
+                    if (receiverSpeaksWorkspace) { add(JsonPrimitive(WorkspaceWire.WELCOME_FEATURE)); add(JsonPrimitive(RemoteFilesWire.WELCOME_FEATURE)) }
+                })
             })
             invite()
         } else if (resized) {
