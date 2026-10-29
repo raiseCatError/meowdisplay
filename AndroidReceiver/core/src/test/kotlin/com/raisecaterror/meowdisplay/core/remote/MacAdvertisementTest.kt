@@ -61,4 +61,19 @@ class MacAdvertisementTest {
         assertEquals("Family MacBook", HomeRows.nearbyEntry("MAC-1", "Family MacBook", unresolved)?.serviceName)
         assertNull("another Mac with the same name is not this one", HomeRows.nearbyEntry("MAC-1", "Family MacBook", nearby.take(1)))
     }
+
+    @Test
+    fun aConflictingSwitchedOutClaimNeverHidesAPairedMac() {
+        // TXT is unauthenticated: a second service claiming MAC-1 as switched out must not win.
+        val nearby = listOf(
+            HomeRows.Nearby("Family MacBook", MacAdvertisement(installID = "MAC-1", switchedOut = true)),
+            HomeRows.Nearby("Family MacBook (2)", MacAdvertisement(installID = "MAC-1")),
+        )
+        assertEquals("Family MacBook (2)", HomeRows.nearbyEntry("MAC-1", "Family MacBook", nearby)?.serviceName)
+        val twins = listOf(
+            HomeRows.Nearby("Imposter", MacAdvertisement(installID = "MAC-1")),
+            HomeRows.Nearby("Family MacBook", MacAdvertisement(installID = "MAC-1")),
+        )
+        assertEquals("among equal claims the paired name wins", "Family MacBook", HomeRows.nearbyEntry("MAC-1", "Family MacBook", twins)?.serviceName)
+    }
 }

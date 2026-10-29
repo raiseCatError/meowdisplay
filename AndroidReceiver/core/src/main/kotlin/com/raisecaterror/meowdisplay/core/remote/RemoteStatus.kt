@@ -215,7 +215,15 @@ object HomeRows {
     }
 
     /** The nearby entry for paired Mac [peerID] (by install ID, else by the name it was paired under). */
-    fun nearbyEntry(peerID: String, pairedName: String?, nearby: List<Nearby>): Nearby? =
-        nearby.firstOrNull { it.advert?.installID == peerID }
+    fun nearbyEntry(peerID: String, pairedName: String?, nearby: List<Nearby>): Nearby? {
+        val claims = nearby.filter { it.advert?.installID == peerID }
+        if (claims.size > 1) {
+            // Bonjour TXT is unauthenticated, so several services claiming this Mac are ambiguous:
+            // a conflicting Switched Out claim never wins, and among equals the paired name does.
+            val usable = claims.filter { it.advert?.switchedOut != true }.ifEmpty { claims }
+            return usable.firstOrNull { it.serviceName == pairedName } ?: usable.first()
+        }
+        return claims.firstOrNull()
             ?: pairedName?.let { name -> nearby.firstOrNull { it.advert?.installID == null && it.serviceName == name } }
+    }
 }

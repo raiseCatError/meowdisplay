@@ -139,7 +139,7 @@ fun ReceiverHome(
             } else {
                 item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID)), centered = true) }   // under the name, as on iPhone
             }
-            mediaUi.updateMessage?.let { message -> item { Hint(listOfNotNull(message, mediaUi.updateLink).joinToString("\n")) } }
+            mediaUi.updateMessage?.let { message -> item { Hint(message) } }
             ui.message?.let { message -> item { Notice(message, onDismiss = pairing::dismissMessage) } }
             mediaUi.connectFailedFor?.let { peer ->
                 item {
@@ -190,7 +190,8 @@ fun ReceiverHome(
                             },
                             enabled = mediaUi.listening || live || busy,
                             menu = buildList {
-                                if (!live && !busy && status != MacStatus.SwitchedOut) {
+                                // Kept even when the Mac advertises Switched Out: that TXT claim is unauthenticated.
+                                if (!live && !busy) {
                                     add("Connect with Mirror" to { remote.connect(mac.peerID, DisplayMode.Mirror) })
                                     add("Connect with Extend" to { remote.connect(mac.peerID, DisplayMode.Extend) })
                                     if (isNearby && saved != null) add("Connect over Remote" to { remote.connectRemotely(mac.peerID) })

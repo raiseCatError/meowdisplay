@@ -63,10 +63,11 @@ fun UpdateRequiredNotice(media: SessionHost) {
     val ui by media.ui.collectAsState()
     // A new notice (another Mac, or the same one again) shows again.
     var dismissed by remember(ui.peerID, ui.receiverUpdateRequired) { mutableStateOf(false) }
-    if (!ui.receiverUpdateRequired || dismissed) return
     val context = LocalContext.current
-    val link = ui.updateLink
-    val onGooglePlay = link?.let { runCatching { Uri.parse(it).host }.getOrNull() } == "play.google.com"
+    if (!ui.receiverUpdateRequired || dismissed) return
+    // The Mac's message arrives before it is authenticated, so its store URL is never opened:
+    // the button always goes to this app's own Google Play listing (iOS uses its own App Store link).
+    val link = "https://play.google.com/store/apps/details?id=${context.packageName}"
     Dialog(onDismissRequest = { dismissed = true }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         BackHandler { dismissed = true }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -81,14 +82,12 @@ fun UpdateRequiredNotice(media: SessionHost) {
                     ui.updateMessage ?: "Update MeowDisplay to keep using your second display.",
                     style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
                 )
-                if (link != null) {
-                    Button(onClick = {
-                        try {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                        } catch (_: ActivityNotFoundException) {
-                        }
-                    }, modifier = Modifier.fillMaxWidth()) { Text(if (onGooglePlay) "Update on Google Play" else "Get the Latest Version") }
-                }
+                Button(onClick = {
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: ActivityNotFoundException) {
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("Update on Google Play") }
                 TextButton(onClick = { dismissed = true }) { Text("Not Now") }
             }
         }
