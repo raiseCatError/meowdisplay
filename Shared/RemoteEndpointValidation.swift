@@ -69,6 +69,9 @@ enum RemoteEndpointValidation {
             guard label.first != "-", label.last != "-" else { return false }
             guard label.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return false }
         }
+        // The last label of a hostname is never all digits (RFC 3696 §2), so
+        // "999.1.1.1" or "1.2.3" is a mistyped address, not a name to look up.
+        guard let last = labels.last, !last.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
         return true
     }
 

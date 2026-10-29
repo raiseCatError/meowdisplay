@@ -38,30 +38,27 @@
    }
   },
   {
-   "name": "ipv4 octet over 255 is a hostname of digits",
+   "name": "ipv4 octet over 255 is not an address or a hostname",
    "host": "256.1.1.1",
    "port": "9004",
    "expect": {
-    "host": "256.1.1.1",
-    "port": 9004
+    "error": "invalidHost"
    }
   },
   {
-   "name": "three numeric labels are a hostname",
+   "name": "three numeric labels are not a hostname",
    "host": "1.2.3",
    "port": "9004",
    "expect": {
-    "host": "1.2.3",
-    "port": 9004
+    "error": "invalidHost"
    }
   },
   {
-   "name": "five numeric labels are a hostname",
+   "name": "five numeric labels are not a hostname",
    "host": "1.2.3.4.5",
    "port": "9004",
    "expect": {
-    "host": "1.2.3.4.5",
-    "port": 9004
+    "error": "invalidHost"
    }
   },
   {
@@ -685,6 +682,40 @@
    "port": "0x2328",
    "expect": {
     "error": "invalidPort"
+   }
+  },
+  {
+   "name": "ipv4-shaped with an octet over 255 is rejected",
+   "host": "999.1.1.1",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "one all-numeric label is not a hostname",
+   "host": "12345",
+   "port": "9004",
+   "expect": {
+    "error": "invalidHost"
+   }
+  },
+  {
+   "name": "a name may start with digits when the last label has letters",
+   "host": "1password.com",
+   "port": "9004",
+   "expect": {
+    "host": "1password.com",
+    "port": 9004
+   }
+  },
+  {
+   "name": "a last label mixing digits and letters is a hostname",
+   "host": "mac.1b",
+   "port": "9004",
+   "expect": {
+    "host": "mac.1b",
+    "port": 9004
    }
   }
  ],

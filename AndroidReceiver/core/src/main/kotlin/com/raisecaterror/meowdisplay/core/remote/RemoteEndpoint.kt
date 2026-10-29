@@ -62,6 +62,9 @@ object RemoteEndpointValidation {
             if (label.first() == '-' || label.last() == '-') return false
             if (!label.all { it.isAsciiLetterOrDigit() || it == '-' }) return false
         }
+        // The last label of a hostname is never all digits (RFC 3696 §2), so "999.1.1.1" or "1.2.3"
+        // is a mistyped address, not a name to look up.
+        if (labels.last().all { it in '0'..'9' }) return false
         return true
     }
 
