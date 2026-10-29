@@ -831,6 +831,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var windowBrowser: WindowBrowserService?
     /// Remote Finder for this session (created on its first request; `queue` only).
     private var fileBrowser: RemoteFileBrowser?
+    /// Window mode: whose sound the audio stream carries (`queue` only).
+    private var windowAudioSources: WindowAudioSources?
+    private var windowAudioGeneration: UInt64 = 0
     // Lock-guarded mirror of `sessionAuthorization`'s input grant for
     // `InputInjector`, which re-checks it under its own lock at injection
     // time; `DeviceSession` only ever mirrors it for display via
@@ -2658,6 +2661,56 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CancellationError()
         }
         if let text { await status(text) }
+        // Window mode: the new stream starts with the whole display's sound; narrow it again.
+        _ = try? await onQueue { sender in sender.applyWindowAudio(nil) }
+    }
+
+    /// `queue` only. Window mode: this receiver hears only the apps its panes show (nothing
+    /// when no pane shows a window); if macOS can't narrow it, normal sound (A1–A3).
+    private func applyWindowAudio(_ new: WindowAudioSources?) {
+        if let new { windowAudioSources = new }
+        guard mode == .window, let sources = windowAudioSources, let stream = captureOwnership.liveStream else { return }
+        windowAudioGeneration &+= 1
+        let generation = windowAudioGeneration
+        let displayID = captureDisplayID
+        let box = WindowAudioStreamBox(stream: stream)
+        let selfBox = self.selfBox
+        let queue = self.queue
+        Task { await Self.updateWindowAudio(sources, stream: box, displayID: displayID, generation: generation, selfBox: selfBox, queue: queue) }
+    }
+
+    private static func updateWindowAudio(_ sources: WindowAudioSources, stream box: WindowAudioStreamBox, displayID: CGDirectDisplayID,
+                                          generation: UInt64, selfBox: MacSenderSelfBox, queue: DispatchQueue) async {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
+              let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
+        let everything = SCContentFilter(display: display, excludingWindows: [])
+        var filter = everything
+        var summary = "everything"
+        if case .apps(let pids) = sources {
+            let apps = content.applications.filter { pids.contains($0.processID) }
+            if pids.isEmpty || !apps.isEmpty {
+                filter = SCContentFilter(display: display, including: apps, exceptingWindows: [])
+                summary = "\(apps.count) app(s)"
+            } else {
+                summary = "everything (apps not found)"
+            }
+        }
+        let current = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            queue.async {
+                let sender = selfBox.currentOnQueue()
+                continuation.resume(returning: sender?.windowAudioGeneration == generation && sender?.captureOwnership.liveStream === box.stream)
+            }
+        }
+        guard current else { return }
+        let stream = box.stream
+        do {
+            try await stream.updateContentFilter(filter)
+            Log.info("workspace audio: \(summary)")
+        } catch {
+            // Never mute unexpectedly: back to the whole Mac's sound.
+            Log.info("workspace audio: narrowing failed (\(error.localizedDescription)); normal audio")
+            try? await stream.updateContentFilter(everything)
+        }
     }
 
     /// `queue` only: the checks and bookkeeping that open a capture start,
@@ -6972,6 +7025,12 @@ extension MacSender {
         engine.releaseHeldInput = {
             queue.async { selfBox.currentOnQueue()?.inputInjector?.cancelActiveInput() }
         }
+        engine.onAudioSources = { [weak engine] sources in
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine else { return }
+                sender.applyWindowAudio(sources)
+            }
+        }
         workspaceEngine = engine
         // Input is mapped per tile to the window under it; the display id is
         // only the fallback for releases.
@@ -7036,6 +7095,8 @@ extension MacSender {
     func stopWorkspaceEngine() {
         guard let engine = workspaceEngine else { return }
         workspaceEngine = nil
+        windowAudioSources = nil
+        windowAudioGeneration &+= 1
         inputInjector?.setTargetMapper(nil)
         engine.stop()
     }
@@ -7144,3 +7205,5 @@ extension MacSender {
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
 }
 #endif
+
+private struct WindowAudioStreamBox: @unchecked Sendable { let stream: SCStream }

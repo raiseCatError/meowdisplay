@@ -248,6 +248,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     var deliverFrame: ((CVPixelBuffer) -> Void)?
     /// A control message for the receiver.
     var sendMessage: (([String: Any]) -> Void)?
+    /// Whose sound this receiver should hear: the shown windows' apps, or everything when a
+    /// pane shows a whole desktop. Reported on change.
+    var onAudioSources: ((WindowAudioSources) -> Void)?
+    private var lastAudioSources: WindowAudioSources?
     /// Release every held key/button on the Mac (source changed under it).
     var releaseHeldInput: (() -> Void)?
 
@@ -504,6 +508,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                                                         previous: previous, nextGeneration: &nextGeneration, displays: displayFrames)
         assignments = result.assignments
         rejected = result.rejected
+        let sources = WindowAudioSources.of(assignments)
+        if sources != lastAudioSources { lastAudioSources = sources; onAudioSources?(sources) }
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
         // Geometry from the catalog right away, so a new tile draws on the next tick.
         let knownFrames = Dictionary(assignments.compactMap { a in
@@ -1081,3 +1087,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 }
 
 private struct MenuItemsBox: @unchecked Sendable { let value: [[String: Any]] }
+
+/// Window mode's audio (A1–A3): ScreenCaptureKit captures sound per app, not per window, so
+/// a pane's window brings its whole app's sound (every Chrome window shares Chrome's).
+enum WindowAudioSources: Equatable, Sendable {
+    /// A pane shows a whole desktop: all of the Mac's sound, as in Mirror.
+    case everything
+    /// Only these apps (empty: no pane shows a window, so silence).
+    case apps(Set<Int32>)
+
+    static func of(_ assignments: [WorkspaceTileAssignment]) -> WindowAudioSources {
+        if assignments.contains(where: { $0.displayID != nil }) { return .everything }
+        return .apps(Set(assignments.map(\.pid).filter { $0 > 0 }))
+    }
+}

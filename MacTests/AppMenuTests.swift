@@ -74,3 +74,19 @@ final class AppMenuTests: XCTestCase {
         XCTAssertNil(m.tile)
     }
 }
+
+/// Window mode audio (A1–A3): which apps a receiver hears.
+final class WindowAudioSourcesTests: XCTestCase {
+    private func tile(_ id: String, pid: Int32, display: UInt32? = nil) -> WorkspaceTileAssignment {
+        var a = WorkspaceTileAssignment(tileID: id, rect: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), windowID: 10, windowGeneration: 1,
+                                        pid: pid, bundleID: "b", follow: .window, rotation: .none, fit: .auto, assignmentGeneration: 1)
+        a.displayID = display
+        return a
+    }
+
+    func testOnlyShownAppsAndNothingWithoutWindows() {
+        XCTAssertEqual(WindowAudioSources.of([]), .apps([]), "no pane shows a window: silence")
+        XCTAssertEqual(WindowAudioSources.of([tile("a", pid: 11), tile("b", pid: 12), tile("c", pid: 11)]), .apps([11, 12]))
+        XCTAssertEqual(WindowAudioSources.of([tile("a", pid: 11), tile("d", pid: 0, display: 1)]), .everything, "a desktop pane: all sound")
+    }
+}
