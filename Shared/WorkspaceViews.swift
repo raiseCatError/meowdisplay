@@ -165,8 +165,9 @@ struct WorkspaceChromeView: View {
     private func tileView(id: String, tile: WorkspaceTile, rect: CGRect, multi: Bool, frames: WorkspaceFrames) -> some View {
         let active = model.active == id
         let hovered = model.hovered == id && !active
+        let corners = outerCorners(rect)
         ZStack(alignment: .topLeading) {
-            Rectangle()
+            PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
                 .allowsHitTesting(false)
@@ -175,6 +176,18 @@ struct WorkspaceChromeView: View {
         }
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
+    }
+
+    /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
+    /// every other corner stays square. (topLeading, topTrailing, bottomTrailing, bottomLeading)
+    private func outerCorners(_ rect: CGRect) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
+        let radius = PaneOutlineShape.screenCornerRadius
+        guard radius > 0, let screen = PaneOutlineShape.screenBounds, model.pictureGlobal.width > 0 else { return (0, 0, 0, 0) }
+        let g = rect.offsetBy(dx: model.pictureGlobal.minX - picture.minX, dy: model.pictureGlobal.minY - picture.minY)
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 2 }
+        let left = near(g.minX, screen.minX), right = near(g.maxX, screen.maxX)
+        let top = near(g.minY, screen.minY), bottom = near(g.maxY, screen.maxY)
+        return (left && top ? radius : 0, right && top ? radius : 0, right && bottom ? radius : 0, left && bottom ? radius : 0)
     }
 
     @ViewBuilder
@@ -912,6 +925,63 @@ struct WorkspaceDropOverlay: View {
     private static func tick() {
         #if canImport(UIKit)
         UISelectionFeedbackGenerator().selectionChanged()
+        #endif
+    }
+}
+
+/// A rectangle with its own radius per corner (outer screen corners round, inner ones square).
+struct PaneOutlineShape: InsettableShape {
+    var topLeading: CGFloat = 0
+    var topTrailing: CGFloat = 0
+    var bottomTrailing: CGFloat = 0
+    var bottomLeading: CGFloat = 0
+    var inset: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: inset, dy: inset)
+        let cap = min(r.width, r.height) / 2
+        func radius(_ v: CGFloat) -> CGFloat { min(max(v - inset, 0), cap) }
+        let tl = radius(topLeading), tr = radius(topTrailing), br = radius(bottomTrailing), bl = radius(bottomLeading)
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX + tl, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX - tr, y: r.minY))
+        if tr > 0 { p.addArc(center: CGPoint(x: r.maxX - tr, y: r.minY + tr), radius: tr, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false) }
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - br))
+        if br > 0 { p.addArc(center: CGPoint(x: r.maxX - br, y: r.maxY - br), radius: br, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false) }
+        p.addLine(to: CGPoint(x: r.minX + bl, y: r.maxY))
+        if bl > 0 { p.addArc(center: CGPoint(x: r.minX + bl, y: r.maxY - bl), radius: bl, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false) }
+        p.addLine(to: CGPoint(x: r.minX, y: r.minY + tl))
+        if tl > 0 { p.addArc(center: CGPoint(x: r.minX + tl, y: r.minY + tl), radius: tl, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false) }
+        p.closeSubpath()
+        return p
+    }
+
+    func inset(by amount: CGFloat) -> PaneOutlineShape {
+        var copy = self
+        copy.inset += amount
+        return copy
+    }
+
+    /// The screen in global coordinates (nil off iOS).
+    static var screenBounds: CGRect? {
+        #if os(iOS)
+        return UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.screen.bounds
+        #else
+        return nil
+        #endif
+    }
+
+    /// The phone's screen-corner radius. There is no public API for it: Face ID iPhones (a home
+    /// indicator inset) are close to an eighth of the short side; home-button phones are square.
+    static var screenCornerRadius: CGFloat {
+        #if os(iOS)
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              let window = scene.windows.first, window.safeAreaInsets.bottom > 0 else { return 0 }
+        if UIDevice.current.userInterfaceIdiom == .pad { return 18 }
+        let short = min(scene.screen.bounds.width, scene.screen.bounds.height)
+        return min(max(short * 0.125, 39), 62)
+        #else
+        return 0
         #endif
     }
 }

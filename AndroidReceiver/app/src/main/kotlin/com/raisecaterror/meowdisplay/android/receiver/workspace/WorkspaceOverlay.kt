@@ -159,9 +159,24 @@ fun WorkspaceChrome(
         Modifier.fillMaxSize().onSizeChanged { box = it }
             .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / density.toDouble(), p.y / density.toDouble()) },
     ) {
+        // A pane corner in a corner of the screen follows the screen's rounding; the rest stay square.
+        val insets = chromeView.rootWindowInsets
+        fun screenCorner(position: Int): Double =
+            if (android.os.Build.VERSION.SDK_INT >= 31) (insets?.getRoundedCorner(position)?.radius ?: 0) / density.toDouble() else 0.0
+        val rootW = chromeView.rootView.width / density.toDouble()
+        val rootH = chromeView.rootView.height / density.toDouble()
         for ((id, rect) in frames.tiles) key(id) {
             val r = transform.viewRect(rect)
             val tile = ui.layout.tiles[id] ?: continue
+            val g = r.offsetBy(origin.x, origin.y)
+            fun near(a: Double, b: Double) = kotlin.math.abs(a - b) < 2.0
+            val left = near(g.minX, 0.0); val top = near(g.minY, 0.0); val right = near(g.maxX, rootW); val bottom = near(g.maxY, rootH)
+            val outline = RoundedCornerShape(
+                topStart = if (left && top) screenCorner(android.view.RoundedCorner.POSITION_TOP_LEFT).dp else 0.dp,
+                topEnd = if (right && top) screenCorner(android.view.RoundedCorner.POSITION_TOP_RIGHT).dp else 0.dp,
+                bottomEnd = if (right && bottom) screenCorner(android.view.RoundedCorner.POSITION_BOTTOM_RIGHT).dp else 0.dp,
+                bottomStart = if (left && bottom) screenCorner(android.view.RoundedCorner.POSITION_BOTTOM_LEFT).dp else 0.dp,
+            )
             val remote = ui.tileState(id)
             val active = ui.active == id
             val hovered = ui.hovered == id && !active
@@ -175,7 +190,7 @@ fun WorkspaceChrome(
                 Modifier
                     .offset { IntOffset((r.minX * density).roundToInt(), (r.minY * density).roundToInt()) }
                     .size(r.width.dp, r.height.dp)
-                    .let { m -> border?.let { m.border(it) } ?: m },
+                    .let { m -> border?.let { m.border(it, outline) } ?: m },
             ) {
                 val desktop = tile.source?.isDisplay == true
                 val status = when {
