@@ -295,8 +295,14 @@ struct StagePeekGallery: View {
                         sectionTitle(String(localized: "Displays"))
                         LazyVGrid(columns: cols, spacing: 16) {
                             ForEach(displays) { d in
-                                Button { onDisplay(d) } label: { StagePeekDisplayCard(model: model, display: d, current: !model.windowMode && d.isMain) }
-                                    .buttonStyle(.plain)
+                                StagePeekDisplayCard(model: model, display: d,
+                                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { if model.drag == nil { onDisplay(d) } }
+                                    // The desktop is a pane source too: hold and drag it onto a pane.
+                                    .simultaneousGesture(dragToPane(model.displayWindow(d)))
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
                             }
                         }
                     }
@@ -322,31 +328,35 @@ struct StagePeekGallery: View {
             ForEach(windows) { w in
                 StagePeekWindowCard(model: model, window: w, inTile: tiled.contains(w.id), current: model.currentWindowID == w.id && model.windowMode)
                     .onTapGesture { if model.drag == nil { onWindow(w) } }
-                    // Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits.
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.35)
-                            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-                            .onChanged { value in
-                                guard case .second(true, let drag) = value else { return }
-                                if model.drag == nil {
-                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                    model.beginDrag(.window(w), at: drag?.location ?? .zero)
-                                } else if let drag {
-                                    model.moveDrag(to: drag.location)
-                                }
-                            }
-                            .onEnded { _ in
-                                guard model.drag != nil else { return }
-                                let dropped = model.endDrag()
-                                if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
-                                onDragEnded(dropped)
-                            })
+                    .simultaneousGesture(dragToPane(w))
                     .accessibilityAction(named: "Show in Pane") { onWindow(w) }
                     .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
                     .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
                     .onDisappear { visible.removeAll { $0 == w.id } }
             }
         }
+    }
+
+    /// Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits.
+    /// Dropped on Cancel (or outside the picture): nothing changes.
+    private func dragToPane(_ w: CatalogWindowItem) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if model.drag == nil {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    model.beginDrag(.window(w), at: drag?.location ?? .zero)
+                } else if let drag {
+                    model.moveDrag(to: drag.location)
+                }
+            }
+            .onEnded { _ in
+                guard model.drag != nil else { return }
+                let dropped = model.endDrag()
+                if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
+                onDragEnded(dropped)
+            }
     }
 
     private func sectionTitle(_ text: String) -> some View {

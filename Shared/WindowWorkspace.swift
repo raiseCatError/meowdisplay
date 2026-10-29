@@ -236,6 +236,15 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     var windowID: UInt32
     var bundleID: String?
     var follow: Follow = .window
+
+    /// A whole Mac display can fill a pane too (Full Desktop as a tile source). It is kept
+    /// as a reserved window id with the high bit set (CGWindowIDs never get there), so
+    /// layouts, tabs and records treat it like any window; on the wire it is
+    /// `"display": <CGDirectDisplayID>` instead of `"window"`.
+    static let displayKeyBit: UInt32 = 0x8000_0000
+    static func displayKey(_ displayID: UInt32) -> UInt32 { displayKeyBit | (displayID & ~displayKeyBit) }
+    static func isDisplayKey(_ id: UInt32) -> Bool { id & displayKeyBit != 0 }
+    var isDisplay: Bool { Self.isDisplayKey(windowID) }
 }
 
 struct WorkspaceTile: Equatable, Codable, Sendable {
@@ -662,6 +671,33 @@ struct WorkspaceLayout: Equatable, Sendable {
         copy.maximized = nil
         copy.normalize()
         return (copy, overflow)
+    }
+
+    /// No empty panes: tiles without a window are dropped, empty slots close up and their
+    /// neighbours take the space (ratios kept in proportion); one window fills the picture.
+    /// Only a layout with no windows at all keeps its single empty slot.
+    func compacted() -> WorkspaceLayout {
+        var copy = self
+        for (id, tile) in tiles where tile.source == nil { copy.tiles[id] = nil }
+        copy.normalize()
+        func prune(_ n: WorkspaceNode) -> WorkspaceNode? {
+            switch n {
+            case .slot(let id): return id == nil ? nil : n
+            case .split(let axis, let children, let ratios):
+                var kept: [WorkspaceNode] = [], keptRatios: [Double] = []
+                let safe = ratios.count == children.count ? ratios : Array(repeating: 1, count: children.count)
+                for (child, ratio) in zip(children, safe) {
+                    if let p = prune(child) { kept.append(p); keptRatios.append(ratio) }
+                }
+                if kept.isEmpty { return nil }
+                if kept.count == 1 { return kept[0] }
+                let sum = keptRatios.reduce(0, +)
+                return .split(axis, kept, sum > 0 ? keptRatios.map { $0 / sum } : [])
+            }
+        }
+        copy.root = prune(copy.root) ?? .slot(nil)
+        copy.normalize()
+        return copy
     }
 
     /// Move `id` to `target`. Dropping on its own slot does nothing.

@@ -32,13 +32,14 @@ struct WorkspaceChromeView: View {
     var safeArea: CGRect?
     /// Opens the receiver's settings (the fullscreen strip's Settings button).
     var onSettings: (() -> Void)?
+    /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
+    var onViewFullScreen: (() -> Void)?
     @State private var confirmClose: String?
     @State private var lastDividerTranslation: CGSize = .zero
     /// The floating label menu: which pane (and tab) it is for.
     @State private var menu: PaneMenuTarget?
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
-    @State private var lastDropKey = ""
     @State private var stripVisible = true
     @State private var stripHideTask: Task<Void, Never>?
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -96,7 +97,7 @@ struct WorkspaceChromeView: View {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                dropPreview
+                WorkspaceDropOverlay(model: model, picture: picture)
                 if model.arranging { arrangeControls(frames) }
                 if let m = menu, let tile = model.layout.tiles[m.tile], let rect = frames.tiles[m.tile]?.onScreen(picture) {
                     // Tap anywhere else to close; nothing reaches the Mac while the menu is open.
@@ -118,45 +119,8 @@ struct WorkspaceChromeView: View {
             } message: {
                 Text("The window closes on the Mac itself, as if you clicked its close button. The app keeps running, and unsaved work asks to be saved there first.")
             }
-            .onChange(of: dropKey) { key in
-                if !key.isEmpty, key != lastDropKey { Self.haptic(.selection) }
-                lastDropKey = key
-            }
             .onChange(of: model.localFullscreen) { full in if full != nil { revealStrip() } }
             .onChange(of: model.touchPulse) { _ in if model.localFullscreen != nil { revealStrip() } }
-        }
-    }
-
-    /// Changes whenever the drop under the finger changes (haptic tick).
-    private var dropKey: String {
-        guard let d = model.drag, let target = model.dropTarget(forGlobal: d.location) else { return "" }
-        return "\(target)"
-    }
-
-    /// The highlighted landing area while a window or label is dragged, with what will happen.
-    @ViewBuilder
-    private var dropPreview: some View {
-        if let d = model.drag, let target = model.dropTarget(forGlobal: d.location) {
-            let r = target.preview.onScreen(picture)
-            let text: String = {
-                switch target {
-                case .replace: if case .pane = d.item { return String(localized: "Swap") } else { return String(localized: "Replace") }
-                case .tab: return String(localized: "Add as Tab")
-                case .split: return String(localized: "New Pane")
-                case .emptySlot: return String(localized: "Show Here")
-                }
-            }()
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(workspaceAccent.opacity(0.22))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(workspaceAccent, lineWidth: 2))
-                .overlay(Text(text).font(.caption.weight(.semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(workspaceChip, in: Capsule()))
-                .frame(width: r.width, height: r.height)
-                .position(x: r.midX, y: r.midY)
-                .allowsHitTesting(false)
-                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
-                .accessibilityHidden(true)
         }
     }
 
@@ -166,6 +130,7 @@ struct WorkspaceChromeView: View {
     }
 
     private func status(for id: String, tile: WorkspaceTile) -> String? {
+        if tile.source?.isDisplay == true, model.missing.contains(id) { return "This display isn't connected to the Mac now" }
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
         // Refused by the Mac (e.g. that window already shows in another tile).
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
@@ -247,12 +212,13 @@ struct WorkspaceChromeView: View {
 
     // MARK: Labels (one per window in the pane; tabs side by side)
 
-    private func windowItem(_ s: WorkspaceSource) -> CatalogWindowItem? { model.catalog?.windows.first { $0.id == s.windowID } }
+    private func windowItem(_ s: WorkspaceSource) -> CatalogWindowItem? { model.windowItem(s) }
 
     /// A label's text: the app's name; when a pane holds several windows of one app, their
     /// titles (shortened to fit).
     private func labelText(_ s: WorkspaceSource, in tile: WorkspaceTile, id: String) -> String {
         let w = windowItem(s)
+        if s.isDisplay { return w?.title ?? String(localized: "Desktop") }   // "Full Desktop", or the display's name
         let app = w?.app ?? (s == tile.source ? model.tileState(id)?.app : nil) ?? "Window"
         guard tile.windows.count > 1 else { return app.isEmpty ? "Window" : app }
         let apps = tile.windows.map { windowItem($0)?.app ?? "" }
@@ -334,13 +300,18 @@ struct WorkspaceChromeView: View {
 
     private func paneMenu(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
         let full = model.localFullscreen == m.tile
-        let isWindow = tile.source != nil
+        let isDesktop = tile.source?.isDisplay == true
+        let isWindow = tile.source != nil && !isDesktop
         return VStack(alignment: .leading, spacing: 0) {
             menuRow(full ? "Exit Fullscreen" : "Fullscreen on This Device",
                     full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
                 full ? model.exitLocalFullscreen() : model.enterLocalFullscreen(m.tile)
             }
-            menuRow(model.effectiveFit(m.tile) == .fill ? "Show Whole Window" : "Fill Pane",
+            if isDesktop, let onViewFullScreen {
+                // The only way from a desktop pane back to the plain full-screen desktop (Mirror/Extend).
+                menuRow("View Full Screen", "display") { onViewFullScreen() }
+            }
+            menuRow(model.effectiveFit(m.tile) == .fill ? (isDesktop ? "Show Whole Desktop" : "Show Whole Window") : "Fill Pane",
                     model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
                 model.toggleFit(m.tile)
             }
@@ -348,7 +319,7 @@ struct WorkspaceChromeView: View {
                 menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
             }
             menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
-            menuRow("Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            menuRow(isDesktop ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
             menuRow("Arrange Panes", "rectangle.3.group") { model.arranging = true }
             if let tab = m.tab {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
@@ -777,5 +748,88 @@ struct WorkspacePresetsView: View {
                 }
             }
         }
+    }
+}
+
+/// While a window or a pane label is dragged: the highlighted landing area with what will
+/// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
+/// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).
+struct WorkspaceDropOverlay: View {
+    @ObservedObject var model: WorkspaceModel
+    /// The picture, in this view's coordinates.
+    let picture: CGRect
+    @State private var lastKey = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let d = model.drag {
+                let target = model.dropTarget(forGlobal: d.location)
+                if let target { preview(target, item: d.item) }
+                cancelZone(over: model.overCancelZone(d.location))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .onChange(of: key) { k in
+            if !k.isEmpty, k != lastKey { Self.tick() }
+            lastKey = k
+        }
+        .onChange(of: model.drag == nil) { ended in if ended { model.cancelZoneGlobal = .zero } }
+    }
+
+    /// Changes whenever the landing under the finger changes (one haptic tick each).
+    private var key: String {
+        guard let d = model.drag else { return "" }
+        if model.overCancelZone(d.location) { return "cancel" }
+        return model.dropTarget(forGlobal: d.location).map { "\($0)" } ?? ""
+    }
+
+    private func preview(_ target: WorkspaceWindowDrop, item: WorkspaceDrag.Item) -> some View {
+        let r = target.preview.onScreen(picture)
+        let text: String = {
+            switch target {
+            case .replace:
+                if case .pane = item { return String(localized: "Swap") }
+                return model.windowMode ? String(localized: "Replace") : String(localized: "Show Instead of Desktop")
+            case .tab: return String(localized: "Add as Tab")
+            case .split: return String(localized: "New Pane")
+            case .emptySlot: return String(localized: "Show Here")
+            }
+        }()
+        return RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(workspaceAccent.opacity(0.22))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(workspaceAccent, lineWidth: 2))
+            .overlay(Text(text).font(.caption.weight(.semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(workspaceChip, in: Capsule()))
+            .frame(width: r.width, height: r.height)
+            .position(x: r.midX, y: r.midY)
+            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
+            .accessibilityHidden(true)
+    }
+
+    private func cancelZone(over: Bool) -> some View {
+        Label(over ? String(localized: "Release to Cancel") : String(localized: "Drop Here to Cancel"), systemImage: "xmark.circle.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(Capsule().fill(over ? Color.red.opacity(0.85) : Color.black.opacity(0.62)))
+            .overlay(Capsule().stroke(Color.white.opacity(over ? 0.9 : 0.35), lineWidth: 1))
+            .scaleEffect(over ? 1.08 : 1)
+            .animation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.8), value: over)
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { model.cancelZoneGlobal = g.frame(in: .global) }
+                    .onChange(of: g.frame(in: .global)) { model.cancelZoneGlobal = $0 }
+            })
+            .position(x: picture.midX, y: picture.maxY - 64)
+            .accessibilityHidden(true)
+    }
+
+    private static func tick() {
+        #if canImport(UIKit)
+        UISelectionFeedbackGenerator().selectionChanged()
+        #endif
     }
 }

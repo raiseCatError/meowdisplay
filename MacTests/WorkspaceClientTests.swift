@@ -22,6 +22,79 @@ final class WorkspaceClientTests: XCTestCase {
         return m
     }
 
+    private func catalogWithDisplay(_ windows: [(UInt32, UInt64, String)]) -> WorkspaceEvent {
+        WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
+            "type": WireMessage.windowCatalog, "host": "mac-a",
+            "windows": windows.map { ["id": Int($0.0), "gen": Int($0.1), "bundle": $0.2, "app": $0.2, "title": "t\($0.0)", "w": 800, "h": 600, "state": "visible"] },
+            "apps": [], "displays": [["id": 1, "name": "Built-in Display", "w": 1512, "h": 982, "main": true]],
+        ])!
+    }
+
+    /// No empty panes: a window leaving a pane closes it up; one window fills the picture.
+    func testEmptyPanesCloseUpAndOneWindowFillsThePicture() {
+        let tiles = (0..<3).map { WorkspaceTile(id: "t\($0)", source: WorkspaceSource(host: "mac-a", windowID: UInt32(10 + $0))) }
+        let grid = WorkspaceLayout(preset: .grid2x2, tiles: tiles)
+        XCTAssertEqual(grid.root.slotCount, 4, "a 2x2 preset with three windows has a hole")
+        let compact = grid.compacted()
+        XCTAssertEqual(compact.root.slotCount, 3)
+        XCTAssertEqual(Set(compact.tiles.keys), ["t0", "t1", "t2"])
+        let frames = WorkspaceGeometry.frames(for: compact, in: WorkspaceSize(width: 400, height: 800), hinge: nil)
+        let area = frames.tiles.values.reduce(0) { $0 + $1.width * $1.height }
+        XCTAssertEqual(area, 1, accuracy: 1e-9, "the rest grow to fill the picture")
+        let one = compact.removing("t1").removing("t2").compacted()
+        XCTAssertEqual(one.root, .slot("t0"), "one window fills everything")
+        let emptyTile = WorkspaceLayout(preset: .sideBySide, tiles: [tiles[0], WorkspaceTile(id: "e")]).compacted()
+        XCTAssertEqual(emptyTile.root, .slot("t0"), "a pane without a window is closed")
+        XCTAssertEqual(WorkspaceLayout().compacted().root, .slot(nil), "nothing at all: the single empty pane stays")
+    }
+
+    /// Mirror/Extend: a window dropped on the desktop's edge starts Window mode with the
+    /// desktop and the window side by side; the desktop is sent as a display, never a window.
+    func testAWindowDroppedOnTheDesktopStartsWindowModeBesideIt() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(catalogWithDisplay([(10, 5, "dev.zed.Zed")]))
+        var requested = false
+        m.requestWindowMode = { requested = true }
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.cancelZoneGlobal = CGRect(x: 120, y: 700, width: 160, height: 44)
+        let w = m.catalog!.windows[0]
+        // Dropped on Cancel: nothing changes.
+        m.beginDrag(.window(w), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: CGPoint(x: 200, y: 720))
+        XCTAssertNil(m.dropTarget(forGlobal: CGPoint(x: 200, y: 720)))
+        XCTAssertFalse(m.endDrag())
+        XCTAssertFalse(requested)
+        // Dropped on the bottom edge: desktop on top, the window below.
+        m.beginDrag(.window(w), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: CGPoint(x: 200, y: 640))
+        guard case .split = m.dropTarget(forGlobal: CGPoint(x: 200, y: 640)) else { return XCTFail("expected a split") }
+        XCTAssertTrue(m.endDrag())
+        XCTAssertTrue(requested, "Window mode starts")
+        m.apply(.mode(window: true))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        m.apply(catalogWithDisplay([(10, 5, "dev.zed.Zed")]))
+        XCTAssertEqual(m.layout.tiles.count, 2)
+        let sources = m.layout.orderedTileIDs.compactMap { m.layout.tiles[$0]?.source }
+        XCTAssertEqual(sources.map(\.isDisplay), [true, false])
+        let exp = expectation(description: "send")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+        let request = sent.last { $0["type"] as? String == WireMessage.workspaceRequest }
+        let tiles = request?["tiles"] as? [[String: Any]] ?? []
+        XCTAssertEqual(tiles.count, 2)
+        XCTAssertEqual(tiles.compactMap { $0["display"] as? Int }, [1])
+        XCTAssertEqual(tiles.compactMap { $0["window"] as? Int }, [10], "the desktop is never sent as a window number")
+        // 2x2 with two windows showing: open windows fill the grid, never an empty pane.
+        m.apply(catalogWithDisplay([(10, 5, "dev.zed.Zed"), (11, 1, "a"), (12, 1, "b"), (13, 1, "c")]))
+        m.apply(.grid2x2)
+        XCTAssertEqual(m.layout.tiles.count, 4)
+        XCTAssertEqual(m.layout.root.slotCount, 4)
+        XCTAssertTrue(m.layout.tiles.values.allSatisfy { $0.source != nil })
+    }
+
     func testStartingWindowModeIsNotAListingFailure() {
         // The Mac answers "starting" when a catalog request beats Window mode's engine.
         guard case .catalog(let starting)? = WorkspaceEvent.parse(type: WireMessage.windowCatalog,

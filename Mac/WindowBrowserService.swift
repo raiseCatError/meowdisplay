@@ -120,6 +120,10 @@ final class WindowBrowserService: @unchecked Sendable {
 
     func scDisplay(_ id: UInt32) -> SCDisplay? { queue.sync { scDisplays[id] } }
     func displayEntry(_ id: UInt32) -> DisplayCatalogEntry? { queue.sync { displays.first { $0.displayID == id } } }
+    /// Listed displays' global bounds (a tile may show one of these, nothing else).
+    func displayFrames() -> [UInt32: CGRect] {
+        queue.sync { Dictionary(displays.map { ($0.displayID, $0.frame) }, uniquingKeysWith: { a, _ in a }) }
+    }
 
     // MARK: Messages (admitted session only; MacSender gates)
 

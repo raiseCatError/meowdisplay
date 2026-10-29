@@ -35,7 +35,18 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     }
 
     func start(window: SCWindow, size: CGSize, fps: Int, sourceRect: CGRect? = nil) async throws {
-        let filter = SCContentFilter(desktopIndependentWindow: window)
+        try await start(filter: SCContentFilter(desktopIndependentWindow: window), size: size, fps: fps, sourceRect: sourceRect)
+    }
+
+    /// A whole display (Full Desktop in a tile). MeowDisplay's own windows are left out.
+    func start(display: SCDisplay, size: CGSize, fps: Int, sourceRect: CGRect? = nil) async throws {
+        let own = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true))?
+            .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
+        try await start(filter: SCContentFilter(display: display, excludingApplications: own, exceptingWindows: []),
+                        size: size, fps: fps, sourceRect: sourceRect)
+    }
+
+    private func start(filter: SCContentFilter, size: CGSize, fps: Int, sourceRect: CGRect?) async throws {
         config.width = Int(size.width)
         config.height = Int(size.height)
         // Per-tile zoom: capture only the zoomed-in part, at the tile's resolution (sharp).
@@ -98,6 +109,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         if current { onStop?(code) }
     }
 }
+
+/// What a tile captures: a window, or a whole display (ScreenCaptureKit objects, read-only here).
+private struct CaptureSource: @unchecked Sendable { let window: SCWindow?; let display: SCDisplay? }
 
 // MARK: - Compositor
 
@@ -408,7 +422,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         followApps(snap)
         var frames: [UInt32: CGRect] = [:]
         let previousFrames = inputLock.withLock { targeting.windowFrames }
+        let displayFrames = browser.displayFrames()
         for a in assignments {
+            if let display = a.displayID {
+                // A desktop tile: the display's bounds; gone when the display is unplugged.
+                if let f = displayFrames[display] {
+                    frames[a.windowID] = f
+                    if tileState[a.tileID] == "closed" { setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting") }
+                } else {
+                    setState(a.tileID, "closed")
+                }
+                continue
+            }
             guard let entry = catalog[a.windowID], entry.generation == a.windowGeneration else {
                 if browser.knows(windowID: a.windowID, generation: a.windowGeneration) {
                     // Skipped by this listing only: keep it as it was.
@@ -466,14 +491,16 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func applyWorkspace(_ obj: [String: Any]) {
         let raw = obj["tiles"] as? [[String: Any]] ?? []
         let previous = Dictionary(assignments.map { ($0.tileID, $0) }, uniquingKeysWith: { a, _ in a })
+        let displayFrames = browser.displayFrames()
         let result = WorkspaceRequestValidator.validate(tiles: raw, catalog: catalog, hostID: hostID, canvasPixels: canvas,
-                                                        previous: previous, nextGeneration: &nextGeneration)
+                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames)
         assignments = result.assignments
         rejected = result.rejected
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
         // Geometry from the catalog right away, so a new tile draws on the next tick.
-        let knownFrames = Dictionary(assignments.compactMap { a in catalog[a.windowID].map { (a.windowID, $0.frame) } },
-                                     uniquingKeysWith: { a, _ in a })
+        let knownFrames = Dictionary(assignments.compactMap { a in
+            a.displayID.map { d in displayFrames[d].map { (a.windowID, $0) } } ?? catalog[a.windowID].map { (a.windowID, $0.frame) }
+        }, uniquingKeysWith: { a, _ in a })
         let release = inputLock.withLock { () -> Bool in
             targeting.windowFrames.merge(knownFrames) { _, new in new }
             let r = targeting.update(assignments: assignments)
@@ -501,7 +528,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
         for a in assignments where captures[a.tileID] == nil && tileState[a.tileID] != "closed" {
-            guard let window = snapshot?.scWindows[a.windowID] else { setState(a.tileID, "waiting"); continue }
+            let source = CaptureSource(window: a.displayID == nil ? snapshot?.scWindows[a.windowID] : nil,
+                                       display: a.displayID.flatMap { browser.scDisplay($0) })
+            guard source.window != nil || source.display != nil else { setState(a.tileID, "waiting"); continue }
             guard Self.reserveBudget() else { setState(a.tileID, "limit"); continue }
             let capture = WindowTileCapture(tileID: a.tileID, windowID: a.windowID, assignmentGeneration: a.assignmentGeneration)
             capture.onFrame = { [weak self] in
@@ -520,7 +549,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     // -3815 (no window) / closed: keep the tile, mark it. Other
                     // errors: one restart on the next refresh, never a loop
                     // that touches other tiles.
-                    self.setState(a.tileID, self.catalog[a.windowID] == nil ? "closed" : "failed")
+                    let gone = a.displayID.map { self.browser.displayEntry($0) == nil } ?? (self.catalog[a.windowID] == nil)
+                    self.setState(a.tileID, gone ? "closed" : "failed")
                     self.sendState()
                 }
             }
@@ -532,7 +562,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                                                  streamFPS: streamFPS, available: true)
             Task { [weak self] in
                 do {
-                    try await capture.start(window: window, size: size, fps: fps, sourceRect: rect)
+                    if let display = source.display {
+                        try await capture.start(display: display, size: size, fps: fps, sourceRect: rect)
+                    } else if let window = source.window {
+                        try await capture.start(window: window, size: size, fps: fps, sourceRect: rect)
+                    }
                     // Superseded while starting (stopped, replaced): don't leave it running.
                     let current = await self?.isCurrent(capture) ?? false
                     if !current { await capture.stop() }
@@ -572,15 +606,21 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// The zoomed-in part of the window in its own points, or nil for the whole window.
+    /// The tile's source in global points: its window's frame, or its display's bounds.
+    private func sourceFrame(_ a: WorkspaceTileAssignment) -> CGRect? {
+        if let d = a.displayID { return inputLock.withLock { targeting.windowFrames[a.windowID] } ?? CGDisplayBounds(d) }
+        return catalog[a.windowID]?.frame
+    }
+
     private func cropRect(for a: WorkspaceTileAssignment) -> CGRect? {
-        guard a.crop != WorkspaceCrop.full, let frame = catalog[a.windowID]?.frame.size else { return nil }
+        guard a.crop != WorkspaceCrop.full, let frame = sourceFrame(a)?.size else { return nil }
         return CGRect(x: frame.width * a.crop.x, y: frame.height * a.crop.y,
                       width: frame.width * a.crop.width, height: frame.height * a.crop.height)
     }
 
     private func captureSize(for a: WorkspaceTileAssignment) -> CGSize {
         let tilePx = CGSize(width: a.rect.width * canvas.width, height: a.rect.height * canvas.height)
-        let whole = catalog[a.windowID]?.frame.size ?? tilePx
+        let whole = sourceFrame(a)?.size ?? tilePx
         // Zoomed in: the captured part is smaller, so it gets more pixels per point (up to the display's own).
         let frame = CGSize(width: whole.width * a.crop.width, height: whole.height * a.crop.height)
         let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
@@ -595,12 +635,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let (t, decision) = inputLock.withLock { (targeting, keyboardDecision) }
         let tiles: [[String: Any]] = assignments.map { a in
             let entry = catalog[a.windowID]
-            return [
+            var tile: [String: Any] = [
                 "id": a.tileID, "window": Int(a.windowID), "gen": Int(a.windowGeneration),
                 "state": tileState[a.tileID] ?? "waiting", "app": entry?.appName ?? "", "bundle": a.bundleID,
                 "title": String((entry?.title ?? "").prefix(120)), "follow": a.follow.rawValue,
                 "rotation": a.rotation.rawValue, "fit": a.fit.rawValue, "crop": [a.crop.x, a.crop.y, a.crop.width, a.crop.height],
             ]
+            if let d = a.displayID {
+                tile["display"] = Int(d)
+                tile["app"] = "Desktop"
+                tile["title"] = String((browser.displayEntry(d)?.name ?? "").prefix(120))
+            }
+            return tile
         }
         var msg: [String: Any] = [
             "type": WireMessage.workspaceState, "host": hostID, "tiles": tiles,
@@ -667,6 +713,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard var target else { return nil }
         if phase == .up { return target.point }   // a release always goes through
+        if WorkspaceSource.isDisplayKey(target.windowID) {
+            // A desktop tile: input lands wherever it is on that display, as in Mirror. Nothing
+            // is raised or activated first, and there is no window to be covered.
+            return target.point
+        }
         if phase == .down || phase == .scroll {
             // The window may have moved since the last refresh: map against its
             // current frame, and only while it is on screen.
@@ -762,7 +813,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     private func activateBounded(_ a: WorkspaceTileAssignment) {
-        guard let frame = inputLock.withLock({ targeting.windowFrames[a.windowID] }) else { return }
+        guard a.displayID == nil, let frame = inputLock.withLock({ targeting.windowFrames[a.windowID] }) else { return }
         Self.raise(pid: a.pid, frame: frame)
     }
 

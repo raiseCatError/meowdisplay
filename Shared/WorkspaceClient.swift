@@ -211,15 +211,23 @@ enum WorkspaceRequests {
 
     /// Only this host's tiles, at their normalized frames.
     static func workspace(_ layout: WorkspaceLayout, frames: WorkspaceFrames, host: String, focus: String?,
-                          generation: (WorkspaceSource) -> UInt64?) -> [String: Any] {
+                          generation: (WorkspaceSource) -> UInt64?,
+                          displayID: (WorkspaceSource) -> UInt32? = { _ in nil }) -> [String: Any] {
         var tiles: [[String: Any]] = []
         for id in layout.orderedTileIDs {
             guard let tile = layout.tiles[id], let source = tile.source, source.host == host,
                   let r = frames.tiles[id], r.width > 0, r.height > 0 else { continue }
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
-                                    "window": Int(source.windowID), "follow": source.follow.rawValue,
+                                    "follow": source.follow.rawValue,
                                     "rotation": tile.rotation.rawValue, "fit": tile.fit.rawValue]
-            if let gen = generation(source) { t["gen"] = Int(gen) }
+            if source.isDisplay {
+                // A whole Mac display (Full Desktop in a pane), by its real display id.
+                guard let d = displayID(source) else { continue }
+                t["display"] = Int(d)
+            } else {
+                t["window"] = Int(source.windowID)
+                if let gen = generation(source) { t["gen"] = Int(gen) }
+            }
             if let c = tile.crop { t["crop"] = [c.x, c.y, c.width, c.height] }
             tiles.append(t)
         }
@@ -326,6 +334,11 @@ final class WorkspaceModel: ObservableObject {
     /// The picture's frame in global (screen) coordinates, reported by the pane chrome, so drags
     /// that start in Stage Peek can find the panes under the finger.
     var pictureGlobal: CGRect = .zero
+    /// Mirror/Extend: the desktop picture's global frame (reported by Stage Peek's overlay), so a
+    /// window dragged onto the desktop can land beside it.
+    var desktopPictureGlobal: CGRect = .zero
+    /// The "Cancel" drop zone shown during a drag (global). Dropping there changes nothing.
+    var cancelZoneGlobal: CGRect = .zero
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -426,7 +439,7 @@ final class WorkspaceModel: ObservableObject {
 
     private func load(for peer: String) {
         host = peer
-        saved = defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()
+        saved = (defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()).compacted()
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
         thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
@@ -445,6 +458,10 @@ final class WorkspaceModel: ObservableObject {
         var rebased = saved
         for (id, tile) in saved.tiles {
             guard let source = tile.source else { continue }
+            if source.isDisplay {
+                if !c.displays.contains(where: { WorkspaceSource.displayKey($0.id) == source.windowID }) { missing.insert(id) }
+                continue
+            }
             // A new Mac session: keep a saved tile only for the same window id of the same app.
             guard let w = byID[source.windowID], source.bundleID == nil || source.bundleID == w.bundleID else { missing.insert(id); continue }
             setGeneration(source, w.generation)
@@ -548,8 +565,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func windowSize(_ tile: WorkspaceTile) -> WorkspaceSize? {
-        guard let source = tile.source, let w = catalog?.windows.first(where: { $0.id == source.windowID }),
-              w.width > 0, w.height > 0 else { return nil }
+        guard let source = tile.source, let w = windowItem(source), w.width > 0, w.height > 0 else { return nil }
         return WorkspaceSize(width: Double(w.width), height: Double(w.height))
     }
 
@@ -614,40 +630,91 @@ final class WorkspaceModel: ObservableObject {
     /// A window dropped from Stage Peek: replace a pane's window, add it as a tab, split a pane, or fill an empty slot.
     /// One window shows in one pane only: it leaves the pane (or tab) it was in.
     func drop(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) {
-        guard let host else { return }
-        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: w.bundleID)
-        setGeneration(source, w.generation)
+        guard let source = source(for: w) else { return }
         if !windowMode { requestWindowMode() }
         var focusTile: String?
         edit { l in
-            var l = l
-            if let holder = l.tile(holding: host, windowID: w.id) {
-                if case .replace(let t, _) = target, t == holder { focusTile = holder; return l }
-                if case .tab(let t, _) = target, t == holder {
-                    if let i = l.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == w.id }) { l = l.switchingTab(of: holder, to: i) }
-                    focusTile = holder; return l
-                }
-                l = Self.detach(source, from: holder, in: l)
-            }
-            switch target {
-            case .replace(let t, _):
-                focusTile = t
-                return l.replacingSource(of: t, with: source)
-            case .tab(let t, _):
-                focusTile = t
-                return l.addingTab(source, to: t)
-            case .split(let index, let edge, _):
-                let id = "w\(nextTile)"; nextTile += 1
-                focusTile = id
-                return l.tiles.count < capacity ? l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge)
-                    : (WorkspaceLayout.slotID(l.root, at: index).flatMap { $0 }.map { l.addingTab(source, to: $0) } ?? l)
-            case .emptySlot(let index, _):
-                let id = "w\(nextTile)"; nextTile += 1
-                focusTile = id
-                return l.filling(slot: index, with: WorkspaceTile(id: id, source: source))
-            }
+            let (next, focus) = dropping(source, on: target, in: l)
+            focusTile = focus
+            return next
         }
         if let focusTile { focus(focusTile) }
+    }
+
+    private func dropping(_ source: WorkspaceSource, on target: WorkspaceWindowDrop, in start: WorkspaceLayout) -> (WorkspaceLayout, String?) {
+        var l = start
+        if let holder = l.tile(holding: source.host, windowID: source.windowID) {
+            if case .replace(let t, _) = target, t == holder { return (l, holder) }
+            if case .tab(let t, _) = target, t == holder {
+                if let i = l.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == source.windowID }) { l = l.switchingTab(of: holder, to: i) }
+                return (l, holder)
+            }
+            l = Self.detach(source, from: holder, in: l)
+        }
+        switch target {
+        case .replace(let t, _):
+            return (l.replacingSource(of: t, with: source), t)
+        case .tab(let t, _):
+            return (l.addingTab(source, to: t), t)
+        case .split(let index, let edge, _):
+            let id = "w\(nextTile)"; nextTile += 1
+            if l.tiles.count < capacity { return (l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge), id) }
+            let holder = WorkspaceLayout.slotID(l.root, at: index).flatMap { $0 }
+            return (holder.map { l.addingTab(source, to: $0) } ?? l, holder)
+        case .emptySlot(let index, _):
+            let id = "w\(nextTile)"; nextTile += 1
+            return (l.filling(slot: index, with: WorkspaceTile(id: id, source: source)), id)
+        }
+    }
+
+    /// The pane source for a catalog window (or a display's pseudo-window), remembering its generation.
+    private func source(for w: CatalogWindowItem) -> WorkspaceSource? {
+        guard let host else { return nil }
+        let display = WorkspaceSource.isDisplayKey(w.id)
+        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: display ? nil : w.bundleID)
+        if !display { setGeneration(source, w.generation) }
+        return source
+    }
+
+    // MARK: Displays as pane sources (Full Desktop in a tile)
+
+    /// A Mac display as a pane source: a pseudo-window Stage Peek, drops and pickers can use.
+    func displayWindow(_ d: CatalogDisplayItem) -> CatalogWindowItem {
+        CatalogWindowItem(id: WorkspaceSource.displayKey(d.id), generation: 0, bundleID: "", app: String(localized: "Desktop"),
+                          title: d.isMain ? String(localized: "Full Desktop") : d.name,
+                          width: d.width, height: d.height, minimized: false, active: false)
+    }
+
+    /// The display a display source shows (nil when it isn't one, or the display is gone).
+    func display(for source: WorkspaceSource) -> CatalogDisplayItem? {
+        guard source.isDisplay else { return nil }
+        return catalog?.displays.first { WorkspaceSource.displayKey($0.id) == source.windowID }
+    }
+
+    /// The Mac's main real display: what Mirror shows as "the desktop".
+    var mainDisplay: CatalogDisplayItem? {
+        let all = catalog?.displays ?? []
+        return all.first { $0.isMain && !$0.isVirtual } ?? all.first { !$0.isVirtual } ?? all.first
+    }
+
+    /// A card's picture: the window's still, or the display's.
+    func still(for w: CatalogWindowItem) -> CGImage? {
+        guard WorkspaceSource.isDisplayKey(w.id) else { return thumbnails[w.id] }
+        return catalog?.displays.first { WorkspaceSource.displayKey($0.id) == w.id }.flatMap { displayThumbnails[$0.id] }
+    }
+
+    /// The catalog entry a pane source shows (a display's pseudo-window for displays).
+    func windowItem(_ source: WorkspaceSource) -> CatalogWindowItem? {
+        if source.isDisplay { return display(for: source).map(displayWindow) }
+        return catalog?.windows.first { $0.id == source.windowID }
+    }
+
+    /// Mirror/Extend: the picture is one pane showing the desktop, so a window dragged onto it
+    /// replaces it, joins it as a tab, or splits it (Window mode then starts with both).
+    private func desktopLayout() -> WorkspaceLayout? {
+        guard let host, let d = mainDisplay else { return nil }
+        let tile = WorkspaceTile(id: "w\(nextTile)", source: WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id)))
+        return WorkspaceLayout(preset: .single, tiles: [tile])
     }
 
     /// A pane's label dragged elsewhere: onto another pane's labels = merge as tabs, onto an
@@ -700,7 +767,8 @@ final class WorkspaceModel: ObservableObject {
     private var arranged = WorkspaceLayout()
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
-        let next = change(arranged)
+        // Never an empty pane: a window that leaves a pane closes it up and the rest grow.
+        let next = change(arranged).compacted()
         guard next != arranged else { return }
         history.record(saved)
         var updated = next
@@ -723,6 +791,7 @@ final class WorkspaceModel: ObservableObject {
         guard let c = catalog else { return }
         missing = Set(saved.tiles.compactMap { id, tile in
             guard let source = tile.source else { return nil }
+            if source.isDisplay { return c.displays.contains { WorkspaceSource.displayKey($0.id) == source.windowID } ? nil : id }
             let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
             return listed ? nil : id
         })
@@ -730,7 +799,17 @@ final class WorkspaceModel: ObservableObject {
 
     func apply(_ preset: WorkspacePreset) {
         edit { l in
-            let ordered = l.orderedTileIDs.compactMap { l.tiles[$0] }
+            var ordered = l.orderedTileIDs.compactMap { l.tiles[$0] }
+            // 2x2 or 3x3 with fewer windows showing: the Mac's other open windows (front to back)
+            // fill the rest, so the grid has no empty panes. Fewer windows than panes: it closes up.
+            if ordered.count < preset.slotCount, let c = catalog {
+                let shown = Set(l.tiles.values.flatMap(\.windows).map(\.windowID))
+                for w in c.windows where !w.minimized && !shown.contains(w.id) && ordered.count < preset.slotCount {
+                    guard let source = source(for: w) else { break }
+                    ordered.append(WorkspaceTile(id: "w\(nextTile)", source: source))
+                    nextTile += 1
+                }
+            }
             return ordered.count > preset.slotCount ? l.applying(preset).layout : WorkspaceLayout(preset: preset, tiles: ordered)
         }
     }
@@ -765,9 +844,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func choose(_ w: CatalogWindowItem, asNewTile: Bool) {
-        guard let host else { return }
-        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: w.bundleID)
-        setGeneration(source, w.generation)
+        guard let host, let source = source(for: w) else { return }
         let replacing = replacingTile
         closeOverview()
         if !windowMode { requestWindowMode() }
@@ -832,27 +909,52 @@ final class WorkspaceModel: ObservableObject {
     func moveDrag(to global: CGPoint) { if drag != nil { drag?.location = global } }
     func cancelDrag() { drag = nil }
 
-    /// The drop under the finger, in picture terms (nil outside the panes or in Mirror/Extend).
+    /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
+    /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
-        guard windowMode, pictureGlobal.width > 0, pictureGlobal.contains(p) else { return nil }
+        if overCancelZone(p) { return nil }
+        if !windowMode {
+            guard case .window = drag?.item, desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p),
+                  let desk = desktopLayout() else { return nil }
+            let g = desktopPictureGlobal
+            let s = WorkspaceSize(width: g.width, height: g.height)
+            let n = WorkspacePoint(x: (p.x - g.minX) / g.width, y: (p.y - g.minY) / g.height)
+            return WorkspaceGeometry.windowDrop(at: n, layout: desk, frames: WorkspaceGeometry.frames(for: desk, in: s, hinge: nil),
+                                                size: s, labelHeight: Double(labelHeight / g.height), canSplit: true)
+        }
+        guard pictureGlobal.width > 0, pictureGlobal.contains(p) else { return nil }
         let n = WorkspacePoint(x: (p.x - pictureGlobal.minX) / pictureGlobal.width, y: (p.y - pictureGlobal.minY) / pictureGlobal.height)
         return windowDrop(at: n, labelHeight: Double(labelHeight / pictureGlobal.height))
     }
 
-    /// Ends a drag: drops onto the pane under the finger. A window dropped in Mirror/Extend
-    /// (no panes on screen) is shown in Window mode. Returns whether anything changed.
+    func overCancelZone(_ p: CGPoint) -> Bool { cancelZoneGlobal.width > 0 && cancelZoneGlobal.insetBy(dx: -8, dy: -8).contains(p) }
+
+    /// Ends a drag: drops onto the pane under the finger. Dropped on Cancel or outside the
+    /// picture: nothing changes. Returns whether anything changed.
     @discardableResult
     func endDrag() -> Bool {
         guard let d = drag else { return false }
-        drag = nil
         let target = dropTarget(forGlobal: d.location)
+        drag = nil
+        guard let target else { return false }
         switch d.item {
         case .window(let w):
-            if let target { drop(w, on: target); return true }
-            if !windowMode { switchTo(w); return true }
-            return false
+            if !windowMode {
+                // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
+                guard let desk = desktopLayout(), let source = source(for: w) else { return false }
+                nextTile += 1   // the desktop pane's id
+                let (next, focusTile) = dropping(source, on: target, in: desk)
+                history.record(saved)
+                saved = next.compacted()
+                localFullscreen = nil
+                refreshMissing(); persist(); publish()
+                requestWindowMode()
+                if let focusTile { focus(focusTile) }
+                return true
+            }
+            drop(w, on: target)
+            return true
         case .pane(let id, let tab):
-            guard let target else { return false }
             dropTile(id, tab: tab, on: target)
             return true
         }
@@ -953,7 +1055,8 @@ final class WorkspaceModel: ObservableObject {
         var sendable = layout
         for id in missing { sendable = sendable.replacingSource(of: id, with: nil) }
         _ = send(WorkspaceRequests.workspace(sendable, frames: WorkspaceGeometry.frames(for: sendable, in: size, hinge: hinge),
-                                             host: host, focus: active, generation: generation))
+                                             host: host, focus: active, generation: generation,
+                                             displayID: { [weak self] in self?.display(for: $0)?.id }))
     }
 
     private func persist() {

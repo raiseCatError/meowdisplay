@@ -37,6 +37,9 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     /// Bumped whenever this tile's window changes: frames, held input and
     /// focus from an older generation are discarded.
     var assignmentGeneration: UInt64
+    /// A whole display in this tile (Full Desktop as a tile source). `windowID` is then its
+    /// reserved key (`WorkspaceSource.displayKey`), so window-keyed maps never collide.
+    var displayID: UInt32? = nil
 }
 
 /// Per-tile zoom from a request: `[x, y, w, h]` normalized to the window.
@@ -72,9 +75,10 @@ enum WorkspaceRequestValidator {
 
     /// `tiles`: the request's `tiles` array. `hostID`: this Mac's install id;
     /// tiles naming another host belong to another connection and are skipped.
+    /// `displays`: the displays this Mac listed to this session (id -> global bounds); a tile may show one.
     static func validate(tiles raw: [[String: Any]], catalog: [UInt32: WindowCatalogEntry], hostID: String,
                          canvasPixels: CGSize, previous: [String: WorkspaceTileAssignment],
-                         nextGeneration: inout UInt64) -> Result {
+                         nextGeneration: inout UInt64, displays: [UInt32: CGRect] = [:]) -> Result {
         var accepted: [WorkspaceTileAssignment] = []
         var rejected: [String: String] = [:]
         var seen = Set<String>()
@@ -95,7 +99,30 @@ enum WorkspaceRequestValidator {
                 rejected[id] = "overlap"
                 continue
             }
+            let rotation = WorkspaceRotation(degrees: item["rotation"] as? Int ?? 0)
+            let fit = (item["fit"] as? String).flatMap(WorkspaceFit.init(rawValue:)) ?? .fit
+            if let raw = item["display"] {
+                // A whole display: only one this Mac listed, at most once in the layout.
+                guard let displayID = (raw as? Int).flatMap({ UInt32(exactly: $0) }), displays[displayID] != nil else {
+                    rejected[id] = "unavailable"; continue
+                }
+                let key = WorkspaceSource.displayKey(displayID)
+                guard !accepted.contains(where: { $0.windowID == key }) else { rejected[id] = "duplicateWindow"; continue }
+                var generation: UInt64
+                if let old = previous[id], old.windowID == key, old.displayID == displayID {
+                    generation = old.assignmentGeneration
+                } else {
+                    generation = nextGeneration
+                    nextGeneration += 1
+                }
+                accepted.append(WorkspaceTileAssignment(
+                    tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
+                    rotation: rotation, fit: fit, crop: WorkspaceCrop.parse(item["crop"]), assignmentGeneration: generation,
+                    displayID: displayID))
+                continue
+            }
             guard let windowNumber = (item["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
+                  !WorkspaceSource.isDisplayKey(windowNumber),
                   let entry = catalog[windowNumber] else { rejected[id] = "unavailable"; continue }
             // The generation is required: without it a reused id can't be told apart.
             guard let gen = (item["gen"] as? Int).flatMap({ UInt64(exactly: $0) }), gen == entry.generation else {
@@ -105,8 +132,6 @@ enum WorkspaceRequestValidator {
             // One window, one tile: a second tile asking for it stays empty.
             guard !accepted.contains(where: { $0.windowID == entry.windowID }) else { rejected[id] = "duplicateWindow"; continue }
             let follow = (item["follow"] as? String).flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window
-            let rotation = WorkspaceRotation(degrees: item["rotation"] as? Int ?? 0)
-            let fit = (item["fit"] as? String).flatMap(WorkspaceFit.init(rawValue:)) ?? .fit
             var generation: UInt64
             if let old = previous[id], old.windowID == entry.windowID, old.windowGeneration == entry.generation {
                 generation = old.assignmentGeneration
@@ -372,6 +397,8 @@ enum WorkspaceKeyboardGate {
     static func decide(active: WorkspaceTileAssignment?, frontmostPID: Int32?, focusedWindowID: UInt32?,
                        focusedWindowIsChild: Bool) -> Decision {
         guard let active else { return .noActiveTile }
+        // A desktop tile types wherever the Mac's focus is, as Mirror does.
+        if active.displayID != nil { return .deliver }
         guard frontmostPID == active.pid else { return .hostFocusElsewhere }
         guard let focusedWindowID else { return .deliver }   // app in front, no window info (AX unavailable): its own window or nothing
         if focusedWindowID == active.windowID || focusedWindowIsChild || active.follow == .app { return .deliver }

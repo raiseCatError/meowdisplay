@@ -97,6 +97,50 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertEqual(r.assignments[0].pid, 100, "owner comes from the Mac's catalog, not the request")
     }
 
+    /// Full Desktop as a tile source: only a display this Mac listed, once, mixed with windows.
+    /// Input to it lands on the display itself; keys go wherever the Mac's focus is.
+    func testADisplayTileNeedsAListedDisplayAndMixesWithWindows() {
+        let catalog: [UInt32: WindowCatalogEntry] = [10: entry(10, gen: 5)]
+        let displays: [UInt32: CGRect] = [1: CGRect(x: 0, y: 0, width: 1512, height: 982)]
+        var next: UInt64 = 1
+        let r = WorkspaceRequestValidator.validate(tiles: [
+            ["id": "d", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "display": 1],
+            ["id": "w", "x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5, "window": 10, "gen": 5],
+            ["id": "x", "x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5, "display": 7],   // never listed
+        ], catalog: catalog, hostID: "mac-a", canvasPixels: CGSize(width: 2000, height: 1000), previous: [:],
+           nextGeneration: &next, displays: displays)
+        XCTAssertEqual(r.assignments.map(\.tileID), ["d", "w"])
+        XCTAssertEqual(r.assignments[0].displayID, 1)
+        XCTAssertEqual(r.assignments[0].windowID, WorkspaceSource.displayKey(1))
+        XCTAssertEqual(r.rejected["x"], "unavailable")
+        // The display's key is never accepted as a window number, and a display shows once.
+        let sneaky = WorkspaceRequestValidator.validate(tiles: [
+            ["id": "a", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "display": 1],
+            ["id": "b", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0, "display": 1],
+            ["id": "c", "x": 0.0, "y": 0.0, "w": 0.1, "h": 0.1, "window": Int(WorkspaceSource.displayKey(1)), "gen": 0],
+        ], catalog: catalog, hostID: "mac-a", canvasPixels: CGSize(width: 2000, height: 1000), previous: [:],
+           nextGeneration: &next, displays: displays)
+        XCTAssertEqual(sneaky.assignments.map(\.tileID), ["a"])
+        XCTAssertEqual(sneaky.rejected["b"], "duplicateWindow")
+        XCTAssertNotNil(sneaky.rejected["c"])
+        // Without the display list (another session, or nothing listed): refused.
+        let unlisted = WorkspaceRequestValidator.validate(tiles: [["id": "a", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "display": 1]],
+            catalog: catalog, hostID: "mac-a", canvasPixels: CGSize(width: 2000, height: 1000), previous: [:], nextGeneration: &next)
+        XCTAssertEqual(unlisted.rejected["a"], "unavailable")
+
+        // Input: a press at the middle of the desktop tile lands at the middle of the display.
+        var targeting = WorkspaceInputTargeting()
+        targeting.canvas = CGSize(width: 2000, height: 1000)
+        targeting.windowFrames = [r.assignments[0].windowID: displays[1]!, 10: CGRect(x: 0, y: 0, width: 800, height: 600)]
+        _ = targeting.update(assignments: r.assignments)
+        let hit = targeting.resolve(.down, at: WorkspacePoint(x: 0.25, y: 0.5))
+        XCTAssertEqual(hit?.tileID, "d")
+        XCTAssertEqual(hit?.point.x ?? 0, 756, accuracy: 1)
+        XCTAssertEqual(hit?.point.y ?? 0, 491, accuracy: 1)
+        XCTAssertEqual(WorkspaceKeyboardGate.decide(active: r.assignments[0], frontmostPID: 999, focusedWindowID: 0,
+                                                    focusedWindowIsChild: false), .deliver)
+    }
+
     func testOneWindowShowsInOneTileOnly() {
         let catalog: [UInt32: WindowCatalogEntry] = [10: entry(10, gen: 5)]
         var next: UInt64 = 1

@@ -48,6 +48,10 @@ struct StagePeekOverlay: View {
     @State private var stripDown = false
     @State private var openDown = false
     @State private var openTouch = 0
+    /// Compact peek: holding a card still lifts it so it can be dragged onto a pane.
+    @State private var holdTask: Task<Void, Never>?
+    @State private var cardDragging = false
+    @State private var openStart: CGPoint = .zero
     @GestureState private var stripPressing = false
     @GestureState private var openPressing = false
     @State private var pollTask: Task<Void, Never>?
@@ -81,15 +85,16 @@ struct StagePeekOverlay: View {
                 backdrop
                     .contentShape(Rectangle())
                     .gesture(openGesture(cards: cards))
-                    .opacity(model.drag != nil ? 0 : 1)
+                    // Barely there (not 0) while dragging, so the finger's gesture keeps its view.
+                    .opacity(model.drag != nil ? 0.001 : 1)
                     .transition(.opacity)
                 if machine.expansion < 0.999 {
                     ForEach(cards, id: \.index) { card in
                         cardView(card)
-                            .opacity(1 - machine.expansion)
+                            .opacity(model.drag != nil ? 0 : 1 - machine.expansion)
                             .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(x: edge == .left ? -48 : 48)))
                     }
-                    if machine.expansion < 0.5, let focus = cards.first(where: \.highlighted) {
+                    if machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
                         title(for: focus)
                     }
                 }
@@ -108,6 +113,13 @@ struct StagePeekOverlay: View {
             if launchpad {
                 launchpadView.transition(.opacity)
             }
+            if model.drag != nil, !model.windowMode {
+                // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
+                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
+            } else if model.drag != nil, case .window = model.drag?.item {
+                // Window mode: the pane chrome shows the landing areas; Cancel shows here too.
+                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
+            }
             if let d = model.drag, case .window(let w) = d.item {
                 // The card under the finger while the peek steps aside to show the panes.
                 dragPreview(w)
@@ -123,8 +135,8 @@ struct StagePeekOverlay: View {
         .frame(width: frame.width, height: frame.height, alignment: .topLeading)
         .background(GeometryReader { g in
             Color.clear
-                .onAppear { overlayOrigin = g.frame(in: .global).origin }
-                .onChange(of: g.frame(in: .global).origin) { overlayOrigin = $0 }
+                .onAppear { overlayOrigin = g.frame(in: .global).origin; model.desktopPictureGlobal = g.frame(in: .global) }
+                .onChange(of: g.frame(in: .global)) { overlayOrigin = $0.origin; model.desktopPictureGlobal = $0 }
         })
         .coordinateSpace(name: "stagePeek")
         .accessibilityAction(.escape) { finish(machine.dismiss()) }
@@ -346,18 +358,28 @@ struct StagePeekOverlay: View {
         model.switchTo(w)
     }
 
+    /// A display card: in Window mode the desktop goes into the pane (Full Desktop is a tile
+    /// source, never a mode switch); in Mirror/Extend it already shows.
     private func pickDisplay(_ d: CatalogDisplayItem?) {
         haptics.play(.select, enabled: hapticsEnabled)
         searchFocused = false
         animate { machine.cancelAll() }
         model.stagePeekOpen = false
-        onDisplay(d)
+        showDisplay(d)
+    }
+
+    private func showDisplay(_ d: CatalogDisplayItem?) {
+        if model.windowMode, let d = d ?? model.mainDisplay {
+            model.switchTo(model.displayWindow(d))
+        } else {
+            onDisplay(d)
+        }
     }
 
     private func dragPreview(_ w: CatalogWindowItem) -> some View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(white: 0.15))
-            if let cg = model.thumbnails[w.id] {
+            if let cg = model.still(for: w) {
                 Image(decorative: cg, scale: 1).resizable().aspectRatio(contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)).padding(4)
             }
@@ -541,17 +563,66 @@ struct StagePeekOverlay: View {
             .updating($openPressing) { _, pressing, _ in pressing = true }
             .onChanged { v in
                 let t = v.time.timeIntervalSinceReferenceDate
+                if cardDragging {
+                    model.moveDrag(to: global(v.location))
+                    return
+                }
                 if !openDown {
                     openDown = true
                     openTouch += 1
+                    openStart = v.startLocation
+                    let wasOpen = machine.phase == .open
                     _ = machine.touchBegan(id: "open\(openTouch)", at: v.startLocation, time: t, onStrip: false)
+                    if wasOpen, machine.expansion < 0.5 { armCardHold(at: v.startLocation, cards: cards) }
                 }
+                if hypot(v.location.x - openStart.x, v.location.y - openStart.y) > StagePeekConfig.tapSlop { holdTask?.cancel() }
                 move("open\(openTouch)", v.location, t)
             }
             .onEnded { v in
                 openDown = false
+                holdTask?.cancel()
+                if cardDragging {
+                    cardDragging = false
+                    model.moveDrag(to: global(v.location))
+                    // Dropped on a pane: done. On Cancel or nowhere: the peek comes back as it was.
+                    if model.endDrag() {
+                        haptics.play(.select, enabled: hapticsEnabled)
+                        animate { machine.cancelAll() }
+                        model.stagePeekOpen = false
+                    }
+                    return
+                }
                 end("open\(openTouch)", v.location, v.time.timeIntervalSinceReferenceDate, cards: cards)
             }
+    }
+
+    private func global(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + overlayOrigin.x, y: p.y + overlayOrigin.y) }
+
+    /// A still finger on a compact card for a moment lifts it: from then on the finger drags it
+    /// over the panes (or the desktop), and lifting drops it. Scrubbing or a tap never lifts.
+    private func armCardHold(at p: CGPoint, cards: [StagePeekCard]) {
+        holdTask?.cancel()
+        guard let index = StagePeekLayout.hit(p, cards: cards), machine.ids.indices.contains(index) else { return }
+        let id = machine.ids[index]
+        let item: CatalogWindowItem? = {
+            if let d = StagePeekIDs.displayIndex(id) {
+                let display = displays.indices.contains(d) ? displays[d] : model.mainDisplay
+                return display.map(model.displayWindow)
+            }
+            return windows.first { $0.id == id }
+        }()
+        guard let item else { return }
+        let touch = openTouch
+        holdTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 420_000_000)
+            guard !Task.isCancelled, openDown, openTouch == touch, !cardDragging else { return }
+            // The touch now belongs to the drag: the peek never selects or scrubs with it.
+            machine.touchCancelled(id: "open\(touch)")
+            cardDragging = true
+            searchFocused = false
+            haptics.play(.activate, enabled: hapticsEnabled)
+            model.beginDrag(.window(item), at: global(p))
+        }
     }
 
     private func move(_ id: String, _ p: CGPoint, _ t: TimeInterval) {
@@ -581,6 +652,8 @@ struct StagePeekOverlay: View {
                 animate { machine.touchCancelled(id: "strip") }
             } else if !strip, openDown {
                 openDown = false
+                holdTask?.cancel()
+                if cardDragging { cardDragging = false; model.cancelDrag() }
                 animate { machine.touchCancelled(id: "open\(openTouch)") }
             } else {
                 return
@@ -617,7 +690,7 @@ struct StagePeekOverlay: View {
                 model.stagePeekOpen = false
                 searchFocused = false
                 if let index = StagePeekIDs.displayIndex(id) {
-                    onDisplay(displays.indices.contains(index) ? displays[index] : nil)
+                    showDisplay(displays.indices.contains(index) ? displays[index] : nil)
                 } else if let w = windows.first(where: { $0.id == id }) {
                     model.switchTo(w)
                 }

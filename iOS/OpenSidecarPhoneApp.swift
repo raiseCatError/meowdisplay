@@ -390,7 +390,8 @@ struct ReceiverScreen: View {
                     WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
-                                        onSettings: { showSettings = true })
+                                        onSettings: { showSettings = true },
+                                        onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)
@@ -445,9 +446,8 @@ struct ReceiverScreen: View {
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             inputAllowed: inputReachesMac,
                             onDisplay: { _ in
-                                // In Mirror/Extend the desktop already shows: nothing changes. From Window
-                                // mode this is "View Full Screen": back to the desktop mode used before.
-                                if model.workspace.windowMode { _ = model.receiver.requestDisplayMode(lastDesktopMode) }
+                                // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts
+                                // the desktop in a pane; "View Full Screen" is in a desktop pane's menu.)
                             })
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
