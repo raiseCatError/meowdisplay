@@ -32,6 +32,18 @@ class WorkspaceWireTest {
     }
 
     @Test
+    fun startingIsNotAListingFailure() {
+        fun parse(error: String) = WindowCatalog.parse(Json.parseToJsonElement(
+            """{"type":"windowCatalog","windows":[],"apps":[],"error":"$error"}""").jsonObject)
+        val starting = parse("starting")
+        assertTrue(starting.starting)
+        assertFalse("the picker keeps asking instead of blaming Screen Recording", starting.unavailable)
+        val failed = parse("unavailable")
+        assertTrue(failed.unavailable)
+        assertFalse(failed.starting)
+    }
+
+    @Test
     fun catalogAndStateParseDefensively() {
         val catalog = WindowCatalog.parse(Json.parseToJsonElement("""
             {"type":"windowCatalog","host":"mac-a","windows":[

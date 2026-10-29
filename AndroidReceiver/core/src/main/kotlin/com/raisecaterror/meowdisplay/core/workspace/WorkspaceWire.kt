@@ -90,7 +90,7 @@ data class CatalogWindow(
 data class CatalogApp(val bundleID: String, val name: String, val hasWindows: Boolean)
 data class InstalledApp(val bundleID: String, val name: String)
 
-data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, val apps: List<CatalogApp>, val installed: List<InstalledApp>, val unavailable: Boolean) {
+data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, val apps: List<CatalogApp>, val installed: List<InstalledApp>, val unavailable: Boolean, val starting: Boolean = false) {
     /** Windows grouped by app, apps in catalog order. */
     val byApp: List<Pair<String, List<CatalogWindow>>> get() = windows.groupBy { it.bundleID }.map { (_, w) -> w.first().app to w }
 
@@ -125,7 +125,9 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
             val installed = obj.arrayOrEmpty("installed").objects().take(WorkspaceWire.MAX_INSTALLED).mapNotNull { a ->
                 InstalledApp(a.str("bundle") ?: return@mapNotNull null, a.str("name")?.take(80) ?: "")
             }
-            return WindowCatalog(obj.str("host"), windows, apps, installed, obj.str("error") != null)
+            // "starting": Window mode is still starting on the Mac. It isn't a listing failure; the picker asks again.
+            val error = obj.str("error")
+            return WindowCatalog(obj.str("host"), windows, apps, installed, error != null && error != "starting", error == "starting")
         }
     }
 }

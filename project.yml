@@ -223,6 +223,7 @@ targets:
       - Mac/QUICTransportSession.swift
       - Mac/TransportProtocolSelection.swift
       - Mac/TailscaleDiscovery.swift
+      - Mac/StartupHandoffPolicy.swift
       - Shared/QUICTransportProtocol.swift
       - Shared/QUICReceiverSession.swift
       - Mac/AutoConnectPolicy.swift

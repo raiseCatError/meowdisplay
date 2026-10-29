@@ -422,7 +422,7 @@ fun WindowOverview(controller: WorkspaceController, macName: String, inputAllowe
                             }
                         }
                         when {
-                            catalog == null -> Text("Asking $macName for its windows…", color = Color.White.copy(alpha = 0.7f))
+                            catalog == null || catalog.starting -> Text("Asking $macName for its windows…", color = Color.White.copy(alpha = 0.7f))
                             catalog.unavailable -> Text("$macName can't list its windows right now. Check that MeowDisplay has Screen Recording permission on the Mac.", color = Color.White.copy(alpha = 0.8f))
                             windows.isEmpty() && query.isNotEmpty() -> Text("No windows match \"$query\".", color = Color.White.copy(alpha = 0.7f))
                             catalog.windows.isEmpty() -> Text("No windows to show. Open an app on the Mac, or pick one below.", color = Color.White.copy(alpha = 0.7f))

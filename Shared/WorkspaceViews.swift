@@ -24,6 +24,9 @@ struct WorkspaceChromeView: View {
     let inputAllowed: Bool
     /// Separating folds/hinges in this view's coordinates: nothing interactive is placed inside them.
     var divisions: [CGRect] = []
+    /// The screen's safe area (clear of a notch, Dynamic Island and the home indicator) in
+    /// this view's coordinates. The picture may run under them; labels and buttons don't.
+    var safeArea: CGRect?
     @State private var dragging: String?
     @State private var dragPoint: CGPoint?
     @State private var confirmClose: String?
@@ -111,6 +114,13 @@ struct WorkspaceChromeView: View {
         }
     }
 
+    /// How far each edge of [rect] reaches outside the safe area.
+    private func unsafeInsets(of rect: CGRect) -> EdgeInsets {
+        guard let safe = safeArea else { return EdgeInsets() }
+        return EdgeInsets(top: max(0, safe.minY - rect.minY), leading: max(0, safe.minX - rect.minX),
+                          bottom: max(0, rect.maxY - safe.maxY), trailing: max(0, rect.maxX - safe.maxX))
+    }
+
     @ViewBuilder
     private func tileView(id: String, tile: WorkspaceTile, rect: CGRect, multi: Bool, frames: WorkspaceFrames) -> some View {
         let active = model.active == id
@@ -120,6 +130,17 @@ struct WorkspaceChromeView: View {
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
                 .allowsHitTesting(false)
+            tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
+                .padding(unsafeInsets(of: rect))
+        }
+        .frame(width: rect.width, height: rect.height)
+        .position(x: rect.midX, y: rect.midY)
+    }
+
+    @ViewBuilder
+    private func tileLabels(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, multi: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.allowsHitTesting(false)
             if let text = status(for: id, tile: tile) {
                 Button { model.openOverview(replacing: id) } label: {
                     Text(text).font(.callout).foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
@@ -141,8 +162,6 @@ struct WorkspaceChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(8)
             }
         }
-        .frame(width: rect.width, height: rect.height)
-        .position(x: rect.midX, y: rect.midY)
     }
 
     private func pill(id: String, tile: WorkspaceTile, active: Bool, rect: CGRect) -> some View {
@@ -215,7 +234,7 @@ struct WorkspaceChromeView: View {
         }
         .padding(8)
         .background(workspaceChip, in: Capsule())
-        .position(x: picture.midX, y: picture.maxY - 44)
+        .position(x: picture.midX, y: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44)
     }
 }
 
@@ -338,6 +357,8 @@ struct WindowOverviewView: View {
     let inputAllowed: Bool
     let onMirror: () -> Void
     let onExtend: () -> Void
+    /// Insets that keep the content clear of a notch and the home indicator; the backdrop fills the screen.
+    var safeInsets = EdgeInsets()
     @State private var query = ""
 
     var body: some View {
@@ -389,6 +410,7 @@ struct WindowOverviewView: View {
                 }
             }
             .padding(16)
+            .padding(safeInsets)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(white: 0.06, opacity: 0.97).ignoresSafeArea())
         }

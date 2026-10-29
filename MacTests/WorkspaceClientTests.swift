@@ -22,6 +22,18 @@ final class WorkspaceClientTests: XCTestCase {
         return m
     }
 
+    func testStartingWindowModeIsNotAListingFailure() {
+        // The Mac answers "starting" when a catalog request beats Window mode's engine.
+        guard case .catalog(let starting)? = WorkspaceEvent.parse(type: WireMessage.windowCatalog,
+                                                                 ["windows": [], "apps": [], "error": "starting"]) else { return XCTFail() }
+        XCTAssertTrue(starting.starting)
+        XCTAssertFalse(starting.unavailable, "the picker keeps asking instead of blaming Screen Recording")
+        guard case .catalog(let failed)? = WorkspaceEvent.parse(type: WireMessage.windowCatalog,
+                                                               ["windows": [], "apps": [], "error": "unavailable"]) else { return XCTFail() }
+        XCTAssertTrue(failed.unavailable)
+        XCTAssertFalse(failed.starting)
+    }
+
     func testParsingIsBoundedAndDefensive() {
         let state = WorkspaceEvent.parse(type: WireMessage.workspaceState, [
             "tiles": [["id": "a", "window": 10, "gen": 2, "state": "live", "app": "Zed"], ["id": "b", "state": "bogus"], ["window": 3]],

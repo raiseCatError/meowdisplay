@@ -1708,23 +1708,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("Screen Recording permission granted")
         }
 
-        let ready = try await waitForHello()
-        guard authenticatedSession.isLive(generation: ready.generation) else {
-            Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
-            throw CancellationError()
-        }
-        // No virtual display, capture or media until the receiver accepted
-        // this session's invitation on the live connection (and this Mac's
-        // user approved a receiver-initiated request that needed it).
-        // Capture belongs to the connection that was admitted, which a
-        // reconnect during the wait can make a later one than `ready`'s.
-        let admittedGeneration = try await awaitSessionAdmission()
-        let admitted = try await waitForHello()
-        guard admitted.generation == admittedGeneration,
-              sessionAuthorization.isAdmitted(generation: admittedGeneration) else {
-            Log.info("sessionDebug: ignored stale capture start generation=\(admittedGeneration)")
-            throw CancellationError()
-        }
+        let (admitted, admittedGeneration) = try await awaitAdmittedConnection()
 
         switch mode {
         case .mirror:
@@ -5286,8 +5270,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
              WireMessage.workspaceFocus, WireMessage.windowAction:
             // Admitted sessions only (gate above). Window metadata exists only
             // while this receiver is in Window mode on this Mac.
-            guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed(),
-                  let engine = workspaceEngine else { return }
+            guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            guard let engine = workspaceEngine else {
+                // Window mode, but its engine isn't running (startup still in progress, or it failed):
+                // say so, instead of leaving the receiver's picker silently empty. It asks again.
+                Log.info("workspace: \(type) before Window mode started — answering starting")
+                if type == WireMessage.windowCatalogRequest {
+                    sendJSONObject(["type": WireMessage.windowCatalog, "windows": [], "apps": [], "error": "starting"])
+                }
+                return
+            }
             engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
         case WireMessage.displayModeRequest
             where (obj["mode"] as? String) == WindowWorkspaceWire.mode:
@@ -5689,6 +5681,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             self.sendJSONObject(["type": WireMessage.sessionInviteCancel, "id": self.sessionInvitation.id])
         }
+    }
+
+    /// The admitted connection capture belongs to. No virtual display,
+    /// capture or media until the receiver accepted this session's
+    /// invitation on the live connection (and this Mac's user approved a
+    /// receiver-initiated request that needed it).
+    ///
+    /// Startup runs once per session, so a connection superseded before
+    /// capture starts must not end it: the Personal Hotspot hot swap to TCP
+    /// lands ~60 ms after the QUIC hello, and giving up there left a session
+    /// connected and admitted with no capture and no Window mode engine
+    /// (an empty window picker). Startup follows the session to its next
+    /// live, admitted connection instead; capture still belongs only to that
+    /// admitted connection (`prepareCaptureStart`).
+    private func awaitAdmittedConnection() async throws -> (ApplicationReadySession, UInt64) {
+        for attempt in 0..<StartupHandoffPolicy.limit {
+            let ready = try await waitForHello()
+            switch StartupHandoffPolicy.afterHello(isLive: authenticatedSession.isLive(generation: ready.generation),
+                                                   attempt: attempt, stopped: stopped) {
+            case .proceed: break
+            case .follow:
+                Log.info("sessionDebug: startup follows the session — hello generation=\(ready.generation) was superseded before capture")
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            case .giveUp:
+                Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
+                throw CancellationError()
+            }
+            let admittedGeneration = try await awaitSessionAdmission()
+            let admitted = try await waitForHello()
+            switch StartupHandoffPolicy.afterAdmission(
+                admittedGeneration: admittedGeneration, helloGeneration: admitted.generation,
+                isAdmitted: sessionAuthorization.isAdmitted(generation: admittedGeneration), attempt: attempt, stopped: stopped) {
+            case .proceed:
+                return (admitted, admittedGeneration)
+            case .follow:
+                Log.info("sessionDebug: startup follows the session — admitted generation=\(admittedGeneration) was superseded before capture")
+                try await Task.sleep(for: .milliseconds(50))
+            case .giveUp:
+                Log.info("sessionDebug: ignored stale capture start generation=\(admittedGeneration)")
+                throw CancellationError()
+            }
+        }
+        Log.info("sessionDebug: ignored stale capture start — the connection kept changing before capture")
+        throw CancellationError()
     }
 
     private func waitForHello() async throws -> ApplicationReadySession {

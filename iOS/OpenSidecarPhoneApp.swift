@@ -372,10 +372,11 @@ struct ReceiverScreen: View {
                         remoteAspectSize: model.receiver.videoSize).displayedRect
                         .offsetBy(dx: canvas.minX, dy: canvas.minY)
                     WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
-                                        divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                                        divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
+                                        safeArea: effectiveSafeInsets.safeRect(in: geo.size))
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
-                            .padding(.top, effectiveSafeInsets.top)
+                            .padding(effectiveSafeInsets.edgeInsets)
                     }
                     ReceiverControlOverlay(
                         store: controlStore,
@@ -437,7 +438,8 @@ struct ReceiverScreen: View {
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
                                        inputAllowed: inputReachesMac,
                                        onMirror: { model.receiver.requestDisplayMode(.mirror) },
-                                       onExtend: { model.receiver.requestDisplayMode(.extend) })
+                                       onExtend: { model.receiver.requestDisplayMode(.extend) },
+                                       safeInsets: effectiveSafeInsets.edgeInsets)
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
                                        keyboardActive: $keyboardActive,

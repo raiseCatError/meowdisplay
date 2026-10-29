@@ -420,6 +420,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 }
                 if let built { self.ledger = built.1 }
                 guard let snapshot = built?.0 else {
+                    Log.info("workspace: window listing failed (Screen Recording permission or ScreenCaptureKit)")
                     if sendCatalog { self.sendMessage?(["type": WireMessage.windowCatalog, "windows": [], "apps": [], "error": "unavailable"]) }
                     return
                 }
@@ -494,6 +495,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             msg["installed"] = installed.filter { !running.contains($0.bundleID) }.prefix(150)
                 .map { ["bundle": $0.bundleID, "name": String($0.name.prefix(80))] }
         }
+        Log.info("workspace: catalog sent enumerated=\(snap.windows.count) sent=\(min(snap.windows.count, 120)) apps=\(min(snap.apps.count, 60))")
         sendMessage?(msg)
     }
 

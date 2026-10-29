@@ -1,3 +1,4 @@
+import SwiftUI
 import CoreGraphics
 
 struct ControlSafeInsets: Equatable {
@@ -7,6 +8,13 @@ struct ControlSafeInsets: Equatable {
     var trailing: CGFloat
 
     static let zero = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+
+    var edgeInsets: EdgeInsets { EdgeInsets(top: top, leading: leading, bottom: bottom, trailing: trailing) }
+
+    /// The safe rectangle of a screen of [size].
+    func safeRect(in size: CGSize) -> CGRect {
+        CGRect(x: leading, y: top, width: max(0, size.width - leading - trailing), height: max(0, size.height - top - bottom))
+    }
 
     /// UIKit's live report is authoritative once the probe has published;
     /// GeometryProxy is only the startup fallback. Treating the runtime

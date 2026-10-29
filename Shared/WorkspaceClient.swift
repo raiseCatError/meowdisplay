@@ -30,6 +30,8 @@ struct WorkspaceCatalogMessage: Equatable, Sendable {
     var apps: [CatalogAppItem]
     var installed: [InstalledAppItem]
     var unavailable: Bool
+    /// Window mode is still starting on the Mac: not a listing failure. The picker keeps asking.
+    var starting = false
 
     func search(_ query: String) -> [CatalogWindowItem] {
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -97,7 +99,9 @@ enum WorkspaceEvent: Sendable {
                 return InstalledAppItem(bundleID: b, name: str(a, "name", 80) ?? "")
             }
             return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
-                                                   installed: Array(installed), unavailable: obj["error"] != nil))
+                                                   installed: Array(installed),
+                                                   unavailable: obj["error"] != nil && obj["error"] as? String != "starting",
+                                                   starting: obj["error"] as? String == "starting"))
         case WireMessage.workspaceState:
             let tiles = (obj["tiles"] as? [[String: Any]] ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { t -> RemoteTileItem? in
                 guard let id = str(t, "id", 32) else { return nil }
@@ -319,6 +323,8 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func onCatalog(_ c: WorkspaceCatalogMessage) {
+        Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
+        if c.starting { return }
         catalog = c
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var missing = Set<String>()
