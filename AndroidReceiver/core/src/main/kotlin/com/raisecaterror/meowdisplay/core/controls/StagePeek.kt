@@ -4,9 +4,11 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 
 // Stage Peek: the floating window switcher. A 1:1 port of Shared/StagePeek.swift (pure state
@@ -55,6 +57,9 @@ object StagePeekConfig {
     /** Vertical finger travel per window while scrubbing. */
     const val scrubPitch: CGFloat = 52.0
 
+    /** Sideways travel that counts as a flick between compact and expanded. */
+    const val flickDistance: CGFloat = 44.0
+
     /** Inward travel before the expanded browser starts to grow, and the travel at which it is fully expanded. */
     const val expandStart: CGFloat = 56.0
     const val expandFull: CGFloat = 156.0
@@ -98,6 +103,9 @@ sealed interface StagePeekEffect {
  */
 class StagePeekMachine {
     enum class Phase(val raw: String) { Closed("closed"), Arming("arming"), Scrubbing("scrubbing"), Open("open") }
+
+    /** Swipe up moves the stack up, revealing the windows below (the default). */
+    var naturalScrolling = true
 
     var phase = Phase.Closed
         private set
@@ -188,16 +196,31 @@ class StagePeekMachine {
         if (id != touchID || start == null) return emptyList()
         when (phase) {
             Phase.Arming -> {
-                if (hypot(to.x - start.point.x, to.y - start.point.y) > StagePeekConfig.holdSlop) {
-                    // A swipe from the edge, not a hold: nothing opens, and the touch stays Stage Peek's until it lifts.
+                val dx = to.x - start.point.x; val dy = to.y - start.point.y
+                if (hypot(dx, dy) > StagePeekConfig.holdSlop) {
+                    // The touch stays Stage Peek's until it lifts either way.
                     consumed.add(id)
                     resetTouch()
                     phase = Phase.Closed
+                    // A flick inward from the edge opens the peek (it stays open; nothing is chosen).
+                    val inward = if (edge == StagePeekEdge.Left) dx else -dx
+                    if (inward > abs(dy)) return openDirectly()
                 }
                 return emptyList()
             }
             Phase.Open -> {
                 if (!tapCandidate) return emptyList()
+                // A sideways flick while open: inward expands, outward compacts (or closes when compact).
+                val dx = to.x - start.point.x; val dy = to.y - start.point.y
+                if (abs(dx) > StagePeekConfig.flickDistance && abs(dx) > abs(dy) * 1.5) {
+                    consumed.add(id)
+                    resetTouch()
+                    val inward = if (edge == StagePeekEdge.Left) dx else -dx
+                    if (inward > 0) { expand(); return listOf(StagePeekEffect.Haptic(StagePeekHaptic.Select)) }
+                    if (expanded) { compact(); return listOf(StagePeekEffect.Haptic(StagePeekHaptic.Select)) }
+                    closeAll()
+                    return listOf(StagePeekEffect.Dismissed)
+                }
                 if (!(hypot(to.x - start.point.x, to.y - start.point.y) > StagePeekConfig.tapSlop)) return emptyList()
                 tapCandidate = false
                 phase = Phase.Scrubbing
@@ -214,10 +237,12 @@ class StagePeekMachine {
         if (id != touchID) return emptyList()
         when (phase) {
             Phase.Arming -> {
-                // Lifted before the hold completed: nothing opens.
+                // A quick tap on the edge bar opens the peek (accessible entry); a longer press
+                // that lifts before the hold completes opens nothing.
+                val wasTap = start?.let { time - it.time <= StagePeekConfig.tapMaxDuration } ?: false
                 resetTouch()
                 phase = Phase.Closed
-                return emptyList()
+                return if (wasTap) openDirectly() else emptyList()
             }
             Phase.Scrubbing -> {
                 settleAfterLift()
@@ -346,7 +371,8 @@ class StagePeekMachine {
         val anchor = anchor
         if (anchor == null || ids.isEmpty()) return emptyList()
         val out = mutableListOf<StagePeekEffect>()
-        val raw = anchor.position + (point.y - anchor.point.y) / StagePeekConfig.scrubPitch
+        val travel = (point.y - anchor.point.y) / StagePeekConfig.scrubPitch
+        val raw = anchor.position + (if (naturalScrolling) -travel else travel)
         val maxIndex = (ids.size - 1).toDouble()
         val overrun = if (raw < 0) -raw else if (raw > maxIndex) raw - maxIndex else 0.0
         position = clampPosition(raw)
@@ -486,30 +512,50 @@ object StagePeekLayout {
         }
         val focusSize = cardSize(focus)
         val margin = 16.0
-        val compactX = if (edge == StagePeekEdge.Left) safe.minX + margin + compactWidth / 2 else safe.maxX - margin - compactWidth / 2
-        val centerX = lerp(compactX, safe.midX)
         // Room for the title under the highlighted card.
         val centerY = safe.midY - 18
+        // Compact (e = 0) is Dock magnification: the highlighted card full size and popped out,
+        // the rest shrinking smoothly with distance, upright, edge-aligned and not overlapping.
+        // Expanded (e = 1) is the layered Cover Flow stack. Positions blend between the two.
+        val gap = 8.0
+        fun dockScale(u: Double): Double = 0.56 + 0.44 * exp(-u * u / 0.7)
+        fun dockHeight(i: Int): Double = cardSize(i).height * dockScale(abs(i.toDouble() - position))
+        // Dock centres: stack outward from the (continuous) position so scrubbing glides.
+        val dockY = DoubleArray(aspects.size)
+        val base = min(max(floor(position).toInt(), 0), aspects.size - 1)
+        val frac = position - base
+        if (base + 1 < aspects.size) dockY[base + 1] = dockHeight(base) / 2 + gap + dockHeight(base + 1) / 2
+        for (i in (base + 2) until aspects.size) dockY[i] = dockY[i - 1] + dockHeight(i - 1) / 2 + gap + dockHeight(i) / 2
+        for (i in base - 1 downTo 0) dockY[i] = dockY[i + 1] - dockHeight(i + 1) / 2 - gap - dockHeight(i) / 2
+        val shift = if (base + 1 < aspects.size) frac * (dockY[base + 1] - dockY[base]) else 0.0
         val out = mutableListOf<StagePeekCard>()
         for (i in aspects.indices) {
             val k = i.toDouble() - position
             val u = abs(k)
-            if (!(u <= 4.5)) continue
+            if (!(u <= (if (e > 0.5) 4.5 else 6.5))) continue
             val near = min(u, 1.0)
             val far = max(0.0, min(u, 3.0) - 1)
-            val scale = 1 - 0.16 * near - 0.07 * far
-            val step = if (u <= 1) u * 0.58 else 0.58 + (u - 1) * 0.30
-            val offset = (if (k < 0) -1.0 else 1.0) * step * focusSize.height
-            val tiltMagnitude = if (reduceMotion) 0.0 else min(16 * near + 3 * far, 22.0)
             val size = cardSize(i)
+            // Cover Flow (expanded).
+            val flowScale = 1 - 0.16 * near - 0.07 * far
+            val step = if (u <= 1) u * 0.58 else 0.58 + (u - 1) * 0.30
+            val flowY = centerY + (if (k < 0) -1.0 else 1.0) * step * focusSize.height
+            val flowTilt = if (reduceMotion) 0.0 else min(16 * near + 3 * far, 22.0)
+            // Dock (compact).
+            val ds = dockScale(u)
+            val dw = size.width * ds
+            val pop = 10 * max(0.0, 1 - u).pow(2) // only the highlighted card pops out
+            val dockX = if (edge == StagePeekEdge.Left) safe.minX + margin + dw / 2 + pop else safe.maxX - margin - dw / 2 - pop
+            val dy = centerY + dockY[i] - shift
+            val scale = lerp(ds, flowScale)
             out.add(
                 StagePeekCard(
                     index = i,
-                    center = CGPoint(centerX, centerY + offset),
+                    center = CGPoint(lerp(dockX, safe.midX), lerp(dy, flowY)),
                     size = CGSize(size.width * scale, size.height * scale),
-                    tilt = if (k < 0) tiltMagnitude else -tiltMagnitude,
+                    tilt = e * (if (k < 0) flowTilt else -flowTilt),
                     z = -u,
-                    opacity = if (u > 3.5) max(0.0, 1 - (u - 3.5)) else 1.0,
+                    opacity = if (u > 3.5 && e > 0.5) max(0.0, 1 - (u - 3.5)) else 1.0,
                     highlighted = i == focus && u < 0.5,
                 ),
             )

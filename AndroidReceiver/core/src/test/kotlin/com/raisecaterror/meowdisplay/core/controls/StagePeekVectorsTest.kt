@@ -56,7 +56,7 @@ class StagePeekVectorsTest {
         val ids = session.getValue("ids").jsonArray.map { it.jsonPrimitive.long }
         val safe = rect(session.getValue("safe").jsonArray)
         val aspect = session.getValue("aspect").num()
-        val machine = StagePeekMachine()
+        val machine = StagePeekMachine().apply { naturalScrolling = false }
         machine.setItems(ids, session.getValue("current").jsonPrimitive.long)
         val steps = session.getValue("steps").jsonArray
         assertTrue(steps.size >= 20)

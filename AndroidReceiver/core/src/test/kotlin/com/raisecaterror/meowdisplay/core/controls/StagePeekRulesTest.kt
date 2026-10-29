@@ -2,7 +2,6 @@ package com.raisecaterror.meowdisplay.core.controls
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,7 +14,7 @@ class StagePeekRulesTest {
     private val tick = StagePeekEffect.Haptic(StagePeekHaptic.Tick)
     private val select = StagePeekEffect.Haptic(StagePeekHaptic.Select)
 
-    private fun machine(current: Long? = 103): StagePeekMachine = StagePeekMachine().also { it.setItems(ids, current) }
+    private fun machine(current: Long? = 103): StagePeekMachine = StagePeekMachine().also { it.naturalScrolling = false; it.setItems(ids, current) }
 
     private fun pt(x: Double, y: Double) = CGPoint(x, y)
 
@@ -49,22 +48,52 @@ class StagePeekRulesTest {
     }
 
     @Test
-    fun aSwipeFromTheEdgeNeitherOpensNorReachesTheMac() {
+    fun anInwardFlickFromTheEdgeOpensAndNeverReachesTheMac() {
         val m = machine()
         assertTrue("owned: never forwarded", m.touchBegan(1, pt(8.0, 400.0), 0.0, onStrip = true))
-        assertEquals(emptyList<StagePeekEffect>(), m.touchMoved(1, pt(40.0, 400.0), 0.1, StagePeekEdge.Left))
-        assertEquals(emptyList<StagePeekEffect>(), m.poll(1.0))
-        assertEquals(StagePeekMachine.Phase.Closed, m.phase)
-        assertEquals(emptyList<StagePeekEffect>(), m.touchEnded(1, pt(60.0, 400.0), 0.2) { 0 })
+        assertEquals(listOf(StagePeekEffect.Opened, StagePeekEffect.Haptic(StagePeekHaptic.Activate)), m.touchMoved(1, pt(40.0, 400.0), 0.1, StagePeekEdge.Left))
+        assertEquals(StagePeekMachine.Phase.Open, m.phase)
+        assertEquals("lifting never selects", emptyList<StagePeekEffect>(), m.touchEnded(1, pt(60.0, 400.0), 0.2) { 0 })
+        assertEquals(StagePeekMachine.Phase.Open, m.phase)
     }
 
     @Test
-    fun liftingBeforeTheHoldOpensNothing() {
+    fun aVerticalSwipeOnTheEdgeOpensNothing() {
         val m = machine()
         m.touchBegan(1, pt(8.0, 400.0), 0.0, onStrip = true)
-        assertEquals(emptyList<StagePeekEffect>(), m.touchEnded(1, pt(8.0, 400.0), 0.1) { 0 })
-        assertEquals(emptyList<StagePeekEffect>(), m.poll(1.0))
+        assertEquals(emptyList<StagePeekEffect>(), m.touchMoved(1, pt(10.0, 460.0), 0.1, StagePeekEdge.Left))
         assertEquals(StagePeekMachine.Phase.Closed, m.phase)
+    }
+
+    @Test
+    fun naturalScrollingSwipeUpRevealsTheWindowsBelow() {
+        val m = machine().also { it.naturalScrolling = true }
+        m.openDirectly()
+        m.touchBegan(2, pt(120.0, 500.0), 1.0, onStrip = false)
+        m.touchMoved(2, pt(120.0, 500.0 - StagePeekConfig.scrubPitch * 2), 1.2, StagePeekEdge.Left)
+        assertEquals("swipe up two windows: the highlight moves down the stack", 105L, m.highlightedID)
+    }
+
+    @Test
+    fun aFlickWhileOpenExpandsThenCompacts() {
+        val m = machine()
+        m.openDirectly()
+        m.touchBegan(2, pt(120.0, 500.0), 1.0, onStrip = false)
+        assertEquals(listOf(select), m.touchMoved(2, pt(200.0, 505.0), 1.1, StagePeekEdge.Left))
+        assertTrue(m.expanded)
+        m.touchEnded(2, pt(200.0, 505.0), 1.2) { null }
+        m.touchBegan(3, pt(200.0, 500.0), 2.0, onStrip = false)
+        assertEquals(listOf(select), m.touchMoved(3, pt(120.0, 500.0), 2.1, StagePeekEdge.Left))
+        assertFalse(m.expanded)
+        assertEquals(StagePeekMachine.Phase.Open, m.phase)
+    }
+
+    @Test
+    fun aTapOnTheEdgeBarOpens() {
+        val m = machine()
+        m.touchBegan(1, pt(8.0, 400.0), 0.0, onStrip = true)
+        assertEquals(listOf(StagePeekEffect.Opened, StagePeekEffect.Haptic(StagePeekHaptic.Activate)), m.touchEnded(1, pt(8.0, 400.0), 0.1) { 0 })
+        assertEquals(StagePeekMachine.Phase.Open, m.phase)
     }
 
     @Test
@@ -130,7 +159,7 @@ class StagePeekRulesTest {
     }
 
     @Test
-    fun tapOnATiltedNeighbourSelectsExactlyThatWindow() {
+    fun tapOnANeighbourSelectsExactlyThatWindow() {
         val m = machine()
         opened(m)
         m.touchEnded(1, pt(8.0, 430.0), 0.5, cardAt(m))
@@ -138,7 +167,6 @@ class StagePeekRulesTest {
         val focus = all.first { it.highlighted }
         val below = all.first { it.index == focus.index + 1 }
         val above = all.first { it.index == focus.index - 1 }
-        assertNotEquals(0.0, below.tilt, 0.0)
         // Points on the neighbours' visible parts, outside the front card.
         val belowPoint = pt(below.center.x, below.center.y + below.size.height * 0.4)
         val abovePoint = pt(above.center.x, above.center.y - above.size.height * 0.4)
@@ -150,7 +178,8 @@ class StagePeekRulesTest {
 
     @Test
     fun whereCardsOverlapTheFrontOneWins() {
-        val all = StagePeekLayout.cards(listOf(1.5, 1.5, 1.5), 1.0, 0.0, StagePeekEdge.Left, phone, isPad = false, reduceMotion = false)
+        // Cards overlap in the expanded (Cover Flow) stack; compact Dock cards never do.
+        val all = StagePeekLayout.cards(listOf(1.5, 1.5, 1.5), 1.0, 1.0, StagePeekEdge.Left, phone, isPad = false, reduceMotion = false)
         val focus = all.first { it.highlighted }
         val below = all.first { it.index == 2 }
         val shared = pt(focus.center.x, (focus.center.y + focus.size.height / 2 + below.center.y - below.size.height / 2) / 2)
@@ -252,13 +281,26 @@ class StagePeekRulesTest {
             val focus = all.first { it.highlighted }
             assertTrue(focus.tilt == 0.0)
             assertEquals("drawn last: in front", focus, all.last())
+            // Compact is Dock magnification: smaller, upright, edge-aligned, never overlapping.
             for (c in all.filter { it != focus }) {
                 assertTrue(c.size.width < focus.size.width)
-                assertTrue(c.tilt != 0.0)
-                assertEquals("cards above tip their top away", (c.index < focus.index), (c.tilt > 0))
+                assertTrue("compact cards stay upright", c.tilt == 0.0)
+                assertEquals("left-aligned to the edge", safe.minX + 16, c.center.x - c.size.width / 2, 0.5)
             }
-            assertTrue("inside the safe area", focus.center.x - focus.size.width / 2 >= safe.minX)
+            val byIndex = all.sortedBy { it.index }
+            byIndex.zipWithNext().forEach { (a, b) ->
+                assertTrue("no overlap", a.center.y + a.size.height / 2 <= b.center.y - b.size.height / 2 + 0.5)
+            }
+            assertTrue("the highlighted card pops out", focus.center.x - focus.size.width / 2 > safe.minX + 16)
             assertTrue("compact: hugs the edge, the Mac stays visible", focus.center.x + focus.size.width / 2 < safe.midX + 1)
+            // Expanded is the layered Cover Flow stack.
+            val flow = StagePeekLayout.cards(ids.map { 1.6 }, 2.0, 1.0, StagePeekEdge.Left, safe, pad, reduceMotion = false)
+            val flowFocus = flow.first { it.highlighted }
+            assertTrue(flowFocus.tilt == 0.0)
+            for (c in flow.filter { it != flowFocus }) {
+                assertTrue(c.tilt != 0.0)
+                assertEquals("cards above tip their top away", (c.index < flowFocus.index), (c.tilt > 0))
+            }
         }
         val still = StagePeekLayout.cards(listOf(1.0, 1.0, 1.0), 1.0, 0.0, StagePeekEdge.Right, phone, isPad = false, reduceMotion = true)
         assertTrue(still.all { it.tilt == 0.0 })

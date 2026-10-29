@@ -62,19 +62,33 @@ enum class WRotation(val degrees: Int) {
     }
 }
 
-enum class WFit(val wire: String) { Fit("fit"), Fill("fill");
-    companion object { fun of(s: String?) = entries.firstOrNull { it.wire == s } ?: Fit }
+enum class WFit(val wire: String) { Fit("fit"), Fill("fill"), Auto("auto");
+    companion object {
+        fun of(s: String?) = entries.firstOrNull { it.wire == s } ?: Auto
+        /** Filling must show at least this share of the window along the cropped side. */
+        const val AUTO_FILL_MINIMUM_SHOWN = 0.7
+        /** [Auto] resolved for a tile and a (rotated) source size (WorkspaceFit.resolved). */
+        fun resolved(fit: WFit, tile: WSize, source: WSize): WFit {
+            if (fit != Auto) return fit
+            if (tile.width <= 0 || tile.height <= 0 || source.width <= 0 || source.height <= 0) return Fit
+            val sx = tile.width / source.width; val sy = tile.height / source.height
+            return if (min(sx, sy) / max(sx, sy) >= AUTO_FILL_MINIMUM_SHOWN) Fill else Fit
+        }
+    }
 }
 
 /** Window pixels <-> canvas for one tile. Both directions exact inverses (TileContentTransform). */
 data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRotation, val fit: WFit) {
     val rotatedSource get() = if (rotation.isQuarterTurn) WSize(source.height, source.width) else source
 
+    /** [WFit.Auto] resolved for this tile and source. */
+    val effectiveFit: WFit get() = WFit.resolved(fit, WSize(tile.width, tile.height), rotatedSource)
+
     val scale: Double get() {
         val r = rotatedSource
         if (r.width <= 0 || r.height <= 0 || tile.width <= 0 || tile.height <= 0) return 0.0
         val sx = tile.width / r.width; val sy = tile.height / r.height
-        return if (fit == WFit.Fit) min(sx, sy) else max(sx, sy)
+        return if (effectiveFit == WFit.Fit) min(sx, sy) else max(sx, sy)
     }
 
     val contentRect: WRect get() {
@@ -127,7 +141,59 @@ enum class WFollow(val wire: String) { Window("window"), App("app");
 /** What a tile shows. The Mac checks identity; `host` only routes requests. */
 data class WSource(val host: String, val windowID: Long, val generation: Long? = null, val bundleID: String? = null, val follow: WFollow = WFollow.Window)
 
-data class WTile(val id: String, val source: WSource? = null, val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Fit)
+/**
+ * One pane. [source] is what it shows (its active tab; only that one streams). [crop] is the
+ * zoomed/panned part of the window, normalized, with the pane's own shape (fills it: no bars).
+ * [tabs] lists every window in the pane in label order when it holds more than one.
+ */
+data class WTile(
+    val id: String, val source: WSource? = null, val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Auto,
+    val crop: WRect? = null, val tabs: List<WSource> = emptyList(),
+) {
+    val windows: List<WSource> get() = if (tabs.isEmpty()) listOfNotNull(source) else tabs
+}
+
+private fun WSource.sameWindow(o: WSource) = host == o.host && windowID == o.windowID
+
+/** Pinch and pan inside one pane (WorkspaceZoom). */
+object WZoom {
+    const val MAXIMUM = 8.0
+
+    fun fillCrop(window: WSize, tile: WSize, rotation: WRotation): WRect {
+        if (window.width <= 0 || window.height <= 0 || tile.width <= 0 || tile.height <= 0) return WRect(0.0, 0.0, 1.0, 1.0)
+        val t = if (rotation.isQuarterTurn) WSize(tile.height, tile.width) else tile
+        val tileAspect = t.width / t.height; val windowAspect = window.width / window.height
+        if (tileAspect >= windowAspect) {
+            val h = windowAspect / tileAspect
+            return WRect(0.0, (1 - h) / 2, 1.0, h)
+        }
+        val w = tileAspect / windowAspect
+        return WRect((1 - w) / 2, 0.0, w, 1.0)
+    }
+
+    fun apply(crop: WRect?, base: WRect, scale: Double, anchor: WPoint, pan: WPoint): WRect? {
+        val c = crop ?: base
+        if (!scale.isFinite() || scale <= 0 || !listOf(anchor.x, anchor.y, pan.x, pan.y).all { it.isFinite() } ||
+            c.width <= 0 || c.height <= 0 || base.width <= 0 || base.height <= 0) return crop
+        val k = min(max(c.width / scale, base.width / MAXIMUM), base.width) / c.width
+        val w = c.width * k; val h = c.height * k
+        val ax = c.x + anchor.x * c.width; val ay = c.y + anchor.y * c.height
+        var x = ax - anchor.x * w - pan.x * w; var y = ay - anchor.y * h - pan.y * h
+        x = min(max(x, 0.0), max(1 - w, 0.0)); y = min(max(y, 0.0), max(1 - h, 0.0))
+        val eps = 1e-6
+        if (abs(w - base.width) < eps && abs(h - base.height) < eps && abs(x - base.x) < eps && abs(y - base.y) < eps) return null
+        return WRect(x, y, w, h)
+    }
+}
+
+/** Where a window dragged from Stage Peek (or a pane's label) lands. */
+sealed interface WWindowDrop {
+    val preview: WRect
+    data class Replace(val tile: String, override val preview: WRect) : WWindowDrop
+    data class Tab(val tile: String, override val preview: WRect) : WWindowDrop
+    data class Split(val index: Int, val edge: WEdge, override val preview: WRect) : WWindowDrop
+    data class EmptySlot(val index: Int, override val preview: WRect) : WWindowDrop
+}
 
 sealed interface WNode {
     data class Slot(val tile: String?) : WNode
@@ -227,9 +293,68 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
         return of(removeSlot(root, id), tiles - id, if (maximized == id) null else maximized)
     }
 
+    /** Change what a pane shows; in a tabbed pane this replaces the active tab (null removes it). */
     fun replacingSource(id: String, source: WSource?): WLayout {
-        val t = tiles[id] ?: return this
+        var t = tiles[id] ?: return this
+        if (t.source != source) t = t.copy(crop = null)
+        val current = t.source
+        if (t.tabs.isNotEmpty() && current != null) {
+            val i = t.tabs.indexOfFirst { it.sameWindow(current) }
+            if (i >= 0) {
+                if (source == null) {
+                    val rest = t.tabs.toMutableList().also { it.removeAt(i) }
+                    val shown = if (rest.isEmpty()) null else rest[min(i, rest.size - 1)]
+                    return with(tiles = tiles + (id to t.copy(source = shown, tabs = if (rest.size <= 1) emptyList() else rest)))
+                }
+                val list = t.tabs.toMutableList().also { it[i] = source }.distinctBy { it.host to it.windowID }
+                return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size <= 1) emptyList() else list)))
+            }
+        }
         return with(tiles = tiles + (id to t.copy(source = source)))
+    }
+
+    fun zooming(id: String, crop: WRect?): WLayout {
+        val t = tiles[id] ?: return this
+        if (t.crop == crop) return this
+        return with(tiles = tiles + (id to t.copy(crop = crop)))
+    }
+
+    fun addingTab(source: WSource, id: String): WLayout {
+        val t = tiles[id] ?: return this
+        val current = t.source ?: return replacingSource(id, source)
+        val list = t.windows.toMutableList()
+        if (list.none { it.sameWindow(current) }) list += current
+        list.removeAll { it.sameWindow(source) }
+        list += source
+        return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size > 1) list else emptyList(), crop = null)))
+    }
+
+    fun switchingTab(id: String, index: Int): WLayout {
+        val t = tiles[id] ?: return this
+        if (index !in t.tabs.indices || t.source == t.tabs[index]) return this
+        return with(tiles = tiles + (id to t.copy(source = t.tabs[index], crop = null)))
+    }
+
+    fun removingTab(id: String, index: Int): WLayout {
+        val t = tiles[id] ?: return this
+        if (index !in t.tabs.indices) return this
+        val rest = t.tabs.toMutableList(); val removed = rest.removeAt(index)
+        var shown = t.source; var crop = t.crop
+        if (shown == removed) { shown = if (rest.isEmpty()) null else rest[min(index, rest.size - 1)]; crop = null }
+        return with(tiles = tiles + (id to t.copy(source = shown, crop = crop, tabs = if (rest.size <= 1) emptyList() else rest)))
+    }
+
+    fun tileHolding(host: String, windowID: Long): String? =
+        orderedTileIDs.firstOrNull { id -> tiles[id]?.windows?.any { it.host == host && it.windowID == windowID } == true }
+
+    fun insertingSplit(tile: WTile, index: Int, edge: WEdge): WLayout {
+        if (tile.id in tiles || tiles.size >= MAXIMUM_TILES || !slotExists(root, index)) return this
+        return of(split(root, index, edge, tile.id), tiles + (tile.id to tile), null)
+    }
+
+    fun filling(index: Int, tile: WTile): WLayout {
+        if (tile.id in tiles || !slotExists(root, index) || slotAt(root, index) != null) return this
+        return of(setSlot(root, index, tile.id), tiles + (tile.id to tile), maximized)
     }
 
     fun rotating(id: String): WLayout {
@@ -281,7 +406,7 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
     fun materializing(hinge: WHinge?) = WLayout(WGeometry.hingeAdjustedRoot(root, hinge), tiles, maximized)
 
     companion object {
-        const val SCHEMA = 1
+        const val SCHEMA = 2
         const val MAXIMUM_TILES = 9
 
         /** Normalizing constructor: drops unknown/duplicate slots and orphan tiles, fixes ratios, flattens. */
@@ -378,8 +503,9 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
 /** A separating/occluding fold, normalized. Nothing interactive goes inside it. */
 data class WHinge(val rect: WRect, val orientation: WAxis)
 
+/** Up to 9 panes everywhere (2x2 and 3x3 on phones too); the minimum pane size decides what fits. */
 enum class WSizeClass(val tileLimit: Int) {
-    Compact(3), Expanded(9);
+    Compact(9), Expanded(9);
     companion object {
         /** From the usable window size in dp (not the screen, not the model). */
         fun of(size: WSize): WSizeClass {
@@ -523,6 +649,22 @@ object WGeometry {
         return WDropTarget.Split(index, edge, preview)
     }
 
+    /** WorkspaceGeometry.windowDrop: label strip = tab, edge band = split, middle = replace. */
+    fun windowDrop(point: WPoint, layout: WLayout, frames: WFrames, size: WSize, labelHeight: Double, canSplit: Boolean): WWindowDrop? {
+        val index = frames.slots.indexOfFirst { it.contains(point) }
+        if (index < 0 || !WLayout.slotExists(layout.root, index)) return null
+        val slot = frames.slots[index]
+        val tile = WLayout.slotAt(layout.root, index)
+        if (tile == null || layout.tiles[tile]?.source == null) return WWindowDrop.EmptySlot(index, slot)
+        val strip = min(labelHeight * 1.6, slot.height * 0.25)
+        if (point.y - slot.y <= strip) return WWindowDrop.Tab(tile, WRect(slot.x, slot.y, slot.width, strip))
+        if (canSplit) {
+            val d = dropTarget(point, frames, size, null, true)
+            if (d is WDropTarget.Split && d.index == index) return WWindowDrop.Split(d.index, d.edge, d.preview)
+        }
+        return WWindowDrop.Replace(tile, slot)
+    }
+
     fun resizing(layout: WLayout, divider: WDivider, delta: Double, size: WSize): WLayout {
         if (!delta.isFinite()) return layout
         fun walk(node: WNode, path: List<Int>, rect: WRect): WNode {
@@ -629,6 +771,13 @@ object WLayoutRecord {
                         put("follow", s.follow.wire)
                     }
                     put("rotation", t.rotation.degrees); put("fit", t.fit.wire)
+                    if (t.tabs.isNotEmpty()) put("tabs", buildJsonArray {
+                        t.tabs.forEach { s -> add(buildJsonObject {
+                            put("host", s.host); put("window", s.windowID)
+                            s.bundleID?.let { put("bundle", it) }
+                            put("follow", s.follow.wire)
+                        }) }
+                    })
                 })
             }
         })
@@ -674,7 +823,17 @@ object WLayoutRecord {
                 host, window, (t["gen"] as? JsonPrimitive)?.longOrNull, (t["bundle"] as? JsonPrimitive)?.contentOrNull(),
                 WFollow.of((t["follow"] as? JsonPrimitive)?.contentOrNull()),
             ) else null
-            tiles[id] = WTile(id, source, WRotation.of((t["rotation"] as? JsonPrimitive)?.intOrNull ?: 0), WFit.of((t["fit"] as? JsonPrimitive)?.contentOrNull()))
+            // Schema 1 saved every tile as "fit" (no automatic fill then): start them on auto.
+            val stored = (t["fit"] as? JsonPrimitive)?.contentOrNull()
+            val fit = if (schema < 2 && stored == WFit.Fit.wire) WFit.Auto else WFit.of(stored)
+            val tabs = (t["tabs"] as? JsonArray)?.take(8)?.mapNotNull { e ->
+                val o = e as? JsonObject ?: return@mapNotNull null
+                val h = (o["host"] as? JsonPrimitive)?.contentOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val w = (o["window"] as? JsonPrimitive)?.longOrNull ?: return@mapNotNull null
+                WSource(h, w, null, (o["bundle"] as? JsonPrimitive)?.contentOrNull(), WFollow.of((o["follow"] as? JsonPrimitive)?.contentOrNull()))
+            }?.map { if (source != null && it.sameWindow(source)) source else it } ?: emptyList()
+            tiles[id] = WTile(id, source, WRotation.of((t["rotation"] as? JsonPrimitive)?.intOrNull ?: 0), fit,
+                tabs = if (tabs.size > 1 && source != null && tabs.any { it.sameWindow(source) }) tabs else emptyList())
         }
         return WLayout.of(node(obj["root"]), tiles, (obj["maximized"] as? JsonPrimitive)?.contentOrNull())
     }

@@ -112,6 +112,27 @@ class WorkspaceVectorsTest {
     }
 
     @Test
+    fun zoomKeepsThePaneShapeLikeSwift() {
+        val cases = vectors.getValue("zoom").jsonArray
+        check(cases.isNotEmpty())
+        for (c in cases) {
+            val o = c.jsonObject
+            val base = WZoom.fillCrop(size(o.getValue("window").jsonArray), size(o.getValue("tile").jsonArray), WRotation.of(o.getValue("rotation").jsonPrimitive.int))
+            assertRect(rect(o.getValue("base").jsonArray), base, "zoom base $o")
+            var crop: WRect? = null
+            for (s in o.getValue("steps").jsonArray) {
+                val st = s.jsonObject
+                val a = st.getValue("anchor").jsonArray; val p = st.getValue("pan").jsonArray
+                crop = WZoom.apply(crop, base, st.getValue("scale").jsonPrimitive.double,
+                    WPoint(a[0].jsonPrimitive.double, a[1].jsonPrimitive.double), WPoint(p[0].jsonPrimitive.double, p[1].jsonPrimitive.double))
+                val e = st["crop"]
+                if (e == null || e is JsonNull) assertEquals("zoom step $st", null, crop)
+                else assertRect(rect(e.jsonArray), crop ?: base, "zoom step $st")
+            }
+        }
+    }
+
+    @Test
     fun capacityAndTransformsMatchSwift() {
         for (c in vectors.getValue("capacities").jsonArray) {
             val o = c.jsonObject
