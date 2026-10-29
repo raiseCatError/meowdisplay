@@ -220,10 +220,7 @@ private fun SettingsPageContent(
             Toggle("Prefer MeowDisplay Gestures", prefs.preferMeowDisplayGestures) { on -> set { it.preferMeowDisplayGestures = on } }
             Section("App Gesture Commands")
             Caption("Sent when Pinch or Rotate targets the App.")
-            listOf("Zoom In" to prefs.appGestureCommands.zoomIn, "Zoom Out" to prefs.appGestureCommands.zoomOut,
-                "Rotate Left" to prefs.appGestureCommands.rotateLeft, "Rotate Right" to prefs.appGestureCommands.rotateRight).forEach { (title, shortcut) ->
-                Row(Modifier.fillMaxWidth()) { Text(title, Modifier.weight(1f)); Text(appGestureCommandDisplayText(shortcut)) }
-            }
+            AppGestureCommandsEditor(controller)
             OutlinedButton(onClick = { set { it.resetAppGestureCommands() } }) { Text("Reset to Defaults") }
         }
         SettingsPage.Controls -> {
@@ -234,6 +231,7 @@ private fun SettingsPageContent(
             Choice("Control Profile", ControlProfileSlot.entries, prefs.activeControlProfile, { it.title }) { slot -> set { it.activeControlProfile = slot } }
             Choice("Landscape Tray Side", LandscapeTraySide.entries, prefs.preferredLandscapeSide, { it.title }) { side -> set { it.preferredLandscapeSide = side } }
             ProfileTrayEditor(controller)
+            ChordPaletteEditor(controller)
             Section("Function Tray")
             Toggle("Show Function Tray", prefs.functionTrayEnabled) { on -> set { it.functionTrayEnabled = on } }
             Choice("Function Profile", ControlProfileSlot.entries, prefs.activeFunctionTrayProfile, { it.title }) { slot -> set { it.activeFunctionTrayProfile = slot } }
@@ -392,32 +390,19 @@ private fun ProfileTrayEditor(controller: ReceiverController) {
 }
 
 @Composable
-private fun FunctionTrayEditor(controller: ReceiverController) {
-    val prefs by controller.store.preferences.collectAsState()
-    val profile = prefs.functionTrayProfile(prefs.activeFunctionTrayProfile)
-    profile.items.forEachIndexed { index, configuration ->
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(configuration.resolvedItem.title, Modifier.weight(1f))
-            TextButton(onClick = { controller.store.updateActiveFunctionTrayProfile { it.moveItems(setOf(index), maxOf(0, index - 1)) } }, enabled = index > 0) { Text("Up") }
-            Switch(checked = configuration.isVisible, onCheckedChange = { on ->
-                controller.store.updateActiveFunctionTrayProfile { p -> p.items = p.items.mapIndexed { i, c -> if (i == index) c.copy(isVisible = on) else c } }
-            })
-        }
-    }
-    TextButton(onClick = { controller.store.update { it.resetFunctionTrayProfile(prefs.activeFunctionTrayProfile) } }) { Text("Reset Function Tray") }
-}
-
-@Composable
 private fun CustomLayoutsSection(controller: ReceiverController) {
     val context = LocalContext.current
     val prefs by controller.store.preferences.collectAsState()
     var importText by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var editingLayoutID by remember { mutableStateOf<String?>(null) }
+    editingLayoutID?.let { id -> CustomLayoutEditor(controller, id, onDismiss = { editingLayoutID = null }) }
     Section("Custom Layouts")
     prefs.customLayouts.forEach { layout ->
         val active = prefs.activeCustomLayout?.id == layout.id
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text((if (active) "✓ " else "") + layout.name, Modifier.weight(1f).clickable { controller.store.update { it.activeCustomLayoutID = layout.id } })
+            TextButton(onClick = { editingLayoutID = layout.id }) { Text("Edit") }
             TextButton(onClick = {
                 val code = CustomLayoutShareCode.encode(layout, prefs.functionTrayProfile(prefs.activeFunctionTrayProfile).allItems)
                 context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("MeowDisplay layout", code))
@@ -462,15 +447,15 @@ private fun LabeledRow(label: String, value: String) {
 }
 
 @Composable
-private fun Section(title: String) {
+internal fun Section(title: String) {
     Text(title.uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp).semantics { heading() })
 }
 
 @Composable
-private fun Caption(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+internal fun Caption(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 @Composable
-private fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+internal fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f), color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
         Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
@@ -480,7 +465,7 @@ private fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onC
 /** A choice among more options than fit a segmented row: chips that wrap. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun <T> ChipChoice(title: String, options: List<T>, selected: T?, label: (T) -> String, enabled: Boolean = true, onSelect: (T) -> Unit) {
+internal fun <T> ChipChoice(title: String, options: List<T>, selected: T?, label: (T) -> String, enabled: Boolean = true, onSelect: (T) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -602,7 +587,7 @@ private fun StreamingSection(media: SessionHost, stream: StreamSettings, live: B
 }
 
 @Composable
-private fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T) -> String, onSelect: (T) -> Unit) {
+internal fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T) -> String, onSelect: (T) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
@@ -616,7 +601,7 @@ private fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T)
 }
 
 @Composable
-private fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
+internal fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
     Column {
         Row { Text(title, Modifier.weight(1f)); Text("%.2f×".format(value)) }
         Slider(value = value, onValueChange = onChange, valueRange = range)

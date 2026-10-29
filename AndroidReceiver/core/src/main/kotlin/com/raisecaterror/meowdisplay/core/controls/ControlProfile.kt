@@ -616,7 +616,9 @@ val appGestureCommandEditableKeys: List<Pair<String, Int>> = run {
         "Space" to 44, "Return" to 40, "Tab" to 43, "Escape" to 41, "Delete" to 42,
         "↑" to 82, "↓" to 81, "←" to 80, "→" to 79,
     )
-    letters + digits + symbols + special
+    // F1–F12 (HID 58..69), the same list on iOS, so labels match across shared layouts.
+    val functionKeys = (1..12).map { "F$it" to 57 + it }
+    letters + digits + symbols + special + functionKeys
 }
 
 fun appGestureCommandKeyLabel(usage: Int): String = appGestureCommandEditableKeys.firstOrNull { it.second == usage }?.first ?: "?"

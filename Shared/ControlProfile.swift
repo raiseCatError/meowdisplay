@@ -540,7 +540,9 @@ let appGestureCommandEditableKeys: [(String, Int)] = {
                                     (";", 51), ("'", 52)]
     let special: [(String, Int)] = [("Space", 44), ("Return", 40), ("Tab", 43), ("Escape", 41),
                                     ("Delete", 42), ("↑", 82), ("↓", 81), ("←", 80), ("→", 79)]
-    return letters + digits + symbols + special
+    // F1–F12 (HID 58...69), the same list on Android, so labels match across shared layouts.
+    let functionKeys = (1...12).map { ("F\($0)", 57 + $0) }
+    return letters + digits + symbols + special + functionKeys
 }()
 
 func appGestureCommandKeyLabel(for usage: Int) -> String {
