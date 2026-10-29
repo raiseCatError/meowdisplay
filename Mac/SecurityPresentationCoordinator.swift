@@ -109,6 +109,61 @@ enum SecurityPresentationCoordinator {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: - Remote Finder ("<Device Name> wants to browse your approved folders")
+
+    private static var filesConsentPanel: NSPanel?
+    private static var filesConsentPanelDelegate: FilesConsentPanelWindowDelegate?
+    /// The open request: who asked and how to answer. Answered exactly once.
+    private static var filesConsentPending: (sessionID: String, decide: (Bool) -> Void)?
+
+    /// Asks the Mac owner whether this session may browse the approved folders. Closing the
+    /// panel is Not Now. A second request while one is open answers the first Not Now.
+    /// Doesn't activate the app, so the owner's front app keeps focus until they click.
+    static func presentFilesConsent(name: String, sessionID: String, decide: @escaping (Bool) -> Void) {
+        answerFilesConsent(false)
+        filesConsentPending = (sessionID, decide)
+        let panel: NSPanel
+        if let existing = filesConsentPanel {
+            panel = existing
+        } else {
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
+                styleMask: [.titled, .closable, .nonactivatingPanel],
+                backing: .buffered, defer: false)
+            panel.title = String(localized: "Files Request")
+            panel.isFloatingPanel = true
+            panel.level = .modalPanel
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            filesConsentPanel = panel
+        }
+        let delegate = FilesConsentPanelWindowDelegate()
+        filesConsentPanelDelegate = delegate
+        panel.delegate = delegate
+        let hostingController = NSHostingController(rootView: FilesConsentPanelView(name: name) { allowed in
+            answerFilesConsent(allowed)
+            panel.orderOut(nil)
+        })
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
+        panel.center()
+        panel.orderFrontRegardless()
+        panel.makeKey()
+    }
+
+    /// The session ended or its connection changed: its question no longer stands.
+    static func dismissFilesConsent(sessionID: String) {
+        guard filesConsentPending?.sessionID == sessionID else { return }
+        filesConsentPending = nil
+        filesConsentPanel?.orderOut(nil)
+    }
+
+    fileprivate static func answerFilesConsent(_ allowed: Bool) {
+        guard let pending = filesConsentPending else { return }
+        filesConsentPending = nil
+        pending.decide(allowed)
+    }
+
     // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
 
     private static var sessionApprovalPanel: NSPanel?
@@ -414,5 +469,43 @@ private struct SessionApprovalPanelView: View {
         .onChange(of: prompt.current) { _, newValue in
             if newValue == nil { onResolved() }
         }
+    }
+}
+
+/// Closing the Remote Finder panel with its window controls is Not Now.
+@MainActor
+private final class FilesConsentPanelWindowDelegate: NSObject, NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        SecurityPresentationCoordinator.answerFilesConsent(false)
+    }
+}
+
+/// "<Device Name> wants to browse your approved folders": Allow for This Session / Not Now.
+private struct FilesConsentPanelView: View {
+    let name: String
+    let decide: (Bool) -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 6) {
+                Text("\(name) wants to browse your approved folders")
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
+                Text("It can see file names and previews in the folders you chose in MeowDisplay Settings, read-only, until this session ends. Opening a file on this Mac also needs control.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
+            }
+            HStack(spacing: 8) {
+                Button("Not Now") { decide(false) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Allow for This Session") { decide(true) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 380)
     }
 }

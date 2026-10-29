@@ -222,6 +222,14 @@ enum WindowWorkspaceWire {
     static let mode = "window"
 }
 
+/// Remote Finder (PROTOCOL.md 6.12): read-only browsing of folders the Mac's owner approved.
+/// Offered only when the Mac lists `welcomeFeature`; every request also needs the owner's
+/// per-session approval on the Mac. No write, delete, upload or transfer operation exists.
+enum RemoteFilesWire {
+    static let welcomeFeature = "files"
+    static let version = 1
+}
+
 enum WireMessage {
     static let welcome = "welcome"                  // Mac -> phone: Mac's pv + min supported
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
@@ -247,6 +255,8 @@ enum WireMessage {
     static let appLaunch = "appLaunch"                         // receiver -> Mac: open an app without activating it (needs control)
     static let appLaunchResult = "appLaunchResult"             // Mac -> receiver: {bundle, ok}
     static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
+    static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
+    static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off

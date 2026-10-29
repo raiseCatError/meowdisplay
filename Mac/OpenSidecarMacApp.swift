@@ -2704,6 +2704,13 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.handleInputControlRequested(session: session, connectionGeneration: generation)
         }
+        sender.onFilesConsentRequest = { [weak self, weak session] generation in
+            // Remote Finder: the Mac owner approves browsing once per session, for this connection.
+            guard let self, let session, self.owns(session) else { return }
+            SecurityPresentationCoordinator.presentFilesConsent(name: session.name, sessionID: session.id) { [weak session] allowed in
+                session?.sender.resolveFilesConsent(allowed, generation: generation)
+            }
+        }
         sender.onSessionInputGrantChanged = { [weak session] granted in
             session?.sessionInputGranted = granted
         }
@@ -2714,6 +2721,7 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             session.inputControlRequest.invalidatePending()
             self.inputControlPrompt.cancelForEndedSession(id: session.id)
+            SecurityPresentationCoordinator.dismissFilesConsent(sessionID: session.id)
         }
         sender.onVideoEnabledRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }
@@ -3009,6 +3017,7 @@ final class SenderController: ObservableObject {
             Log.info("deviceUI: activeSession removed peerID=\(session.deviceID ?? "unknown") sessionID=\(session.id)")
         }
         sessionObservations.removeValue(forKey: ObjectIdentifier(session))
+        SecurityPresentationCoordinator.dismissFilesConsent(sessionID: session.id)
         // Identity comparison prevents a late callback from an old attempt
         // removing its newer replacement, which can have the same route id.
         sessions.removeAll { $0 === session }

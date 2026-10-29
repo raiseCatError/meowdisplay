@@ -266,6 +266,7 @@ targets:
       - Mac/WindowWorkspaceTargeting.swift
       - Mac/WindowWorkspaceEngine.swift
       - Mac/WindowBrowserService.swift
+      - Mac/RemoteFileBrowser.swift
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift

@@ -48,6 +48,8 @@ struct DisplaysSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            RemoteFilesSettingsSection()
+
             if controller.mode == .mirror {
                 Section {
                     MirrorDisplayPickerView(controller: controller)
@@ -103,5 +105,75 @@ struct DisplaysSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Remote Finder: off by default; the owner picks the folders, and every session still asks.
+private struct RemoteFilesSettingsSection: View {
+    @AppStorage(RemoteFilesPolicy.enabledKey) private var enabled = false
+    @State private var roots = RemoteFileRoot.load()
+    @State private var refused: String?
+
+    var body: some View {
+        Section {
+            Toggle("Let devices browse approved folders", isOn: $enabled)
+            if enabled {
+                ForEach(roots) { root in
+                    HStack {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: root.path))
+                            .resizable().frame(width: 16, height: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(root.name)
+                            Text(root.path).font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("Remove") { remove(root) }
+                    }
+                }
+                if roots.isEmpty {
+                    Text("No folders yet. Devices see nothing until you add one.")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Add Folder…") { addFolders() }
+                    if let refused {
+                        Text(refused).font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+        } header: {
+            Text("Files")
+        } footer: {
+            Text("A connected device can look through these folders on its own screen: names, sizes and previews, read-only. Each session asks you first. Hidden files and your Library folder never show. Opening a file on this Mac also needs control.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func addFolders() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = String(localized: "Approve")
+        panel.message = String(localized: "Choose folders connected devices may browse.")
+        guard panel.runModal() == .OK else { return }
+        refused = nil
+        for url in panel.urls {
+            let canonical = RemoteFilesPolicy.canonical(url)
+            guard RemoteFilesPolicy.isAllowedRoot(canonical) else {
+                refused = String(localized: "\(canonical.lastPathComponent) can't be shared: only folders in your home folder (not Library) or on external drives.")
+                continue
+            }
+            guard !roots.contains(where: { $0.path == canonical.path }) else { continue }
+            roots.append(RemoteFileRoot(id: UUID().uuidString, path: canonical.path))
+        }
+        RemoteFileRoot.save(roots)
+    }
+
+    private func remove(_ root: RemoteFileRoot) {
+        roots.removeAll { $0.id == root.id }
+        RemoteFileRoot.save(roots)
     }
 }

@@ -1444,6 +1444,57 @@ display is focused.
   the caret when the keyboard closes. The shared test vectors are in
   `fixtures/viewport/caret-vectors.json`.
 
+### 6.12 Remote Finder (`filesRequest` / `files`)
+
+Optional and additive: no `pv` bump. A receiver browses folders the Mac owner
+approved, on its own screen, read-only.
+
+* **Capability.** A sender that can answer lists `"files"` in
+  `welcome.features`. A receiver sends `filesRequest` only to such a sender;
+  a peer that doesn't know the types ignores them.
+* **Gates (sender).** Answered only for an admitted, unpaused session. The Mac
+  owner turns the feature on (off by default) and chooses the folders: inside
+  their home folder (never `~/Library`) or on a mounted volume. Each
+  connection then asks the owner once: the first `filesRequest` with
+  `op` `"state"` shows the prompt; every other op before the answer gets the
+  error `asking`. The approval ends with the connection.
+* **Paths.** A request names a `root` (an approved folder's opaque id) and a
+  `path` (array of names below it). The sender rejects `.`, `..`, separators
+  and hidden names, resolves symlinks and answers only if the result stays
+  inside that folder and outside `~/Library` and other users' homes. Hidden
+  files are never listed.
+* **`filesRequest`** (receiver to sender): `{"type":"filesRequest","op":…,"req":7,…}`.
+  `req` is echoed in the reply. Ops:
+  * `state`: whether browsing is possible, and the folders.
+  * `list` (`root`, `path`): one folder, folders first, at most 2000 entries.
+  * `search` (`root`, `path`, `q` ≤ 100 chars): names containing `q` below
+    `path`, at most 200 results, bounded in time; a newer search replaces an
+    older one.
+  * `preview` (`root`, `path`, optional `max` side ≤ 1024): a text excerpt
+    (≤ 32 KB) or a Quick Look JPEG. Only the newest preview is answered.
+  * `thumbs` (`root`, `path`, `names` ≤ 48, optional `max` ≤ 256): grid
+    thumbnails, one `thumb` reply each; a newer `thumbs` cancels the rest.
+  * `open` (`root`, `path`, optional `with` bundle id): opens the file on the
+    Mac, in its default app or in that app, without bringing it forward.
+    Needs the input grant (6.1 `allowInputState`), else error `control`.
+* **`files`** (sender to receiver): `{"type":"files","op":…,"req":7,"ok":true,…}`.
+  * `state`: `state` is `off`, `asking`, `denied`, `noFolders` or `ready`;
+    `ready` carries `roots: [{id, name}]`. Sent again when the owner answers.
+  * `list`: `root`, `path`, `entries`, optional `truncated`. An entry is
+    `{name, dir, kind, size?, mod?}`: `kind` is `folder`, `app`, `image`,
+    `video`, `audio`, `pdf`, `archive`, `text`, `document` or `file`; `size`
+    in bytes for files; `mod` in Unix seconds.
+  * `search`: `root`, `q`, `entries` (each with `in`, the folder path below
+    the root), `complete`.
+  * `preview`: `root`, `path`, then `text` (+ `truncated`) or `jpeg` (base64)
+    with `w`, `h`.
+  * `thumb`: `root`, `path`, `name`, then `jpeg`, `w`, `h` or `ok:false`.
+  * Errors: `ok:false` with `error` `off`, `asking`, `denied`, `notFound`,
+    `permission` (macOS refused this app), `control`, `badQuery`,
+    `noPreview` or `unsupported`.
+* **Never.** No writes, deletes, renames, uploads or downloads of whole files;
+  no Finder windows on the Mac and no change of display mode or focus.
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1708,3 +1759,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-27 | Additive, no `pv` change: opt-in same-Mac login-session TXT keys `hg`/`hn`/`sl`/`ss` on `_opendisplay-mac-pair._tcp` (section 2.1) |
 | 2026-10-29 | Additive, no `pv` change: text caret (section 6.11), `welcome.features` `textCaret`, `keyboardState`, `textCaret` |
 | 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |
+| 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |

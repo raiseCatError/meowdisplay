@@ -374,6 +374,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// applied immediately by `denySessionInput` at the call site in
     /// `handleControl` and never reaches here.
     @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
+    /// Remote Finder: this connection asks to browse the approved folders; answer with
+    /// `resolveFilesConsent(_:generation:)` after the owner decides.
+    @MainActor var onFilesConsentRequest: ((_ generation: UInt64) -> Void)?
     /// Fires when the connection changes, so a pending control-request
     /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
     @MainActor var onInputAuthorityReset: (() -> Void)? {
@@ -826,6 +829,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var workspaceEngine: WindowWorkspaceEngine?
     /// Window/app/display browsing for this receiver in every display mode (Stage Peek over Mirror/Extend).
     private var windowBrowser: WindowBrowserService?
+    /// Remote Finder for this session (created on its first request; `queue` only).
+    private var fileBrowser: RemoteFileBrowser?
     // Lock-guarded mirror of `sessionAuthorization`'s input grant for
     // `InputInjector`, which re-checks it under its own lock at injection
     // time; `DeviceSession` only ever mirrors it for display via
@@ -1368,6 +1373,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func notifyInputRequestPending() {
         let selfBox = self.selfBox
         queue.async { selfBox.currentOnQueue()?.sendAllowInputState(state: .requesting) }
+    }
+
+    /// The owner's answer to a Remote Finder prompt, for the connection that asked.
+    func resolveFilesConsent(_ allowed: Bool, generation: UInt64) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
+            self.fileBrowser?.consentDecided(allowed)
+        }
     }
 
     /// A Mac-owner (or auto-policy) decision granted control to the
@@ -2876,6 +2890,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         stopWorkspaceEngine()
         windowBrowser?.stop()
         windowBrowser = nil
+        fileBrowser?.stop()
+        fileBrowser = nil
         textCaretFollower.stop()
         let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
@@ -5281,6 +5297,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let phase = captureStateSnapshot().phase
             guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+        case WireMessage.filesRequest:
+            // Admitted sessions only. Read-only, owner-approved folders; the service checks
+            // the Mac's switch, the owner's per-session approval and every path.
+            let phase = captureStateSnapshot().phase
+            guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction:
             // Admitted sessions only (gate above). Window metadata exists only
             // while this receiver is in Window mode on this Mac.
@@ -6443,7 +6465,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
                                       "min": WireProtocol.minSupportedPeer]
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
-        var features = [TextCaretWire.welcomeFeature]
+        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature]
         if WindowStreamingPolicy.isAllowed() { features.insert(WindowWorkspaceWire.welcomeFeature, at: 0) }
         welcome["features"] = features
         sendJSONObject(welcome)
@@ -6739,6 +6761,9 @@ extension MacSender: MacSenderTransportDelegate {
     /// relative ordering the pre-Phase-1 code had.
     func transportSessionBecameReady(on connection: NWConnection) {
         activeConnectionGeneration = authenticatedSession.beginTransport()
+        // The owner's Remote Finder approval belonged to the old connection.
+        fileBrowser?.stop()
+        fileBrowser = nil
         // A new connection starts unverified and unadmitted, whichever path
         // replaced the old one (redial, `switchTransport`, or the transport
         // controller's own migration) — see `SenderSessionAuthorization`.
@@ -6949,6 +6974,28 @@ extension MacSender {
         inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         inputInjector?.setTargetMapper(engine)
         engine.start()
+    }
+
+    /// `queue` only. One Remote Finder per connection; its replies pass the admission gate.
+    private func ensureFileBrowser() -> RemoteFileBrowser {
+        if let fileBrowser { return fileBrowser }
+        let browser = RemoteFileBrowser()
+        let selfBox = self.selfBox
+        let queue = self.queue
+        let generation = activeConnectionGeneration
+        browser.sendMessage = { [weak browser] message in
+            let box = WorkspaceMessageBox(value: message)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let browser, sender.fileBrowser === browser,
+                      sender.sessionAuthorization.isAdmitted else { return }
+                sender.sendJSONObject(box.value)
+            }
+        }
+        browser.askConsent = {
+            Task { @MainActor in selfBox.resolve()?.onFilesConsentRequest?(generation) }
+        }
+        fileBrowser = browser
+        return browser
     }
 
     /// `queue` only. One browser per session; its messages pass the same admission gate.
