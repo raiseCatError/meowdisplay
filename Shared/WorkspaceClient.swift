@@ -523,7 +523,13 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, crop: WorkspaceRect?, base: WorkspaceRect, anchor: WorkspacePoint, rect: WorkspaceRect)?
+    private var zoomGesture: (tile: String, crop: WorkspaceRect?, base: WorkspaceRect, anchor: WorkspacePoint, rect: WorkspaceRect,
+                              start: WorkspaceRect?)?
+
+    /// The instant local zoom of the pane under the fingers (nil when there is none): the receiver
+    /// scales the picture it already has until the Mac's sharp frame arrives. Kept after the
+    /// gesture ends so the view can hold it until then.
+    private(set) var zoomPreview: WorkspaceZoomPreview?
 
     /// Two-finger pinch/pan in Window mode. Points are normalized to the picture.
     /// Only the tile under the fingers where the gesture began changes. A pinch zooms that
@@ -535,10 +541,11 @@ final class WorkspaceModel: ObservableObject {
             guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
                   let tile = layout.tiles[id], tile.source != nil,
                   isPinch || tile.crop != nil || effectiveFit(id) == .fill,
-                  let base = fillBase(id, rect: rect) else { zoomGesture = nil; return false }
+                  let base = fillBase(id, rect: rect) else { zoomGesture = nil; zoomPreview = nil; return false }
             let anchor = WorkspacePoint(x: min(max((initial.x - rect.x) / max(rect.width, 1e-6), 0), 1),
                                         y: min(max((initial.y - rect.y) / max(rect.height, 1e-6), 0), 1))
-            zoomGesture = (id, tile.crop, base, Self.unrotate(anchor, tile.rotation), rect)
+            zoomGesture = (id, tile.crop, base, Self.unrotate(anchor, tile.rotation), rect, drawnWindowRect(tile, in: rect))
+            zoomPreview = nil
             if active != id { focus(id) }
         }
         guard let g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
@@ -550,11 +557,27 @@ final class WorkspaceModel: ObservableObject {
             saved = next
             publish(); scheduleThrottledSend()
         }
+        if let start = g.start, let now = next.tiles[g.tile].flatMap({ drawnWindowRect($0, in: g.rect) }) {
+            zoomPreview = WorkspaceZoomPreview(tile: g.tile, pane: g.rect, from: start, to: now)
+        } else {
+            zoomPreview = nil
+        }
         if ended {
             zoomGesture = nil
             persist()
         }
         return true
+    }
+
+    /// Where the pane draws its whole window (picture-normalized; larger than the pane when
+    /// filled or zoomed), as the Mac composes it. Nil for a turned pane or without the window's size.
+    private func drawnWindowRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
+        guard tile.rotation == .none, let w = windowSize(tile), size.width > 0, size.height > 0 else { return nil }
+        if let crop = tile.crop { return WorkspaceZoomPreview.windowRect(crop: crop, content: rect) }
+        let c = TileContentTransform(tile: WorkspaceRect(x: rect.x * size.width, y: rect.y * size.height,
+                                                         width: rect.width * size.width, height: rect.height * size.height),
+                                     source: w, rotation: .none, fit: tile.fit).contentRect
+        return WorkspaceRect(x: c.x / size.width, y: c.y / size.height, width: c.width / size.width, height: c.height / size.height)
     }
 
     /// The pane's fill region in its window (the zoom's 1x), or nil without the window's size.
@@ -609,6 +632,12 @@ final class WorkspaceModel: ObservableObject {
             copy.tiles[id] = tile
             return copy
         }
+    }
+
+    /// Two-finger double-tap: the pane under the fingers back to its default view.
+    func resetView(at p: WorkspacePoint) {
+        guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key, layout.tiles[id]?.source != nil else { return }
+        resetView(id)
     }
 
     /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).

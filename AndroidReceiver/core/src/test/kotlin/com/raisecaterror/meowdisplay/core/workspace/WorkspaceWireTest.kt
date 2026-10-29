@@ -136,4 +136,23 @@ class WorkspaceWireTest {
         assertEquals(setOf("c"), catalog.missingTiles(layout.replacingSource("b", WSource("m", 12, bundleID = "dev.qa.probe"))))
         assertEquals(setOf("b"), catalog.missingTiles(layout.removing("c")))
     }
+
+    /** Hybrid zoom: the preview maps the picture as drawn at the start to where it belongs now (same as Swift). */
+    @Test
+    fun aZoomPreviewScalesThePaneAboutTheFingers() {
+        val pane = WRect(0.0, 0.0, 1.0, 1.0)
+        // A 4:3 window in a 4:3 pane, then zoomed 2x about its centre.
+        val start = WZoomPreview.windowRect(WRect(0.0, 0.0, 1.0, 1.0), pane)!!
+        val now = WZoomPreview.windowRect(WRect(0.25, 0.25, 0.5, 0.5), pane)!!
+        val p = WZoomPreview.between("t", pane, start, now)!!
+        assertEquals(2.0, p.scaleX, 1e-9)
+        assertEquals(2.0, p.scaleY, 1e-9)
+        val c = p.apply(WPoint(0.5, 0.5))
+        assertEquals(0.5, c.x, 1e-9)
+        assertEquals(0.5, c.y, 1e-9)
+        val corner = p.apply(WPoint(0.25, 0.25))
+        assertEquals(0.0, corner.x, 1e-9)
+        assertEquals(0.0, corner.y, 1e-9)
+        assertNull(WZoomPreview.between("t", pane, WRect(0.0, 0.0, 0.0, 1.0), now))
+    }
 }

@@ -81,7 +81,8 @@ enum ReceiverMultiFingerRecognizer: CaseIterable {
 /// user is only moving the view.
 ///
 /// Remote-only recognizers (three-finger, pinch/spread) also need Allow
-/// Input; the viewport double tap needs Local View Navigation; the
+/// Input; the viewport double tap needs Local View Navigation, or Window
+/// mode panes (there it resets the pane under the fingers); the
 /// two-finger recognizer needs either (it both scrolls the Mac and moves
 /// the local view — see `TwoFingerRoutingPolicy`).
 struct ReceiverMultiFingerGestureGate: Equatable {
@@ -89,6 +90,7 @@ struct ReceiverMultiFingerGestureGate: Equatable {
     private(set) var viewportNavigationActive = false
     private(set) var remoteInputAllowed = true
     private(set) var localNavigationAllowed = true
+    private(set) var workspacePanes = false
 
     init(voiceOverRunning: Bool) {
         self.voiceOverRunning = voiceOverRunning
@@ -106,6 +108,13 @@ struct ReceiverMultiFingerGestureGate: Equatable {
     }
 
     /// Returns whether availability changed.
+    mutating func update(workspacePanes: Bool) -> Bool {
+        guard workspacePanes != self.workspacePanes else { return false }
+        self.workspacePanes = workspacePanes
+        return true
+    }
+
+    /// Returns whether availability changed.
     mutating func update(viewportNavigationActive: Bool) -> Bool {
         guard viewportNavigationActive != self.viewportNavigationActive else { return false }
         self.viewportNavigationActive = viewportNavigationActive
@@ -116,7 +125,7 @@ struct ReceiverMultiFingerGestureGate: Equatable {
         guard recognizersEnabled else { return false }
         switch recognizer {
         case .twoFingerViewport: return remoteInputAllowed || localNavigationAllowed
-        case .viewportDoubleTap: return localNavigationAllowed
+        case .viewportDoubleTap: return localNavigationAllowed || workspacePanes
         case .threeFingerSwipe, .threeFingerTap, .pinchSpread: return remoteInputAllowed
         }
     }

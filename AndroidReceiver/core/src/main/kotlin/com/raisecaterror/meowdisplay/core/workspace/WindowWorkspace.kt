@@ -200,6 +200,32 @@ object WZoom {
     }
 }
 
+/**
+ * Hybrid zoom: while the fingers move, the receiver scales the picture it already has (instantly,
+ * clipped to the pane); the Mac's sharp frame replaces it after the gesture. Picture-normalized.
+ * `v' = scale * v + offset` per axis moves a point of the picture as drawn when the gesture began
+ * to where it belongs now. Same as Swift's WorkspaceZoomPreview.
+ */
+data class WZoomPreview(val tile: String, val pane: WRect, val scaleX: Double, val scaleY: Double, val offsetX: Double, val offsetY: Double) {
+    fun apply(p: WPoint) = WPoint(scaleX * p.x + offsetX, scaleY * p.y + offsetY)
+
+    companion object {
+        fun between(tile: String, pane: WRect, old: WRect, new: WRect): WZoomPreview? {
+            if (old.width <= 0 || old.height <= 0 || new.width <= 0 || new.height <= 0 ||
+                !listOf(old.x, old.y, new.x, new.y, new.width, new.height).all { it.isFinite() }) return null
+            val sx = new.width / old.width; val sy = new.height / old.height
+            return WZoomPreview(tile, pane, sx, sy, new.x - sx * old.x, new.y - sy * old.y)
+        }
+
+        /** Where the whole window lands when [crop] (window-normalized) is drawn into [content]. */
+        fun windowRect(crop: WRect, content: WRect): WRect? {
+            if (crop.width <= 0 || crop.height <= 0) return null
+            val w = content.width / crop.width; val h = content.height / crop.height
+            return WRect(content.x - crop.x * w, content.y - crop.y * h, w, h)
+        }
+    }
+}
+
 /** Where a window dragged from Stage Peek (or a pane's label) lands. */
 sealed interface WWindowDrop {
     val preview: WRect

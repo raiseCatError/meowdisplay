@@ -51,6 +51,9 @@ interface ReceiverSurfaceEffects {
      * lets it scroll on the Mac as usual (WorkspaceModel.pinch on iOS).
      */
     fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double): Boolean = false
+
+    /** Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture). Never a click. */
+    fun workspaceViewReset(at: CGPoint) {}
 }
 
 /** Everything the dispatcher reads from preferences and the session, refreshed by the host. */
@@ -219,7 +222,9 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     }
 
     fun poll(now: Double) {
+        if (now > 0) lastTime = now
         dispatch(engine.poll(now))
+        if (heldRightTapsDue?.let { now >= it } == true) flushHeldRightTaps()
         requestPoll(now)
     }
 
@@ -336,13 +341,43 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
             SurfaceTouchPhase.Ended -> PointerTouchSample.Phase.Ended
             SurfaceTouchPhase.Cancelled -> PointerTouchSample.Phase.Cancelled
         }
+        if (time > 0) lastTime = time
         for (touch in touches) {
             val norm = currentTransform.remotePoint(touch.point)
             dispatch(engine.handle(PointerTouchSample(touch.id, samplePhase, touch.point, norm, time)))
         }
     }
 
-    private fun dispatch(commands: List<PointerCommand>) {
+    // Window mode: a two-finger tap's right-click waits a moment, so a two-finger double-tap
+    // resets the pane instead of right-clicking the Mac twice.
+    private val heldRightTaps = mutableListOf<PointerCommand>()
+    private var heldRightTapsDue: Double? = null
+    private var suppressRightTapsUntil = 0.0
+
+    private fun flushHeldRightTaps() {
+        heldRightTapsDue = null
+        if (heldRightTaps.isEmpty()) return
+        val held = heldRightTaps.toList()
+        heldRightTaps.clear()
+        dispatch(held, holdingRightTaps = false)
+    }
+
+    private fun dropHeldRightTaps(now: Double) {
+        heldRightTaps.clear()
+        heldRightTapsDue = null
+        // The engine may still be holding the second tap's right-click for its chain window.
+        suppressRightTapsUntil = now + PointerGestureConfig.tapChainWindow + 0.15
+    }
+
+    private fun dispatch(commands: List<PointerCommand>, holdingRightTaps: Boolean = true) {
+        if (holdingRightTaps && config.workspaceZoom && isRightTap(commands)) {
+            if (lastTime < suppressRightTapsUntil) return
+            heldRightTaps += commands
+            heldRightTapsDue = lastTime + WORKSPACE_RIGHT_TAP_HOLD
+            return
+        }
+        // Anything else keeps its order after a right-click still waiting.
+        if (holdingRightTaps && commands.isNotEmpty() && heldRightTaps.isNotEmpty()) flushHeldRightTaps()
         for (command in commands) {
             when (command) {
                 is PointerCommand.MoveAbsolute -> input.pointerMove(command.x, command.y)
@@ -374,7 +409,9 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
 
     private fun requestPoll(now: Double) {
         if (now > 0) lastTime = now
-        effects.pollRequested(engine.pollDelay(lastTime))
+        val engineDelay = engine.pollDelay(lastTime)
+        val heldDelay = heldRightTapsDue?.let { max(it - lastTime, 0.0) }
+        effects.pollRequested(if (engineDelay == null) heldDelay else if (heldDelay == null) engineDelay else minOf(engineDelay, heldDelay))
     }
 
     /** The engine owns the touches: no recognizer may begin (iOS `pointerEngineOwnsAnchor`). */
@@ -641,7 +678,14 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
                 val previous = lastTwoFingerTapEnd
                 if (previous != null && time - previous.first <= DOUBLE_TAP_WINDOW && distance(previous.second, center) <= DOUBLE_TAP_DISTANCE) {
                     lastTwoFingerTapEnd = null
-                    if (!systemOwned && config.videoEnabled && config.localNavigationAllowed) toggleViewportResetRestore()
+                    if (!systemOwned && config.videoEnabled) {
+                        if (config.workspaceZoom) {
+                            dropHeldRightTaps(time)
+                            currentTransform.remotePoint(center)?.let(effects::workspaceViewReset)
+                        } else if (config.localNavigationAllowed) {
+                            toggleViewportResetRestore()
+                        }
+                    }
                 } else {
                     lastTwoFingerTapEnd = time to center
                 }
@@ -767,6 +811,13 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         const val TAP_MAX_DURATION = 0.35
         const val DOUBLE_TAP_WINDOW = 0.35
         const val DOUBLE_TAP_DISTANCE = 40.0
+        /** Window mode: how long a two-finger tap's right-click waits for a second tap (a pane reset). */
+        const val WORKSPACE_RIGHT_TAP_HOLD = 0.25
+
+        private fun isRightTap(commands: List<PointerCommand>): Boolean {
+            val down = commands.indexOfFirst { it is PointerCommand.MouseDown && it.button == PointerButton.Right }
+            return down >= 0 && commands.drop(down).any { it is PointerCommand.MouseUp && it.button == PointerButton.Right }
+        }
 
         private val OWNING_MODES = setOf(
             PointerEngineMode.AbsolutePointer, PointerEngineMode.RelativePointerSession, PointerEngineMode.LeftDragHeld,

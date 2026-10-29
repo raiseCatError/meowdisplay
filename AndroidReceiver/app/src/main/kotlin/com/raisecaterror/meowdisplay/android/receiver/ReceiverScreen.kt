@@ -15,6 +15,7 @@ import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowOverview
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WindowRail
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceChrome
 import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController
+import com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceZoomPreviewLayer
 import android.app.Activity
 import android.os.Build
 import android.view.HapticFeedbackConstants
@@ -254,7 +255,10 @@ fun ReceiverScreen(
         } else {
             Modifier.fillMaxSize()
         }
-        if (picture != null) picture(videoModifier) else if (pipeline != null) AndroidView(factory = { ctx -> videoSurface(ctx, pipeline) }, modifier = videoModifier)
+        val videoView = remember { mutableStateOf<SurfaceView?>(null) }
+        if (picture != null) picture(videoModifier) else if (pipeline != null) AndroidView(factory = { ctx -> videoSurface(ctx, pipeline).also { videoView.value = it } }, modifier = videoModifier)
+        // Window mode: a pinch shows at once as a local zoom of the pane, until the Mac's sharp frame arrives.
+        if (workspace != null && !shownFrame.isEmpty) WorkspaceZoomPreviewLayer(workspace, shownFrame, videoView.value)
         // Video off: the last frame is discarded from view (PROTOCOL.md 6.2) and the mapped surface shown.
         if (!state.videoEnabled) {
             Box(Modifier.fillMaxSize().background(Color.Black))

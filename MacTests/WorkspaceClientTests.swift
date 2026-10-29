@@ -48,6 +48,35 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(WorkspaceLayout().compacted().root, .slot(nil), "nothing at all: the single empty pane stays")
     }
 
+    /// Hybrid zoom: during a pinch the pane gets an instant local preview (the picture it had,
+    /// scaled about the fingers, uniformly); a two-finger double-tap puts the pane back.
+    func testPinchGivesAnInstantPreviewAndDoubleTapResetsThePane() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed")]))
+        m.updateSpace(WorkspaceSize(width: 800, height: 600), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        guard let id = m.layout.orderedTileIDs.first else { return XCTFail("no pane") }
+        let c = WorkspacePoint(x: 0.5, y: 0.5)
+        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
+        XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: c, scale: 2))
+        guard let p = m.zoomPreview else { return XCTFail("no preview") }
+        XCTAssertEqual(p.tile, id)
+        XCTAssertEqual(p.scaleX, 2, accuracy: 1e-6)
+        XCTAssertEqual(p.scaleY, p.scaleX, accuracy: 1e-6, "zoom never stretches")
+        let fixed = p.apply(c)
+        XCTAssertEqual(fixed.x, 0.5, accuracy: 1e-6); XCTAssertEqual(fixed.y, 0.5, accuracy: 1e-6)
+        // A two-finger pan moves the picture with the fingers.
+        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 2))
+        XCTAssertNotNil(m.zoomPreview, "kept until the sharp frame arrives")
+        XCTAssertGreaterThan(m.zoomPreview!.apply(c).x, 0.5)
+        XCTAssertNotNil(m.layout.tiles[id]?.crop)
+        m.resetView(at: WorkspacePoint(x: 0.2, y: 0.8))
+        XCTAssertNil(m.layout.tiles[id]?.crop, "double-tap resets the pane")
+    }
+
     /// Mirror/Extend: a window dropped on the desktop's edge starts Window mode with the
     /// desktop and the window side by side; the desktop is sent as a display, never a window.
     func testAWindowDroppedOnTheDesktopStartsWindowModeBesideIt() {

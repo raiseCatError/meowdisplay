@@ -37,6 +37,8 @@ class ReceiverSurfaceInputTest {
         override fun viewportChanged(state: ManualViewportState, animated: Boolean) {
             viewports += state
         }
+        val resets = mutableListOf<CGPoint>()
+        override fun workspaceViewReset(at: CGPoint) { resets += at }
     }
 
     private val link = FakeLink()
@@ -169,6 +171,32 @@ class ReceiverSurfaceInputTest {
         twoFingerTap(4.0)
         twoFingerTap(4.2)
         assertEquals(zoomed, surface.manualZoom)
+    }
+
+    /** Window mode: a two-finger double-tap resets the pane under the fingers and never right-clicks the Mac. */
+    @Test
+    fun aTwoFingerDoubleTapInWindowModeResetsThePaneWithoutClicking() {
+        surface.updateConfig(surface.config.copy(workspaceZoom = true))
+        fun twoFingerTap(t: Double) {
+            surface.touches(SurfaceTouchPhase.Began, listOf(finger(5, 450.0, 300.0), finger(6, 550.0, 300.0)), t)
+            surface.touches(SurfaceTouchPhase.Ended, listOf(finger(5, 450.0, 300.0), finger(6, 550.0, 300.0)), t + 0.08)
+        }
+        twoFingerTap(2.0)
+        surface.poll(2.31)   // the engine lets the first right-click go; the pane hold keeps it
+        twoFingerTap(2.32)
+        for (t in listOf(2.5, 2.7, 3.0, 3.5)) surface.poll(t)
+        assertEquals(1, effects.resets.size)
+        assertEquals(0.5, effects.resets[0].x, 1e-6)
+        assertEquals(0.5, effects.resets[0].y, 1e-6)
+        assertTrue("no click reached the Mac: ${inputTypes()}", inputTypes().none { it.first == "pointer" })
+        assertTrue("the whole picture never zooms in Window mode", surface.manualZoom.isIdentity)
+
+        // One two-finger tap is still a right-click, just a moment later.
+        twoFingerTap(5.0)
+        surface.poll(5.35)
+        assertTrue(inputTypes().none { it.first == "pointer" })
+        surface.poll(5.7)
+        assertEquals(listOf("pointer" to "down", "pointer" to "up"), inputTypes().filter { it.first == "pointer" })
     }
 
     @Test

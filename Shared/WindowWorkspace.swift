@@ -313,6 +313,40 @@ enum WorkspaceZoom {
     }
 }
 
+/// Hybrid zoom: while the fingers move, the receiver scales the picture it already has
+/// (instantly, clipped to the pane); the Mac's sharp frame replaces it after the gesture.
+/// Picture-normalized units throughout.
+struct WorkspaceZoomPreview: Equatable, Sendable {
+    var tile: String
+    /// The preview is clipped to this pane.
+    var pane: WorkspaceRect
+    /// `v' = scale * v + offset` per axis: a point of the picture as drawn when the
+    /// gesture began, moved to where it belongs now.
+    var scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double
+
+    init?(tile: String, pane: WorkspaceRect, from old: WorkspaceRect, to new: WorkspaceRect) {
+        guard old.width > 0, old.height > 0, new.width > 0, new.height > 0,
+              [old.x, old.y, new.x, new.y, new.width, new.height].allSatisfy(\.isFinite) else { return nil }
+        self.tile = tile
+        self.pane = pane
+        scaleX = new.width / old.width
+        scaleY = new.height / old.height
+        offsetX = new.x - scaleX * old.x
+        offsetY = new.y - scaleY * old.y
+    }
+
+    /// Where the whole window lands when `crop` (window-normalized) is drawn into `content`.
+    static func windowRect(crop: WorkspaceRect, content: WorkspaceRect) -> WorkspaceRect? {
+        guard crop.width > 0, crop.height > 0 else { return nil }
+        let w = content.width / crop.width, h = content.height / crop.height
+        return WorkspaceRect(x: content.x - crop.x * w, y: content.y - crop.y * h, width: w, height: h)
+    }
+
+    func apply(_ p: WorkspacePoint) -> WorkspacePoint {
+        WorkspacePoint(x: scaleX * p.x + offsetX, y: scaleY * p.y + offsetY)
+    }
+}
+
 // MARK: - Layout tree
 
 /// A layout is a tree of splits whose leaves are slots. A slot holds a tile

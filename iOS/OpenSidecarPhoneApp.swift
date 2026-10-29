@@ -320,6 +320,9 @@ struct ReceiverScreen: View {
                                            model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
                                            model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
                                        } : nil,
+                                   workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.zoomPreview } : nil,
+                                   onWorkspaceViewReset: model.workspace.windowMode
+                                       ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -2058,6 +2061,10 @@ struct VideoLayerView: UIViewRepresentable {
     var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
     /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
     var onWorkspaceTouch: ((CGPoint) -> Void)?
+    /// Window mode: the instant local zoom of the pane under the fingers, read after each pinch step.
+    var workspaceZoomPreview: (() -> WorkspaceZoomPreview?)?
+    /// Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture).
+    var onWorkspaceViewReset: ((CGPoint) -> Void)?
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
     /// See `VideoView.onBlockedInputAttempt`.
@@ -2086,6 +2093,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.setLocalNavigationAllowed(allowLocalViewNavigation)
         view.setWorkspacePinch(onWorkspacePinch)
         view.workspaceTouch = onWorkspaceTouch
+        view.workspaceZoomPreview = workspaceZoomPreview
+        view.workspaceViewReset = onWorkspaceViewReset
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -2226,6 +2235,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
         uiView.setWorkspacePinch(onWorkspacePinch)
         uiView.workspaceTouch = onWorkspaceTouch
+        uiView.workspaceZoomPreview = workspaceZoomPreview
+        uiView.workspaceViewReset = onWorkspaceViewReset
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -2684,13 +2695,31 @@ struct VideoLayerView: UIViewRepresentable {
 
         private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
         var workspaceTouch: ((CGPoint) -> Void)?
+        var workspaceZoomPreview: (() -> WorkspaceZoomPreview?)?
+        var workspaceViewReset: ((CGPoint) -> Void)?
         /// The current two-finger gesture belongs to a tile (decided when it begins).
         private var workspaceGestureOwned = false
+        /// Hybrid zoom: a still of the picture, clipped to the pane and scaled by the fingers,
+        /// shown until the Mac's sharp frame has arrived.
+        private var zoomPreviewClip: UIView?
+        private var zoomPreviewStill: UIView?
+        private var zoomPreviewFade: DispatchWorkItem?
+        /// Window mode: a two-finger tap's right-click waits this long, so a two-finger
+        /// double-tap resets the pane instead of right-clicking the Mac twice.
+        private static let workspaceRightTapHold: TimeInterval = 0.25
+        private var heldRightTaps: [PointerCommand] = []
+        private var heldRightTapWork: DispatchWorkItem?
+        private var suppressRightTapsUntil: CFTimeInterval = 0
 
         func setWorkspacePinch(_ handler: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?) {
             let entering = workspacePinch == nil && handler != nil
             workspacePinch = handler
-            if handler == nil { workspaceGestureOwned = false }
+            if handler == nil {
+                workspaceGestureOwned = false
+                removeZoomPreview(animated: false)
+                flushHeldRightTaps()
+            }
+            if multiFingerGate.update(workspacePanes: handler != nil) { applyMultiFingerGate() }
             // Entering Window mode: drop any whole-picture zoom so the picture lines up with its tiles.
             if entering, !manualZoom.isIdentity {
                 manualZoom = .identity
@@ -2711,19 +2740,83 @@ struct VideoLayerView: UIViewRepresentable {
             case .began:
                 workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
                                                        pinch ? recognizer.scaleRatio : 1)
+                if workspaceGestureOwned { updateZoomPreview(base: base, began: true, ended: false) }
                 return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
             case .changed:
                 guard workspaceGestureOwned else { return pinch }
                 _ = workspacePinch(false, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
                                    pinch ? recognizer.scaleRatio : 1)
+                updateZoomPreview(base: base, began: false, ended: false)
                 return true
             default:
                 guard workspaceGestureOwned else { return pinch }
                 workspaceGestureOwned = false
                 _ = workspacePinch(false, true, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
                                    pinch ? recognizer.scaleRatio : 1)
+                updateZoomPreview(base: base, began: false, ended: true)
                 return true
             }
+        }
+
+        /// Hybrid zoom: the pane follows the fingers at once by scaling a still of the picture it
+        /// showed when the gesture began; the Mac's sharp frames take over shortly after the end.
+        private func updateZoomPreview(base: CGRect, began: Bool, ended: Bool) {
+            zoomPreviewFade?.cancel()
+            zoomPreviewFade = nil
+            if began { removeZoomPreview(animated: false) }
+            guard let p = workspaceZoomPreview?() else {
+                if ended { removeZoomPreview(animated: true) }
+                return
+            }
+            let pane = CGRect(x: base.minX + p.pane.x * base.width, y: base.minY + p.pane.y * base.height,
+                              width: p.pane.width * base.width, height: p.pane.height * base.height)
+            if zoomPreviewClip == nil {
+                // The still is taken before the Mac has had time to change the picture, and holds
+                // only this pane (zooming back out never shows a neighbour's picture).
+                guard let snapshot = snapshotView(afterScreenUpdates: false) else { return }
+                let clip = UIView(frame: pane)
+                clip.clipsToBounds = true
+                clip.backgroundColor = .black
+                clip.isUserInteractionEnabled = false
+                let still = UIView()
+                still.clipsToBounds = true
+                still.isUserInteractionEnabled = false
+                still.layer.anchorPoint = .zero
+                still.bounds = CGRect(origin: .zero, size: pane.size)
+                snapshot.frame = CGRect(origin: CGPoint(x: -pane.minX, y: -pane.minY), size: bounds.size)
+                still.addSubview(snapshot)
+                clip.addSubview(still)
+                addSubview(clip)
+                zoomPreviewClip = clip
+                zoomPreviewStill = still
+            }
+            guard let clip = zoomPreviewClip, let still = zoomPreviewStill else { return }
+            // In view points the picture moves by v' = scale * v + t; the still's (0,0) is the pane's corner.
+            let tx = base.minX * (1 - p.scaleX) + p.offsetX * base.width
+            let ty = base.minY * (1 - p.scaleY) + p.offsetY * base.height
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            clip.alpha = 1
+            clip.frame = pane
+            still.transform = CGAffineTransform(scaleX: p.scaleX, y: p.scaleY)
+            still.layer.position = CGPoint(x: p.scaleX * pane.minX + tx - pane.minX, y: p.scaleY * pane.minY + ty - pane.minY)
+            CATransaction.commit()
+            if ended {
+                // Long enough for the last crop to reach the Mac and its frame to come back.
+                let work = DispatchWorkItem { [weak self] in self?.removeZoomPreview(animated: true) }
+                zoomPreviewFade = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+            }
+        }
+
+        private func removeZoomPreview(animated: Bool) {
+            zoomPreviewFade?.cancel()
+            zoomPreviewFade = nil
+            guard let clip = zoomPreviewClip else { return }
+            zoomPreviewClip = nil
+            zoomPreviewStill = nil
+            guard animated, !UIAccessibility.isReduceMotionEnabled else { clip.removeFromSuperview(); return }
+            UIView.animate(withDuration: 0.15, animations: { clip.alpha = 0 }, completion: { _ in clip.removeFromSuperview() })
         }
 
         func setLocalNavigationAllowed(_ allowed: Bool) {
@@ -3633,6 +3726,21 @@ struct VideoLayerView: UIViewRepresentable {
             // recognizer stays attached to a system gesture's leftover
             // touches too.
             guard !systemGestureSequenceOwned else { return }
+            if workspacePinch != nil {
+                // Window mode: reset the pane under the fingers; never a click on the Mac.
+                guard recognizer.state == .ended, videoEnabled, let workspaceViewReset else { return }
+                let base = unzoomedBaseTransform().displayedRect
+                guard base.width > 0, base.height > 0 else { return }
+                heldRightTapWork?.cancel()
+                heldRightTapWork = nil
+                heldRightTaps.removeAll()
+                // The engine may still be holding the second tap's right-click for its chain window.
+                suppressRightTapsUntil = CACurrentMediaTime() + PointerGestureConfig.tapChainWindow + 0.15
+                removeZoomPreview(animated: false)
+                let p = recognizer.location(in: self)
+                workspaceViewReset(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height))
+                return
+            }
             guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
             let base = unzoomedBaseTransform().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
@@ -3959,7 +4067,37 @@ struct VideoLayerView: UIViewRepresentable {
             schedulePointerPoll()
         }
 
-        private func dispatchPointerCommands(_ commands: [PointerCommand]) {
+        private func flushHeldRightTaps() {
+            heldRightTapWork?.cancel()
+            heldRightTapWork = nil
+            guard !heldRightTaps.isEmpty else { return }
+            let held = heldRightTaps
+            heldRightTaps.removeAll()
+            dispatchPointerCommands(held, holdingRightTaps: false)
+        }
+
+        /// A whole right-click (down and up), as a two-finger tap produces it.
+        private static func isRightTap(_ commands: [PointerCommand]) -> Bool {
+            guard let down = commands.firstIndex(where: {
+                if case .mouseDown(button: .right, clickCount: _) = $0 { return true } else { return false }
+            }) else { return false }
+            return commands[down...].contains {
+                if case .mouseUp(button: .right, clickCount: _) = $0 { return true } else { return false }
+            }
+        }
+
+        private func dispatchPointerCommands(_ commands: [PointerCommand], holdingRightTaps: Bool = true) {
+            if holdingRightTaps, workspacePinch != nil, Self.isRightTap(commands) {
+                guard CACurrentMediaTime() >= suppressRightTapsUntil else { return }
+                heldRightTaps += commands
+                heldRightTapWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.flushHeldRightTaps() }
+                heldRightTapWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.workspaceRightTapHold, execute: work)
+                return
+            }
+            // Anything else keeps its order after a right-click still waiting.
+            if holdingRightTaps, !commands.isEmpty, !heldRightTaps.isEmpty { flushHeldRightTaps() }
             #if DEBUG
             // Checkpoint D — remove once root-caused.
             if !commands.isEmpty {

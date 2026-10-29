@@ -37,7 +37,9 @@ import com.raisecaterror.meowdisplay.core.workspace.WLayoutRecord
 import com.raisecaterror.meowdisplay.core.workspace.WPoint
 import com.raisecaterror.meowdisplay.core.workspace.WPreset
 import com.raisecaterror.meowdisplay.core.workspace.WRect
+import com.raisecaterror.meowdisplay.core.workspace.TileTransform
 import com.raisecaterror.meowdisplay.core.workspace.WRotation
+import com.raisecaterror.meowdisplay.core.workspace.WZoomPreview
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.workspace.WSource
 import com.raisecaterror.meowdisplay.core.workspace.WTile
@@ -586,8 +588,16 @@ class WorkspaceController(
 
     // MARK: Per-pane zoom
 
-    private data class ZoomGesture(val tile: String, val crop: WRect?, val base: WRect, val anchor: WPoint, val rect: WRect)
+    private data class ZoomGesture(val tile: String, val crop: WRect?, val base: WRect, val anchor: WPoint, val rect: WRect, val start: WRect?)
     private var zoomGesture: ZoomGesture? = null
+
+    /** One pinch or pan's instant local zoom ([gesture] changes with each new gesture). */
+    data class ZoomPreviewState(val gesture: Int, val preview: WZoomPreview)
+    private val zoomPreviewState = MutableStateFlow<ZoomPreviewState?>(null)
+    /** Hybrid zoom: the pane under the fingers, scaled locally until the Mac's sharp frame arrives. */
+    val zoomPreview: StateFlow<ZoomPreviewState?> = zoomPreviewState.asStateFlow()
+    private var zoomGestures = 0
+    private val clearZoomPreview = Runnable { zoomPreviewState.value = null }
 
     /**
      * Two-finger pinch/pan in Window mode; points normalized to the picture. Only the pane under the
@@ -596,12 +606,15 @@ class WorkspaceController(
      */
     fun pinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: WPoint, current: WPoint, scale: Double): Boolean {
         if (began || zoomGesture == null) {
+            main.removeCallbacks(clearZoomPreview)
+            zoomPreviewState.value = null
             val (id, rect) = frames().tiles.entries.firstOrNull { it.value.contains(initial) }?.toPair() ?: run { zoomGesture = null; return false }
             val tile = state.value.layout.tiles[id]
             if (tile?.source == null || !(isPinch || tile.crop != null || effectiveFit(id) == WFit.Fill)) { zoomGesture = null; return false }
             val base = fillBase(id, rect) ?: run { zoomGesture = null; return false }
             val anchor = WPoint(((initial.x - rect.x) / max(rect.width, 1e-6)).coerceIn(0.0, 1.0), ((initial.y - rect.y) / max(rect.height, 1e-6)).coerceIn(0.0, 1.0))
-            zoomGesture = ZoomGesture(id, tile.crop, base, unrotate(anchor, tile.rotation), rect)
+            zoomGesture = ZoomGesture(id, tile.crop, base, unrotate(anchor, tile.rotation), rect, drawnWindowRect(tile, rect))
+            zoomGestures += 1
             if (state.value.active != id) focus(id)
         }
         val g = zoomGesture ?: return false
@@ -613,8 +626,36 @@ class WorkspaceController(
             saved = next
             publish(); scheduleThrottledSend()
         }
-        if (ended) { zoomGesture = null; persist() }
+        val start = g.start
+        val now = next.tiles[g.tile]?.let { drawnWindowRect(it, g.rect) }
+        zoomPreviewState.value = if (start != null && now != null) {
+            WZoomPreview.between(g.tile, g.rect, start, now)?.let { ZoomPreviewState(zoomGestures, it) }
+        } else null
+        if (ended) {
+            zoomGesture = null
+            persist()
+            // Long enough for the last crop to reach the Mac and its frame to come back.
+            main.postDelayed(clearZoomPreview, 300)
+        }
         return true
+    }
+
+    /** Where the pane draws its whole window (picture-normalized), as the Mac composes it; null for a turned pane. */
+    private fun drawnWindowRect(tile: WTile, rect: WRect): WRect? {
+        if (tile.rotation != WRotation.None || size.width <= 0 || size.height <= 0) return null
+        val w = windowSize(tile) ?: return null
+        tile.crop?.let { return WZoomPreview.windowRect(it, rect) }
+        val c = TileTransform(WRect(rect.x * size.width, rect.y * size.height, rect.width * size.width, rect.height * size.height), w, WRotation.None, tile.fit).contentRect
+        return WRect(c.x / size.width, c.y / size.height, c.width / size.width, c.height / size.height)
+    }
+
+    /** Two-finger double-tap: the pane under the fingers back to its default view. */
+    fun resetView(at: WPoint) {
+        val id = frames().tiles.entries.firstOrNull { it.value.contains(at) }?.key ?: return
+        if (state.value.layout.tiles[id]?.source == null) return
+        main.removeCallbacks(clearZoomPreview)
+        zoomPreviewState.value = null
+        resetView(id)
     }
 
     /** The pane's fill region in its window (the zoom's 1x), or null without the window's size. */

@@ -152,6 +152,10 @@ class ReceiverController(
             if (ws.ui.value.windowMode != true) return false
             return ws.pinch(began, ended, isPinch, WPoint(initial.x, initial.y), WPoint(current.x, current.y), scale)
         }
+        override fun workspaceViewReset(at: CGPoint) {
+            val ws = workspace ?: return
+            if (ws.ui.value.windowMode == true) ws.resetView(WPoint(at.x, at.y))
+        }
         override fun activityEnded() = store.scheduleAutoHide()
         override fun blockedAttempt(maximumTouchCount: Int) = noteBlockedAttempt()
     })
