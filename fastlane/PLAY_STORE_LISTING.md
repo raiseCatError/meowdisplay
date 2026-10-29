@@ -25,7 +25,7 @@ Only claim what the Android app does today. Check every feature line against
 | Free or paid | Free |
 | Category | Productivity |
 | Website | `https://meowdisplay.app` |
-| Privacy policy | `https://meowdisplay.app/privacy.html` |
+| Privacy policy | `https://meowdisplay.app/privacy` |
 | First version | 2.0.0 (versionCode 2000001) |
 | Play App Signing | On (Google holds the app signing key; we hold the upload key) |
 | Upload certificate SHA-256 | `6A:9A:C0:78:DC:13:59:FE:51:DA:77:64:AF:7B:30:9B:AE:F7:08:77:A0:B2:36:F1:50:8F:40:F7:16:33:8E:94` |
@@ -95,7 +95,7 @@ keep its DEMO label.
 
 | Declaration | Answer |
 |---|---|
-| Privacy policy | `https://meowdisplay.app/privacy.html` (must mention Android: see the website's `privacy.html`) |
+| Privacy policy | `https://meowdisplay.app/privacy` (must mention Android: see the website's `privacy.html`) |
 | Ads | No, the app contains no ads |
 | App access | Some functionality is restricted: see Reviewer instructions |
 | Content rating | IARC questionnaire, category "All other app types": no violence, sexuality, language, controlled substances, gambling; no user-generated content shared with others; no location sharing; no digital purchases. Expected: Everyone / PEGI 3 |
