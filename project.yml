@@ -222,6 +222,7 @@ targets:
       # above reference these directly.
       - Mac/QUICTransportSession.swift
       - Mac/TransportProtocolSelection.swift
+      - Mac/TailscaleDiscovery.swift
       - Shared/QUICTransportProtocol.swift
       - Shared/QUICReceiverSession.swift
       - Mac/AutoConnectPolicy.swift

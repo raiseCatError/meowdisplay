@@ -103,3 +103,24 @@ object RouteClassifier {
         }
     }
 }
+
+/** Whether this device looks connected to a tailnet: Add Remote Mac's guidance, never a trust signal. */
+enum class TailscaleReach { Connected, OtherVpn, Off }
+
+object TailscaleGuidance {
+    fun reach(networks: List<NetworkFacts>): TailscaleReach {
+        val vpns = networks.filter { it.transport == Transport.Vpn }
+        return when {
+            vpns.any { vpn -> vpn.addresses.any(::isTailnetAddress) } -> TailscaleReach.Connected
+            vpns.isNotEmpty() -> TailscaleReach.OtherVpn
+            else -> TailscaleReach.Off
+        }
+    }
+
+    /** 100.64.0.0/10 (Tailscale's CGNAT range) or fd7a:115c:a1e0::/48. */
+    fun isTailnetAddress(bytes: ByteArray): Boolean = when (bytes.size) {
+        4 -> (bytes[0].toInt() and 0xFF) == 100 && (bytes[1].toInt() and 0xC0) == 0x40
+        16 -> bytes.take(6).map { it.toInt() and 0xFF } == listOf(0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0)
+        else -> false
+    }
+}

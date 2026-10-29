@@ -18,7 +18,7 @@ struct RemoteAccessSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Text("Use a reachable private-network address for this paired Mac, such as its Tailscale address or MagicDNS name. This lets you connect when the Mac isn't on the same network — it's only used to reach the device, it does not grant trust, and every connection still requires the existing secure pairing.")
+                Text("Use a reachable private-network address for this paired Mac, such as its Tailscale address or MagicDNS name. This lets you connect when the Mac isn't on the same network — it's only used to reach the device, it does not grant trust, and every connection still requires the existing secure pairing. On the Mac, Settings → Remote Access → Check Tailscale shows its Tailscale name.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -26,7 +26,7 @@ struct RemotePairingView: View {
     private var form: some View {
         Form {
             Section {
-                Text("On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here.")
+                Text("On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here. The Mac shows both in Settings → Remote Access → Check Tailscale.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

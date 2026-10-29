@@ -128,6 +128,15 @@ internal fun AddRemoteMacDialog(
                         "Reach a Mac on another network, over Tailscale or a VPN. The address only tells this device where to look. Trust comes from pairing.",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    val reach = remember { com.raisecaterror.meowdisplay.core.remote.TailscaleGuidance.reach(remote.routes.snapshot()) }
+                    Text(
+                        when (reach) {
+                            com.raisecaterror.meowdisplay.core.remote.TailscaleReach.Connected -> "Tailscale is connected on this device. On your Mac, open Settings → Remote Access → Check Tailscale to see its name."
+                            com.raisecaterror.meowdisplay.core.remote.TailscaleReach.OtherVpn -> "A VPN is on. To use Tailscale, open the Tailscale app and connect, then find your Mac's name in its Settings → Remote Access → Check Tailscale."
+                            com.raisecaterror.meowdisplay.core.remote.TailscaleReach.Off -> "Tailscale doesn't look connected on this device. Open the Tailscale app and connect to the same tailnet as your Mac. Your Mac shows its Tailscale name in Settings → Remote Access → Check Tailscale."
+                        },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     OutlinedTextField(
                         value = address, onValueChange = { address = it; problem = null },
                         label = { Text("Address") }, singleLine = true, isError = problem != null,

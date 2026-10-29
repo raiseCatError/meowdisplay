@@ -144,7 +144,14 @@ other end. It does not by itself admit a session:
   local request would not. The app creates no VPN and opens no relay or
   port mapping; "Remote · Tailscale" on screen is a label drawn from the
   phone's own network facts, not a security claim. Logs name only the kind of
-  address (IPv4, IPv6, DNS or Tailscale range). Android 17 asks for a Local
+  address (IPv4, IPv6, DNS or Tailscale range). The Mac reads Tailscale's
+  status (its bundled or Homebrew CLI, `tailscale status --json`, bounded to
+  3 s) only when you press Check Tailscale or Find on Tailscale in Settings →
+  Remote Access: it shows the Mac's own name and suggests tailnet peers for a
+  paired device's address. A suggestion only fills the field; nothing is
+  saved, trusted or changed in Tailscale without you. Android's Add Remote Mac
+  says whether a tailnet VPN looks connected, from the phone's own network
+  facts. Android 17 asks for a Local
   Network permission only from apps that target API 37; MeowDisplay targets
   36 today and must declare the permission when it moves.
 - **MeowDisplay does not operate its own relay, cloud service, or account
