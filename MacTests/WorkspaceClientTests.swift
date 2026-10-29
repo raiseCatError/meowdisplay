@@ -77,6 +77,45 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertNil(m.layout.tiles[id]?.crop, "double-tap resets the pane")
     }
 
+    /// Undo, redo and a saved layout put back later (one undo step), kept per Mac.
+    func testSavedLayoutsAndRedo() {
+        let defaults = UserDefaults(suiteName: "WorkspaceClientTests-\(UUID().uuidString)")!
+        func make() -> WorkspaceModel {
+            let m = WorkspaceModel(defaults: defaults)
+            m.send = { _ in true }
+            m.inputAllowed = { true }
+            m.apply(.connected(peerID: "mac-a"))
+            m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+            m.apply(.mode(window: true))
+            m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
+            m.updateSpace(WorkspaceSize(width: 844, height: 390), hinge: nil)
+            return m
+        }
+        let m = make()
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        let two = m.layout
+        XCTAssertEqual(two.tiles.count, 2)
+        m.saveLayout(named: "  Coding  ")
+        XCTAssertEqual(m.savedLayouts.map(\.name), ["Coding"])
+        m.removeTile(two.orderedTileIDs[1])
+        XCTAssertEqual(m.layout.tiles.count, 1)
+        m.undo()
+        XCTAssertEqual(m.layout.tiles.count, 2)
+        XCTAssertTrue(m.canRedo)
+        m.redo()
+        XCTAssertEqual(m.layout.tiles.count, 1)
+        m.applySaved(m.savedLayouts[0].id)
+        XCTAssertEqual(Set(m.layout.tiles.values.compactMap { $0.source?.windowID }), [10, 11])
+        m.undo()
+        XCTAssertEqual(m.layout.tiles.count, 1, "applying a saved layout is one undo step")
+        // Kept for this Mac across sessions.
+        let again = make()
+        XCTAssertEqual(again.savedLayouts.map(\.name), ["Coding"])
+        again.deleteSavedLayout(again.savedLayouts[0].id)
+        XCTAssertTrue(make().savedLayouts.isEmpty)
+    }
+
     /// Mirror/Extend: a window dropped on the desktop's edge starts Window mode with the
     /// desktop and the window side by side; the desktop is sent as a display, never a window.
     func testAWindowDroppedOnTheDesktopStartsWindowModeBesideIt() {

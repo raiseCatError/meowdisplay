@@ -323,6 +323,9 @@ final class WorkspaceModel: ObservableObject {
     private var planner = ThumbnailRequestPlanner()
     private var appRevision: Int?
     @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+    /// Layouts saved by name for this Mac, newest first.
+    @Published private(set) var savedLayouts: [WorkspaceSavedLayout] = []
     /// A window (from Stage Peek) or a pane label being dragged over the panes.
     @Published private(set) var drag: WorkspaceDrag?
     /// "Fullscreen on This Device": this pane fills the screen locally. The saved arrangement,
@@ -442,6 +445,7 @@ final class WorkspaceModel: ObservableObject {
         saved = (defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()).compacted()
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
+        savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
         thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []
@@ -517,6 +521,7 @@ final class WorkspaceModel: ObservableObject {
         stacked = adapted.stacked
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
+        canRedo = history.canRedo
     }
 
     // MARK: Editing
@@ -808,10 +813,52 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func undo() {
-        guard let previous = history.undo() else { return }
+        guard let previous = history.undo(current: saved) else { return }
         saved = previous
         refreshMissing()
         persist(); publish(); scheduleSend()
+    }
+
+    func redo() {
+        guard let next = history.redo(current: saved) else { return }
+        saved = next
+        refreshMissing()
+        persist(); publish(); scheduleSend()
+    }
+
+    // MARK: Saved layouts
+
+    /// Keeps this arrangement under `name` for this Mac (a saved layout with the same name is replaced).
+    func saveLayout(named name: String) {
+        guard let host else { return }
+        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        var n = savedLayouts.count + 1
+        while trimmed.isEmpty, savedLayouts.contains(where: { $0.name == "Layout \(n)" }) { n += 1 }
+        let title = trimmed.isEmpty ? "Layout \(n)" : trimmed
+        var list = savedLayouts.filter { $0.name != title }
+        list.insert(WorkspaceSavedLayout(id: UUID().uuidString, name: title, record: WorkspaceLayoutRecord(saved)), at: 0)
+        savedLayouts = Array(list.prefix(WorkspaceSavedLayout.maximum))
+        defaults.set(WorkspaceSavedLayout.encodeList(savedLayouts), forKey: "workspace.saved.\(host)")
+    }
+
+    /// Puts a saved layout back, on the windows open now (one undo step).
+    func applySaved(_ id: String) {
+        guard let s = savedLayouts.first(where: { $0.id == id }) else { return }
+        var layout = s.record.layout
+        if let c = catalog { layout = layout.rebinding(to: c.windows.map { ($0.id, $0.bundleID) }) }
+        layout = layout.compacted()
+        guard layout != saved else { return }
+        history.record(saved)
+        saved = layout
+        nextTile = max(nextTile, (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1)
+        refreshMissing()
+        persist(); publish(); scheduleSend()
+    }
+
+    func deleteSavedLayout(_ id: String) {
+        guard let host else { return }
+        savedLayouts.removeAll { $0.id == id }
+        defaults.set(WorkspaceSavedLayout.encodeList(savedLayouts), forKey: "workspace.saved.\(host)")
     }
 
     /// After an edit: a tile is missing only while its window is unlisted, so

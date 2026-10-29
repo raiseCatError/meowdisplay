@@ -76,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.raisecaterror.meowdisplay.core.controls.CGPoint
 import com.raisecaterror.meowdisplay.core.controls.CGRect
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
@@ -137,6 +138,14 @@ fun WorkspaceChrome(
     val density = LocalDensity.current.density
     var confirmClose by remember { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf<PaneMenuTarget?>(null) }
+    var layoutsOpen by remember { mutableStateOf(false) }
+    var savingLayout by remember { mutableStateOf(false) }
+    /** Outside Arrange: the divider held (long press) and being dragged. */
+    var heldDivider by remember { mutableStateOf<Pair<List<Int>, Int>?>(null) }
+    val chromeView = androidx.compose.ui.platform.LocalView.current
+    val screenReader = remember(chromeView) {
+        (chromeView.context.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager)?.isTouchExplorationEnabled == true
+    }
     val multi = ui.layout.tiles.size > 1
     // Labels at the top edge stay clear of the cutout and any visible status bar.
     val topInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getTop(this).toDp().value.toDouble() }
@@ -260,8 +269,78 @@ fun WorkspaceChrome(
             val lift = avoid.filter { it.intersects(band) }.maxOfOrNull { band.maxY - it.minY + 8 } ?: 0.0
             Row(Modifier.align(Alignment.BottomCenter).padding(bottom = (24 + lift).dp).background(Chip, RoundedCornerShape(20.dp)).padding(4.dp)) {
                 if (ui.canUndo) TextButton(onClick = controller::undo) { Text("Undo", color = Color.White) }
+                if (ui.canRedo) TextButton(onClick = controller::redo) { Text("Redo", color = Color.White) }
+                Box {
+                    TextButton(onClick = { layoutsOpen = true }) { Text("Layouts", color = Color.White) }
+                    DropdownMenu(expanded = layoutsOpen, onDismissRequest = { layoutsOpen = false }) {
+                        DropdownMenuItem(text = { Text("Save This Layout…") }, onClick = { layoutsOpen = false; savingLayout = true })
+                        for (s in ui.savedLayouts) {
+                            DropdownMenuItem(
+                                text = { Text(s.name) },
+                                onClick = { layoutsOpen = false; controller.applySaved(s.id) },
+                                trailingIcon = {
+                                    TextButton(onClick = { controller.deleteSavedLayout(s.id) }) { Text("Delete", color = Color(0xFFFF6B6B)) }
+                                },
+                            )
+                        }
+                        androidx.compose.material3.HorizontalDivider()
+                        Text("Arrangements", color = Color.Gray, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                        for (p in com.raisecaterror.meowdisplay.core.workspace.WPreset.available(ui.capacity)) {
+                            DropdownMenuItem(text = { Text(p.title) }, onClick = { layoutsOpen = false; controller.applyPreset(p) })
+                        }
+                    }
+                }
                 TextButton(onClick = { controller.setArranging(false) }) { Text("Done", color = Accent) }
             }
+        } else if (ui.localFullscreen == null && !screenReader) {
+            // Outside Arrange: press and hold a divider, then drag it. The strip is narrow so the
+            // windows' own edges still get their touches.
+            for (divider in frames.dividers) key(divider.path, divider.index, divider.axis) {
+                val r = transform.viewRect(divider.hitRect)
+                val horizontal = divider.axis == com.raisecaterror.meowdisplay.core.workspace.WAxis.Horizontal
+                val current by rememberUpdatedState(divider)
+                val scale by rememberUpdatedState(if (horizontal) transform.displayedRect.width else transform.displayedRect.height)
+                val id = divider.path to divider.index
+                val w = if (horizontal) minOf(r.width, 14.0) else r.width
+                val h = if (horizontal) r.height else minOf(r.height, 14.0)
+                Box(
+                    Modifier.offset { IntOffset(((r.midX - w / 2) * density).roundToInt(), ((r.midY - h / 2) * density).roundToInt()) }.size(w.dp, h.dp)
+                        .pointerInput(divider.path, divider.index, divider.axis) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    heldDivider = id
+                                    chromeView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                },
+                                onDragEnd = { heldDivider = null; controller.endResize() },
+                                onDragCancel = { heldDivider = null; controller.endResize() },
+                            ) { change, amount ->
+                                change.consume()
+                                val delta = (if (horizontal) amount.x else amount.y) / density / scale
+                                controller.resize(current, delta.toDouble())
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (heldDivider == id) {
+                        Box(Modifier.size(if (horizontal) 6.dp else 44.dp, if (horizontal) 44.dp else 6.dp).background(Accent, CircleShape))
+                    }
+                }
+            }
+        }
+        if (savingLayout) {
+            var name by remember { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { savingLayout = false },
+                title = { Text("Save Layout") },
+                text = {
+                    Column {
+                        Text("Saved layouts are kept for this Mac. Their windows are matched again when you use one.")
+                        OutlinedTextField(name, { name = it.take(40) }, singleLine = true, label = { Text("Name") })
+                    }
+                },
+                confirmButton = { TextButton(onClick = { savingLayout = false; controller.saveLayout(name) }) { Text("Save") } },
+                dismissButton = { TextButton(onClick = { savingLayout = false }) { Text("Cancel") } },
+            )
         }
 
         // The label menu: tap anywhere else to close; nothing reaches the Mac while it's open.

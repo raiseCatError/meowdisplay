@@ -1241,10 +1241,13 @@ enum WorkspaceAdaptation {
 struct WorkspaceHistory: Equatable, Sendable {
     static let depth = 20
     private(set) var past: [WorkspaceLayout] = []
+    /// Undone layouts, newest last; any new change clears them.
+    private(set) var future: [WorkspaceLayout] = []
     private var grouping = false
     private var groupRecorded = false
 
     var canUndo: Bool { !past.isEmpty }
+    var canRedo: Bool { !future.isEmpty }
 
     /// Until `endGroup()`, changes are one undo step (a divider drag sends many).
     mutating func beginGroup() {
@@ -1259,6 +1262,7 @@ struct WorkspaceHistory: Equatable, Sendable {
     }
 
     mutating func record(_ layout: WorkspaceLayout) {
+        future.removeAll()
         if grouping {
             if groupRecorded { return }
             groupRecorded = true
@@ -1268,7 +1272,73 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
     }
 
-    mutating func undo() -> WorkspaceLayout? { past.popLast() }
+    /// The layout before the last change. With `current`, that change can be redone.
+    mutating func undo(current: WorkspaceLayout? = nil) -> WorkspaceLayout? {
+        guard let previous = past.popLast() else { return nil }
+        if let current { future.append(current) }
+        return previous
+    }
+
+    /// The change undone last, back again.
+    mutating func redo(current: WorkspaceLayout) -> WorkspaceLayout? {
+        guard let next = future.popLast() else { return nil }
+        past.append(current)
+        if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
+        return next
+    }
+}
+
+// MARK: - Saved layouts
+
+/// A layout the user saved by name, kept per Mac. Its windows are matched again when it is applied.
+struct WorkspaceSavedLayout: Codable, Equatable, Identifiable, Sendable {
+    static let maximum = 8
+    var id: String
+    var name: String
+    var record: WorkspaceLayoutRecord
+
+    static func decodeList(_ data: Data) -> [WorkspaceSavedLayout] {
+        Array(((try? JSONDecoder().decode([WorkspaceSavedLayout].self, from: data)) ?? []).prefix(maximum))
+    }
+
+    static func encodeList(_ list: [WorkspaceSavedLayout]) -> Data? { try? JSONEncoder().encode(list) }
+}
+
+extension WorkspaceLayout {
+    /// A saved layout on today's windows: each pane keeps its window while it is still open,
+    /// otherwise takes another open window of the same app that no pane shows yet. Desktop panes
+    /// and windows with nothing to match stay as they are (the pane then asks for a window).
+    func rebinding(to windows: [(id: UInt32, bundleID: String)]) -> WorkspaceLayout {
+        let listed = Set(windows.map(\.id))
+        var used = Set<UInt32>()
+        for tile in tiles.values {
+            for s in tile.windows where !s.isDisplay && listed.contains(s.windowID) { used.insert(s.windowID) }
+        }
+        var moved: [UInt32: UInt32] = [:]
+        for id in orderedTileIDs {
+            for s in tiles[id]?.windows ?? [] where !s.isDisplay && !listed.contains(s.windowID) && moved[s.windowID] == nil {
+                guard let bundle = s.bundleID,
+                      let w = windows.first(where: { $0.bundleID == bundle && !used.contains($0.id) }) else { continue }
+                used.insert(w.id)
+                moved[s.windowID] = w.id
+            }
+        }
+        guard !moved.isEmpty else { return self }
+        func mapped(_ s: WorkspaceSource) -> WorkspaceSource {
+            guard !s.isDisplay, let n = moved[s.windowID] else { return s }
+            var copy = s
+            copy.windowID = n
+            return copy
+        }
+        var next = self
+        for (id, tile) in tiles {
+            var t = tile
+            t.source = t.source.map(mapped)
+            t.tabs = t.tabs.map(mapped)
+            next.tiles[id] = t
+        }
+        return next
+    }
 }
 
 // MARK: - Persistence (schema 1, lenient)

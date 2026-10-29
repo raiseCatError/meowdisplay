@@ -39,6 +39,8 @@ import com.raisecaterror.meowdisplay.core.workspace.WPreset
 import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.TileTransform
 import com.raisecaterror.meowdisplay.core.workspace.WRotation
+import com.raisecaterror.meowdisplay.core.workspace.WSavedLayout
+import com.raisecaterror.meowdisplay.core.workspace.rebinding
 import com.raisecaterror.meowdisplay.core.workspace.WZoomPreview
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.workspace.WSource
@@ -94,6 +96,9 @@ data class WorkspaceUi(
     val arranging: Boolean = false,
     val hovered: String? = null,
     val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
+    /** Layouts saved by name for this Mac, newest first. */
+    val savedLayouts: List<WSavedLayout> = emptyList(),
     /** Tiles whose saved window is no longer on the Mac. */
     val missing: Set<String> = emptySet(),
     /** Every app on the Mac (Finder first, running next), from `appCatalog`. */
@@ -256,6 +261,8 @@ class WorkspaceController(
         saved = (prefs.getString(LAYOUT + peerID, null)?.let(WLayoutRecord::decode) ?: WLayout.of()).compacted()
         nextTile = (saved.tiles.keys.mapNotNull { it.removePrefix("w").toIntOrNull() }.maxOrNull() ?: 0) + 1
         history = WHistory()
+        val savedLayouts = prefs.getString(SAVED + peerID, null)?.let(WSavedLayout::decodeList).orEmpty()
+        state.update { it.copy(savedLayouts = savedLayouts) }
         thumbs.value = emptyMap(); thumbAge.clear(); iconState.value = emptyMap(); displayThumbs.value = emptyMap()
         planner.reset(); appRevision = null
         state.update { it.copy(apps = emptyList(), launching = emptySet(), localFullscreen = null) }
@@ -406,7 +413,7 @@ class WorkspaceController(
         state.update {
             it.copy(
                 layout = full?.let { id -> adapted.visible.maximizing(id) } ?: adapted.visible, localFullscreen = full,
-                stacked = adapted.stacked, capacity = WGeometry.capacity(size, hinge), canUndo = history.canUndo,
+                stacked = adapted.stacked, capacity = WGeometry.capacity(size, hinge), canUndo = history.canUndo, canRedo = history.canRedo,
             )
         }
     }
@@ -435,10 +442,52 @@ class WorkspaceController(
     }
 
     fun undo() {
-        val previous = history.undo() ?: return
+        val previous = history.undo(saved) ?: return
         saved = previous
         refreshMissing()
         persist(); publish(); scheduleSend()
+    }
+
+    fun redo() {
+        val next = history.redo(saved) ?: return
+        saved = next
+        refreshMissing()
+        persist(); publish(); scheduleSend()
+    }
+
+    // MARK: Saved layouts
+
+    /** Keeps this arrangement under [name] for this Mac (a saved layout with the same name is replaced). */
+    fun saveLayout(name: String) {
+        val host = host ?: return
+        val trimmed = name.trim().take(40)
+        val existing = state.value.savedLayouts
+        var n = existing.size + 1
+        while (trimmed.isEmpty() && existing.any { it.name == "Layout $n" }) n++
+        val title = trimmed.ifEmpty { "Layout $n" }
+        val list = (listOf(WSavedLayout(java.util.UUID.randomUUID().toString(), title, saved)) + existing.filter { it.name != title }).take(WSavedLayout.MAXIMUM)
+        state.update { it.copy(savedLayouts = list) }
+        prefs.edit { putString(SAVED + host, WSavedLayout.encodeList(list)) }
+    }
+
+    /** Puts a saved layout back, on the windows open now (one undo step). */
+    fun applySaved(id: String) {
+        val s = state.value.savedLayouts.firstOrNull { it.id == id } ?: return
+        val catalog = state.value.catalog
+        val layout = (catalog?.let { c -> s.layout.rebinding(c.windows.map { it.id to it.bundleID }) } ?: s.layout).compacted()
+        if (layout == saved) return
+        history.record(saved)
+        saved = layout
+        nextTile = maxOf(nextTile, (saved.tiles.keys.mapNotNull { it.removePrefix("w").toIntOrNull() }.maxOrNull() ?: 0) + 1)
+        refreshMissing()
+        persist(); publish(); scheduleSend()
+    }
+
+    fun deleteSavedLayout(id: String) {
+        val host = host ?: return
+        val list = state.value.savedLayouts.filter { it.id != id }
+        state.update { it.copy(savedLayouts = list) }
+        prefs.edit { putString(SAVED + host, WSavedLayout.encodeList(list)) }
     }
 
     fun applyPreset(preset: WPreset) = edit { layout ->
@@ -942,6 +991,7 @@ class WorkspaceController(
         /** The drop target when no display can join the window (it then shows alone). */
         const val NO_DESKTOP = "\u0000desktop"
         const val LAYOUT = "layout."
+        const val SAVED = "savedLayouts."
         const val RAIL_EDGE = "railEdge"
         const val MAX_THUMBS = 72
         const val MAX_ICONS = 400

@@ -787,9 +787,12 @@ object WAdaptation {
 
 class WHistory {
     private val past = ArrayDeque<WLayout>()
+    /** Undone layouts, newest last; any new change clears them. */
+    private val future = ArrayDeque<WLayout>()
     private var grouping = false
     private var groupRecorded = false
     val canUndo get() = past.isNotEmpty()
+    val canRedo get() = future.isNotEmpty()
     val depth get() = past.size
 
     /** Until [endGroup], changes are one undo step (a divider drag sends many). */
@@ -805,6 +808,7 @@ class WHistory {
     }
 
     fun record(layout: WLayout) {
+        future.clear()
         if (grouping) {
             if (groupRecorded) return
             groupRecorded = true
@@ -814,9 +818,65 @@ class WHistory {
         while (past.size > DEPTH) past.removeFirst()
     }
 
-    fun undo(): WLayout? = past.removeLastOrNull()
+    /** The layout before the last change. With [current], that change can be redone. */
+    fun undo(current: WLayout? = null): WLayout? {
+        val previous = past.removeLastOrNull() ?: return null
+        if (current != null) future.addLast(current)
+        return previous
+    }
+
+    /** The change undone last, back again. */
+    fun redo(current: WLayout): WLayout? {
+        val next = future.removeLastOrNull() ?: return null
+        past.addLast(current)
+        while (past.size > DEPTH) past.removeFirst()
+        return next
+    }
 
     companion object { const val DEPTH = 20 }
+}
+
+/** A layout the user saved by name, kept per Mac; its windows are matched again when applied (WorkspaceSavedLayout). */
+data class WSavedLayout(val id: String, val name: String, val layout: WLayout) {
+    companion object {
+        const val MAXIMUM = 8
+
+        fun encodeList(list: List<WSavedLayout>): String = buildJsonArray {
+            for (s in list) add(buildJsonObject { put("id", s.id); put("name", s.name); put("record", WLayoutRecord.encode(s.layout)) })
+        }.toString()
+
+        fun decodeList(text: String): List<WSavedLayout> = runCatching { Json.parseToJsonElement(text) as? JsonArray }.getOrNull().orEmpty()
+            .mapNotNull { e ->
+                val o = e as? JsonObject ?: return@mapNotNull null
+                val id = (o["id"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                val name = (o["name"] as? JsonPrimitive)?.content ?: return@mapNotNull null
+                val layout = (o["record"] as? JsonObject)?.let(WLayoutRecord::decode) ?: return@mapNotNull null
+                WSavedLayout(id, name, layout)
+            }.take(MAXIMUM)
+    }
+}
+
+/**
+ * A saved layout on today's windows: each pane keeps its window while it is still open, otherwise
+ * takes another open window of the same app that no pane shows yet. Desktop panes and windows with
+ * nothing to match stay as they are. [windows] are (id, bundle) pairs from the catalog.
+ */
+fun WLayout.rebinding(windows: List<Pair<Long, String>>): WLayout {
+    val listed = windows.map { it.first }.toSet()
+    val used = tiles.values.flatMap { it.windows }.filter { !it.isDisplay && it.windowID in listed }.map { it.windowID }.toMutableSet()
+    val moved = HashMap<Long, Long>()
+    for (id in orderedTileIDs) {
+        for (s in tiles[id]?.windows.orEmpty()) {
+            if (s.isDisplay || s.windowID in listed || s.windowID in moved) continue
+            val bundle = s.bundleID ?: continue
+            val w = windows.firstOrNull { it.second == bundle && it.first !in used } ?: continue
+            used += w.first
+            moved[s.windowID] = w.first
+        }
+    }
+    if (moved.isEmpty()) return this
+    fun mapped(s: WSource) = moved[s.windowID]?.takeIf { !s.isDisplay }?.let { s.copy(windowID = it, generation = null) } ?: s
+    return with(tiles = tiles.mapValues { (_, t) -> t.copy(source = t.source?.let(::mapped), tabs = t.tabs.map(::mapped)) })
 }
 
 /** Schema 1 stored/wire form, lenient like WorkspaceLayoutRecord. */

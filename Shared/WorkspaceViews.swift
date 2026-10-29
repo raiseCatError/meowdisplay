@@ -36,6 +36,10 @@ struct WorkspaceChromeView: View {
     var onViewFullScreen: (() -> Void)?
     @State private var confirmClose: String?
     @State private var lastDividerTranslation: CGSize = .zero
+    /// Outside Arrange: the divider held (long press) and being dragged, by index.
+    @State private var heldDivider: Int?
+    @State private var savingLayout = false
+    @State private var layoutName = ""
     /// The floating label menu: which pane (and tab) it is for.
     @State private var menu: PaneMenuTarget?
     /// A label is held (long press recognized); drags and the menu start from it.
@@ -98,7 +102,11 @@ struct WorkspaceChromeView: View {
                     }
                 }
                 WorkspaceDropOverlay(model: model, picture: picture)
-                if model.arranging { arrangeControls(frames) }
+                if model.arranging {
+                    arrangeControls(frames)
+                } else if model.localFullscreen == nil, !voiceOver {
+                    dividerHolds(frames)
+                }
                 if let m = menu, let tile = model.layout.tiles[m.tile], let rect = frames.tiles[m.tile]?.onScreen(picture) {
                     // Tap anywhere else to close; nothing reaches the Mac while the menu is open.
                     Color.black.opacity(0.001)
@@ -242,10 +250,16 @@ struct WorkspaceChromeView: View {
             }
         }
         .padding(6)
-        ViewThatFits(in: .horizontal) {
-            row.fixedSize()
+        if #available(macOS 13.0, iOS 16.0, *) {
+            ViewThatFits(in: .horizontal) {
+                row.fixedSize()
+                ScrollView(.horizontal, showsIndicators: false) { row }
+                    .scrollDisabled(heldLabel != nil || model.drag != nil)
+                    .frame(width: available + 12)
+            }
+        } else {
+            // macOS 12 receiver: always a scrolling strip.
             ScrollView(.horizontal, showsIndicators: false) { row }
-                .scrollDisabled(heldLabel != nil || model.drag != nil)
                 .frame(width: available + 12)
         }
     }
@@ -455,13 +469,79 @@ struct WorkspaceChromeView: View {
                     })
                 .accessibilityLabel("Resize tiles")
         }
-        HStack {
+        HStack(spacing: 14) {
             if model.canUndo { Button("Undo") { model.undo() } }
+            if model.canRedo { Button("Redo") { model.redo() } }
+            Menu("Layouts") {
+                Button { layoutName = ""; savingLayout = true } label: { Label("Save This Layout…", systemImage: "square.and.arrow.down") }
+                if !model.savedLayouts.isEmpty {
+                    Section("Saved") {
+                        ForEach(model.savedLayouts) { s in Button(s.name) { model.applySaved(s.id) } }
+                    }
+                    Menu("Delete a Saved Layout") {
+                        ForEach(model.savedLayouts) { s in Button(s.name, role: .destructive) { model.deleteSavedLayout(s.id) } }
+                    }
+                }
+                Section("Arrangements") {
+                    ForEach(WorkspacePreset.available(capacity: model.capacity), id: \.self) { p in
+                        Button(p.title) { model.apply(p) }
+                    }
+                }
+            }
             Button { model.arranging = false } label: { Text("Done").fontWeight(.semibold) }
         }
-        .padding(8)
+        .padding(.horizontal, 14).padding(.vertical, 8)
         .background(workspaceChip, in: Capsule())
         .position(x: picture.midX, y: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44)
+        .alert("Save Layout", isPresented: $savingLayout) {
+            TextField("Name", text: $layoutName)
+            Button("Save") { model.saveLayout(named: layoutName) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saved layouts are kept for this Mac. Their windows are matched again when you use one.")
+        }
+    }
+
+    /// Outside Arrange: press and hold a divider, then drag it. The strip is narrow so the
+    /// windows' own edges still get their touches; a short tap there does nothing.
+    @ViewBuilder
+    private func dividerHolds(_ frames: WorkspaceFrames) -> some View {
+        ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, divider in
+            let r = divider.hitRect.onScreen(picture)
+            let horizontal = divider.axis == .horizontal
+            let held = heldDivider == i
+            ZStack {
+                Color.white.opacity(0.001)
+                if held {
+                    Capsule().fill(workspaceAccent)
+                        .frame(width: horizontal ? 6 : 44, height: horizontal ? 44 : 6)
+                }
+            }
+            .frame(width: horizontal ? min(r.width, 14) : r.width, height: horizontal ? r.height : min(r.height, 14))
+            .contentShape(Rectangle())
+            .position(x: r.midX, y: r.midY)
+            .gesture(LongPressGesture(minimumDuration: 0.35, maximumDistance: 10)
+                .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("workspace")))
+                .onChanged { value in
+                    guard case .second(true, let drag) = value else { return }
+                    if heldDivider != i {
+                        heldDivider = i
+                        lastDividerTranslation = .zero
+                        Self.haptic(.lift)
+                    }
+                    guard let drag else { return }
+                    let dx = drag.translation.width - lastDividerTranslation.width
+                    let dy = drag.translation.height - lastDividerTranslation.height
+                    lastDividerTranslation = drag.translation
+                    model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1))
+                }
+                .onEnded { _ in
+                    if heldDivider == i { model.endResize(); Self.haptic(.drop) }
+                    heldDivider = nil
+                    lastDividerTranslation = .zero
+                })
+            .accessibilityHidden(true)   // VoiceOver uses Arrange Panes
+        }
     }
 }
 

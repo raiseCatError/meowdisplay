@@ -295,6 +295,46 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertNil(history.undo())
     }
 
+    func testRedoBringsBackWhatWasUndoneUntilANewChange() {
+        var history = WorkspaceHistory()
+        let a = WorkspaceLayout(preset: .grid2x2, tiles: tiles(4))
+        let b = a.swapping("t0", "t1"), c = b.rotating("t2")
+        history.record(a)          // a -> b
+        history.record(b)          // b -> c
+        XCTAssertEqual(history.undo(current: c), b)
+        XCTAssertEqual(history.undo(current: b), a)
+        XCTAssertTrue(history.canRedo)
+        XCTAssertEqual(history.redo(current: a), b)
+        XCTAssertEqual(history.redo(current: b), c)
+        XCTAssertFalse(history.canRedo)
+        XCTAssertEqual(history.undo(current: c), b)
+        history.record(b)          // a new change from b
+        XCTAssertFalse(history.canRedo, "a new change ends the redo chain")
+    }
+
+    func testASavedLayoutFindsTodaysWindowsOfTheSameApp() {
+        let zed = WorkspaceSource(host: "mac-a", windowID: 10, bundleID: "dev.zed.Zed")
+        let chrome = WorkspaceSource(host: "mac-a", windowID: 11, bundleID: "com.google.Chrome")
+        let desktop = WorkspaceSource(host: "mac-a", windowID: WorkspaceSource.displayKey(1))
+        let layout = WorkspaceLayout(preset: .threeColumns, tiles: [
+            WorkspaceTile(id: "t0", source: zed), WorkspaceTile(id: "t1", source: chrome), WorkspaceTile(id: "t2", source: desktop),
+        ])
+        // Zed relaunched (new window id); Chrome's window is still open; Safari is unrelated.
+        let today: [(id: UInt32, bundleID: String)] = [(40, "com.apple.Safari"), (41, "dev.zed.Zed"), (11, "com.google.Chrome")]
+        let rebound = layout.rebinding(to: today)
+        XCTAssertEqual(rebound.tiles["t0"]?.source?.windowID, 41)
+        XCTAssertEqual(rebound.tiles["t1"]?.source?.windowID, 11)
+        XCTAssertEqual(rebound.tiles["t2"]?.source, desktop, "desktop panes stay")
+        // Nothing to match: the pane keeps its old window (and will ask for one).
+        let none = layout.rebinding(to: [(40, "com.apple.Safari")])
+        XCTAssertEqual(none.tiles["t0"]?.source?.windowID, 10)
+        // A saved layout round-trips through storage.
+        let saved = WorkspaceSavedLayout(id: "s1", name: "Coding", record: WorkspaceLayoutRecord(layout))
+        let back = WorkspaceSavedLayout.decodeList(WorkspaceSavedLayout.encodeList([saved])!)
+        XCTAssertEqual(back.first?.name, "Coding")
+        XCTAssertEqual(back.first?.record.layout.tiles.count, 3)
+    }
+
     // MARK: Hinge
 
     func testNoTileEverSitsInsideAHinge() {
