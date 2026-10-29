@@ -280,6 +280,11 @@ Sender's per-session Allow Input consent turns it on.
 - **Remote Access** connects to a stored, validated private-network endpoint
   (`RemoteEndpointStore`, `RemoteEndpointValidation`). The address is a
   routing hint only; the pinned TLS session still authenticates.
+  A knock is answered on the route it arrived on: over a tunnel (Tailscale or
+  another VPN's utun) the Mac dials the knock's source first, because a
+  Bonjour result for a phone that left the Wi-Fi stays listed and its dial
+  never fails fast (`RemoteConnectRequestPolicy.dialOrder`). On the local
+  network the order is unchanged: Bonjour, the saved hint, then the source.
 - **Android Remote Access** (`AndroidReceiver/core/.../core/remote/`) is the
   same design in Kotlin: `RemoteEndpoint` (validation shared by fixture with
   `RemoteEndpointValidation`), `RemoteKnockClient`/`RemoteKnocker` (the pinned

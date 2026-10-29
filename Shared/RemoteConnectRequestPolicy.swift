@@ -19,6 +19,28 @@ enum RemoteConnectRequestPolicy {
         guard let last = lastAccepted[peerID] else { return true }
         return now.timeIntervalSince(last) >= minimumInterval
     }
+
+    /// A route the Mac can answer a knock on.
+    enum DialRoute: Equatable {
+        /// The receiver's Bonjour result on the local network.
+        case localBonjour
+        /// The address saved for the receiver in Remote Access settings.
+        case savedHint
+        /// The address the knock came from, on the media port.
+        case observedSource
+    }
+
+    /// The order the Mac tries routes in to answer a knock. A knock that
+    /// arrived over a tunnel (Tailscale or another VPN) proves the receiver
+    /// is reachable there right now, while its Bonjour result may be stale: a
+    /// phone that left the Wi-Fi without a goodbye stays listed, and a dial to
+    /// its old address never fails fast, so it would shadow the route that
+    /// works. Routing only — every route still ends in the pinned handshake.
+    static func dialOrder(arrivedOverTunnel: Bool) -> [DialRoute] {
+        arrivedOverTunnel
+            ? [.observedSource, .savedHint, .localBonjour]
+            : [.localBonjour, .savedHint, .observedSource]
+    }
 }
 
 /// The intent a remote connect-request knock declares. The knocking

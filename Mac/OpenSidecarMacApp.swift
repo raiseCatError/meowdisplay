@@ -1490,6 +1490,7 @@ final class SenderController: ObservableObject {
                 case .ready:
                     connection.stateUpdateHandler = nil
                     let observedHost = Self.hostString(from: connection.currentPath?.remoteEndpoint ?? connection.endpoint)
+                    let overTunnel = Self.arrivedOverTunnel(connection.currentPath)
                     self.readRemoteConnectRequestIntent(from: connection) { [weak self] intent in
                         // Resolved against the pins current NOW (after the
                         // read), and before cancelling, while the
@@ -1501,7 +1502,8 @@ final class SenderController: ObservableObject {
                             Log.info("SECURITY: remote connect-request from unresolvable/unpinned peer rejected")
                             return
                         }
-                        self.handleRemoteConnectRequest(peerID: peerID, observedHost: observedHost, intent: intent)
+                        self.handleRemoteConnectRequest(peerID: peerID, observedHost: observedHost,
+                                                        arrivedOverTunnel: overTunnel, intent: intent)
                     }
                 case .failed, .cancelled:
                     connection.stateUpdateHandler = nil
@@ -1583,7 +1585,18 @@ final class SenderController: ObservableObject {
     /// receiver's own recovery) is judged as a background attempt: it never
     /// raises an approval prompt, never clears this Mac's own disconnect
     /// suppression, and follows the Auto-Reconnect preference.
+    /// Whether a knock came in over a tunnel (Tailscale's or another VPN's
+    /// utun) rather than the local Wi-Fi or Ethernet. Judged by the interface
+    /// the connection actually uses: `usesInterfaceType(.wifi)` is also true
+    /// for a tunnel carried over Wi-Fi, so it can't tell the two apart.
+    private static func arrivedOverTunnel(_ path: NWPath?) -> Bool {
+        guard let interface = path?.availableInterfaces.first else { return false }
+        return interface.type == .other
+            && (interface.name.hasPrefix("utun") || interface.name.hasPrefix("ipsec"))
+    }
+
     private func handleRemoteConnectRequest(peerID: String, observedHost: String?,
+                                            arrivedOverTunnel: Bool,
                                             intent: SessionInvitationIntent) {
         let now = Date()
         guard RemoteConnectRequestPolicy.shouldHandle(
@@ -1592,7 +1605,7 @@ final class SenderController: ObservableObject {
             return
         }
         remoteConnectRequestAccepted[peerID] = now
-        Log.info("routeDebug: remote connect-request peer=\(peerID) intent=\(intent.rawValue)")
+        Log.info("routeDebug: remote connect-request peer=\(peerID) intent=\(intent.rawValue) overTunnel=\(arrivedOverTunnel)")
         if intent == .automatic {
             guard autoReconnectEnabled,
                   autoConnectPolicy.suppressedIdentifiers.isDisjoint(with: ["install:\(peerID)"]) else {
@@ -1612,18 +1625,21 @@ final class SenderController: ObservableObject {
                            needsSenderApproval: needsApproval)
         }
 
-        if let localResult = discovered.first(where: { txtID(of: $0) == peerID }) {
-            if dial(.wifi(localResult), via: "local Bonjour") { return }
+        for route in RemoteConnectRequestPolicy.dialOrder(arrivedOverTunnel: arrivedOverTunnel) {
+            switch route {
+            case .localBonjour:
+                if let localResult = discovered.first(where: { txtID(of: $0) == peerID }),
+                   dial(.wifi(localResult), via: "local Bonjour") { return }
+            case .savedHint:
+                if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil,
+                   dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
+            case .observedSource:
+                if let observedHost,
+                   dial(.remoteCallback(peerID: peerID, host: observedHost, port: WireCrypto.tlsPort),
+                        via: "observed source \(observedHost)\(arrivedOverTunnel ? " (tunnel)" : "")") { return }
+            }
         }
-        if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil {
-            if dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
-        }
-        guard let observedHost else {
-            Log.info("routeDebug: remote connect-request peer=\(peerID) has no usable route")
-            return
-        }
-        _ = dial(.remoteCallback(peerID: peerID, host: observedHost, port: WireCrypto.tlsPort),
-             via: "observed source \(observedHost)")
+        Log.info("routeDebug: remote connect-request peer=\(peerID) has no usable route")
     }
 
     private func startReceiverPairingBrowsing() {

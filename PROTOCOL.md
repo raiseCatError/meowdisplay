@@ -1201,7 +1201,10 @@ remains the only way to turn it on.
   control channel: `{"type":"remoteConnectRequest","intent":"manual"}` or
   `"automatic"`. A receiver sends `manual` only while its user's explicit
   request for that sender is outstanding; its own automatic recovery sends
-  `automatic`. A knock with no frame (older receivers), a malformed frame
+  `automatic`. The sender answers a knock on the route it came in on: one
+  that arrived over a tunnel (Tailscale or another VPN) is dialed back at its
+  source address first, ahead of a possibly stale Bonjour result (routing
+  only; the dial-back is authenticated like any other). A knock with no frame (older receivers), a malformed frame
   or an unknown value is `automatic`, and an `automatic` knock is judged as
   a background attempt: it never raises a prompt on the sender. A desired
   mode travels as `hello.requestedMode` (`mirror` or `extend`, optional), sent
