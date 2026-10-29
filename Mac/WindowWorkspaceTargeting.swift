@@ -43,7 +43,8 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
 /// Anything malformed shows the whole window; zoom is capped at 8x.
 enum WorkspaceCrop {
     static let full = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
-    static let minimumSide = 1.0 / 8
+    /// Zoom is capped at 8x of the tile's fill region by the receiver; this only stops absurd values.
+    static let minimumSide = 1.0 / 64
 
     static func parse(_ value: Any?) -> WorkspaceRect {
         guard let a = value as? [Double], a.count == 4, a.allSatisfy(\.isFinite) else { return full }
@@ -172,7 +173,8 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         let c = a.crop
         return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width * c.width, height: frame.height * c.height),
-                                    rotation: a.rotation, fit: a.fit,
+                                    // A zoomed/panned region has the tile's shape and always fills it.
+                                    rotation: a.rotation, fit: c != WorkspaceCrop.full ? .fill : a.fit,
                                     origin: WorkspacePoint(x: frame.width * c.x, y: frame.height * c.y))
     }
 
@@ -399,7 +401,9 @@ enum WorkspaceCaptureBudget {
         // The window's aspect at the size it is drawn in the tile (fill draws
         // it larger and crops), never above its own pixels.
         let sx = tile.width / window.width, sy = tile.height / window.height
-        let s = min(fit == .fit ? min(sx, sy) : max(sx, sy), backingScale)
+        let resolved = WorkspaceFit.resolved(fit, tile: WorkspaceSize(width: tile.width, height: tile.height),
+                                             source: WorkspaceSize(width: window.width, height: window.height))
+        let s = min(resolved == .fit ? min(sx, sy) : max(sx, sy), backingScale)
         let w = max(Int((window.width * s).rounded()) & ~1, 2), h = max(Int((window.height * s).rounded()) & ~1, 2)
         return CGSize(width: w, height: h)
     }

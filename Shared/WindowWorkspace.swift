@@ -89,10 +89,25 @@ enum WorkspaceRotation: Int, Codable, CaseIterable, Sendable {
 }
 
 enum WorkspaceFit: String, Codable, Sendable {
-    /// Whole window visible, letterboxed. Default.
+    /// Whole window visible, letterboxed.
     case fit
     /// Tile filled, window cropped evenly. Never stretched.
     case fill
+    /// Default: fill when that still shows most of the window (no letterbox bars
+    /// in split panes), whole window when filling would hide too much.
+    case auto
+
+    /// Filling must show at least this share of the window along the cropped side.
+    static let autoFillMinimumShown = 0.7
+
+    /// `.auto` resolved for a tile and a (rotated) source size. Pure: the Mac, iOS
+    /// and Android resolve it identically.
+    static func resolved(_ fit: WorkspaceFit, tile: WorkspaceSize, source: WorkspaceSize) -> WorkspaceFit {
+        guard fit == .auto else { return fit }
+        guard tile.width > 0, tile.height > 0, source.width > 0, source.height > 0 else { return .fit }
+        let sx = tile.width / source.width, sy = tile.height / source.height
+        return min(sx, sy) / max(sx, sy) >= autoFillMinimumShown ? .fill : .fit
+    }
 }
 
 /// Maps between a source window's pixels and the workspace canvas for one
@@ -114,11 +129,16 @@ struct TileContentTransform: Equatable, Sendable {
         rotation.isQuarterTurn ? WorkspaceSize(width: source.height, height: source.width) : source
     }
 
+    /// `.auto` resolved for this tile and source.
+    var effectiveFit: WorkspaceFit {
+        WorkspaceFit.resolved(fit, tile: WorkspaceSize(width: tile.width, height: tile.height), source: rotatedSourceSize)
+    }
+
     var scale: Double {
         let r = rotatedSourceSize
         guard r.width > 0, r.height > 0, tile.width > 0, tile.height > 0 else { return 0 }
         let sx = tile.width / r.width, sy = tile.height / r.height
-        return fit == .fit ? min(sx, sy) : max(sx, sy)
+        return effectiveFit == .fit ? min(sx, sy) : max(sx, sy)
     }
 
     /// Where the whole (rotated, scaled) image lands. With `.fill` it is
@@ -220,30 +240,67 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
 
 struct WorkspaceTile: Equatable, Codable, Sendable {
     var id: String
+    /// The window this pane shows (its active tab). Only this one streams.
     var source: WorkspaceSource?
     var rotation: WorkspaceRotation = .none
-    var fit: WorkspaceFit = .fit
-    /// Per-tile zoom: the part of the window shown, normalized to the window. Nil = whole window.
+    var fit: WorkspaceFit = .auto
+    /// Per-tile zoom/pan: the part of the window shown, normalized to the window, with the
+    /// pane's own shape (so it fills the pane: no bars). Nil = the fit's default view.
     var crop: WorkspaceRect?
+    /// Every window in this pane, in label order, when it holds more than one (tabs).
+    /// Empty for a single-window pane. `source` is always one of them.
+    var tabs: [WorkspaceSource] = []
+
+    /// The pane's windows in label order (one, or its tabs).
+    var windows: [WorkspaceSource] { tabs.isEmpty ? (source.map { [$0] } ?? []) : tabs }
 }
 
 /// Pinch and pan inside one tile, as a change to the part of its window it shows.
+/// A zoomed tile always shows a region with the TILE's shape, drawn filling the
+/// tile: zooming never adds letterbox bars, and the Mac captures exactly that
+/// region at the tile's resolution (sharp).
 enum WorkspaceZoom {
     static let maximum = 8.0
 
-    /// `crop` zoomed by `scale` (>1 zooms in) around `anchor` (a point in the tile, 0..1),
-    /// then moved by `pan` (the fingers' travel as a share of the tile). The anchor stays
-    /// under the fingers. Clamped to the window; whole window (nil) at 1x.
-    static func apply(_ crop: WorkspaceRect?, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
-        let c = crop ?? WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
-        guard scale.isFinite, scale > 0, [anchor.x, anchor.y, pan.x, pan.y].allSatisfy(\.isFinite) else { return crop }
-        let w = min(max(c.width / scale, 1 / maximum), 1), h = min(max(c.height / scale, 1 / maximum), 1)
-        // The window point under the anchor before, kept under the anchor after.
+    /// The largest region of the window with the tile's shape, centred: what "fill" shows.
+    /// `window` and `tile` in any units (aspects matter); `rotation` turns the tile's
+    /// shape into the window's orientation.
+    static func fillCrop(window: WorkspaceSize, tile: WorkspaceSize, rotation: WorkspaceRotation) -> WorkspaceRect {
+        guard window.width > 0, window.height > 0, tile.width > 0, tile.height > 0 else { return WorkspaceRect(x: 0, y: 0, width: 1, height: 1) }
+        let t = rotation.isQuarterTurn ? WorkspaceSize(width: tile.height, height: tile.width) : tile
+        let tileAspect = t.width / t.height, windowAspect = window.width / window.height
+        if tileAspect >= windowAspect {
+            let h = windowAspect / tileAspect
+            return WorkspaceRect(x: 0, y: (1 - h) / 2, width: 1, height: h)
+        }
+        let w = tileAspect / windowAspect
+        return WorkspaceRect(x: (1 - w) / 2, y: 0, width: w, height: 1)
+    }
+
+    /// `crop` (or `base`, the fill region, when nil) zoomed by `scale` (>1 zooms in) around
+    /// `anchor` (a point in the tile, 0..1), then moved by `pan` (the fingers' travel as a share
+    /// of the tile). The anchor stays under the fingers; the shape never changes; never larger
+    /// than `base`, never more than `maximum` times smaller; clamped to the window. Nil when it
+    /// is exactly `base` again (back to the default view).
+    static func apply(_ crop: WorkspaceRect?, base: WorkspaceRect, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
+        let c = crop ?? base
+        guard scale.isFinite, scale > 0, [anchor.x, anchor.y, pan.x, pan.y].allSatisfy(\.isFinite),
+              c.width > 0, c.height > 0, base.width > 0, base.height > 0 else { return crop }
+        // Uniform: both sides scale together (the shape is the tile's).
+        let k = min(max(c.width / scale, base.width / maximum), base.width) / c.width
+        let w = c.width * k, h = c.height * k
         let ax = c.x + anchor.x * c.width, ay = c.y + anchor.y * c.height
         var x = ax - anchor.x * w - pan.x * w, y = ay - anchor.y * h - pan.y * h
-        x = min(max(x, 0), 1 - w); y = min(max(y, 0), 1 - h)
-        if w >= 1 - 1e-6, h >= 1 - 1e-6 { return nil }
-        return WorkspaceRect(x: x, y: y, width: w, height: h)
+        x = min(max(x, 0), max(1 - w, 0)); y = min(max(y, 0), max(1 - h, 0))
+        let r = WorkspaceRect(x: x, y: y, width: w, height: h)
+        let eps = 1e-6
+        if abs(w - base.width) < eps, abs(h - base.height) < eps, abs(x - base.x) < eps, abs(y - base.y) < eps { return nil }
+        return r
+    }
+
+    /// Back-compat for callers without a tile shape (whole window as base).
+    static func apply(_ crop: WorkspaceRect?, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
+        apply(crop, base: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), scale: scale, anchor: anchor, pan: pan)
     }
 }
 
@@ -376,10 +433,28 @@ enum WorkspaceDropTarget: Equatable, Sendable {
     case split(index: Int, edge: WorkspaceEdge, preview: WorkspaceRect)
 }
 
+/// Where a window dropped on the workspace goes.
+enum WorkspaceWindowDrop: Equatable, Sendable {
+    /// Show it in this pane instead of its window.
+    case replace(tile: String, preview: WorkspaceRect)
+    /// Add it to this pane as another tab.
+    case tab(tile: String, preview: WorkspaceRect)
+    /// A new pane beside the one in slot `index`.
+    case split(index: Int, edge: WorkspaceEdge, preview: WorkspaceRect)
+    /// Fill this empty slot.
+    case emptySlot(index: Int, preview: WorkspaceRect)
+
+    var preview: WorkspaceRect {
+        switch self {
+        case .replace(_, let p), .tab(_, let p), .split(_, _, let p), .emptySlot(_, let p): return p
+        }
+    }
+}
+
 /// The workspace a receiver arranges. Value type: every operation returns a
 /// new layout, so undo is a stack of values and nothing is half-applied.
 struct WorkspaceLayout: Equatable, Sendable {
-    static let schema = 1
+    static let schema = 2
     /// Hard ceiling on tiles in one workspace (iPad / expanded Android).
     static let maximumTiles = 9
 
@@ -443,13 +518,98 @@ struct WorkspaceLayout: Equatable, Sendable {
         return copy
     }
 
-    /// Change what a tile shows without moving the tile.
+    /// Change what a tile shows without moving the tile. In a tabbed pane this replaces
+    /// the active tab (nil removes it and shows the next one).
     func replacingSource(of id: String, with source: WorkspaceSource?) -> WorkspaceLayout {
         guard var tile = tiles[id] else { return self }
         if tile.source != source { tile.crop = nil }   // zoom belongs to the window it was set on
+        if !tile.tabs.isEmpty, let current = tile.source, let i = tile.tabs.firstIndex(of: current) {
+            if let source {
+                tile.tabs[i] = source
+                tile.tabs = Self.unique(tile.tabs)
+            } else {
+                tile.tabs.remove(at: i)
+                tile.source = tile.tabs.isEmpty ? nil : tile.tabs[min(i, tile.tabs.count - 1)]
+                if tile.tabs.count <= 1 { tile.tabs = [] }
+                var copy = self
+                copy.tiles[id] = tile
+                return copy
+            }
+            if tile.tabs.count <= 1 { tile.tabs = [] }
+        }
         tile.source = source
         var copy = self
         copy.tiles[id] = tile
+        return copy
+    }
+
+    private static func unique(_ list: [WorkspaceSource]) -> [WorkspaceSource] {
+        var seen: [WorkspaceSource] = []
+        for s in list where !seen.contains(where: { $0.host == s.host && $0.windowID == s.windowID }) { seen.append(s) }
+        return seen
+    }
+
+    /// Adds a window to a pane as a new tab and shows it (the pane's current window stays as a tab).
+    func addingTab(_ source: WorkspaceSource, to id: String) -> WorkspaceLayout {
+        guard var tile = tiles[id] else { return self }
+        guard let current = tile.source else { return replacingSource(of: id, with: source) }
+        var list = tile.windows
+        if !list.contains(where: { $0.host == current.host && $0.windowID == current.windowID }) { list.append(current) }
+        list.removeAll { $0.host == source.host && $0.windowID == source.windowID }
+        list.append(source)
+        tile.tabs = list.count > 1 ? list : []
+        tile.source = source
+        tile.crop = nil
+        var copy = self
+        copy.tiles[id] = tile
+        return copy
+    }
+
+    /// Shows another tab of a pane (only the shown tab streams from the Mac).
+    func switchingTab(of id: String, to index: Int) -> WorkspaceLayout {
+        guard var tile = tiles[id], tile.tabs.indices.contains(index), tile.source != tile.tabs[index] else { return self }
+        tile.source = tile.tabs[index]
+        tile.crop = nil
+        var copy = self
+        copy.tiles[id] = tile
+        return copy
+    }
+
+    /// Takes one window out of a pane's tabs (the Mac window is untouched).
+    func removingTab(of id: String, at index: Int) -> WorkspaceLayout {
+        guard let tile = tiles[id], tile.tabs.indices.contains(index) else { return self }
+        var copy = self
+        var t = tile
+        let removed = t.tabs.remove(at: index)
+        if t.source == removed { t.source = t.tabs.isEmpty ? nil : t.tabs[min(index, t.tabs.count - 1)]; t.crop = nil }
+        if t.tabs.count <= 1 { t.tabs = [] }
+        copy.tiles[id] = t
+        return copy
+    }
+
+    /// The pane showing (or holding as a tab) this window, if any.
+    func tile(holding host: String, windowID: UInt32) -> String? {
+        orderedTileIDs.first { id in tiles[id]?.windows.contains { $0.host == host && $0.windowID == windowID } == true }
+    }
+
+    /// A new pane beside the one in slot `index` (a drop on a pane's edge).
+    func insertingSplit(_ tile: WorkspaceTile, at index: Int, edge: WorkspaceEdge) -> WorkspaceLayout {
+        guard tiles[tile.id] == nil, tiles.count < Self.maximumTiles, Self.slotIndices(root).contains(index) else { return self }
+        var copy = self
+        copy.tiles[tile.id] = tile
+        copy.root = Self.split(root, at: index, edge: edge, inserting: tile.id)
+        copy.maximized = nil
+        copy.normalize()
+        return copy
+    }
+
+    /// Fills an empty slot with a new pane.
+    func filling(slot index: Int, with tile: WorkspaceTile) -> WorkspaceLayout {
+        guard tiles[tile.id] == nil, Self.slotID(root, at: index) == .some(nil) else { return self }
+        var copy = self
+        copy.tiles[tile.id] = tile
+        copy.root = Self.setSlot(root, at: index, to: tile.id)
+        copy.normalize()
         return copy
     }
 
@@ -906,6 +1066,26 @@ enum WorkspaceGeometry {
         return .split(index: index, edge: edge, preview: preview)
     }
 
+    /// Where a window dragged from Stage Peek (or a file) lands on the panes:
+    /// the pane's label strip adds it as a tab, a band along an edge splits the pane,
+    /// the middle replaces the pane's window. `labelHeight` is the label strip's
+    /// height normalized to the workspace.
+    static func windowDrop(at point: WorkspacePoint, layout: WorkspaceLayout, frames: WorkspaceFrames, size: WorkspaceSize,
+                           labelHeight: Double, canSplit: Bool) -> WorkspaceWindowDrop? {
+        guard let index = frames.slots.firstIndex(where: { $0.contains(point) }) else { return nil }
+        let slot = frames.slots[index]
+        guard let occupant = WorkspaceLayout.slotID(layout.root, at: index) else { return nil }
+        guard let tile = occupant, layout.tiles[tile]?.source != nil else { return .emptySlot(index: index, preview: slot) }
+        let strip = min(labelHeight * 1.6, slot.height * 0.25)
+        if point.y - slot.y <= strip {
+            return .tab(tile: tile, preview: WorkspaceRect(x: slot.x, y: slot.y, width: slot.width, height: strip))
+        }
+        if canSplit, case .split(let i, let edge, let preview)? = dropTarget(at: point, frames: frames, size: size, canSplit: true), i == index {
+            return .split(index: i, edge: edge, preview: preview)
+        }
+        return .replace(tile: tile, preview: slot)
+    }
+
     /// Move a divider by `delta` (normalized workspace units along its axis).
     /// Both neighbours keep at least the minimum size of everything inside
     /// them; the move is clamped, never rejected, so dragging past a limit
@@ -1040,6 +1220,15 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var follow: String?
         var rotation: Int?
         var fit: String?
+        /// A tabbed pane's windows, in label order (schema 2).
+        var tabs: [TabRecord]?
+    }
+
+    struct TabRecord: Codable, Equatable, Sendable {
+        var host: String
+        var window: UInt32
+        var bundle: String?
+        var follow: String?
     }
 
     var schema: Int
@@ -1059,7 +1248,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         root = encode(layout.root)
         tiles = layout.orderedTileIDs.compactMap { layout.tiles[$0] }.map {
             Tile(id: $0.id, host: $0.source?.host, window: $0.source?.windowID, bundle: $0.source?.bundleID,
-                 follow: $0.source?.follow.rawValue, rotation: $0.rotation.rawValue, fit: $0.fit.rawValue)
+                 follow: $0.source?.follow.rawValue, rotation: $0.rotation.rawValue, fit: $0.fit.rawValue,
+                 tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { TabRecord(host: $0.host, window: $0.windowID, bundle: $0.bundleID, follow: $0.follow.rawValue) })
         }
         maximized = layout.maximized
     }
@@ -1083,8 +1273,16 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                 source = WorkspaceSource(host: host, windowID: window, bundleID: t.bundle,
                                          follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
             }
-            map[t.id] = WorkspaceTile(id: t.id, source: source, rotation: WorkspaceRotation(degrees: t.rotation ?? 0),
-                                      fit: t.fit.flatMap(WorkspaceFit.init(rawValue:)) ?? .fit)
+            // Schema 1 saved every tile as "fit" (there was no automatic fill): start them on auto.
+            let storedFit = t.fit.flatMap(WorkspaceFit.init(rawValue:))
+            let fit: WorkspaceFit = schema < 2 && storedFit == .fit ? .auto : (storedFit ?? .auto)
+            var tile = WorkspaceTile(id: t.id, source: source, rotation: WorkspaceRotation(degrees: t.rotation ?? 0), fit: fit)
+            let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
+                WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
+                                follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
+            }
+            if tabs.count > 1, let s = source, tabs.contains(s) { tile.tabs = Array(tabs) }
+            map[t.id] = tile
         }
         return WorkspaceLayout(root: decode(root), tiles: map, maximized: maximized)
     }

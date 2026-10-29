@@ -78,7 +78,7 @@ final class WindowWorkspaceVectorTests: XCTestCase {
         // Transforms: forward points per rotation and fit.
         var transforms: [[String: Any]] = []
         for rotation in WorkspaceRotation.allCases {
-            for fit in [WorkspaceFit.fit, .fill] {
+            for fit in [WorkspaceFit.fit, .fill, .auto] {
                 let t = TileContentTransform(tile: .init(x: 40, y: 20, width: 600, height: 400), source: .init(width: 1600, height: 900),
                                              rotation: rotation, fit: fit)
                 let pts: [[Double]] = [[0, 0], [1600, 0], [0, 900], [800, 450], [123, 777]]
@@ -86,7 +86,23 @@ final class WindowWorkspaceVectorTests: XCTestCase {
                                    "points": pts, "canvas": pts.map { let c = t.canvasPoint(fromSource: .init(x: $0[0], y: $0[1])); return [c.x, c.y] }])
             }
         }
-        return ["schema": 1, "layouts": layoutCases, "operations": opCases, "capacities": capacities, "transforms": transforms]
+        // Per-tile zoom: the fill region for a tile shape, then pinch/pan steps from it.
+        var zoom: [[String: Any]] = []
+        for (window, tile, rotation) in [((1600.0, 1000.0), (400.0, 300.0), WorkspaceRotation.none),
+                                         ((1600.0, 1000.0), (300.0, 600.0), .none),
+                                         ((1000.0, 1600.0), (500.0, 300.0), .quarter)] {
+            let base = WorkspaceZoom.fillCrop(window: .init(width: window.0, height: window.1), tile: .init(width: tile.0, height: tile.1), rotation: rotation)
+            var crop: WorkspaceRect?
+            var steps: [[String: Any]] = []
+            for (scale, ax, ay, px, py) in [(2.0, 0.25, 0.5, 0.0, 0.0), (1.5, 0.5, 0.5, 0.1, -0.2), (0.2, 0.5, 0.5, 0.0, 0.0), (20.0, 1.0, 0.0, 0.0, 0.0)] {
+                crop = WorkspaceZoom.apply(crop, base: base, scale: scale, anchor: .init(x: ax, y: ay), pan: .init(x: px, y: py))
+                steps.append(["scale": scale, "anchor": [ax, ay], "pan": [px, py],
+                              "crop": crop.map { [$0.x, $0.y, $0.width, $0.height] } ?? NSNull()])
+            }
+            zoom.append(["window": [window.0, window.1], "tile": [tile.0, tile.1], "rotation": rotation.rawValue,
+                         "base": [base.x, base.y, base.width, base.height], "steps": steps])
+        }
+        return ["schema": 2, "layouts": layoutCases, "operations": opCases, "capacities": capacities, "transforms": transforms, "zoom": zoom]
     }
 
     func testWorkspaceVectorsMatchTheSharedFixture() throws {

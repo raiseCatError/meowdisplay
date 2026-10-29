@@ -479,27 +479,28 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, crop: WorkspaceRect?, anchor: WorkspacePoint, rect: WorkspaceRect)?
+    private var zoomGesture: (tile: String, crop: WorkspaceRect?, base: WorkspaceRect, anchor: WorkspacePoint, rect: WorkspaceRect)?
 
     /// Two-finger pinch/pan in Window mode. Points are normalized to the picture.
-    /// Only the tile under the fingers where the gesture began changes.
-    /// A pinch zooms that tile; a two-finger pan (not a pinch) only pans a tile that is already
-    /// zoomed in, otherwise it stays a scroll on the Mac. Returns whether the tile took it.
+    /// Only the tile under the fingers where the gesture began changes. A pinch zooms that
+    /// tile; a two-finger pan moves a tile that is zoomed or filled (otherwise it stays a
+    /// scroll on the Mac). The tile keeps its shape: zoom and pan never add bars.
     @discardableResult
     func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double) -> Bool {
         if began || zoomGesture == nil {
             guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
-                  let tile = layout.tiles[id], tile.source != nil, isPinch || tile.crop != nil else { zoomGesture = nil; return false }
-            let content = contentRect(of: id, in: rect)
-            let anchor = WorkspacePoint(x: min(max((initial.x - content.x) / max(content.width, 1e-6), 0), 1),
-                                        y: min(max((initial.y - content.y) / max(content.height, 1e-6), 0), 1))
-            zoomGesture = (id, tile.crop, anchor, content)
+                  let tile = layout.tiles[id], tile.source != nil,
+                  isPinch || tile.crop != nil || effectiveFit(id) == .fill,
+                  let base = fillBase(id, rect: rect) else { zoomGesture = nil; return false }
+            let anchor = WorkspacePoint(x: min(max((initial.x - rect.x) / max(rect.width, 1e-6), 0), 1),
+                                        y: min(max((initial.y - rect.y) / max(rect.height, 1e-6), 0), 1))
+            zoomGesture = (id, tile.crop, base, Self.unrotate(anchor, tile.rotation), rect)
             if active != id { focus(id) }
         }
-        guard let g = zoomGesture else { return false }
-        let pan = WorkspacePoint(x: (current.x - initial.x) / max(g.rect.width, 1e-6),
-                                 y: (current.y - initial.y) / max(g.rect.height, 1e-6))
-        let crop = WorkspaceZoom.apply(g.crop, scale: scale, anchor: g.anchor, pan: pan)
+        guard let g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
+        let pan = Self.unrotate(vector: WorkspacePoint(x: (current.x - initial.x) / max(g.rect.width, 1e-6),
+                                                       y: (current.y - initial.y) / max(g.rect.height, 1e-6)), tile.rotation)
+        let crop = WorkspaceZoom.apply(g.crop, base: g.base, scale: scale, anchor: g.anchor, pan: pan)
         let next = saved.zooming(g.tile, to: crop)
         if next != saved {
             saved = next
@@ -512,7 +513,60 @@ final class WorkspaceModel: ObservableObject {
         return true
     }
 
+    /// The pane's fill region in its window (the zoom's 1x), or nil without the window's size.
+    private func fillBase(_ id: String, rect: WorkspaceRect) -> WorkspaceRect? {
+        guard let tile = layout.tiles[id], let w = windowSize(tile) else { return nil }
+        return WorkspaceZoom.fillCrop(window: w, tile: WorkspaceSize(width: rect.width * size.width, height: rect.height * size.height),
+                                      rotation: tile.rotation)
+    }
+
+    private func windowSize(_ tile: WorkspaceTile) -> WorkspaceSize? {
+        guard let source = tile.source, let w = catalog?.windows.first(where: { $0.id == source.windowID }),
+              w.width > 0, w.height > 0 else { return nil }
+        return WorkspaceSize(width: Double(w.width), height: Double(w.height))
+    }
+
+    /// Fit or fill as actually drawn (`.auto` resolved), for menus and gestures.
+    func effectiveFit(_ id: String) -> WorkspaceFit {
+        guard let tile = layout.tiles[id] else { return .fit }
+        if tile.crop != nil { return .fill }
+        guard let rect = frames.tiles[id], let w = windowSize(tile) else { return tile.fit == .auto ? .fit : tile.fit }
+        let tilePx = WorkspaceSize(width: rect.width * size.width, height: rect.height * size.height)
+        let src = tile.rotation.isQuarterTurn ? WorkspaceSize(width: w.height, height: w.width) : w
+        return WorkspaceFit.resolved(tile.fit, tile: tilePx, source: src)
+    }
+
+    /// A point in the (rotated) tile, 0..1, as the same point of the unrotated picture.
+    private static func unrotate(_ p: WorkspacePoint, _ r: WorkspaceRotation) -> WorkspacePoint {
+        switch r {
+        case .none: return p
+        case .quarter: return WorkspacePoint(x: p.y, y: 1 - p.x)
+        case .half: return WorkspacePoint(x: 1 - p.x, y: 1 - p.y)
+        case .threeQuarter: return WorkspacePoint(x: 1 - p.y, y: p.x)
+        }
+    }
+
+    private static func unrotate(vector v: WorkspacePoint, _ r: WorkspaceRotation) -> WorkspacePoint {
+        switch r {
+        case .none: return v
+        case .quarter: return WorkspacePoint(x: v.y, y: -v.x)
+        case .half: return WorkspacePoint(x: -v.x, y: -v.y)
+        case .threeQuarter: return WorkspacePoint(x: -v.y, y: v.x)
+        }
+    }
+
     func resetZoom(_ id: String) { edit { $0.zooming(id, to: nil) } }
+
+    /// Two-finger double-tap: this pane's whole view back to default (zoom, pan, rotation, fit). Other panes untouched.
+    func resetView(_ id: String) {
+        edit { l in
+            guard var tile = l.tiles[id] else { return l }
+            tile.crop = nil; tile.rotation = .none; tile.fit = .auto
+            var copy = l
+            copy.tiles[id] = tile
+            return copy
+        }
+    }
 
     /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).
     func selectTile(at p: WorkspacePoint) {
@@ -521,17 +575,98 @@ final class WorkspaceModel: ObservableObject {
         focus(id)
     }
 
-    /// Where the window's picture sits inside a tile (normalized to the canvas), for a fitted window.
-    private func contentRect(of id: String, in tile: WorkspaceRect) -> WorkspaceRect {
-        guard let tileItem = layout.tiles[id], tileItem.fit == .fit, !tileItem.rotation.isQuarterTurn,
-              let source = tileItem.source, let w = catalog?.windows.first(where: { $0.id == source.windowID }),
-              w.width > 0, w.height > 0, size.width > 0, size.height > 0 else { return tile }
-        let c = tileItem.crop ?? WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
-        let srcW = Double(w.width) * c.width, srcH = Double(w.height) * c.height
-        let tw = tile.width * size.width, th = tile.height * size.height
-        let s = min(tw / srcW, th / srcH)
-        let cw = srcW * s / size.width, ch = srcH * s / size.height
-        return WorkspaceRect(x: tile.midX - cw / 2, y: tile.midY - ch / 2, width: cw, height: ch)
+    // MARK: Tabs and drops
+
+    func switchTab(_ id: String, to index: Int) {
+        edit { $0.switchingTab(of: id, to: index) }
+        focus(id)
+    }
+
+    func removeTab(_ id: String, at index: Int) { edit { $0.removingTab(of: id, at: index) } }
+
+    /// A window dropped from Stage Peek: replace a pane's window, add it as a tab, split a pane, or fill an empty slot.
+    /// One window shows in one pane only: it leaves the pane (or tab) it was in.
+    func drop(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) {
+        guard let host else { return }
+        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: w.bundleID)
+        setGeneration(source, w.generation)
+        if !windowMode { requestWindowMode() }
+        var focusTile: String?
+        edit { l in
+            var l = l
+            if let holder = l.tile(holding: host, windowID: w.id) {
+                if case .replace(let t, _) = target, t == holder { focusTile = holder; return l }
+                if case .tab(let t, _) = target, t == holder {
+                    if let i = l.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == w.id }) { l = l.switchingTab(of: holder, to: i) }
+                    focusTile = holder; return l
+                }
+                l = Self.detach(source, from: holder, in: l)
+            }
+            switch target {
+            case .replace(let t, _):
+                focusTile = t
+                return l.replacingSource(of: t, with: source)
+            case .tab(let t, _):
+                focusTile = t
+                return l.addingTab(source, to: t)
+            case .split(let index, let edge, _):
+                let id = "w\(nextTile)"; nextTile += 1
+                focusTile = id
+                return l.tiles.count < capacity ? l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge)
+                    : (WorkspaceLayout.slotID(l.root, at: index).flatMap { $0 }.map { l.addingTab(source, to: $0) } ?? l)
+            case .emptySlot(let index, _):
+                let id = "w\(nextTile)"; nextTile += 1
+                focusTile = id
+                return l.filling(slot: index, with: WorkspaceTile(id: id, source: source))
+            }
+        }
+        if let focusTile { focus(focusTile) }
+    }
+
+    /// A pane's label dragged elsewhere: onto another pane's labels = merge as tabs, onto an
+    /// edge = move the pane there, onto a pane's middle = swap. `tab` moves just that tab.
+    func dropTile(_ id: String, tab: Int? = nil, on target: WorkspaceWindowDrop) {
+        guard let moving = layout.tiles[id] else { return }
+        let windows = tab.map { i in moving.tabs.indices.contains(i) ? [moving.tabs[i]] : [] } ?? moving.windows
+        guard !windows.isEmpty else { return }
+        edit { l in
+            var l = l
+            switch target {
+            case .tab(let t, _) where t != id:
+                for s in windows { l = Self.detach(s, from: id, in: l); l = l.addingTab(s, to: t) }
+                return l
+            case .replace(let t, _) where t != id:
+                if tab != nil, let s = windows.first {
+                    l = Self.detach(s, from: id, in: l)
+                    return l.addingTab(s, to: t)
+                }
+                return l.swapping(id, t)
+            case .split(let index, let edge, let preview):
+                if tab != nil, let s = windows.first, l.tiles.count < capacity {
+                    l = Self.detach(s, from: id, in: l)
+                    let newID = "w\(nextTile)"; nextTile += 1
+                    return l.insertingSplit(WorkspaceTile(id: newID, source: s), at: index, edge: edge)
+                }
+                return l.materializing(hinge: hinge).moving(id, to: .split(index: index, edge: edge, preview: preview))
+            case .emptySlot(let index, let preview):
+                return l.materializing(hinge: hinge).moving(id, to: .slot(index: index, preview: preview))
+            default:
+                return l
+            }
+        }
+    }
+
+    /// Takes a window out of a pane (a tab leaves; a single-window pane is removed).
+    private static func detach(_ s: WorkspaceSource, from id: String, in l: WorkspaceLayout) -> WorkspaceLayout {
+        guard let tile = l.tiles[id] else { return l }
+        if let i = tile.tabs.firstIndex(where: { $0.host == s.host && $0.windowID == s.windowID }) { return l.removingTab(of: id, at: i) }
+        return tile.source?.windowID == s.windowID ? l.removing(id) : l
+    }
+
+    /// Where a dragged window or label would land (normalized picture point).
+    func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
+        WorkspaceGeometry.windowDrop(at: p, layout: layout, frames: frames, size: size, labelHeight: labelHeight,
+                                     canSplit: layout.tiles.count < capacity)
     }
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
@@ -578,7 +713,11 @@ final class WorkspaceModel: ObservableObject {
 
     func endResize() { history.endGroup() }
     func rotate(_ tile: String) { edit { $0.rotating(tile) } }
-    func toggleFit(_ tile: String) { edit { l in l.settingFit(l.tiles[tile]?.fit == .fill ? .fit : .fill, for: tile) } }
+    /// Fill Tile / Show Whole Window, from what the tile shows now (`.auto` resolved). Clears zoom.
+    func toggleFit(_ tile: String) {
+        let next: WorkspaceFit = effectiveFit(tile) == .fill ? .fit : .fill
+        edit { l in l.zooming(tile, to: nil).settingFit(next, for: tile) }
+    }
     func toggleMaximize(_ tile: String) { edit { l in l.maximized == tile ? l.restoringMaximized() : l.maximizing(tile) } }
     /// Removes the tile only; the Mac window stays open.
     func removeTile(_ tile: String) { edit { $0.removing(tile) } }
@@ -605,6 +744,13 @@ final class WorkspaceModel: ObservableObject {
         let landscape = size.width >= size.height
         // One window, one tile: choosing a window that's already showing selects its tile,
         // or swaps the two tiles when replacing another one.
+        if let holder = layout.tile(holding: host, windowID: w.id), layout.tiles[holder]?.source?.windowID != w.id,
+           let i = layout.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == w.id }) {
+            // It's a background tab: show that tab.
+            edit { $0.switchingTab(of: holder, to: i) }
+            focus(holder)
+            return
+        }
         if let existing = layout.orderedTileIDs.first(where: { layout.tiles[$0]?.source?.host == host && layout.tiles[$0]?.source?.windowID == w.id }) {
             let target = replacing ?? (asNewTile ? nil : active)
             if let target, target != existing, let other = layout.tiles[target]?.source, layout.tiles[existing] != nil {

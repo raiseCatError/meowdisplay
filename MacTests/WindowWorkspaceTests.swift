@@ -372,7 +372,7 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertEqual(Set(r.orderedTileIDs), ["a", "b"], "duplicate and unknown tiles dropped")
         XCTAssertEqual(r.tiles["a"]?.rotation, WorkspaceRotation.none, "45° is not a tile rotation")
         XCTAssertEqual(r.tiles["b"]?.rotation, .threeQuarter)
-        XCTAssertEqual(r.tiles["b"]?.fit, .fit, "unknown fit falls back")
+        XCTAssertEqual(r.tiles["b"]?.fit, .auto, "unknown fit falls back to automatic")
         XCTAssertNil(r.tiles["b"]?.source, "a tile without host+window has no source")
         XCTAssertNil(r.maximized)
         assertTiling(WorkspaceGeometry.frames(for: r, in: .init(width: 1000, height: 800)))
@@ -384,5 +384,52 @@ final class WindowWorkspaceTests: XCTestCase {
         for _ in 0..<200 { deep = #"{"axis":"vertical","children":[\#(deep),{"tile":null}]}"# }
         let deepRecord = #"{"schema":1,"root":\#(deep),"tiles":[{"id":"a"}]}"#
         XCTAssertNotNil(WorkspaceLayoutRecord.decode(Data(deepRecord.utf8)))
+    }
+
+    // MARK: Fill, zoom shape, tabs, window drops
+
+    func testAutoFitFillsWhenLittleIsHiddenAndZoomKeepsTheTileShape() {
+        XCTAssertEqual(WorkspaceFit.resolved(.auto, tile: .init(width: 430, height: 300), source: .init(width: 1600, height: 1000)), .fill)
+        XCTAssertEqual(WorkspaceFit.resolved(.auto, tile: .init(width: 430, height: 930), source: .init(width: 1600, height: 1000)), .fit)
+        let t = TileContentTransform(tile: .init(x: 0, y: 0, width: 430, height: 300), source: .init(width: 1600, height: 1000), rotation: .none, fit: .auto)
+        XCTAssertEqual(t.visibleRect, WorkspaceRect(x: 0, y: 0, width: 430, height: 300), "auto fill: no bars")
+        let base = WorkspaceZoom.fillCrop(window: .init(width: 1600, height: 1000), tile: .init(width: 300, height: 600), rotation: .none)
+        let zoomed = try! XCTUnwrap(WorkspaceZoom.apply(nil, base: base, scale: 2, anchor: .init(x: 0.5, y: 0.5), pan: .init(x: 0, y: 0)))
+        XCTAssertEqual((zoomed.width * 1600) / (zoomed.height * 1000), 0.5, accuracy: 1e-9, "the tile's shape: fills it with no bars")
+        XCTAssertNil(WorkspaceZoom.apply(zoomed, base: base, scale: 0.1, anchor: .init(x: 0.5, y: 0.5), pan: .init(x: 0, y: 0)),
+                     "zooming out stops at the fill view (default)")
+    }
+
+    func testTabsAddSwitchRemoveAndOneWindowLivesInOnePane() {
+        let a = WorkspaceSource(host: "m", windowID: 1), b = WorkspaceSource(host: "m", windowID: 2), c = WorkspaceSource(host: "m", windowID: 3)
+        var l = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "t", source: a)])
+        l = l.addingTab(b, to: "t")
+        XCTAssertEqual(l.tiles["t"]?.source, b)
+        XCTAssertEqual(l.tiles["t"]?.tabs, [a, b])
+        l = l.addingTab(c, to: "t").switchingTab(of: "t", to: 0)
+        XCTAssertEqual(l.tiles["t"]?.source, a, "tab order is stable; switching only changes what shows")
+        XCTAssertEqual(l.tiles["t"]?.tabs, [a, b, c])
+        XCTAssertEqual(l.tile(holding: "m", windowID: 3), "t", "a background tab counts as shown")
+        l = l.removingTab(of: "t", at: 0)
+        XCTAssertEqual(l.tiles["t"]?.source, b)
+        l = l.removingTab(of: "t", at: 1)
+        XCTAssertEqual(l.tiles["t"]?.tabs, [], "one window left: a plain pane again")
+        XCTAssertEqual(l.tiles["t"]?.source, b)
+        let record = WorkspaceLayoutRecord(l.addingTab(c, to: "t")).encoded().flatMap(WorkspaceLayoutRecord.decode)
+        XCTAssertEqual(record?.tiles["t"]?.tabs, [b, c], "tabs survive a save")
+    }
+
+    func testWindowDropZonesLabelStripTabsEdgesSplitMiddleReplaces() {
+        let l = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "t", source: WorkspaceSource(host: "m", windowID: 1))])
+        let size = WorkspaceSize(width: 1000, height: 800)
+        let f = WorkspaceGeometry.frames(for: l, in: size)
+        func drop(_ x: Double, _ y: Double) -> WorkspaceWindowDrop? {
+            WorkspaceGeometry.windowDrop(at: .init(x: x, y: y), layout: l, frames: f, size: size, labelHeight: 0.05, canSplit: true)
+        }
+        if case .tab("t", _)? = drop(0.5, 0.03) {} else { XCTFail("label strip adds a tab") }
+        if case .replace("t", _)? = drop(0.5, 0.5) {} else { XCTFail("middle replaces") }
+        if case .split(0, .right, _)? = drop(0.95, 0.5) {} else { XCTFail("right edge splits") }
+        let full = WorkspaceGeometry.windowDrop(at: .init(x: 0.95, y: 0.5), layout: l, frames: f, size: size, labelHeight: 0.05, canSplit: false)
+        if case .replace("t", _)? = full {} else { XCTFail("no room for another pane: replace") }
     }
 }

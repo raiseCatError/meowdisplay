@@ -586,7 +586,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
         let scale = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
         return WorkspaceCaptureBudget.captureSize(tilePixels: tilePx, window: frame, backingScale: scale,
-                                                  rotation: a.rotation, fit: a.fit)
+                                                  rotation: a.rotation, fit: a.crop != WorkspaceCrop.full ? .fill : a.fit)
     }
 
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }
