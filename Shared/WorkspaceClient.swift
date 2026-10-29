@@ -32,6 +32,8 @@ struct WorkspaceCatalogMessage: Equatable, Sendable {
     var unavailable: Bool
     /// Window mode is still starting on the Mac: not a listing failure. The picker keeps asking.
     var starting = false
+    /// The Mac's displays (Full Desktop sources), main first.
+    var displays: [CatalogDisplayItem] = []
 
     func search(_ query: String) -> [CatalogWindowItem] {
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -70,8 +72,12 @@ enum WorkspaceEvent: Sendable {
     case mode(window: Bool)
     case catalog(WorkspaceCatalogMessage)
     case state(WorkspaceStateMessage)
-    case thumbnail(windowID: UInt32, generation: UInt64, data: Data?)
+    case thumbnail(windowID: UInt32, generation: UInt64, data: Data?, stale: Bool = false)
     case icon(bundleID: String, data: Data)
+    case displayThumbnail(displayID: UInt32, data: Data)
+    /// `apps` nil: the receiver's revision is current.
+    case appCatalog(revision: Int, apps: [MacAppItem]?)
+    case launchResult(bundleID: String, ok: Bool)
     case connected(peerID: String)
     case disconnected
 
@@ -98,10 +104,16 @@ enum WorkspaceEvent: Sendable {
                 guard let b = str(a, "bundle") else { return nil }
                 return InstalledAppItem(bundleID: b, name: str(a, "name", 80) ?? "")
             }
+            let displays = (obj["displays"] as? [[String: Any]] ?? []).prefix(8).compactMap { d -> CatalogDisplayItem? in
+                guard let id = u32(d, "id") else { return nil }
+                return CatalogDisplayItem(id: id, name: str(d, "name", 80) ?? "Display", width: d["w"] as? Int ?? 0,
+                                          height: d["h"] as? Int ?? 0, isMain: d["main"] as? Bool ?? false,
+                                          isVirtual: d["virtual"] as? Bool ?? false)
+            }
             return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
                                                    installed: Array(installed),
                                                    unavailable: obj["error"] != nil && obj["error"] as? String != "starting",
-                                                   starting: obj["error"] as? String == "starting"))
+                                                   starting: obj["error"] as? String == "starting", displays: Array(displays)))
         case WireMessage.workspaceState:
             let tiles = (obj["tiles"] as? [[String: Any]] ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { t -> RemoteTileItem? in
                 guard let id = str(t, "id", 32) else { return nil }
@@ -118,7 +130,24 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
-            return .thumbnail(windowID: id, generation: u64(obj, "gen") ?? 0, data: data)
+            return .thumbnail(windowID: id, generation: u64(obj, "gen") ?? 0, data: data, stale: obj["stale"] as? Bool ?? false)
+        case WireMessage.displayThumbnail:
+            guard let id = u32(obj, "id"), let jpeg = obj["jpeg"] as? String, jpeg.count <= maxBase64,
+                  let data = Data(base64Encoded: jpeg) else { return nil }
+            return .displayThumbnail(displayID: id, data: data)
+        case WireMessage.appCatalog:
+            guard let rev = obj["rev"] as? Int else { return nil }
+            if obj["same"] as? Bool == true { return .appCatalog(revision: rev, apps: nil) }
+            let apps = (obj["apps"] as? [[String: Any]] ?? []).prefix(900).compactMap { a -> MacAppItem? in
+                guard let b = str(a, "bundle"), !b.isEmpty else { return nil }
+                return MacAppItem(bundleID: b, name: str(a, "name", 80) ?? b, running: a["running"] as? Bool ?? false,
+                                  windowCount: a["windows"] as? Int ?? 0,
+                                  lastUsed: (a["used"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) })
+            }
+            return .appCatalog(revision: rev, apps: Array(apps))
+        case WireMessage.appLaunchResult:
+            guard let b = str(obj, "bundle") else { return nil }
+            return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
@@ -159,10 +188,25 @@ enum WorkspaceRequests {
         return m
     }
 
-    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String]) -> [String: Any] {
+    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String], displays: [UInt32] = []) -> [String: Any] {
         var m: [String: Any] = ["type": WireMessage.windowThumbnailRequest, "ids": ids.prefix(24).map { Int($0) }, "max": maxWidth]
-        if !icons.isEmpty { m["icons"] = Array(icons.prefix(32)) }
+        if !icons.isEmpty { m["icons"] = Array(icons.prefix(48)) }
+        if !displays.isEmpty { m["displays"] = displays.prefix(8).map { Int($0) } }
         return m
+    }
+
+    static func appCatalog(revision: Int?) -> [String: Any] {
+        var m: [String: Any] = ["type": WireMessage.appCatalogRequest]
+        if let revision { m["rev"] = revision }
+        return m
+    }
+
+    /// Opens an app on the Mac without activating it (needs control).
+    static func appLaunch(_ bundle: String) -> [String: Any] { ["type": WireMessage.appLaunch, "bundle": bundle] }
+
+    /// Minimizes the real Mac window: only from its own explicit action.
+    static func minimizeWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
+        ["type": WireMessage.windowAction, "action": "minimize", "window": Int(id), "gen": Int(generation)]
     }
 
     /// Only this host's tiles, at their normalized frames.
@@ -242,7 +286,23 @@ final class WorkspaceModel: ObservableObject {
     @Published var arranging = false
     @Published private(set) var hovered: String?
     @Published private(set) var thumbnails: [UInt32: CGImage] = [:]
+    /// Stills the Mac could only answer with an older capture (minimized now, say).
+    @Published private(set) var staleThumbnails: Set<UInt32> = []
+    /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
+    @Published private(set) var unavailableThumbnails: Set<UInt32> = []
+    @Published private(set) var displayThumbnails: [UInt32: CGImage] = [:]
     @Published private(set) var icons: [String: CGImage] = [:]
+    /// Every launchable Mac app (Finder first), from `appCatalog`.
+    @Published private(set) var apps: [MacAppItem] = []
+    /// Apps opened from this device that haven't shown a window yet.
+    @Published private(set) var launching: Set<String> = []
+    @Published private(set) var launchFailed: String?
+    /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
+    @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
+    /// Cards on screen now, most important first: their stills are asked for first.
+    var thumbnailPriority: [UInt32] = [] { didSet { if thumbnailPriority != oldValue { requestThumbnails() } } }
+    private var planner = ThumbnailRequestPlanner()
+    private var appRevision: Int?
     @Published private(set) var canUndo = false
 
     /// Sends one workspace message on the current, admitted connection.
@@ -306,19 +366,39 @@ final class WorkspaceModel: ObservableObject {
             if !duplicates.isEmpty {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
             }
-        case .thumbnail(let id, _, let data):
-            guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 640) else { return }
+        case .thumbnail(let id, _, let data, let stale):
+            let now = Date().timeIntervalSinceReferenceDate
+            guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 560) else {
+                planner.failed(id, now: now)
+                if thumbnails[id] == nil { unavailableThumbnails.insert(id) }
+                return
+            }
+            planner.received(id, now: now)
             thumbAge[id] = Date()
             thumbnails[id] = image
-            if thumbnails.count > 48, let oldest = thumbAge.min(by: { $0.value < $1.value })?.key {
-                thumbnails[oldest] = nil; thumbAge[oldest] = nil
+            unavailableThumbnails.remove(id)
+            if stale { staleThumbnails.insert(id) } else { staleThumbnails.remove(id) }
+            // Bounded: ~70 stills; the least recently refreshed that isn't on screen goes first.
+            if thumbnails.count > 72, let oldest = thumbAge.filter({ !thumbnailPriority.contains($0.key) }).min(by: { $0.value < $1.value })?.key {
+                thumbnails[oldest] = nil; thumbAge[oldest] = nil; planner.forget(oldest)
             }
         case .icon(let bundle, let data):
-            guard icons.count < 64, let image = WorkspaceImageDecoder.image(data, maxSide: 128) else { return }
+            guard icons.count < 400, let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
             icons[bundle] = image
+        case .displayThumbnail(let id, let data):
+            guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
+            displayThumbnails[id] = image
+        case .appCatalog(let rev, let list):
+            appRevision = rev
+            if let list { apps = WorkspaceSearch.carouselOrder(list) }
+            requestIcons()
+        case .launchResult(let bundle, let ok):
+            if !ok { launching.remove(bundle); launchFailed = bundle }
+            requestCatalog()
         case .disconnected:
             sendTask?.cancel()
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
+            launchpadOpen = false; launching = []; planner.reset()
         }
     }
 
@@ -327,7 +407,9 @@ final class WorkspaceModel: ObservableObject {
         saved = defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
-        thumbnails = [:]; icons = [:]; thumbAge = [:]
+        thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
+        staleThumbnails = []; unavailableThumbnails = []; planner.reset()
+        apps = []; appRevision = nil; launching = []
         generations = [:]
         publish()
     }
@@ -348,22 +430,36 @@ final class WorkspaceModel: ObservableObject {
         }
         if rebased != saved { saved = rebased; persist() }
         self.missing = missing
+        // An app opened from here showed a window: it's no longer "opening".
+        if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
         requestThumbnails()
     }
 
+    private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
+
+    /// Visible cards first; nothing asked twice within a few seconds; failures back off.
     private func requestThumbnails() {
-        guard overviewOpen || railExpanded || stagePeekOpen, let c = catalog else { return }
-        let now = Date()
-        let ids = c.windows.filter { now.timeIntervalSince(thumbAge[$0.id] ?? .distantPast) > 8 }.map(\.id)
-        let wantedIcons = c.apps.map(\.bundleID).filter { icons[$0] == nil }
-        guard !ids.isEmpty || !wantedIcons.isEmpty else { return }
-        // Stage Peek shows larger cards (its expanded browser): the sender's maximum.
-        _ = send(WorkspaceRequests.thumbnails(Array(ids.prefix(24)), maxWidth: stagePeekOpen ? 640 : 240, icons: wantedIcons))
+        guard browsing, let c = catalog else { return }
+        let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
+        let wantedIcons = Array(Set(c.windows.map(\.bundleID) + c.apps.map(\.bundleID)).filter { icons[$0] == nil }.prefix(48))
+        let displays = (stagePeekOpen || overviewOpen) ? c.displays.map(\.id) : []
+        guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
+        // Stage Peek's gallery shows large cards: sharp stills.
+        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays))
     }
 
-    func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: inputAllowed())) }
+    /// Icons for the app carousel and Launchpad, a page at a time.
+    func requestIcons(_ bundles: [String]? = nil) {
+        let wanted = (bundles ?? apps.prefix(64).map(\.bundleID)).filter { icons[$0] == nil }
+        guard browsing, !wanted.isEmpty else { return }
+        _ = send(WorkspaceRequests.thumbnails([], maxWidth: 320, icons: Array(wanted.prefix(48))))
+    }
+
+    func requestApps() { _ = send(WorkspaceRequests.appCatalog(revision: apps.isEmpty ? nil : appRevision)) }
+
+    func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
 
     // MARK: Space
 
@@ -533,7 +629,18 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
-    func launch(_ bundle: String) { _ = send(WorkspaceRequests.launch(bundle)) }
+    /// Opens an app on the Mac (explicit action; the Mac refuses it without control and never activates it).
+    func launch(_ bundle: String) {
+        guard inputAllowed() else { return }
+        launchFailed = nil
+        launching.insert(bundle)
+        _ = send(WorkspaceRequests.appLaunch(bundle))
+    }
+
+    func minimizeRemoteWindow(_ tile: String) {
+        guard inputAllowed(), let source = layout.tiles[tile]?.source, let gen = generation(source) else { return }
+        _ = send(WorkspaceRequests.minimizeWindow(source.windowID, generation: gen))
+    }
     func focus(_ tile: String) { _ = send(WorkspaceRequests.focus(tile)) }
 
     /// The hardware pointer at a normalized canvas point: hover only, never focus.
@@ -575,14 +682,20 @@ final class WorkspaceModel: ObservableObject {
     /// Whether another tile can be added (Stage Peek's "Add as Tile").
     var canAddTile: Bool { layout.tiles.count < capacity }
 
+    /// While any browser is open (in every display mode): catalog every few seconds,
+    /// stills as cards appear, the app list once (then only when it changed).
     private func startRefreshing() {
         refreshTask?.cancel()
         requestCatalog()
+        requestApps()
         refreshTask = Task { [weak self] in
-            while let self, self.overviewOpen || self.railExpanded || self.stagePeekOpen {
-                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen ? 3_000_000_000 : 5_000_000_000)
-                guard !Task.isCancelled, self.overviewOpen || self.railExpanded || self.stagePeekOpen else { break }
+            var tick = 0
+            while let self, self.browsing {
+                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen ? 3_000_000_000 : 5_000_000_000)
+                guard !Task.isCancelled, self.browsing else { break }
                 self.requestCatalog()
+                tick += 1
+                if tick % 5 == 0 { self.requestApps() }
             }
         }
     }

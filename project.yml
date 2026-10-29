@@ -292,6 +292,7 @@ targets:
       # (StreamReceiver.init touches all of these).
       - Shared/StreamReceiver.swift
       - Shared/WorkspaceClient.swift
+      - Shared/WorkspaceBrowse.swift
       - Shared/ReceiverVideoTelemetry.swift
       - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift

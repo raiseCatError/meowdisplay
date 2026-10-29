@@ -45,7 +45,7 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertTrue(s.hostFocus.isMismatch)
         XCTAssertEqual(s.rejected, ["c": "unavailable"])
         let huge = String(repeating: "A", count: WorkspaceEvent.maxBase64 + 4)
-        guard case .thumbnail(_, _, let data)? = WorkspaceEvent.parse(type: WireMessage.windowThumbnail, ["id": 1, "jpeg": huge]) else {
+        guard case .thumbnail(_, _, let data, _)? = WorkspaceEvent.parse(type: WireMessage.windowThumbnail, ["id": 1, "jpeg": huge]) else {
             return XCTFail("expected thumbnail")
         }
         XCTAssertNil(data, "oversized stills are dropped before decoding")
@@ -123,8 +123,11 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(m.layout, before)
         XCTAssertFalse(sent.isEmpty, "opening refreshes the catalog")
         XCTAssertTrue(sent.allSatisfy {
-            [WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest].contains($0["type"] as? String)
-        }, "browsing sends only catalog and thumbnail requests: \(sent.map { $0["type"] ?? "?" })")
+            [WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest].contains($0["type"] as? String)
+        }, "browsing sends only read-only catalog, app list and thumbnail requests: \(sent.map { $0["type"] ?? "?" })")
+        XCTAssertFalse(sent.contains { [WireMessage.displayModeRequest, WireMessage.workspaceRequest, WireMessage.appLaunch,
+                                         WireMessage.windowAction].contains($0["type"] as? String) },
+                       "browsing never changes the mode, the tiles or the Mac")
 
         m.switchTo(m.catalog!.windows[2])
         XCTAssertEqual(m.layout.orderedTileIDs, ids, "no tile added or removed")

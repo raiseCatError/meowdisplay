@@ -3062,6 +3062,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
             self.workspaceEngine?.setSuspended(true)
+            self.windowBrowser?.setActive(false)
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
@@ -5276,6 +5277,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
             // Launching still needs control (checked by the service).
             guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
+            let phase = captureStateSnapshot().phase
+            guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction:
             // Admitted sessions only (gate above). Window metadata exists only
@@ -5650,6 +5654,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         textCaretFollower.stop()
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
+        windowBrowser?.setActive(false)
         if dropped {
             sessionInputGrant.set(false)
             inputInjector?.cancelActiveInput()

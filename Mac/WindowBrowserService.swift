@@ -89,6 +89,7 @@ final class WindowBrowserService: @unchecked Sendable {
     private var inFlight = 0
     private static let maxConcurrentStills = 2
     private var lastAppRevisionSent: Int?
+    private var iconsSent = Set<String>()
 
     /// A message for the receiver (the sender gates it on admission).
     var sendMessage: (([String: Any]) -> Void)?
@@ -135,7 +136,10 @@ final class WindowBrowserService: @unchecked Sendable {
                 let ids = (obj["ids"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
                 let width = min(max(obj["max"] as? Int ?? 240, 64), 640)
                 requestStills(Array(ids.prefix(48)), width: width)
-                if let bundles = obj["icons"] as? [String] { sendIcons(Array(bundles.prefix(48))) }
+                if let bundles = obj["icons"] as? [String] {
+                    let fresh = bundles.prefix(48).filter { iconsSent.insert($0).inserted }   // each icon once per session
+                    if !fresh.isEmpty { sendIcons(Array(fresh)) }
+                }
                 if let ds = obj["displays"] as? [Int] { sendDisplayStills(ds.compactMap { UInt32(exactly: $0) }.prefix(8), width: width) }
             case WireMessage.appCatalogRequest:
                 let rev = obj["rev"] as? Int
@@ -256,7 +260,7 @@ final class WindowBrowserService: @unchecked Sendable {
 
     private func pump() {
         while active, !stopped, inFlight < Self.maxConcurrentStills, let id = scheduler.next() {
-            guard let snap = snapshot, let entry = snap.windows.first(where: { $0.windowID == id }),
+            guard let snap = snapshot, active, let entry = snap.windows.first(where: { $0.windowID == id }),
                   let window = snap.scWindows[id] else { scheduler.forget(id); continue }
             inFlight += 1
             let width = captureWidth[id] ?? 320
@@ -303,10 +307,21 @@ final class WindowBrowserService: @unchecked Sendable {
         }
     }
 
+    private var displayStillsBusy = false
+    private var lastDisplayStillsAt: TimeInterval = 0
+
+    /// One display batch at a time, at most every 2 s (a display still is a full-screen capture).
     private func sendDisplayStills(_ ids: ArraySlice<UInt32>, width: Int) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard !displayStillsBusy, now - lastDisplayStillsAt >= 2 else { return }
         let wanted = ids.compactMap { scDisplays[$0] }
+        guard !wanted.isEmpty else { return }
+        displayStillsBusy = true
+        lastDisplayStillsAt = now
         Task { [weak self] in
+            defer { self?.queue.async { self?.displayStillsBusy = false } }
             for d in wanted {
+                guard let self, await self.isActive() else { return }
                 let cfg = SCStreamConfiguration()
                 cfg.width = width
                 cfg.height = max(Int(Double(width) * Double(d.height) / Double(max(d.width, 1))) & ~1, 2)
@@ -317,12 +332,16 @@ final class WindowBrowserService: @unchecked Sendable {
                 let filter = SCContentFilter(display: d, excludingApplications: own, exceptingWindows: [])
                 guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg),
                       let jpeg = Self.jpeg(image, quality: 0.6) else { continue }
-                self?.queue.async {
+                self.queue.async { [weak self] in
                     guard let self, self.active else { return }
                     self.sendMessage?(["type": WireMessage.displayThumbnail, "id": Int(d.displayID), "jpeg": jpeg.base64EncodedString()])
                 }
             }
         }
+    }
+
+    private func isActive() async -> Bool {
+        await withCheckedContinuation { c in queue.async { [self] in c.resume(returning: active && !stopped) } }
     }
 
     private func sendIcons(_ bundles: [String]) {
