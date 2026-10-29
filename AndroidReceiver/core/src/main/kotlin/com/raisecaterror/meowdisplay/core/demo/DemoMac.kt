@@ -7,6 +7,7 @@ import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.MediaLink
 import com.raisecaterror.meowdisplay.core.session.WireProtocol
 import com.raisecaterror.meowdisplay.core.workspace.TileTransform
+import com.raisecaterror.meowdisplay.core.workspace.WPaneZoom
 import com.raisecaterror.meowdisplay.core.workspace.WFit
 import com.raisecaterror.meowdisplay.core.workspace.WPoint
 import com.raisecaterror.meowdisplay.core.workspace.WRect
@@ -33,7 +34,12 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** A tile the demo Mac accepted (Window mode), canvas-normalized. */
-data class DemoTile(val id: String, val kind: DemoWindowKind, val frame: WRect, val rotation: WRotation, val fit: WFit)
+data class DemoTile(
+    val id: String, val kind: DemoWindowKind, val frame: WRect, val rotation: WRotation, val fit: WFit,
+    val zoom: WPaneZoom = WPaneZoom.IDENTITY,
+    /** The receiver's view counter for this pane, echoed once the demo Mac has drawn it. */
+    val view: Int? = null,
+)
 
 /** Everything the demo screen draws, one immutable snapshot per change. */
 data class DemoScene(
@@ -163,6 +169,9 @@ class DemoMac(
             WorkspaceWire.CATALOG_REQUEST -> if (admitted && windowModeOffered) sendCatalog()
             WorkspaceWire.THUMBNAIL_REQUEST -> if (admitted && windowModeOffered) sendThumbnails(obj)
             WorkspaceWire.WORKSPACE_REQUEST -> if (admitted && windowModeOffered) workspace(obj)
+            WorkspaceWire.WORKSPACE_BACKDROP_REQUEST -> if (admitted && windowModeOffered && mode == DisplayMode.Window) sendBackdrop(obj)
+            // Sample windows never stall: a retry just reports them live again.
+            WorkspaceWire.WORKSPACE_RETRY -> if (admitted && windowModeOffered) sendWorkspaceState(emptyMap())
             WorkspaceWire.WORKSPACE_FOCUS -> if (admitted && windowModeOffered) {
                 activeTile = obj.str("tile")?.takeIf { id -> tiles.any { it.id == id } }
                 focusActiveTile()
@@ -328,7 +337,7 @@ class DemoMac(
 
     fun transform(tile: DemoTile): TileTransform {
         val canvas = desktop.size
-        return TileTransform(tile.frame.scaled(WSize(canvas.width, canvas.height)), WSize(tile.kind.nativeWidth, tile.kind.nativeHeight), tile.rotation, tile.fit)
+        return TileTransform(tile.frame.scaled(WSize(canvas.width, canvas.height)), WSize(tile.kind.nativeWidth, tile.kind.nativeHeight), tile.rotation, tile.fit, tile.zoom)
     }
 
     private fun press(clickCount: Int) {
@@ -435,7 +444,7 @@ class DemoMac(
         val ids = (obj["ids"] as? JsonArray).orEmpty().take(24).mapNotNull { (it as? JsonPrimitive)?.longOrNull }
         for (id in ids) {
             val kind = DemoWindowKind.ofWindow(id) ?: continue
-            val jpeg = thumbnail(kind, maxWidth)
+            val jpeg = thumbnail(kind, maxWidth.coerceAtMost(320))
             send(buildJsonObject {
                 put("type", WorkspaceWire.THUMBNAIL); put("id", id); put("gen", GENERATION)
                 if (jpeg != null) put("jpeg", jpeg) else put("unavailable", true)
@@ -463,7 +472,8 @@ class DemoMac(
                 frame.width <= 0 || frame.height <= 0 || frame.x < -EPS || frame.y < -EPS || frame.maxX > 1 + EPS || frame.maxY > 1 + EPS -> rejected[id] = "geometry"
                 accepted.any { it.kind == kind } -> rejected[id] = "duplicate"
                 accepted.any { it.frame.intersection(frame)?.let { r -> r.area > EPS } == true } -> rejected[id] = "overlap"
-                else -> accepted += DemoTile(id, kind, frame, WRotation.of(t.int("rotation") ?: 0), WFit.of(t.str("fit")))
+                else -> accepted += DemoTile(id, kind, frame, WRotation.of(t.int("rotation") ?: 0), WFit.of(t.str("fit")),
+                    WPaneZoom.fromWire(t["zoom"]) ?: WPaneZoom.IDENTITY, t.int("view"))
             }
         }
         tiles = accepted
@@ -477,6 +487,23 @@ class DemoMac(
         focusActiveTile()
         sendWorkspaceState(rejected)
         publish()
+        // Drawn at once here: the receiver's instant zoom can hand over to the picture.
+        val views = accepted.mapNotNull { tile -> tile.view?.let { tile.id to it } }
+        if (views.isNotEmpty()) send(buildJsonObject {
+            put("type", WorkspaceWire.WORKSPACE_VIEW)
+            put("tiles", buildJsonObject { views.forEach { (id, v) -> put(id, v) } })
+        })
+    }
+
+    /** A pane's whole window as a still, for the receiver's instant zoom. */
+    private fun sendBackdrop(obj: JsonObject) {
+        val tile = tiles.firstOrNull { it.id == obj.str("tile") } ?: return
+        val jpeg = thumbnail(tile.kind, (obj.int("max") ?: 1280).coerceIn(320, 1600)) ?: return
+        send(buildJsonObject {
+            put("type", WorkspaceWire.WORKSPACE_BACKDROP); put("tile", tile.id); put("window", tile.kind.windowID)
+            obj.int("req")?.let { put("req", it) }
+            put("jpeg", jpeg)
+        })
     }
 
     private fun focusActiveTile() {

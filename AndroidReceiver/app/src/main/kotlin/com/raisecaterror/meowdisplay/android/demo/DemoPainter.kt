@@ -17,6 +17,9 @@ import com.raisecaterror.meowdisplay.core.demo.DemoFile
 import com.raisecaterror.meowdisplay.core.demo.DemoScene
 import com.raisecaterror.meowdisplay.core.demo.DemoWindowKind
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
+import com.raisecaterror.meowdisplay.core.workspace.TileTransform
+import com.raisecaterror.meowdisplay.core.workspace.WRect
+import com.raisecaterror.meowdisplay.core.workspace.WSize
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -37,6 +40,8 @@ object DemoPainter {
     private const val WINDOW = 0xFFFBFBFD.toInt()
     private const val TITLE = 0xFFECECEF.toInt()
     private const val INK = 0xFF1F2328.toInt()
+    /** The Mac's pane background (letterbox and zoomed-out margins). */
+    private const val PANE_BACKGROUND = 0xFF121214.toInt()
     private const val SECONDARY = 0xFF6B7280.toInt()
 
     /** The whole picture, [widthPx] × [heightPx]. */
@@ -73,13 +78,16 @@ object DemoPainter {
             val r = tile.frame
             val tileRect = RectF((r.x * size.width).toFloat(), (r.y * size.height).toFloat(), (r.maxX * size.width).toFloat(), (r.maxY * size.height).toFloat())
             val source = tile.kind.nativeSize
-            val quarter = tile.rotation.isQuarterTurn
-            val rw = if (quarter) source.height else source.width
-            val rh = if (quarter) source.width else source.height
-            val scale = if (tile.fit.wire == "fit") min(tileRect.width() / rw, tileRect.height() / rh) else max(tileRect.width() / rw, tileRect.height() / rh)
+            // As the Mac composes a pane: Fit or Fill, then the pane's own zoom about its centre.
+            val t = TileTransform(WRect(tileRect.left.toDouble(), tileRect.top.toDouble(), tileRect.width().toDouble(), tileRect.height().toDouble()),
+                WSize(source.width, source.height), tile.rotation, tile.fit, tile.zoom)
+            val c = t.contentRect
+            val scale = t.scale
             canvas.save()
             canvas.clipRect(tileRect)
-            canvas.translate(tileRect.centerX(), tileRect.centerY())
+            fill.color = PANE_BACKGROUND
+            canvas.drawRect(tileRect, fill)
+            canvas.translate((c.x + c.width / 2).toFloat(), (c.y + c.height / 2).toFloat())
             canvas.rotate(tile.rotation.degrees.toFloat())
             canvas.scale(scale.toFloat(), scale.toFloat())
             canvas.translate(-(source.width / 2).toFloat(), -(source.height / 2).toFloat())
@@ -264,7 +272,7 @@ object DemoPainter {
     /** A still of one sample window, at most [maxWidth] pixels wide, as base64 JPEG. */
     fun thumbnailBase64(scene: DemoScene, kind: DemoWindowKind, maxWidth: Int): String? = runCatching {
         val source = kind.nativeSize
-        val width = maxWidth.coerceIn(64, 320)
+        val width = maxWidth.coerceIn(64, 1600)
         val height = (width * source.height / source.width).toInt().coerceAtLeast(1)
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)

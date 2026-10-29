@@ -6,7 +6,13 @@ import com.raisecaterror.meowdisplay.core.session.InMemorySessionPolicyStore
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 import com.raisecaterror.meowdisplay.core.session.ReceiverSession
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
+import com.raisecaterror.meowdisplay.core.workspace.TileTransform
+import com.raisecaterror.meowdisplay.core.workspace.WPaneZoom
+import com.raisecaterror.meowdisplay.core.workspace.WSize
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceBackdrop
+import com.raisecaterror.meowdisplay.core.workspace.WorkspaceViewEcho
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -161,6 +167,44 @@ class DemoMacTest {
         drain()
         assertEquals("b", mac.scene.value.activeTile)
         assertTrue(mac.scene.value.notes.endsWith("!"))
+    }
+
+    /** P1: a pane's zoom is drawn by the demo Mac, its view echoed, its whole window sent as a still, Retry answered. */
+    @Test
+    fun aZoomedPaneIsDrawnEchoedAndItsStillSent() {
+        connect()
+        session.requestDisplayMode(DisplayMode.Window)
+        drain()
+        session.sendWorkspace(buildJsonObject {
+            put("type", WorkspaceWire.WORKSPACE_REQUEST)
+            put("tiles", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", "a"); put("host", DemoMac.PEER_ID); put("x", 0.0); put("y", 0.0); put("w", 1.0); put("h", 1.0)
+                    put("window", DemoWindowKind.Notes.windowID); put("gen", 1); put("fit", "fit"); put("view", 5)
+                    put("zoom", buildJsonArray { add(JsonPrimitive(0.7)); add(JsonPrimitive(0.5)); add(JsonPrimitive(0.5)) })
+                })
+            })
+        })
+        drain()
+        val tile = mac.scene.value.tiles.single()
+        assertEquals(WPaneZoom.of(0.7, 0.5, 0.5), tile.zoom)
+        val fit = TileTransform(tile.frame.scaled(WSize(mac.scene.value.size.width, mac.scene.value.size.height)),
+            WSize(DemoWindowKind.Notes.nativeWidth, DemoWindowKind.Notes.nativeHeight), tile.rotation, tile.fit)
+        assertEquals(fit.scale * 0.7, mac.transform(tile).scale, 1e-9)
+        val echo = events.filterIsInstance<SessionEvent.Control>().last { it.type == WorkspaceWire.WORKSPACE_VIEW }
+        assertEquals(mapOf("a" to 5), WorkspaceViewEcho.parse(echo.body).tiles)
+
+        session.sendWorkspace(WorkspaceWire.backdrop("a", 1280, 3))
+        drain()
+        val still = WorkspaceBackdrop.parse(events.filterIsInstance<SessionEvent.Control>().last { it.type == WorkspaceWire.WORKSPACE_BACKDROP }.body)
+        assertEquals("a", still?.tile)
+        assertEquals(DemoWindowKind.Notes.windowID, still?.windowID)
+        assertEquals("jpeg-Notes", still?.jpegBase64)
+
+        val states = events.count { it is SessionEvent.Control && it.type == WorkspaceWire.WORKSPACE_STATE }
+        session.sendWorkspace(WorkspaceWire.retry("a"))
+        drain()
+        assertEquals(states + 1, events.count { it is SessionEvent.Control && it.type == WorkspaceWire.WORKSPACE_STATE })
     }
 
     @Test

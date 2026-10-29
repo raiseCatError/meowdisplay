@@ -31,6 +31,15 @@ object WorkspaceWire {
     const val APP_LAUNCH = "appLaunch"
     const val APP_LAUNCH_RESULT = "appLaunchResult"
     const val DISPLAY_THUMBNAIL = "displayThumbnail"
+    /** Mac -> receiver: `{tiles: {id: view epoch}}` once a frame with that pane view went out. */
+    const val WORKSPACE_VIEW = "workspaceView"
+    /** Receiver -> Mac: `{tile}`: start that pane's capture again now. */
+    const val WORKSPACE_RETRY = "workspaceRetry"
+    /** Receiver -> Mac: `{tile, max, req}`: the pane's whole source as a still, for the instant zoom. */
+    const val WORKSPACE_BACKDROP_REQUEST = "workspaceBackdropRequest"
+    const val WORKSPACE_BACKDROP = "workspaceBackdrop"
+    /** A pane's whole-source still: the Mac keeps it under this (inside the 1 MiB control-message limit). */
+    const val MAX_BACKDROP_BASE64 = 700_000
     const val MAX_MAC_APPS = 900
 
     /** Bounds on what the receiver keeps from the Mac (sizes are on the wire already bounded by the Mac). */
@@ -55,7 +64,8 @@ object WorkspaceWire {
     fun appLaunch(bundleID: String) = buildJsonObject { put("type", APP_LAUNCH); put("bundle", bundleID) }
 
     /** The tiles this host shows, at their normalized frames. Tiles of other hosts are not sent here. */
-    fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?, displayID: (WSource) -> Long? = { null }) = buildJsonObject {
+    fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?, displayID: (WSource) -> Long? = { null },
+                         viewEpoch: (String) -> Int? = { null }) = buildJsonObject {
         put("type", WORKSPACE_REQUEST)
         put("tiles", buildJsonArray {
             for (id in layout.orderedTileIDs) {
@@ -78,7 +88,9 @@ object WorkspaceWire {
                     put("follow", source.follow.wire)
                     put("rotation", tile.rotation.degrees)
                     put("fit", tile.fit.wire)
-                    tile.crop?.let { c -> put("crop", buildJsonArray { add(JsonPrimitive(c.x)); add(JsonPrimitive(c.y)); add(JsonPrimitive(c.width)); add(JsonPrimitive(c.height)) }) }
+                    // Never a capture crop: the Mac captures the whole source and composes the zoom.
+                    tile.zoom?.let { z -> put("zoom", buildJsonArray { z.wire.forEach { add(JsonPrimitive(it)) } }) }
+                    viewEpoch(id)?.let { put("view", it) }
                 })
             }
         })
@@ -86,6 +98,9 @@ object WorkspaceWire {
     }
 
     fun focus(tile: String?) = buildJsonObject { put("type", WORKSPACE_FOCUS); tile?.let { put("tile", it) } }
+
+    fun retry(tile: String) = buildJsonObject { put("type", WORKSPACE_RETRY); put("tile", tile) }
+    fun backdrop(tile: String, max: Int, req: Int) = buildJsonObject { put("type", WORKSPACE_BACKDROP_REQUEST); put("tile", tile); put("max", max); put("req", req) }
 
     fun activate(windowID: Long, generation: Long?) = action("activate") { put("window", windowID); generation?.let { put("gen", it) } }
     fun launch(bundleID: String) = action("launch") { put("bundle", bundleID) }
@@ -159,10 +174,17 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
 }
 
 /** A tile as the Mac accepted it. */
-data class RemoteTileState(val id: String, val windowID: Long, val generation: Long, val state: TileStatus, val app: String, val bundleID: String, val title: String)
+data class RemoteTileState(
+    val id: String, val windowID: Long, val generation: Long, val state: TileStatus, val app: String, val bundleID: String, val title: String,
+    /** Restarts so far while [TileStatus.Retrying]. */
+    val attempt: Int = 0,
+    /** In Stage Manager's side strip: macOS pauses its picture. */
+    val inStageStrip: Boolean = false,
+)
 
+/** A pane's capture on the Mac (RemoteTileStatus): paused by macOS, retrying after a stall, failed (Retry). */
 enum class TileStatus(val wire: String) {
-    Live("live"), Waiting("waiting"), Offscreen("offscreen"), Closed("closed"), Failed("failed"), Limit("limit");
+    Live("live"), Waiting("waiting"), Offscreen("offscreen"), Closed("closed"), Failed("failed"), Limit("limit"), Paused("paused"), Retrying("retrying");
     companion object { fun of(s: String?) = entries.firstOrNull { it.wire == s } ?: Waiting }
 }
 
@@ -182,6 +204,7 @@ data class WorkspaceState(
                 RemoteTileState(
                     t.str("id") ?: return@mapNotNull null, t.long("window") ?: 0, t.long("gen") ?: 0, TileStatus.of(t.str("state")),
                     t.str("app")?.take(80) ?: "", t.str("bundle") ?: "", t.str("title")?.take(120) ?: "",
+                    (t.int("attempt") ?: 0).coerceIn(0, 99), t.bool("strip") == true,
                 )
             }
             val rejected = (obj["rejected"] as? JsonObject)?.entries?.take(32)?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { k to it } }?.toMap() ?: emptyMap()
@@ -196,6 +219,28 @@ data class WindowThumbnail(val windowID: Long, val generation: Long, val jpegBas
             val id = obj.long("id") ?: return null
             val jpeg = obj.str("jpeg")?.takeIf { it.length <= WorkspaceWire.MAX_THUMBNAIL_BASE64 }
             return WindowThumbnail(id, obj.long("gen") ?: 0, jpeg, obj.bool("stale") == true)
+        }
+    }
+}
+
+/** Panes whose latest view the Mac has composed (`workspaceView`). */
+data class WorkspaceViewEcho(val tiles: Map<String, Int>) {
+    companion object {
+        fun parse(obj: JsonObject): WorkspaceViewEcho = WorkspaceViewEcho(
+            (obj["tiles"] as? JsonObject)?.entries?.take(WLayout.MAXIMUM_TILES * 2)
+                ?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull?.takeIf { k.length <= 32 }?.let { k to it } }
+                ?.toMap() ?: emptyMap(),
+        )
+    }
+}
+
+/** A pane's whole source as a still (`workspaceBackdrop`). */
+data class WorkspaceBackdrop(val tile: String, val windowID: Long, val jpegBase64: String, val stale: Boolean) {
+    companion object {
+        fun parse(obj: JsonObject): WorkspaceBackdrop? {
+            val tile = obj.str("tile")?.takeIf { it.length <= 32 } ?: return null
+            val jpeg = obj.str("jpeg")?.takeIf { it.length <= WorkspaceWire.MAX_BACKDROP_BASE64 } ?: return null
+            return WorkspaceBackdrop(tile, obj.long("window") ?: 0, jpeg, obj.bool("stale") == true)
         }
     }
 }

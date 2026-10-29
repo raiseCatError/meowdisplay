@@ -62,39 +62,80 @@ enum class WRotation(val degrees: Int) {
     }
 }
 
+/** Fit (default: the whole source, letterboxed) or Fill (explicit). [Auto], the old default, is Fit. */
 enum class WFit(val wire: String) { Fit("fit"), Fill("fill"), Auto("auto");
     companion object {
-        fun of(s: String?) = entries.firstOrNull { it.wire == s } ?: Auto
-        /** Filling must show at least this share of the window along the cropped side. */
-        const val AUTO_FILL_MINIMUM_SHOWN = 0.7
-        /** [Auto] resolved for a tile and a (rotated) source size (WorkspaceFit.resolved). */
-        fun resolved(fit: WFit, tile: WSize, source: WSize): WFit {
-            if (fit != Auto) return fit
-            if (tile.width <= 0 || tile.height <= 0 || source.width <= 0 || source.height <= 0) return Fit
-            val sx = tile.width / source.width; val sy = tile.height / source.height
-            return if (min(sx, sy) / max(sx, sy) >= AUTO_FILL_MINIMUM_SHOWN) Fill else Fit
+        fun of(s: String?) = entries.firstOrNull { it.wire == s } ?: Fit
+        /** [Auto] is Fit (WorkspaceFit.resolved). */
+        @Suppress("UNUSED_PARAMETER")
+        fun resolved(fit: WFit, tile: WSize, source: WSize): WFit = if (fit == Fill) Fill else Fit
+    }
+}
+
+/**
+ * One pane's own zoom: a factor of its Fit (or Fill) size, 0.7x to 8x, and the point of the
+ * (rotated) source shown at the pane's centre, normalized (WorkspacePaneZoom).
+ */
+data class WPaneZoom(val scale: Double, val centerX: Double, val centerY: Double) {
+    val isIdentity get() = abs(scale - 1) < 1e-4 && abs(centerX - 0.5) < 1e-4 && abs(centerY - 0.5) < 1e-4
+    val wire: List<Double> get() = listOf(scale, centerX, centerY)
+
+    companion object {
+        const val MINIMUM = 0.7
+        const val MAXIMUM = 8.0
+        val IDENTITY = WPaneZoom(1.0, 0.5, 0.5)
+
+        /** Lenient: scale clamped, centre finite. */
+        fun of(scale: Double, centerX: Double, centerY: Double) = WPaneZoom(
+            if (scale.isFinite()) min(max(scale, MINIMUM), MAXIMUM) else 1.0,
+            if (centerX.isFinite()) min(max(centerX, -4.0), 5.0) else 0.5,
+            if (centerY.isFinite()) min(max(centerY, -4.0), 5.0) else 0.5,
+        )
+
+        /** `[scale, centerX, centerY]` from the wire or a saved layout. */
+        fun fromWire(e: JsonElement?): WPaneZoom? {
+            val a = e as? JsonArray ?: return null
+            if (a.size != 3) return null
+            val v = a.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> !p.isString }?.doubleOrNull }
+            return if (v.size == 3) of(v[0], v[1], v[2]) else null
         }
     }
 }
 
 /** Window pixels <-> canvas for one tile. Both directions exact inverses (TileContentTransform). */
-data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRotation, val fit: WFit) {
+data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRotation, val fit: WFit, val zoom: WPaneZoom = WPaneZoom.IDENTITY) {
     val rotatedSource get() = if (rotation.isQuarterTurn) WSize(source.height, source.width) else source
 
     /** [WFit.Auto] resolved for this tile and source. */
     val effectiveFit: WFit get() = WFit.resolved(fit, WSize(tile.width, tile.height), rotatedSource)
 
-    val scale: Double get() {
+    /** The mode's own size (zoom 1x). */
+    val baseScale: Double get() {
         val r = rotatedSource
         if (r.width <= 0 || r.height <= 0 || tile.width <= 0 || tile.height <= 0) return 0.0
         val sx = tile.width / r.width; val sy = tile.height / r.height
-        return if (effectiveFit == WFit.Fit) min(sx, sy) else max(sx, sy)
+        return if (effectiveFit == WFit.Fill) max(sx, sy) else min(sx, sy)
     }
 
+    val scale: Double get() = baseScale * zoom.scale
+
+    /** The zoom's centre at the pane's centre, kept navigable per axis (no gap when larger, inside when smaller). */
     val contentRect: WRect get() {
         val r = rotatedSource; val s = scale
         val w = r.width * s; val h = r.height * s
-        return WRect(tile.midX - w / 2, tile.midY - h / 2, w, h)
+        fun place(start: Double, extent: Double, size: Double, center: Double): Double {
+            val want = start + extent / 2 - center * size
+            val lo = min(start, start + extent - size); val hi = max(start, start + extent - size)
+            return min(max(want, lo), hi)
+        }
+        return WRect(place(tile.x, tile.width, w, zoom.centerX), place(tile.y, tile.height, h, zoom.centerY), w, h)
+    }
+
+    /** [zoom] with its centre as actually drawn. */
+    val effectiveZoom: WPaneZoom get() {
+        val c = contentRect
+        if (c.width <= 0 || c.height <= 0) return zoom
+        return WPaneZoom.of(zoom.scale, (tile.midX - c.x) / c.width, (tile.midY - c.y) / c.height)
     }
 
     val visibleRect get() = contentRect.intersection(tile)
@@ -156,72 +197,61 @@ data class WSource(val host: String, val windowID: Long, val generation: Long? =
 }
 
 /**
- * One pane. [source] is what it shows (its active tab; only that one streams). [crop] is the
+ * One pane. [source] is what it shows (its active tab; only that one streams). [zoom] is its own
  * zoomed/panned part of the window, normalized, with the pane's own shape (fills it: no bars).
  * [tabs] lists every window in the pane in label order when it holds more than one.
  */
 data class WTile(
-    val id: String, val source: WSource? = null, val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Auto,
-    val crop: WRect? = null, val tabs: List<WSource> = emptyList(),
+    val id: String, val source: WSource? = null, val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Fit,
+    val zoom: WPaneZoom? = null, val tabs: List<WSource> = emptyList(),
 ) {
     val windows: List<WSource> get() = if (tabs.isEmpty()) listOfNotNull(source) else tabs
 }
 
 private fun WSource.sameWindow(o: WSource) = host == o.host && windowID == o.windowID
 
-/** Pinch and pan inside one pane (WorkspaceZoom). */
+/** Pinch and pan inside one pane (WorkspaceZoom): the point under the fingers stays there, 0.7x-8x. */
 object WZoom {
-    const val MAXIMUM = 8.0
+    const val MINIMUM = WPaneZoom.MINIMUM
+    const val MAXIMUM = WPaneZoom.MAXIMUM
 
-    fun fillCrop(window: WSize, tile: WSize, rotation: WRotation): WRect {
-        if (window.width <= 0 || window.height <= 0 || tile.width <= 0 || tile.height <= 0) return WRect(0.0, 0.0, 1.0, 1.0)
-        val t = if (rotation.isQuarterTurn) WSize(tile.height, tile.width) else tile
-        val tileAspect = t.width / t.height; val windowAspect = window.width / window.height
-        if (tileAspect >= windowAspect) {
-            val h = windowAspect / tileAspect
-            return WRect(0.0, (1 - h) / 2, 1.0, h)
-        }
-        val w = tileAspect / windowAspect
-        return WRect((1 - w) / 2, 0.0, w, 1.0)
-    }
-
-    fun apply(crop: WRect?, base: WRect, scale: Double, anchor: WPoint, pan: WPoint): WRect? {
-        val c = crop ?: base
-        if (!scale.isFinite() || scale <= 0 || !listOf(anchor.x, anchor.y, pan.x, pan.y).all { it.isFinite() } ||
-            c.width <= 0 || c.height <= 0 || base.width <= 0 || base.height <= 0) return crop
-        val k = min(max(c.width / scale, base.width / MAXIMUM), base.width) / c.width
-        val w = c.width * k; val h = c.height * k
-        val ax = c.x + anchor.x * c.width; val ay = c.y + anchor.y * c.height
-        var x = ax - anchor.x * w - pan.x * w; var y = ay - anchor.y * h - pan.y * h
-        x = min(max(x, 0.0), max(1 - w, 0.0)); y = min(max(y, 0.0), max(1 - h, 0.0))
-        val eps = 1e-6
-        if (abs(w - base.width) < eps && abs(h - base.height) < eps && abs(x - base.x) < eps && abs(y - base.y) < eps) return null
-        return WRect(x, y, w, h)
+    fun pinched(start: WPaneZoom?, tile: WSize, source: WSize, rotation: WRotation, fit: WFit,
+                ratio: Double, from: WPoint, to: WPoint): WPaneZoom? {
+        val z0 = start ?: WPaneZoom.IDENTITY
+        if (!ratio.isFinite() || ratio <= 0 || !listOf(from.x, from.y, to.x, to.y).all { it.isFinite() } ||
+            tile.width <= 0 || tile.height <= 0 || source.width <= 0 || source.height <= 0) return start
+        val rect = WRect(0.0, 0.0, tile.width, tile.height)
+        val c0 = TileTransform(rect, source, rotation, fit, z0).contentRect
+        if (c0.width <= 0 || c0.height <= 0) return start
+        val ux = (from.x * tile.width - c0.x) / c0.width; val uy = (from.y * tile.height - c0.y) / c0.height
+        val scale = min(max(z0.scale * ratio, MINIMUM), MAXIMUM)
+        val w = c0.width / z0.scale * scale; val h = c0.height / z0.scale * scale
+        val ox = to.x * tile.width - ux * w; val oy = to.y * tile.height - uy * h
+        val wanted = WPaneZoom.of(scale, (tile.width / 2 - ox) / w, (tile.height / 2 - oy) / h)
+        val drawn = TileTransform(rect, source, rotation, fit, wanted).effectiveZoom
+        return if (drawn.isIdentity) null else drawn
     }
 }
 
 /**
- * Hybrid zoom: while the fingers move, the receiver scales the picture it already has (instantly,
- * clipped to the pane); the Mac's sharp frame replaces it after the gesture. Picture-normalized.
- * `v' = scale * v + offset` per axis moves a point of the picture as drawn when the gesture began
- * to where it belongs now. Same as Swift's WorkspaceZoomPreview.
+ * Instant local zoom: while the fingers move, the receiver moves the picture it already has (clipped
+ * to the pane) and fills what it doesn't cover from the pane's whole-source still; the Mac's frame with
+ * the same view replaces it. Picture-normalized. `v' = scale * v + offset` per axis moves a point of the
+ * picture as drawn when the gesture began to where it belongs now. Same as Swift's WorkspaceZoomPreview.
  */
-data class WZoomPreview(val tile: String, val pane: WRect, val scaleX: Double, val scaleY: Double, val offsetX: Double, val offsetY: Double) {
+data class WZoomPreview(
+    val tile: String, val pane: WRect, val scaleX: Double, val scaleY: Double, val offsetX: Double, val offsetY: Double,
+    /** Where the whole (rotated) source is drawn now, and where it was when the gesture began. */
+    val source: WRect, val from: WRect, val rotation: WRotation = WRotation.None, val sourceKey: Long = 0,
+) {
     fun apply(p: WPoint) = WPoint(scaleX * p.x + offsetX, scaleY * p.y + offsetY)
 
     companion object {
-        fun between(tile: String, pane: WRect, old: WRect, new: WRect): WZoomPreview? {
+        fun between(tile: String, pane: WRect, old: WRect, new: WRect, rotation: WRotation = WRotation.None, sourceKey: Long = 0): WZoomPreview? {
             if (old.width <= 0 || old.height <= 0 || new.width <= 0 || new.height <= 0 ||
                 !listOf(old.x, old.y, new.x, new.y, new.width, new.height).all { it.isFinite() }) return null
             val sx = new.width / old.width; val sy = new.height / old.height
-            return WZoomPreview(tile, pane, sx, sy, new.x - sx * old.x, new.y - sy * old.y)
-        }
-
-        /** Where the whole window lands when [crop] (window-normalized) is drawn into [content]. */
-        fun windowRect(crop: WRect, content: WRect): WRect? {
-            if (crop.width <= 0 || crop.height <= 0) return null
-            val w = content.width / crop.width; val h = content.height / crop.height
-            return WRect(content.x - crop.x * w, content.y - crop.y * h, w, h)
+            return WZoomPreview(tile, pane, sx, sy, new.x - sx * old.x, new.y - sy * old.y, new, old, rotation, sourceKey)
         }
     }
 }
@@ -336,7 +366,7 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
     /** Change what a pane shows; in a tabbed pane this replaces the active tab (null removes it). */
     fun replacingSource(id: String, source: WSource?): WLayout {
         var t = tiles[id] ?: return this
-        if (t.source != source) t = t.copy(crop = null)
+        if (t.source != source) t = t.copy(zoom = null)
         val current = t.source
         if (t.tabs.isNotEmpty() && current != null) {
             val i = t.tabs.indexOfFirst { it.sameWindow(current) }
@@ -378,10 +408,11 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
         return of(prune(root) ?: WNode.Slot(null), kept, maximized?.takeIf { it in kept })
     }
 
-    fun zooming(id: String, crop: WRect?): WLayout {
+    fun zooming(id: String, zoom: WPaneZoom?): WLayout {
+        val z = zoom?.takeIf { !it.isIdentity }
         val t = tiles[id] ?: return this
-        if (t.crop == crop) return this
-        return with(tiles = tiles + (id to t.copy(crop = crop)))
+        if (t.zoom == z) return this
+        return with(tiles = tiles + (id to t.copy(zoom = z)))
     }
 
     fun addingTab(source: WSource, id: String): WLayout {
@@ -391,22 +422,22 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
         if (list.none { it.sameWindow(current) }) list += current
         list.removeAll { it.sameWindow(source) }
         list += source
-        return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size > 1) list else emptyList(), crop = null)))
+        return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size > 1) list else emptyList(), zoom = null)))
     }
 
     fun switchingTab(id: String, index: Int): WLayout {
         val t = tiles[id] ?: return this
         if (index !in t.tabs.indices || t.source == t.tabs[index]) return this
-        return with(tiles = tiles + (id to t.copy(source = t.tabs[index], crop = null)))
+        return with(tiles = tiles + (id to t.copy(source = t.tabs[index], zoom = null)))
     }
 
     fun removingTab(id: String, index: Int): WLayout {
         val t = tiles[id] ?: return this
         if (index !in t.tabs.indices) return this
         val rest = t.tabs.toMutableList(); val removed = rest.removeAt(index)
-        var shown = t.source; var crop = t.crop
+        var shown = t.source; var crop = t.zoom
         if (shown == removed) { shown = if (rest.isEmpty()) null else rest[min(index, rest.size - 1)]; crop = null }
-        return with(tiles = tiles + (id to t.copy(source = shown, crop = crop, tabs = if (rest.size <= 1) emptyList() else rest)))
+        return with(tiles = tiles + (id to t.copy(source = shown, zoom = crop, tabs = if (rest.size <= 1) emptyList() else rest)))
     }
 
     fun tileHolding(host: String, windowID: Long): String? =
@@ -471,7 +502,7 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
     fun materializing(hinge: WHinge?) = WLayout(WGeometry.hingeAdjustedRoot(root, hinge), tiles, maximized)
 
     companion object {
-        const val SCHEMA = 2
+        const val SCHEMA = 3
         const val MAXIMUM_TILES = 9
 
         /** Normalizing constructor: drops unknown/duplicate slots and orphan tiles, fixes ratios, flattens. */
@@ -896,6 +927,7 @@ object WLayoutRecord {
                         put("follow", s.follow.wire)
                     }
                     put("rotation", t.rotation.degrees); put("fit", t.fit.wire)
+                    t.zoom?.let { z -> put("zoom", buildJsonArray { z.wire.forEach { add(JsonPrimitive(it)) } }) }
                     if (t.tabs.isNotEmpty()) put("tabs", buildJsonArray {
                         t.tabs.forEach { s -> add(buildJsonObject {
                             put("host", s.host); put("window", s.windowID)
@@ -948,16 +980,16 @@ object WLayoutRecord {
                 host, window, (t["gen"] as? JsonPrimitive)?.longOrNull, (t["bundle"] as? JsonPrimitive)?.contentOrNull(),
                 WFollow.of((t["follow"] as? JsonPrimitive)?.contentOrNull()),
             ) else null
-            // Schema 1 saved every tile as "fit" (no automatic fill then): start them on auto.
-            val stored = (t["fit"] as? JsonPrimitive)?.contentOrNull()
-            val fit = if (schema < 2 && stored == WFit.Fit.wire) WFit.Auto else WFit.of(stored)
+            // Fit unless Fill was chosen ("auto", the old default, shows the whole window too).
+            val fit = if ((t["fit"] as? JsonPrimitive)?.contentOrNull() == WFit.Fill.wire) WFit.Fill else WFit.Fit
+            val zoom = if (source != null) WPaneZoom.fromWire(t["zoom"])?.takeIf { !it.isIdentity } else null
             val tabs = (t["tabs"] as? JsonArray)?.take(8)?.mapNotNull { e ->
                 val o = e as? JsonObject ?: return@mapNotNull null
                 val h = (o["host"] as? JsonPrimitive)?.contentOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
                 val w = (o["window"] as? JsonPrimitive)?.longOrNull ?: return@mapNotNull null
                 WSource(h, w, null, (o["bundle"] as? JsonPrimitive)?.contentOrNull(), WFollow.of((o["follow"] as? JsonPrimitive)?.contentOrNull()))
             }?.map { if (source != null && it.sameWindow(source)) source else it } ?: emptyList()
-            tiles[id] = WTile(id, source, WRotation.of((t["rotation"] as? JsonPrimitive)?.intOrNull ?: 0), fit,
+            tiles[id] = WTile(id, source, WRotation.of((t["rotation"] as? JsonPrimitive)?.intOrNull ?: 0), fit, zoom = zoom,
                 tabs = if (tabs.size > 1 && source != null && tabs.any { it.sameWindow(source) }) tabs else emptyList())
         }
         return WLayout.of(node(obj["root"]), tiles, (obj["maximized"] as? JsonPrimitive)?.contentOrNull())

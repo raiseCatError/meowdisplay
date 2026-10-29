@@ -111,23 +111,31 @@ class WorkspaceVectorsTest {
         assertEquals(o.getValue("stacked").jsonArray.map { it.jsonPrimitive.content }, adapted.stacked)
     }
 
+    private fun zoom(e: kotlinx.serialization.json.JsonElement?): WPaneZoom? =
+        if (e == null || e is JsonNull) null else WPaneZoom.fromWire(e)
+
     @Test
-    fun zoomKeepsThePaneShapeLikeSwift() {
+    fun pinchZoomMatchesSwiftFrom07xTo8x() {
         val cases = vectors.getValue("zoom").jsonArray
         check(cases.isNotEmpty())
         for (c in cases) {
             val o = c.jsonObject
-            val base = WZoom.fillCrop(size(o.getValue("window").jsonArray), size(o.getValue("tile").jsonArray), WRotation.of(o.getValue("rotation").jsonPrimitive.int))
-            assertRect(rect(o.getValue("base").jsonArray), base, "zoom base $o")
-            var crop: WRect? = null
+            val window = size(o.getValue("window").jsonArray); val tile = size(o.getValue("tile").jsonArray)
+            val rotation = WRotation.of(o.getValue("rotation").jsonPrimitive.int); val fit = WFit.of(o.getValue("fit").jsonPrimitive.content)
+            var z: WPaneZoom? = null
             for (s in o.getValue("steps").jsonArray) {
                 val st = s.jsonObject
-                val a = st.getValue("anchor").jsonArray; val p = st.getValue("pan").jsonArray
-                crop = WZoom.apply(crop, base, st.getValue("scale").jsonPrimitive.double,
-                    WPoint(a[0].jsonPrimitive.double, a[1].jsonPrimitive.double), WPoint(p[0].jsonPrimitive.double, p[1].jsonPrimitive.double))
-                val e = st["crop"]
-                if (e == null || e is JsonNull) assertEquals("zoom step $st", null, crop)
-                else assertRect(rect(e.jsonArray), crop ?: base, "zoom step $st")
+                val f = st.getValue("from").jsonArray; val to = st.getValue("to").jsonArray
+                z = WZoom.pinched(z, tile, window, rotation, fit, st.getValue("ratio").jsonPrimitive.double,
+                    WPoint(f[0].jsonPrimitive.double, f[1].jsonPrimitive.double), WPoint(to[0].jsonPrimitive.double, to[1].jsonPrimitive.double))
+                val want = zoom(st["zoom"])
+                if (want == null) assertEquals("zoom step $st", null, z)
+                else {
+                    val got = z ?: error("zoom step $st: expected $want")
+                    assertEquals("scale $st", want.scale, got.scale, 1e-9)
+                    assertEquals("centerX $st", want.centerX, got.centerX, 1e-9)
+                    assertEquals("centerY $st", want.centerY, got.centerY, 1e-9)
+                }
             }
         }
     }
@@ -141,7 +149,9 @@ class WorkspaceVectorsTest {
         for (c in vectors.getValue("transforms").jsonArray) {
             val o = c.jsonObject
             val t = TileTransform(rect(o.getValue("tile").jsonArray), size(o.getValue("source").jsonArray),
-                WRotation.of(o.getValue("rotation").jsonPrimitive.int), WFit.of(o.getValue("fit").jsonPrimitive.content))
+                WRotation.of(o.getValue("rotation").jsonPrimitive.int), WFit.of(o.getValue("fit").jsonPrimitive.content),
+                zoom(o["zoom"]) ?: WPaneZoom.IDENTITY)
+            assertRect(rect(o.getValue("content").jsonArray), t.contentRect, "content $o")
             val pts = o.getValue("points").jsonArray; val canvas = o.getValue("canvas").jsonArray
             pts.forEachIndexed { i, p ->
                 val q = t.canvasPoint(WPoint(p.jsonArray[0].jsonPrimitive.double, p.jsonArray[1].jsonPrimitive.double))

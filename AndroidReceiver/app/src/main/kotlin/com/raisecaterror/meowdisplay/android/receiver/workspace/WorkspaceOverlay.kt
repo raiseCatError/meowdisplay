@@ -124,6 +124,18 @@ private fun RemoteViewportTransform.viewRect(r: WRect): CGRect {
  * another pane's labels (merge as tabs), an edge (move/split) or a middle (swap); release without
  * moving for the pane's menu. Everything else in a pane goes to the Mac as usual.
  */
+/** A pill button under a pane's status text. */
+@Composable
+private fun PaneButton(label: String, enabled: Boolean, action: () -> Unit) {
+    Text(
+        label, color = Color.White, style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+            .clickable(enabled = enabled, onClick = action)
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+            .graphicsLayer { alpha = if (enabled) 1f else 0.5f },
+    )
+}
+
 @Composable
 fun WorkspaceChrome(
     controller: WorkspaceController,
@@ -206,8 +218,12 @@ fun WorkspaceChrome(
                     remote.state == TileStatus.Waiting -> "Waiting for ${remote.app.ifEmpty { "the window" }}…"
                     remote.state == TileStatus.Offscreen -> "${remote.app.ifEmpty { "This window" }} is minimized or hidden on the Mac"
                     remote.state == TileStatus.Closed -> "Closed on Mac. Tap to choose another window."
-                    remote.state == TileStatus.Failed -> "Can't show this window right now"
+                    remote.state == TileStatus.Failed -> "The Mac stopped sending ${remote.app.ifEmpty { "this window" }}. Tap Retry."
                     remote.state == TileStatus.Limit -> "Paused: too many windows at once"
+                    remote.state == TileStatus.Paused -> if (remote.inStageStrip)
+                        "${remote.app.ifEmpty { "This window" }} is in Stage Manager's side strip, so macOS pauses its picture. Show it on the Mac, or put it in the same stage."
+                    else "macOS paused ${remote.app.ifEmpty { "this window" }}'s picture. It comes back when the window is shown on the Mac."
+                    remote.state == TileStatus.Retrying -> "Reconnecting to ${remote.app.ifEmpty { "the window" }}… (try ${remote.attempt})"
                     else -> null
                 }
                 if (status != null) {
@@ -217,6 +233,14 @@ fun WorkspaceChrome(
                             modifier = Modifier.background(Chip, RoundedCornerShape(10.dp)).clickable { controller.openOverview(replacing = id) }
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                         )
+                        // A stalled or failed capture can be started again now (no control needed: nothing on the Mac changes).
+                        if (remote?.state == TileStatus.Failed || remote?.state == TileStatus.Retrying) {
+                            PaneButton("Retry", enabled = true) { controller.retryTile(id) }
+                        }
+                        // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
+                        if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop) {
+                            PaneButton("Show on Mac", enabled = inputAllowed) { controller.showOnMac(id) }
+                        }
                         // A closed window's app can open it again (explicit; needs control).
                         val bundle = remote?.bundleID?.ifEmpty { null } ?: tile.source?.bundleID
                         if (remote?.state == TileStatus.Closed && bundle != null && !desktop) {
@@ -535,7 +559,7 @@ private fun PaneMenu(
         row(if (full) "Exit Fullscreen" else "Fullscreen on This Device") { if (full) controller.exitLocalFullscreen() else controller.enterLocalFullscreen(m.tile) }
         if (desktop) row("View Full Screen", action = onViewFullScreen)
         row(if (fill) (if (desktop) "Show Whole Desktop" else "Show Whole Window") else "Fill Pane") { controller.toggleFit(m.tile) }
-        if (tile.crop != null || tile.rotation != WRotation.None || tile.fit != WFit.Auto) row("Reset View") { controller.resetView(m.tile) }
+        if (tile.zoom != null || tile.rotation != WRotation.None || tile.fit == WFit.Fill) row("Reset View") { controller.resetView(m.tile) }
         row("Rotate") { controller.rotate(m.tile) }
         row(if (desktop) "Show a Window Here…" else "Change Window…") { controller.openOverview(replacing = m.tile) }
         row("Arrange Panes") { controller.setArranging(true) }

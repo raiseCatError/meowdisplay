@@ -2,6 +2,7 @@ package com.raisecaterror.meowdisplay.core.workspace
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.double
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -29,18 +30,23 @@ class WorkspaceWireTest {
         assertEquals(WNode.Slot(null), WLayout.of().compacted().root)
     }
 
-    /** Full Desktop in a pane goes to the Mac as "display", never as a window number; zoom goes as "crop". */
+    /** Full Desktop in a pane goes to the Mac as "display", never as a window number; zoom goes as "zoom", never a crop. */
     @Test
-    fun aDesktopPaneIsSentAsADisplayWithItsCrop() {
-        val desk = WTile("d", WSource("mac-a", WSource.displayKey(1)), crop = WRect(0.1, 0.2, 0.5, 0.5))
+    fun aDesktopPaneIsSentAsADisplayWithItsZoom() {
+        val desk = WTile("d", WSource("mac-a", WSource.displayKey(1)), zoom = WPaneZoom.of(2.0, 0.3, 0.45))
         val win = WTile("w", WSource("mac-a", 10, 5))
         val layout = WLayout.of(WNode.Split(WAxis.Vertical, listOf(WNode.Slot("d"), WNode.Slot("w")), listOf(0.5, 0.5)), mapOf("d" to desk, "w" to win))
         assertTrue(desk.source!!.isDisplay)
-        val msg = WorkspaceWire.workspaceRequest(layout, WGeometry.frames(layout, WSize(400.0, 800.0)), "mac-a", null) { s -> if (s.windowID == WSource.displayKey(1)) 1L else null }
+        val msg = WorkspaceWire.workspaceRequest(layout, WGeometry.frames(layout, WSize(400.0, 800.0)), "mac-a", null,
+            displayID = { s -> if (s.windowID == WSource.displayKey(1)) 1L else null }, viewEpoch = { if (it == "d") 7 else null })
         val sent = msg.getValue("tiles").jsonArray.map { it.jsonObject }
         assertEquals(1L, sent[0].getValue("display").jsonPrimitive.long)
         assertNull(sent[0]["window"])
-        assertEquals(listOf(0.1, 0.2, 0.5, 0.5), sent[0].getValue("crop").jsonArray.map { it.jsonPrimitive.double })
+        assertEquals(listOf(2.0, 0.3, 0.45), sent[0].getValue("zoom").jsonArray.map { it.jsonPrimitive.double })
+        assertNull(sent[0]["crop"])
+        assertEquals(7, sent[0].getValue("view").jsonPrimitive.int)
+        assertEquals("fit", sent[0].getValue("fit").jsonPrimitive.content)
+        assertNull(sent[1]["zoom"])
         assertEquals(10L, sent[1].getValue("window").jsonPrimitive.long)
         // A display the Mac no longer lists isn't sent at all.
         val gone = WorkspaceWire.workspaceRequest(layout, WGeometry.frames(layout, WSize(400.0, 800.0)), "mac-a", null) { null }
@@ -141,10 +147,12 @@ class WorkspaceWireTest {
     @Test
     fun aZoomPreviewScalesThePaneAboutTheFingers() {
         val pane = WRect(0.0, 0.0, 1.0, 1.0)
-        // A 4:3 window in a 4:3 pane, then zoomed 2x about its centre.
-        val start = WZoomPreview.windowRect(WRect(0.0, 0.0, 1.0, 1.0), pane)!!
-        val now = WZoomPreview.windowRect(WRect(0.25, 0.25, 0.5, 0.5), pane)!!
+        // The whole source drawn across the pane, then zoomed 2x about its centre.
+        val start = WRect(0.0, 0.0, 1.0, 1.0)
+        val now = WRect(-0.5, -0.5, 2.0, 2.0)
         val p = WZoomPreview.between("t", pane, start, now)!!
+        assertEquals(now, p.source)
+        assertEquals(start, p.from)
         assertEquals(2.0, p.scaleX, 1e-9)
         assertEquals(2.0, p.scaleY, 1e-9)
         val c = p.apply(WPoint(0.5, 0.5))
