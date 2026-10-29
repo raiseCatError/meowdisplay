@@ -824,6 +824,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     #endif
     /// Window mode only: this receiver's window workspace (queue-confined reference).
     private var workspaceEngine: WindowWorkspaceEngine?
+    /// Window/app/display browsing for this receiver in every display mode (Stage Peek over Mirror/Extend).
+    private var windowBrowser: WindowBrowserService?
     // Lock-guarded mirror of `sessionAuthorization`'s input grant for
     // `InputInjector`, which re-checks it under its own lock at injection
     // time; `DeviceSession` only ever mirrors it for display via
@@ -2872,6 +2874,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func stopOnQueue() {
         stopWorkspaceEngine()
+        windowBrowser?.stop()
+        windowBrowser = nil
         textCaretFollower.stop()
         let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
@@ -5266,18 +5270,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // step, so an open keyboard without a grant reads nothing.
             guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
             textCaretFollower.setKeyboardOpen(open)
-        case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.workspaceRequest,
-             WireMessage.workspaceFocus, WireMessage.windowAction:
+        case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
+             WireMessage.appLaunch:
+            // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
+            // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
+            // Launching still needs control (checked by the service).
+            guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+        case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction:
             // Admitted sessions only (gate above). Window metadata exists only
             // while this receiver is in Window mode on this Mac.
             guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
             guard let engine = workspaceEngine else {
                 // Window mode, but its engine isn't running (startup still in progress, or it failed):
                 // say so, instead of leaving the receiver's picker silently empty. It asks again.
-                Log.info("workspace: \(type) before Window mode started — answering starting")
-                if type == WireMessage.windowCatalogRequest {
-                    sendJSONObject(["type": WireMessage.windowCatalog, "windows": [], "apps": [], "error": "starting"])
-                }
+                Log.info("workspace: \(type) before Window mode started — ignored")
                 return
             }
             engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
@@ -6908,7 +6915,7 @@ extension MacSender {
     /// `queue` only.
     private func installWorkspaceEngine(hostID: String, canvas: CGSize, fps: Int) {
         stopWorkspaceEngine()
-        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps)
+        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser())
         let selfBox = self.selfBox
         let queue = self.queue
         // Only the CURRENT engine may reach this session: a stopped one's late
@@ -6939,6 +6946,26 @@ extension MacSender {
         engine.start()
     }
 
+    /// `queue` only. One browser per session; its messages pass the same admission gate.
+    @discardableResult
+    private func ensureWindowBrowser() -> WindowBrowserService {
+        if let windowBrowser { return windowBrowser }
+        let browser = WindowBrowserService(hostID: TrustStore.shared.installID() ?? "mac")
+        let selfBox = self.selfBox
+        let queue = self.queue
+        browser.sendMessage = { [weak browser] message in
+            let box = WorkspaceMessageBox(value: message)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let browser, sender.windowBrowser === browser,
+                      sender.sessionAuthorization.isAdmitted else { return }
+                sender.sendJSONObject(box.value)
+            }
+        }
+        windowBrowser = browser
+        syncWorkspaceSuspension()
+        return browser
+    }
+
     /// `queue` only. Window streams run only while video is on and the
     /// display isn't paused or stopping: a Video On request during a pause
     /// must not restart them.
@@ -6946,6 +6973,7 @@ extension MacSender {
         let phase = captureStateSnapshot().phase
         let paused = phase == .pausing || phase == .paused || phase == .stopped
         workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
+        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
     }
 
     /// `queue` only. Stops every window stream this receiver owns.

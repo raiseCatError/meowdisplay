@@ -242,6 +242,11 @@ enum WireMessage {
     static let workspaceFocus = "workspaceFocus"               // receiver -> Mac: the tile keyboard input goes to
     static let workspaceState = "workspaceState"               // Mac -> receiver: accepted tiles, states, focus
     static let windowAction = "windowAction"                   // receiver -> Mac: activate / launch / close (needs control)
+    static let appCatalogRequest = "appCatalogRequest"         // receiver -> Mac: every launchable app (any display mode)
+    static let appCatalog = "appCatalog"                       // Mac -> receiver: {rev, apps|same}
+    static let appLaunch = "appLaunch"                         // receiver -> Mac: open an app without activating it (needs control)
+    static let appLaunchResult = "appLaunchResult"             // Mac -> receiver: {bundle, ok}
+    static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off

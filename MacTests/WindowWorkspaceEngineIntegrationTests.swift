@@ -77,14 +77,16 @@ final class WindowWorkspaceEngineIntegrationTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.6))
 
         let box = Box()
-        let engine = WindowWorkspaceEngine(hostID: "test-mac", canvas: CGSize(width: 960, height: 480), fps: 30)
-        engine.includeOwnProcessForTesting = true
+        let browser = WindowBrowserService(hostID: "test-mac")
+        browser.includeOwnProcessForTesting = true
+        browser.sendMessage = { box.add($0) }
+        let engine = WindowWorkspaceEngine(hostID: "test-mac", canvas: CGSize(width: 960, height: 480), fps: 30, browser: browser)
         engine.deliverFrame = { box.add($0) }
         engine.sendMessage = { box.add($0) }
         engine.start()
-        defer { engine.stop() }
+        defer { engine.stop(); browser.stop() }
 
-        engine.handle(type: WireMessage.windowCatalogRequest, message: [:], inputGranted: false)
+        browser.handle(type: WireMessage.windowCatalogRequest, message: [:], inputGranted: false)
         XCTAssertTrue(waitUntil(5) { box.last(WireMessage.windowCatalog) != nil })
         let windows = try XCTUnwrap(box.last(WireMessage.windowCatalog)?["windows"] as? [[String: Any]])
         func gen(_ w: NSWindow) -> Int? { windows.first { $0["id"] as? Int == w.windowNumber }?["gen"] as? Int }

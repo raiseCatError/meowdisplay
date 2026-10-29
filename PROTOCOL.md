@@ -1343,6 +1343,30 @@ minimized one) and one `appIcon {bundle, png}` per app. Receivers bound
 both before decoding (96 KiB base64; refuse images declaring more than 16
 megapixels). Stills are requested only while the receiver's picker is open.
 
+**Browsing in every mode.** `windowCatalogRequest`, `windowThumbnailRequest`,
+`appCatalogRequest` and `appLaunch` are answered in Mirror, Extend and Window
+mode alike (admitted session, `hello.ws`, Window mode allowed on the Mac), so a
+receiver's switcher and search open over the desktop without changing the
+mode. One identity ledger serves every mode: a window keeps its `gen` when the
+receiver later switches to Window mode with it. `windowCatalog` also carries
+`displays` `[{id, name, w, h, main, virtual}]`. Stills are queued in the order
+asked (the latest request first; nothing is dropped while a batch runs) and a
+fresh still is answered from the Mac's cache; a still that can't be taken now
+is answered with the last real one and `stale: true`, or `unavailable: true`
+with `reason` `offscreen` (minimized, hidden) or `failed`. `ids` may hold 48,
+`max` is 64–640, `icons` 48, and optional `displays` (display ids) are
+answered with `displayThumbnail {id, jpeg}` (MeowDisplay's own windows are
+never in a display still). Receivers bound stills at 256 KiB base64.
+`appCatalogRequest {rev?}` is answered with `appCatalog {rev, apps}` — every
+launchable app the Mac finds (Spotlight's index of the app folders, a folder
+scan when Spotlight is off), one per bundle id, Finder first, at most 900:
+`{bundle, name, running?, windows?, used?}` (`used`: last-used time, seconds
+since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
+`appLaunch {bundle}` needs the input grant, opens only an app the Mac listed,
+never activates it (no focus change on the Mac), and is answered with
+`appLaunchResult {bundle, ok}`. `windowAction` also takes
+`minimize {window, gen}` (input grant; the real Mac window; never activates).
+
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
 normalized `x y w h` in the canvas (non-overlapping, inside it, at least
