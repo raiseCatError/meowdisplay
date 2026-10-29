@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -35,6 +36,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
@@ -98,9 +101,21 @@ fun DemoScreen(runtime: DemoRuntime, onExit: () -> Unit, onOpenSettings: () -> U
                 androidx.compose.material3.Button(onClick = { runtime.workspace.openOverview() }) { Text("Choose Windows…") }
             }
         }
+        // The badge takes whichever top spot is free: trays run down the sides in landscape and along the
+        // bottom in portrait; the keyboard's key row, Stage Peek's stack and the window labels of side-by-side
+        // tiles take the top centre; the window chooser has its title on the left.
+        val window = LocalWindowInfo.current.containerSize
+        val keyboardUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        val badgeCentred = when {
+            keyboardUp || workspaceUi.stagePeekOpen || workspaceUi.railExpanded -> false
+            workspaceUi.overviewOpen -> true
+            scene.mode == com.raisecaterror.meowdisplay.core.session.DisplayMode.Window -> false
+            else -> window.width > window.height
+        }
         DemoBadgeBar(
             onGuide = { showGuide = true }, onExit = onExit,
-            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.displayCutout).padding(10.dp),
+            modifier = Modifier.align(if (badgeCentred) Alignment.TopCenter else Alignment.TopStart)
+                .windowInsetsPadding(WindowInsets.displayCutout).padding(10.dp),
         )
         chip?.let { current ->
             val (label, text) = when (current) {
@@ -108,7 +123,7 @@ fun DemoScreen(runtime: DemoRuntime, onExit: () -> Unit, onOpenSettings: () -> U
                 is DemoFeedback.OnMac -> "On a Mac" to current.text
             }
             Row(
-                Modifier.align(Alignment.TopCenter).padding(top = 56.dp).widthIn(max = 420.dp)
+                Modifier.align(Alignment.TopCenter).padding(top = 64.dp).widthIn(max = 420.dp)
                     .background(Color(0xE6202428), RoundedCornerShape(16.dp)).padding(horizontal = 14.dp, vertical = 8.dp)
                     .semantics { liveRegion = LiveRegionMode.Polite },
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically,
@@ -121,7 +136,7 @@ fun DemoScreen(runtime: DemoRuntime, onExit: () -> Unit, onOpenSettings: () -> U
     if (showGuide) DemoGuide(onDismiss = { showGuide = false }, onExit = onExit)
 }
 
-/** Always on screen and small enough to clear the top-centre prompts: DEMO (opens the guide) and Exit. */
+/** Always on screen and clear of the trays: DEMO (opens the guide) and Exit. The demo turns off the top-centre prompts. */
 @Composable
 private fun DemoBadgeBar(onGuide: () -> Unit, onExit: () -> Unit, modifier: Modifier) {
     Row(
