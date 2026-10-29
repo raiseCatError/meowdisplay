@@ -248,9 +248,9 @@ final class WorkspaceClientTests: XCTestCase {
         m.updateSpace(WorkspaceSize(width: 1366, height: 1024), hinge: nil)
         for w in m.catalog!.windows { m.choose(w, asNewTile: true) }
         XCTAssertEqual(m.layout.tiles.count, 9)
-        m.updateSpace(WorkspaceSize(width: 360, height: 780), hinge: nil)   // fold to a cover screen
-        XCTAssertEqual(m.layout.tiles.count, 3)
-        XCTAssertEqual(m.stacked.count, 6)
+        m.updateSpace(WorkspaceSize(width: 300, height: 500), hinge: nil)   // a small cover screen: 3x3 doesn't fit
+        XCTAssertEqual(m.layout.tiles.count, 6)
+        XCTAssertEqual(m.stacked.count, 3)
         m.updateSpace(WorkspaceSize(width: 1366, height: 1024), hinge: nil)
         XCTAssertEqual(m.layout.tiles.count, 9, "unfolding brings every tile back")
     }

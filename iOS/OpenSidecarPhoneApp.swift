@@ -316,7 +316,10 @@ struct ReceiverScreen: View {
                                                                  scale: Double(scale)) }
                                        : nil,
                                    onWorkspaceTouch: model.workspace.windowMode
-                                       ? { p in model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                                       ? { p in
+                                           model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
+                                           model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
+                                       } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -386,7 +389,8 @@ struct ReceiverScreen: View {
                         .offsetBy(dx: canvas.minX, dy: canvas.minY)
                     WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
-                                        safeArea: effectiveSafeInsets.safeRect(in: geo.size))
+                                        safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                        onSettings: { showSettings = true })
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)

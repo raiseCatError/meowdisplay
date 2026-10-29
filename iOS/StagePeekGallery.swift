@@ -257,6 +257,8 @@ struct StagePeekGallery: View {
     let onDisplay: (CatalogDisplayItem) -> Void
     let onApp: (MacAppItem) -> Void
     let onAddTile: (CatalogWindowItem) -> Void
+    /// A card was dropped (or the drag ended): the peek decides whether to close.
+    var onDragEnded: (Bool) -> Void = { _ in }
     @State private var visible: [UInt32] = []
 
     /// Two columns at most; one when two would make cards too small.
@@ -311,6 +313,7 @@ struct StagePeekGallery: View {
             .padding(.horizontal, 20)
         }
         .scrollDismissesKeyboard(.interactively)
+        .scrollDisabled(model.drag != nil)
         .onChange(of: visible) { model.thumbnailPriority = $0 }
     }
 
@@ -318,13 +321,28 @@ struct StagePeekGallery: View {
         LazyVGrid(columns: cols, spacing: 16) {
             ForEach(windows) { w in
                 StagePeekWindowCard(model: model, window: w, inTile: tiled.contains(w.id), current: model.currentWindowID == w.id && model.windowMode)
-                    .onTapGesture { onWindow(w) }
-                    .contextMenu {
-                        Button { onWindow(w) } label: { Label("Show in Tile", systemImage: "rectangle") }
-                        if model.canAddTile, !tiled.contains(w.id) {
-                            Button { onAddTile(w) } label: { Label("Add as New Tile", systemImage: "rectangle.split.2x1") }
-                        }
-                    }
+                    .onTapGesture { if model.drag == nil { onWindow(w) } }
+                    // Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits.
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.35)
+                            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                            .onChanged { value in
+                                guard case .second(true, let drag) = value else { return }
+                                if model.drag == nil {
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    model.beginDrag(.window(w), at: drag?.location ?? .zero)
+                                } else if let drag {
+                                    model.moveDrag(to: drag.location)
+                                }
+                            }
+                            .onEnded { _ in
+                                guard model.drag != nil else { return }
+                                let dropped = model.endDrag()
+                                if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
+                                onDragEnded(dropped)
+                            })
+                    .accessibilityAction(named: "Show in Pane") { onWindow(w) }
+                    .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
                     .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
                     .onDisappear { visible.removeAll { $0 == w.id } }
             }

@@ -263,6 +263,19 @@ enum WorkspaceImageDecoder {
 
 enum WorkspaceRailEdge: String, CaseIterable, Sendable { case top, bottom, left, right }
 
+/// Something being dragged over the panes.
+struct WorkspaceDrag: Equatable {
+    enum Item: Equatable {
+        /// A Mac window from Stage Peek.
+        case window(CatalogWindowItem)
+        /// A pane's label (all its windows), or one of its tabs.
+        case pane(String, tab: Int?)
+    }
+    var item: Item
+    /// Global (screen) coordinates.
+    var location: CGPoint
+}
+
 @MainActor
 final class WorkspaceModel: ObservableObject {
     @Published private(set) var available = false
@@ -302,6 +315,17 @@ final class WorkspaceModel: ObservableObject {
     private var planner = ThumbnailRequestPlanner()
     private var appRevision: Int?
     @Published private(set) var canUndo = false
+    /// A window (from Stage Peek) or a pane label being dragged over the panes.
+    @Published private(set) var drag: WorkspaceDrag?
+    /// "Fullscreen on This Device": this pane fills the screen locally. The saved arrangement,
+    /// dividers and every pane's view are kept and come back unchanged on exit. Not a Mac fullscreen.
+    @Published private(set) var localFullscreen: String?
+    /// Bumped by the video surface on any touch: reveals the fullscreen strip without taking the touch.
+    @Published private(set) var touchPulse = 0
+    func noteSurfaceTouch() { if localFullscreen != nil { touchPulse &+= 1 } }
+    /// The picture's frame in global (screen) coordinates, reported by the pane chrome, so drags
+    /// that start in Stage Peek can find the panes under the finger.
+    var pictureGlobal: CGRect = .zero
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -469,7 +493,10 @@ final class WorkspaceModel: ObservableObject {
 
     private func publish() {
         let adapted = WorkspaceAdaptation.adapt(saved, to: size, hinge: hinge, active: remote?.active)
-        layout = adapted.visible
+        if let full = localFullscreen, adapted.visible.tiles[full] == nil { localFullscreen = nil }
+        // Local fullscreen is presentation only: the saved tree is untouched.
+        arranged = adapted.visible
+        layout = localFullscreen.map { adapted.visible.maximizing($0) } ?? adapted.visible
         stacked = adapted.stacked
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
@@ -669,9 +696,12 @@ final class WorkspaceModel: ObservableObject {
                                      canSplit: layout.tiles.count < capacity)
     }
 
+    /// The arrangement without local fullscreen: what edits apply to.
+    private var arranged = WorkspaceLayout()
+
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
-        let next = change(layout)
-        guard next != layout else { return }
+        let next = change(arranged)
+        guard next != arranged else { return }
         history.record(saved)
         var updated = next
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
@@ -779,6 +809,53 @@ final class WorkspaceModel: ObservableObject {
         launchFailed = nil
         launching.insert(bundle)
         _ = send(WorkspaceRequests.appLaunch(bundle))
+    }
+
+    // MARK: Local fullscreen (receiver only)
+
+    func enterLocalFullscreen(_ tile: String) {
+        guard layout.tiles[tile] != nil else { return }
+        localFullscreen = tile
+        publish(); scheduleSend(immediately: true)
+        focus(tile)
+    }
+
+    func exitLocalFullscreen() {
+        guard localFullscreen != nil else { return }
+        localFullscreen = nil
+        publish(); scheduleSend(immediately: true)
+    }
+
+    // MARK: Dragging windows and labels onto panes
+
+    func beginDrag(_ item: WorkspaceDrag.Item, at global: CGPoint) { drag = WorkspaceDrag(item: item, location: global) }
+    func moveDrag(to global: CGPoint) { if drag != nil { drag?.location = global } }
+    func cancelDrag() { drag = nil }
+
+    /// The drop under the finger, in picture terms (nil outside the panes or in Mirror/Extend).
+    func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
+        guard windowMode, pictureGlobal.width > 0, pictureGlobal.contains(p) else { return nil }
+        let n = WorkspacePoint(x: (p.x - pictureGlobal.minX) / pictureGlobal.width, y: (p.y - pictureGlobal.minY) / pictureGlobal.height)
+        return windowDrop(at: n, labelHeight: Double(labelHeight / pictureGlobal.height))
+    }
+
+    /// Ends a drag: drops onto the pane under the finger. A window dropped in Mirror/Extend
+    /// (no panes on screen) is shown in Window mode. Returns whether anything changed.
+    @discardableResult
+    func endDrag() -> Bool {
+        guard let d = drag else { return false }
+        drag = nil
+        let target = dropTarget(forGlobal: d.location)
+        switch d.item {
+        case .window(let w):
+            if let target { drop(w, on: target); return true }
+            if !windowMode { switchTo(w); return true }
+            return false
+        case .pane(let id, let tab):
+            guard let target else { return false }
+            dropTile(id, tab: tab, on: target)
+            return true
+        }
     }
 
     func minimizeRemoteWindow(_ tile: String) {

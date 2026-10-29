@@ -135,11 +135,12 @@ final class WindowWorkspaceTests: XCTestCase {
     }
 
     func testCapacityFollowsTheUsableSpaceNotTheDevice() {
-        XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 390, height: 844)), 3, "phone portrait")
-        XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 844, height: 390)), 3, "phone landscape")
+        XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 390, height: 844)), 9, "phone portrait: 3x3 fits")
+        XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 844, height: 390)), 9, "phone landscape: 3x3 fits")
+        XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 300, height: 500)), 6, "small cover screen")
         XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 1024, height: 1366)), 9, "iPad Pro")
         XCTAssertEqual(WorkspaceGeometry.capacity(for: .init(width: 744, height: 1133)), 9, "iPad mini")
-        XCTAssertLessThanOrEqual(WorkspaceGeometry.capacity(for: .init(width: 320, height: 1024)), 3, "iPad Split View third")
+        XCTAssertLessThanOrEqual(WorkspaceGeometry.capacity(for: .init(width: 320, height: 1024)), 6, "iPad Split View third")
         XCTAssertEqual(WorkspaceSizeClass.of(.init(width: 790, height: 820)), .expanded, "unfolded foldable inner display")
         XCTAssertEqual(WorkspaceSizeClass.of(.init(width: 360, height: 780)), .compact, "folded cover display")
         // Tiny windows still get one tile, never zero.
@@ -341,9 +342,9 @@ final class WindowWorkspaceTests: XCTestCase {
 
     func testCollapsingToACompactScreenStacksTilesAndExpandingRestoresThem() {
         let saved = WorkspaceLayout(preset: .grid3x3, tiles: tiles(9)).swapping("t0", "t8")
-        let compact = WorkspaceAdaptation.adapt(saved, to: .init(width: 360, height: 780), active: "t5")
-        XCTAssertEqual(compact.visible.tiles.count, 3)
-        XCTAssertEqual(compact.stacked.count, 6)
+        let compact = WorkspaceAdaptation.adapt(saved, to: .init(width: 300, height: 500), active: "t5")
+        XCTAssertEqual(compact.visible.tiles.count, 6)
+        XCTAssertEqual(compact.stacked.count, 3)
         XCTAssertTrue(compact.visible.tiles.keys.contains("t5"), "the active tile stays visible")
         XCTAssertEqual(Set(compact.visible.orderedTileIDs).union(compact.stacked), Set(saved.orderedTileIDs), "nothing lost")
         XCTAssertEqual(compact.visible.tiles["t5"]?.source, saved.tiles["t5"]?.source, "sources kept")

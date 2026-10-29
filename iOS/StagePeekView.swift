@@ -43,6 +43,7 @@ struct StagePeekOverlay: View {
     @State private var appFilter: String?
     @State private var launchpad = false
     @State private var hint = false
+    @State private var overlayOrigin: CGPoint = .zero
     @FocusState private var searchFocused: Bool
     @State private var stripDown = false
     @State private var openDown = false
@@ -80,6 +81,7 @@ struct StagePeekOverlay: View {
                 backdrop
                     .contentShape(Rectangle())
                     .gesture(openGesture(cards: cards))
+                    .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
                 if machine.expansion < 0.999 {
                     ForEach(cards, id: \.index) { card in
@@ -93,16 +95,25 @@ struct StagePeekOverlay: View {
                 }
                 if machine.expansion > 0.001 {
                     gallery
-                        .opacity(machine.expansion)
+                        .opacity(model.drag != nil ? 0 : machine.expansion)
                         .allowsHitTesting(machine.expanded)
                 }
                 toolbar(cards: cards)
+                    .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
                 topControls
+                    .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
             }
             if launchpad {
                 launchpadView.transition(.opacity)
+            }
+            if let d = model.drag, case .window(let w) = d.item {
+                // The card under the finger while the peek steps aside to show the panes.
+                dragPreview(w)
+                    .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
+                    .allowsHitTesting(false)
+                    .zIndex(60)
             }
             if !machine.ids.isEmpty, !model.overviewOpen, !launchpad,
                let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
@@ -110,6 +121,11 @@ struct StagePeekOverlay: View {
             }
         }
         .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { overlayOrigin = g.frame(in: .global).origin }
+                .onChange(of: g.frame(in: .global).origin) { overlayOrigin = $0 }
+        })
         .coordinateSpace(name: "stagePeek")
         .accessibilityAction(.escape) { finish(machine.dismiss()) }
         .position(x: frame.midX, y: frame.midY)
@@ -277,6 +293,10 @@ struct StagePeekOverlay: View {
                              animate { machine.cancelAll() }
                              model.stagePeekOpen = false
                              model.choose(w, asNewTile: true)
+                         },
+                         onDragEnded: { dropped in
+                             // Dropped on a pane: done. Dropped nowhere: the peek comes back as it was.
+                             if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false }
                          })
             .frame(width: safe.width, height: safe.height)
             .position(x: safe.midX, y: safe.midY)
@@ -332,6 +352,22 @@ struct StagePeekOverlay: View {
         animate { machine.cancelAll() }
         model.stagePeekOpen = false
         onDisplay(d)
+    }
+
+    private func dragPreview(_ w: CatalogWindowItem) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(white: 0.15))
+            if let cg = model.thumbnails[w.id] {
+                Image(decorative: cg, scale: 1).resizable().aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)).padding(4)
+            }
+            MacAppIcon(model: model, bundleID: w.bundleID, name: w.app, size: 24).offset(x: -4, y: 4)
+        }
+        .frame(width: 150, height: 94)
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(meowAccent, lineWidth: 2))
+        .shadow(color: .black.opacity(0.45), radius: 14, y: 8)
+        .scaleEffect(1.04)
+        .opacity(0.95)
     }
 
     /// The edge bar nudges inward a few times after it appears, so people know it's there.

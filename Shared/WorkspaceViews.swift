@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // Window mode's views for the Apple receivers (iPhone, iPad, Mac Receiver),
 // drawn over the live picture. Same design and wording as Android
@@ -27,10 +30,21 @@ struct WorkspaceChromeView: View {
     /// The screen's safe area (clear of a notch, Dynamic Island and the home indicator) in
     /// this view's coordinates. The picture may run under them; labels and buttons don't.
     var safeArea: CGRect?
-    @State private var dragging: String?
-    @State private var dragPoint: CGPoint?
+    /// Opens the receiver's settings (the fullscreen strip's Settings button).
+    var onSettings: (() -> Void)?
     @State private var confirmClose: String?
     @State private var lastDividerTranslation: CGSize = .zero
+    /// The floating label menu: which pane (and tab) it is for.
+    @State private var menu: PaneMenuTarget?
+    /// A label is held (long press recognized); drags and the menu start from it.
+    @State private var heldLabel: PaneMenuTarget?
+    @State private var lastDropKey = ""
+    @State private var stripVisible = true
+    @State private var stripHideTask: Task<Void, Never>?
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    struct PaneMenuTarget: Equatable { var tile: String; var tab: Int? }
 
     private var size: WorkspaceSize { WorkspaceSize(width: picture.width, height: picture.height) }
 
@@ -67,31 +81,82 @@ struct WorkspaceChromeView: View {
             let frames = model.frames
             let multi = model.layout.tiles.count > 1
             ZStack(alignment: .topLeading) {
+                // Where the picture is on screen, for drags that start in Stage Peek.
+                Color.clear
+                    .frame(width: picture.width, height: picture.height)
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { model.pictureGlobal = g.frame(in: .global) }
+                            .onChange(of: g.frame(in: .global)) { model.pictureGlobal = $0 }
+                    })
+                    .position(x: picture.midX, y: picture.midY)
+                    .allowsHitTesting(false)
                 ForEach(Array(frames.tiles.keys).sorted(), id: \.self) { id in
                     if let rect = frames.tiles[id], let tile = model.layout.tiles[id] {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                if let d = dragging, let p = dragPoint,
-                   let target = WorkspaceGeometry.dropTarget(at: normalized(p), frames: frames, size: size, canSplit: true) {
-                    let r = target.previewRect.onScreen(picture)
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(workspaceAccent.opacity(target.isSlot ? 0.18 : 0.28))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(workspaceAccent, lineWidth: 2))
-                        .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                        .id(d)
-                }
+                dropPreview
                 if model.arranging { arrangeControls(frames) }
+                if let m = menu, let tile = model.layout.tiles[m.tile], let rect = frames.tiles[m.tile]?.onScreen(picture) {
+                    // Tap anywhere else to close; nothing reaches the Mac while the menu is open.
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { menu = nil } }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    paneMenu(m, tile: tile)
+                        .position(x: min(max(rect.minX + 132, picture.minX + 132), picture.maxX - 132),
+                                  y: min(rect.minY + 44 + 170, picture.maxY - 180))
+                        .transition(reduceMotion ? .opacity : .scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity))
+                }
+                if model.localFullscreen != nil { fullscreenStrip }
             }
             .coordinateSpace(name: "workspace")
             .alert(closeTitle, isPresented: Binding(get: { confirmClose != nil }, set: { if !$0 { confirmClose = nil } })) {
                 Button("Close Window", role: .destructive) { if let id = confirmClose { model.closeRemoteWindow(id) }; confirmClose = nil }
                 Button("Cancel", role: .cancel) { confirmClose = nil }
             } message: {
-                Text("The window closes on the Mac itself, as if you clicked its close button. Unsaved work may ask to be saved there.")
+                Text("The window closes on the Mac itself, as if you clicked its close button. The app keeps running, and unsaved work asks to be saved there first.")
             }
+            .onChange(of: dropKey) { key in
+                if !key.isEmpty, key != lastDropKey { Self.haptic(.selection) }
+                lastDropKey = key
+            }
+            .onChange(of: model.localFullscreen) { full in if full != nil { revealStrip() } }
+            .onChange(of: model.touchPulse) { _ in if model.localFullscreen != nil { revealStrip() } }
+        }
+    }
+
+    /// Changes whenever the drop under the finger changes (haptic tick).
+    private var dropKey: String {
+        guard let d = model.drag, let target = model.dropTarget(forGlobal: d.location) else { return "" }
+        return "\(target)"
+    }
+
+    /// The highlighted landing area while a window or label is dragged, with what will happen.
+    @ViewBuilder
+    private var dropPreview: some View {
+        if let d = model.drag, let target = model.dropTarget(forGlobal: d.location) {
+            let r = target.preview.onScreen(picture)
+            let text: String = {
+                switch target {
+                case .replace: if case .pane = d.item { return String(localized: "Swap") } else { return String(localized: "Replace") }
+                case .tab: return String(localized: "Add as Tab")
+                case .split: return String(localized: "New Pane")
+                case .emptySlot: return String(localized: "Show Here")
+                }
+            }()
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(workspaceAccent.opacity(0.22))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(workspaceAccent, lineWidth: 2))
+                .overlay(Text(text).font(.caption.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(workspaceChip, in: Capsule()))
+                .frame(width: r.width, height: r.height)
+                .position(x: r.midX, y: r.midY)
+                .allowsHitTesting(false)
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
+                .accessibilityHidden(true)
         }
     }
 
@@ -110,7 +175,7 @@ struct WorkspaceChromeView: View {
         case .live: return nil
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
         case .offscreen: return "\(app) is minimized or hidden on the Mac"
-        case .closed: return "This window was closed. Tap to choose another."
+        case .closed: return "Closed on Mac. Tap to choose another window."
         case .failed: return "Can't show this window right now"
         case .limit: return "Paused: too many windows at once"
         }
@@ -144,14 +209,28 @@ struct WorkspaceChromeView: View {
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
             if let text = status(for: id, tile: tile) {
-                Button { model.openOverview(replacing: id) } label: {
-                    Text(text).font(.callout).foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+                VStack(spacing: 8) {
+                    Button { model.openOverview(replacing: id) } label: {
+                        Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                    if model.tileState(id)?.status == .closed, inputAllowed, let bundle = tile.source?.bundleID {
+                        // The app may reopen a window (needs control; never automatic).
+                        Button { model.launch(bundle) } label: {
+                            Label("Open on Mac", systemImage: "arrow.up.forward.app").font(.callout.weight(.semibold))
+                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(workspaceChip, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            if multi || model.arranging { pill(id: id, tile: tile, active: active, rect: rect) }
+            if multi || model.arranging || tile.tabs.count > 1 || model.localFullscreen == id {
+                labelStrip(id: id, tile: tile, rect: rect, active: active)
+            }
             if active, model.remote?.hostFocus.isMismatch == true {
                 Button { model.focus(id) } label: {
                     Text(model.remote?.hostFocus == .otherWindowFocused
@@ -166,47 +245,218 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    private func pill(id: String, tile: WorkspaceTile, active: Bool, rect: CGRect) -> some View {
-        let remoteName = model.tileState(id)?.app ?? ""
-        let name = tile.source == nil ? "Empty"
-            : (!remoteName.isEmpty ? remoteName : (model.catalog?.windows.first { $0.id == tile.source?.windowID }?.app ?? "Window"))
-        return Menu {
-            Button("Change Window…") { model.openOverview(replacing: id) }
-            if tile.crop != nil { Button("Reset Zoom") { model.resetZoom(id) } }
-            Button("Rotate") { model.rotate(id) }
-            Button(tile.fit == .fill ? "Show Whole Window" : "Fill Tile") { model.toggleFit(id) }
-            Button(model.layout.maximized == id ? "Restore Layout" : "Maximize") { model.toggleMaximize(id) }
-            Button("Arrange Tiles") { model.arranging = true }
-            Button("Remove Tile") { model.removeTile(id) }
-            Button("Close Window on Mac…", role: .destructive) { confirmClose = id }.disabled(!inputAllowed)
-        } label: {
-            HStack(spacing: 6) {
-                if let bundle = tile.source?.bundleID, let icon = model.icons[bundle] {
-                    Image(decorative: icon, scale: 1).resizable().frame(width: 16, height: 16)
-                }
-                Text(name).font(.caption.weight(.medium)).lineLimit(1).frame(maxWidth: 160, alignment: .leading)
+    // MARK: Labels (one per window in the pane; tabs side by side)
+
+    private func windowItem(_ s: WorkspaceSource) -> CatalogWindowItem? { model.catalog?.windows.first { $0.id == s.windowID } }
+
+    /// A label's text: the app's name; when a pane holds several windows of one app, their
+    /// titles (shortened to fit).
+    private func labelText(_ s: WorkspaceSource, in tile: WorkspaceTile, id: String) -> String {
+        let w = windowItem(s)
+        let app = w?.app ?? (s == tile.source ? model.tileState(id)?.app : nil) ?? "Window"
+        guard tile.windows.count > 1 else { return app.isEmpty ? "Window" : app }
+        let apps = tile.windows.map { windowItem($0)?.app ?? "" }
+        if apps.filter({ $0 == app }).count > 1, let title = w?.title, !title.isEmpty { return title }
+        return app.isEmpty ? (w?.title ?? "Window") : app
+    }
+
+    @ViewBuilder
+    private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool) -> some View {
+        let windows = tile.windows
+        let available = max(rect.width - 12, 60)
+        // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
+        let each = windows.count <= 1 ? min(180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
+        let row = HStack(spacing: 4) {
+            if windows.isEmpty {
+                label(id: id, tab: nil, text: String(localized: "Empty"), icon: nil, shown: true, active: active, width: each)
             }
-            .foregroundStyle(active ? Color.black : Color.white)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(active ? workspaceAccent.opacity(0.9) : workspaceChip, in: Capsule())
-        } primaryAction: {
-            // A tap selects the tile and types there; hold for the tile's actions.
-            model.focus(id)
+            ForEach(Array(windows.enumerated()), id: \.offset) { i, s in
+                label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(s, in: tile, id: id),
+                      icon: s.bundleID.flatMap { model.icons[$0] }, shown: s == tile.source, active: active, width: each)
+            }
         }
         .padding(6)
-        .accessibilityLabel("\(name) tile options" + (active ? ", typing goes here" : ""))
+        ViewThatFits(in: .horizontal) {
+            row.fixedSize()
+            ScrollView(.horizontal, showsIndicators: false) { row }
+                .scrollDisabled(heldLabel != nil || model.drag != nil)
+                .frame(width: available + 12)
+        }
+    }
+
+    private func label(id: String, tab: Int?, text: String, icon: CGImage?, shown: Bool, active: Bool, width: CGFloat) -> some View {
+        let highlighted = shown && active
+        let target = PaneMenuTarget(tile: id, tab: tab)
+        return HStack(spacing: 5) {
+            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 15, height: 15) }
+            Text(text).font(.caption.weight(shown ? .semibold : .regular)).lineLimit(1).truncationMode(.tail)
+        }
+        .frame(maxWidth: width, alignment: .leading)
+        .fixedSize(horizontal: true, vertical: false)
+        .foregroundStyle(highlighted ? Color.black : Color.white.opacity(shown ? 1 : 0.8))
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(highlighted ? workspaceAccent.opacity(0.9) : (shown ? workspaceChip : Color(white: 0.2, opacity: 0.6)), in: Capsule())
+        .overlay(Capsule().stroke(heldLabel == target ? workspaceAccent : .clear, lineWidth: 2))
+        .scaleEffect(heldLabel == target && !reduceMotion ? 1.08 : 1)
+        .contentShape(Capsule())
+        .onTapGesture {
+            // A tap selects the pane (typing goes there) or shows that tab. Never a click on the Mac.
+            guard heldLabel == nil else { return }
+            if let tab, !shown { model.switchTab(id, to: tab) } else { model.focus(id) }
+        }
+        // Hold: lift the label. Move = drag it to another pane (merge as a tab, split, swap);
+        // release without moving = the label's menu.
         .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35).sequenced(before: DragGesture(coordinateSpace: .named("workspace")))
+            LongPressGesture(minimumDuration: 0.4)
+                .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
                 .onChanged { value in
-                    if case .second(true, let drag?) = value { dragging = id; dragPoint = drag.location }
+                    guard case .second(true, let drag) = value else { return }
+                    if heldLabel == nil { heldLabel = target; Self.haptic(.lift) }
+                    guard let drag else { return }
+                    let moved = hypot(drag.translation.width, drag.translation.height)
+                    if model.drag == nil, moved > 10 { model.beginDrag(.pane(id, tab: tab), at: drag.location) }
+                    else if model.drag != nil { model.moveDrag(to: drag.location) }
                 }
                 .onEnded { _ in
-                    if let d = dragging, let p = dragPoint,
-                       let target = WorkspaceGeometry.dropTarget(at: normalized(p), frames: model.frames, size: size, canSplit: true) {
-                        model.move(d, to: target)
+                    if model.drag != nil {
+                        if model.endDrag() { Self.haptic(.drop) }
+                    } else if heldLabel == target {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82)) { menu = target }
                     }
-                    dragging = nil; dragPoint = nil
+                    heldLabel = nil
                 })
+        .accessibilityLabel(text + (shown ? "" : ", tab"))
+        .accessibilityHint(shown ? "Selects this pane for typing. Hold for options or to move it." : "Shows this tab.")
+        .accessibilityAction(named: "Options") { menu = target }
+    }
+
+    // MARK: The label menu
+
+    private func paneMenu(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
+        let full = model.localFullscreen == m.tile
+        let isWindow = tile.source != nil
+        return VStack(alignment: .leading, spacing: 0) {
+            menuRow(full ? "Exit Fullscreen" : "Fullscreen on This Device",
+                    full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
+                full ? model.exitLocalFullscreen() : model.enterLocalFullscreen(m.tile)
+            }
+            menuRow(model.effectiveFit(m.tile) == .fill ? "Show Whole Window" : "Fill Pane",
+                    model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
+                model.toggleFit(m.tile)
+            }
+            if tile.crop != nil || tile.rotation != .none || tile.fit != .auto {
+                menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
+            }
+            menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
+            menuRow("Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            menuRow("Arrange Panes", "rectangle.3.group") { model.arranging = true }
+            if let tab = m.tab {
+                menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
+            }
+            menuRow("Remove from Layout", "rectangle.badge.minus") { model.removeTile(m.tile) }
+            if isWindow {
+                Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
+                menuRow("Minimize on Mac", "minus.rectangle", enabled: inputAllowed) { model.minimizeRemoteWindow(m.tile) }
+                menuRow("Close Window on Mac…", "xmark.square", destructive: true, enabled: inputAllowed) { confirmClose = m.tile }
+                if !inputAllowed {
+                    Text("Minimize and Close need control of the Mac.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).padding(.horizontal, 14).padding(.bottom, 6)
+                }
+            }
+        }
+        .padding(.vertical, 6)
+        .frame(width: 252)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.ultraThinMaterial))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+        .environment(\.colorScheme, .dark)
+        .onAppear { Self.haptic(.lift) }
+    }
+
+    private func menuRow(_ title: LocalizedStringKey, _ symbol: String, destructive: Bool = false, enabled: Bool = true,
+                         action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { menu = nil }
+            action()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: symbol).frame(width: 20)
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .font(.subheadline)
+            .foregroundStyle(destructive ? Color.red : Color.white)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+    }
+
+    // MARK: Fullscreen on This Device
+
+    /// Exit, Fit/Fill, Reset View and Settings. Shown on entering and on any touch, then fades after 3 s
+    /// (kept visible with VoiceOver). Its buttons never reach the Mac; the rest of the screen still does.
+    @ViewBuilder
+    private var fullscreenStrip: some View {
+        if let id = model.localFullscreen, stripVisible || voiceOver {
+            HStack(spacing: 4) {
+                stripButton("Exit Fullscreen", "arrow.down.right.and.arrow.up.left") { model.exitLocalFullscreen() }
+                stripButton(model.effectiveFit(id) == .fill ? "Show Whole Window" : "Fill Pane",
+                            model.effectiveFit(id) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
+                    model.toggleFit(id)
+                }
+                stripButton("Reset View", "arrow.counterclockwise") { model.resetView(id) }
+                if let onSettings { stripButton("Settings", "gearshape") { onSettings() } }
+            }
+            .padding(5)
+            .background(Capsule().fill(.ultraThinMaterial))
+            .background(Capsule().fill(Color.black.opacity(0.3)))
+            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+            .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+            .environment(\.colorScheme, .dark)
+            .position(x: picture.midX, y: max(picture.minY, safeArea?.minY ?? 0) + 34)
+            .transition(.opacity)
+            .accessibilityIdentifier("fullscreenStrip")
+        }
+    }
+
+    private func stripButton(_ title: LocalizedStringKey, _ symbol: String, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            revealStrip()
+        } label: {
+            Image(systemName: symbol).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 40, height: 36).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(title))
+    }
+
+    private func revealStrip() {
+        withAnimation(.easeOut(duration: 0.2)) { stripVisible = true }
+        stripHideTask?.cancel()
+        stripHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.4)) { stripVisible = false }
+        }
+    }
+
+    // MARK: Haptics
+
+    private enum Haptic { case lift, selection, drop }
+
+    private static func haptic(_ h: Haptic) {
+        #if canImport(UIKit)
+        switch h {
+        case .lift: UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        case .selection: UISelectionFeedbackGenerator().selectionChanged()
+        case .drop: UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7)
+        }
+        #endif
     }
 
     @ViewBuilder

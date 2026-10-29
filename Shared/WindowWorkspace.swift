@@ -860,12 +860,14 @@ struct WorkspaceHinge: Equatable, Codable, Sendable {
 }
 
 enum WorkspaceSizeClass: String, Codable, Sendable {
-    /// Phones and folded covers: up to 3 tiles.
+    /// Phones and folded covers.
     case compact
-    /// Tablets, unfolded foldables, large Mac windows: up to 9 tiles.
+    /// Tablets, unfolded foldables, large Mac windows.
     case expanded
 
-    var tileLimit: Int { self == .compact ? 3 : 9 }
+    /// Up to 9 panes everywhere (2x2 and 3x3 grids on phones too); the minimum pane
+    /// size decides how many actually fit the space.
+    var tileLimit: Int { 9 }
 
     /// From the usable window size in points/dp (not the screen, not the model).
     static func of(_ size: WorkspaceSize) -> WorkspaceSizeClass {
