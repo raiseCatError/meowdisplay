@@ -303,7 +303,10 @@ struct ReceiverScreen: View {
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: controlStore.moveViewActive,
                                    viewportResetGeneration: controlStore.viewportResetGeneration,
-                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
+                                   // Window mode: the picture is every tile at once, so zooming it would
+                                   // pull the windows out from under their tiles. Tiles zoom on their own.
+                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation
+                                       && !model.workspace.windowMode,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -2654,6 +2657,10 @@ struct VideoLayerView: UIViewRepresentable {
             if !allowed {
                 navigationTouches.removeAll()
                 navigationSession.end()
+                if !manualZoom.isIdentity {
+                    manualZoom = .identity
+                    animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+                }
             }
             updateInputGate()
         }

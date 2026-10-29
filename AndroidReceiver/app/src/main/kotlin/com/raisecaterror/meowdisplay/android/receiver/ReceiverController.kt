@@ -236,7 +236,9 @@ class ReceiverController(
             is SessionEvent.Control -> onControl(event)
             else -> Unit
         }
+        val wasWindowMode = workspace?.ui?.value?.windowMode == true
         workspace?.onSessionEvent(event)
+        if ((workspace?.ui?.value?.windowMode == true) != wasWindowMode) refreshConfig()
         if (event is SessionEvent.MacFeatures || event is SessionEvent.Disconnected) {
             surface.threeFingerHoldEnabled = event is SessionEvent.MacFeatures && "window" in event.features && !screenReaderRunning
         }
@@ -294,7 +296,9 @@ class ReceiverController(
                 trackpadSensitivity = p.trackpadSensitivity,
                 smartTouchEnabled = p.smartTouchEnabled,
                 touchStyle = p.touchStyle,
-                localNavigationAllowed = p.allowLocalViewNavigation,
+                // Window mode: the picture is every tile at once; zooming it would pull
+                // windows out from under their tiles. Tiles zoom on their own.
+                localNavigationAllowed = p.allowLocalViewNavigation && workspace?.ui?.value?.windowMode != true,
                 pinchTarget = p.pinchTarget,
                 // A SurfaceView can't rotate the picture, so the view never rotates on Android
                 // (App rotation still sends its key chords). See the parity notes.
