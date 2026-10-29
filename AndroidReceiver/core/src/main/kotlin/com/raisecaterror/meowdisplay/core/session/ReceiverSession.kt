@@ -60,7 +60,7 @@ sealed interface SessionEvent {
     data class DisplayModeConfirmed(val mode: DisplayMode) : SessionEvent
     /** What the Mac offers beyond its protocol version (welcome `features`), e.g. "window". */
     data class MacFeatures(val features: Set<String>) : SessionEvent
-    data class Cursor(val x: Double, val y: Double, val visible: Boolean) : SessionEvent
+    data class Cursor(val x: Double, val y: Double, val visible: Boolean, val pane: CursorPane? = null) : SessionEvent
     /** The Mac's focused text caret, normalized to the streamed display (`visible` false: none). */
     data class TextCaret(val x: Double, val y: Double, val width: Double, val height: Double, val visible: Boolean) : SessionEvent
     data class UpdateRequired(val message: String?, val storeUrl: String?) : SessionEvent
@@ -635,7 +635,7 @@ class ReceiverSession(
                     if (sequence <= lastCursorSequence) return
                     lastCursorSequence = sequence
                 }
-                emit(SessionEvent.Cursor(message.x, message.y, message.visible))
+                emit(SessionEvent.Cursor(message.x, message.y, message.visible, message.pane))
             }
             is SenderMessage.TextCaret -> {
                 // Like the cursor: nothing before admission, and a reordered frame is dropped.

@@ -155,6 +155,10 @@ final class ReceiverUISink: Sendable {
         target?.applyTextCaretUpdate(rect)
     }
 
+    func publishCursorPaneSize(_ size: CursorPaneSize?) {
+        target?.applyCursorPaneSizeUpdate(size)
+    }
+
     func publishCursorSprite(image: CGImage, anchor: CGPoint, normSize: CGSize) {
         target?.applyCursorSpriteUpdate(image: image, anchor: anchor, normSize: normSize)
     }
@@ -253,5 +257,26 @@ final class ReceiverUISink: Sendable {
 
     func publishDisplayState(_ state: DisplayState) {
         target?.applyDisplayStateUpdate(state)
+    }
+}
+
+/// Window mode: the cursor sprite's size where it is now (normalized to the picture: its size
+/// in Mac points times the pane's scale) and that pane's rotation in degrees.
+struct CursorPaneSize: Equatable, Sendable {
+    var normSize: CGSize
+    var rotation: Int
+}
+
+/// Window mode's cursor size bounds (view points, longest side): visible over a window shown
+/// small in a narrow pane, never huge over one zoomed 8x. The shape is always kept.
+enum PaneCursorSizing {
+    static let minLongestSide: CGFloat = 16
+    static let maxLongestSide: CGFloat = 44
+
+    static func bounded(_ size: CGSize) -> CGSize {
+        let longest = max(size.width, size.height)
+        guard longest > 0, longest.isFinite else { return size }
+        let f = min(max(longest, minLongestSide), maxLongestSide) / longest
+        return CGSize(width: size.width * f, height: size.height * f)
     }
 }

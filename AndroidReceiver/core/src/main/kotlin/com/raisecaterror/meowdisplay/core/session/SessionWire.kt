@@ -145,7 +145,8 @@ sealed interface SenderMessage {
     data class CodecState(val codec: StreamCodec) : SenderMessage
     data class DisplayPaused(val paused: Boolean) : SenderMessage
     data class DisplayModeState(val mode: DisplayMode) : SenderMessage
-    data class Cursor(val x: Double, val y: Double, val visible: Boolean, val sequence: Long?) : SenderMessage
+    /** [pane]: Window mode's scale and rotation of the pane under the cursor (PROTOCOL.md 6.10); null otherwise. */
+    data class Cursor(val x: Double, val y: Double, val visible: Boolean, val sequence: Long?, val pane: CursorPane? = null) : SenderMessage
 
     /**
      * The Mac's focused text caret as a rectangle normalized to the streamed display, top-left
@@ -220,6 +221,7 @@ sealed interface SenderMessage {
                     y = obj.number("y") ?: 0.0,
                     visible = obj.int("v") == 1,
                     sequence = obj.long("s")?.takeIf { it >= 0 },
+                    pane = CursorPane.parse(obj.number("kx"), obj.number("ky"), obj.int("r")),
                 )
                 "textCaret" -> {
                     val sequence = obj.long("s")?.takeIf { it >= 0 }
@@ -267,3 +269,17 @@ internal fun JsonObject.long(key: String): Long? {
 }
 
 internal fun JsonObject.array(key: String): JsonArray? = get(key) as? JsonArray
+
+/**
+ * Window mode: how big one Mac point is where the cursor is ([kx]/[ky], normalized to the canvas
+ * width and height: the pane's Fit/Fill and zoom) and the pane's rotation in degrees. The cursor
+ * sprite is sized from its size in Mac points times these, so it keeps its shape.
+ */
+data class CursorPane(val kx: Double, val ky: Double, val rotation: Int) {
+    companion object {
+        fun parse(kx: Double?, ky: Double?, r: Int?): CursorPane? {
+            if (kx == null || ky == null || !(kx > 0 && kx < 1) || !(ky > 0 && ky < 1)) return null
+            return CursorPane(kx, ky, (((r ?: 0) % 360) + 360) % 360)
+        }
+    }
+}

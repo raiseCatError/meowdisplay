@@ -1,5 +1,6 @@
 package com.raisecaterror.meowdisplay.android.receiver
 
+import com.raisecaterror.meowdisplay.core.session.CursorPane
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Handler
@@ -68,10 +69,18 @@ data class ReceiverViewState(
     val transformAnimated: Boolean = false,
 )
 
-data class CursorState(val x: Double = 0.5, val y: Double = 0.5, val visible: Boolean = false, val sprite: CursorSprite? = null)
+data class CursorState(
+    val x: Double = 0.5, val y: Double = 0.5, val visible: Boolean = false, val sprite: CursorSprite? = null,
+    /** Window mode: the pane under the cursor sizes and turns the sprite. */
+    val pane: CursorPane? = null,
+)
 
 /** `cursorImg`: the sprite and its size normalized to the display, anchor normalized within itself. */
-data class CursorSprite(val bitmap: Bitmap, val normalizedWidth: Double, val normalizedHeight: Double, val anchorX: Double, val anchorY: Double)
+data class CursorSprite(
+    val bitmap: Bitmap, val normalizedWidth: Double, val normalizedHeight: Double, val anchorX: Double, val anchorY: Double,
+    /** Its size in Mac points (newer Macs), for Window mode's pane-scaled cursor. */
+    val pointWidth: Double? = null, val pointHeight: Double? = null,
+)
 
 sealed interface ReceiverHaptic {
     data class Control(val event: ControlHapticEvent) : ReceiverHaptic
@@ -245,7 +254,9 @@ class ReceiverController(
                 update { it.copy(paused = event.paused) }
                 refreshConfig()
             }
-            is SessionEvent.Cursor -> update { it.copy(cursor = it.cursor.copy(x = event.x, y = event.y, visible = event.visible)) }
+            is SessionEvent.Cursor -> update {
+                it.copy(cursor = it.cursor.copy(x = event.x, y = event.y, visible = event.visible, pane = if (event.visible) event.pane else it.cursor.pane))
+            }
             is SessionEvent.TextCaret -> followCaret(if (event.visible) CGRect(event.x, event.y, event.width, event.height) else null)
             is SessionEvent.Control -> onControl(event)
             else -> Unit
@@ -291,7 +302,10 @@ class ReceiverController(
         } ?: return null
         val nw = num("nw")?.takeIf { it > 0 && it <= 1 } ?: return null
         val nh = num("nh")?.takeIf { it > 0 && it <= 1 } ?: return null
-        return CursorSprite(bitmap, nw, nh, (num("ax") ?: 0.0).coerceIn(0.0, 1.0), (num("ay") ?: 0.0).coerceIn(0.0, 1.0))
+        val pw = num("pw")?.takeIf { it > 0 && it < 1024 }
+        val ph = num("ph")?.takeIf { it > 0 && it < 1024 }
+        return CursorSprite(bitmap, nw, nh, (num("ax") ?: 0.0).coerceIn(0.0, 1.0), (num("ay") ?: 0.0).coerceIn(0.0, 1.0),
+            pointWidth = if (pw != null && ph != null) pw else null, pointHeight = if (pw != null && ph != null) ph else null)
     }
 
     // MARK: - Configuration and geometry

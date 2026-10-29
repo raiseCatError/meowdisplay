@@ -1220,6 +1220,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.canvasPoint(forGlobal: g) }
     }
 
+    func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
+        inputLock.withLock { targeting.cursorPlacement(forGlobal: g) }
+    }
+
     /// The focused text caret (global points) in normalized canvas
     /// coordinates, when it is in the window being typed into.
     func caretCanvasRect(forGlobal g: CGRect) -> CGRect? {

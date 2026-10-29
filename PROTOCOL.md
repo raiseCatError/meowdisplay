@@ -956,7 +956,9 @@ a PNG (kept under 24000 bytes pre-encoding, see section 4); `nw`, `nh` are
 the sprite's width/height **normalized to the display size**, so the
 receiver can scale it without knowing the sender's HiDPI factor; `ax`, `ay`
 are the hotspot **normalized within the sprite** (0..1 of its own size).
-Sent when the sprite changes and re-sent after reconnects.
+Newer Macs add `pw`, `ph`: the sprite's size in Mac points (Window mode
+sizes it with the pane's scale, section 6.10). Sent when the sprite changes
+and re-sent after reconnects.
 
 ### 6.3 Cursor side channel (UDP) — removed
 
@@ -1407,7 +1409,14 @@ isn't active activates its window first, then delivers that same press
 once. Keyboard input goes only to the active tile, and only while the Mac
 really has that window's app in front (`hostFocus`). Changing a tile's
 window releases held buttons and keys. `cursor` positions are in canvas
-coordinates (hidden when the Mac pointer is over no tile's window).
+coordinates (hidden when the Mac pointer is over no tile's window). A
+visible Window-mode `cursor` also carries the pane under it: `kx`, `ky`
+(one Mac point there, normalized to the canvas width and height — the
+pane's Fit/Fill and zoom) and `r` (the pane's rotation in degrees). The
+canvas isn't the Mac display's shape, so a receiver sizes the sprite as
+`cursorImg.pw × kx` by `cursorImg.ph × ky` of the picture and turns it by
+`r` about its hotspot, instead of using `nw`/`nh` (which would stretch it).
+Receivers may bound the drawn size so it stays visible; its shape is kept.
 
 ### 6.11 Text caret (`keyboardState` / `textCaret`)
 

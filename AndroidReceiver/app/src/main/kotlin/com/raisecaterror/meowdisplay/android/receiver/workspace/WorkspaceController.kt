@@ -61,6 +61,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WindowThumbnail
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceSearch
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceState
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
+import com.raisecaterror.meowdisplay.core.workspace.TileStatus
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceBackdrop
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceViewEcho
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -270,6 +271,11 @@ class WorkspaceController(
                     val layout = state.value.layout
                     val duplicates = parsed.rejected.filterValues { it == "duplicateWindow" }.keys.filter { layout.tiles[it]?.source != null }
                     if (duplicates.isNotEmpty()) edit { l -> duplicates.fold(l) { acc, id -> acc.replacingSource(id, null) } }
+                    // A live pane gets its whole-source still before the first pinch, so zooming out or
+                    // panning never shows an empty area while the fingers move (bounded: once a second).
+                    if (zoomGesture == null) {
+                        for (t in parsed.tiles) if (t.state == TileStatus.Live && backdrop(t.id) == null) requestBackdrop(t.id)
+                    }
                 }
                 WorkspaceWire.THUMBNAIL -> WindowThumbnail.parse(event.body)?.let(::onThumbnail)
                 WorkspaceWire.WORKSPACE_VIEW -> onViewEcho(WorkspaceViewEcho.parse(event.body))
@@ -692,6 +698,7 @@ class WorkspaceController(
 
     private data class ZoomGesture(val tile: String, val start: WPaneZoom?, val rect: WRect, val drawn: WRect?)
     private var zoomGesture: ZoomGesture? = null
+    private var zoomEndedAt = 0L
 
     /**
      * One pane's instant local zoom ([gesture] changes with each new gesture): the picture it showed
@@ -766,6 +773,7 @@ class WorkspaceController(
             main.removeCallbacks(throttledSend); throttledSendPending = false
             sendNow()
             if (zoom != null) requestBackdrop(g.tile, refresh = true)   // fresh for the next gesture
+            zoomEndedAt = SystemClock.elapsedRealtime()
             main.postDelayed(zoomPreviewDeadline, 1_500)
             refreshZoomPreview()
         }
@@ -779,6 +787,9 @@ class WorkspaceController(
         val next = cur.copy(backdrop = backdrop(cur.preview.tile) ?: cur.backdrop, composed = composed)
         if (next != cur) zoomPreviewState.value = next
         if (composed) {
+            // Sharp catch-up after the fingers lift (the gesture itself is drawn locally at once).
+            if (zoomEndedAt > 0) Log.i(TAG, "zoom sharp after ${SystemClock.elapsedRealtime() - zoomEndedAt} ms backdrop=${next.backdrop != null}")
+            zoomEndedAt = 0
             main.removeCallbacks(zoomPreviewDeadline)
             main.removeCallbacks(clearZoomPreview)
             main.postDelayed(clearZoomPreview, 70)
@@ -841,6 +852,9 @@ class WorkspaceController(
         val wid = state.value.layout.tiles[b.tile]?.source?.windowID ?: return
         if (b.windowID != wid && b.windowID != 0L) return
         val image = decodeBounded(b.jpegBase64, MAX_BACKDROP_SIDE)?.asImageBitmap() ?: return
+        backdropAskedAt[b.tile]?.let { asked ->
+            Log.i(TAG, "backdrop ${b.tile} ${image.width}x${image.height} after ${SystemClock.elapsedRealtime() - asked} ms${if (zoomGesture?.tile == b.tile) " (mid-gesture)" else ""}")
+        }
         backdrops[b.tile] = Backdrop(wid, image, b.stale)
         if (zoomPreviewState.value?.preview?.tile == b.tile) {
             if (zoomGesture != null) zoomPreviewState.update { it?.copy(backdrop = image) } else refreshZoomPreview()

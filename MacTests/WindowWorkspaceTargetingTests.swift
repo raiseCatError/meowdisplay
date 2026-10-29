@@ -297,6 +297,33 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         }
     }
 
+    /// The cursor's size in a pane comes from that pane's own scale: equal in x and y in canvas
+    /// pixels whatever the canvas shape (the old display-normalized size stretched it), and it
+    /// follows Fit, zoom and rotation.
+    func testCursorPlacementCarriesThePanesUniformScale() {
+        var t = WorkspaceInputTargeting()
+        t.canvas = CGSize(width: 1179, height: 2556)   // a portrait phone: nothing like the Mac display
+        t.windowFrames = [10: CGRect(x: 0, y: 0, width: 1500, height: 1000)]
+        func place(zoom: Double, rotation: WorkspaceRotation = .none) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int) {
+            _ = t.update(assignments: [WorkspaceTileAssignment(
+                tileID: "a", rect: .unit, windowID: 10, windowGeneration: 1, pid: 1, bundleID: "a", follow: .window,
+                rotation: rotation, fit: .fit, zoom: WorkspacePaneZoom(scale: zoom, centerX: 0.5, centerY: 0.5),
+                assignmentGeneration: UInt64(zoom * 100) + UInt64(rotation.rawValue))])
+            return try! XCTUnwrap(t.cursorPlacement(forGlobal: CGPoint(x: 750, y: 500)))
+        }
+        let one = place(zoom: 1)
+        XCTAssertEqual(one.kx * 1179, one.ky * 2556, accuracy: 1e-9, "uniform in canvas pixels: the shape is kept")
+        XCTAssertEqual(one.kx * 1179, 1179.0 / 1500, accuracy: 1e-9, "Fit: the window's width fills the pane")
+        XCTAssertEqual(one.x, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(one.y, 0.5, accuracy: 1e-9)
+        let three = place(zoom: 3)
+        XCTAssertEqual(three.kx / one.kx, 3, accuracy: 1e-9, "zoom scales the cursor with the picture")
+        let turned = place(zoom: 1, rotation: .quarter)
+        XCTAssertEqual(turned.rotation, 90)
+        XCTAssertEqual(turned.kx * 1179, 1179.0 / 1000, accuracy: 1e-9, "turned: the window's height now spans the width")
+        XCTAssertNil(t.cursorPlacement(forGlobal: CGPoint(x: 2000, y: 500)), "off the window: hidden")
+    }
+
     func testARefusedPressLeavesNothingBound() {
         var t = twoTiles()
         _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))

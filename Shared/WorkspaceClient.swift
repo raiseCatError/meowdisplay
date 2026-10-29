@@ -461,6 +461,9 @@ final class WorkspaceModel: ObservableObject {
         case .backdrop(let tile, let window, let data, let stale):
             guard layout.tiles[tile]?.source?.windowID == window || window == 0,
                   let image = WorkspaceImageDecoder.image(data, maxSide: 1600) else { return }
+            if let asked = backdropAskedAt[tile] {
+                Log.info("workspace: backdrop \(tile) \(image.width)x\(image.height) after \(Int(Date().timeIntervalSince(asked) * 1000)) ms\(zoomGesture?.tile == tile ? " (mid-gesture)" : "")")
+            }
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
         case .mode(let window):
             windowMode = window
@@ -470,6 +473,11 @@ final class WorkspaceModel: ObservableObject {
             onCatalog(c)
         case .state(let s):
             remote = s
+            // A live pane gets its whole-source still before the first pinch, so zooming out or
+            // panning never shows an empty area while the fingers move (bounded: once a second).
+            for item in s.tiles where item.status == .live && backdrop(item.id) == nil && zoomGesture == nil {
+                requestBackdrop(item.id)
+            }
             // The Mac refused a tile because its window already shows in another one
             // (e.g. a layout saved before that rule): empty the tile instead of leaving
             // it labelled with a window it will never show.

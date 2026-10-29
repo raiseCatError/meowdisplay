@@ -304,11 +304,20 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     /// The Mac's cursor in canvas coordinates (normalized), when it is over a
     /// tile's window; nil hides the remote cursor indicator.
     func canvasPoint(forGlobal g: CGPoint) -> WorkspacePoint? {
+        cursorPlacement(forGlobal: g).map { WorkspacePoint(x: $0.x, y: $0.y) }
+    }
+
+    /// The cursor over a tile: where it is (normalized canvas), how big one Mac point is there
+    /// (`kx`/`ky`: normalized to the canvas width and height — the pane's own scale with Fit,
+    /// Fill and zoom) and the pane's rotation in degrees. The receiver sizes and turns its
+    /// cursor sprite from these, so it keeps its shape in a pane of any shape.
+    func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
+        guard canvas.width > 0, canvas.height > 0 else { return nil }
         for a in assignments {
             guard let frame = windowFrames[a.windowID], frame.contains(g), let t = transform(for: a) else { continue }
             let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
             guard let visible = t.visibleRect, visible.contains(q) else { continue }
-            return WorkspacePoint(x: q.x / canvas.width, y: q.y / canvas.height)
+            return (q.x / canvas.width, q.y / canvas.height, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
         }
         return nil
     }

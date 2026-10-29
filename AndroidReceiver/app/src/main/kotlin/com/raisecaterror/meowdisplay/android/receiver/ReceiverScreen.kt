@@ -268,24 +268,42 @@ fun ReceiverScreen(
 
         // The streamed cursor, at the Mac's position under the current zoom.
         val cursor = state.cursor
+        var mouseHovering by remember { mutableStateOf(false) }
         val sprite = cursor.sprite
-        // In Window mode the workspace pointer is the local one; the Mac's cursor isn't drawn twice.
+        // Window mode: the Mac's cursor is sized and turned by the pane under it (the canvas isn't the
+        // Mac display's shape, so the sprite's display-normalized size would stretch it). While a
+        // hardware mouse hovers, its own pointer is the one shown, never both.
         val windowMode = workspace?.ui?.collectAsState()?.value?.windowMode == true
-        if (cursor.visible && sprite != null && transform.isValid && !windowMode) {
+        val pane = cursor.pane
+        val paneSized = windowMode && pane != null && sprite?.pointWidth != null && sprite.pointHeight != null && !mouseHovering
+        if (cursor.visible && sprite != null && transform.isValid && (!windowMode || paneSized)) {
             val image = remember(sprite) { sprite.bitmap.asImageBitmap() }
             Canvas(Modifier.fillMaxSize()) {
                 val crop = shown.remoteCrop
-                val w = sprite.normalizedWidth * shownFrame.width / crop.width
-                val h = sprite.normalizedHeight * shownFrame.height / crop.height
+                var w = sprite.normalizedWidth * shownFrame.width / crop.width
+                var h = sprite.normalizedHeight * shownFrame.height / crop.height
+                var turn = 0f
+                if (paneSized && pane != null) {
+                    w = sprite.pointWidth!! * pane.kx * shownFrame.width / crop.width
+                    h = sprite.pointHeight!! * pane.ky * shownFrame.height / crop.height
+                    val longest = maxOf(w, h)
+                    if (longest > 0) {
+                        val f = longest.coerceIn(PANE_CURSOR_MIN_DP, PANE_CURSOR_MAX_DP) / longest
+                        w *= f; h *= f
+                    }
+                    turn = pane.rotation.toFloat()
+                }
                 val at = shown.viewPoint(com.raisecaterror.meowdisplay.core.controls.CGPoint(cursor.x, cursor.y))
                 val px = density.density
-                drawImage(
-                    image,
-                    srcOffset = IntOffset.Zero,
-                    srcSize = IntSize(image.width, image.height),
-                    dstOffset = IntOffset(((at.x - sprite.anchorX * w) * px).roundToInt(), ((at.y - sprite.anchorY * h) * px).roundToInt()),
-                    dstSize = IntSize((w * px).roundToInt().coerceAtLeast(1), (h * px).roundToInt().coerceAtLeast(1)),
-                )
+                rotate(turn, pivot = Offset((at.x * px).toFloat(), (at.y * px).toFloat())) {
+                    drawImage(
+                        image,
+                        srcOffset = IntOffset.Zero,
+                        srcSize = IntSize(image.width, image.height),
+                        dstOffset = IntOffset(((at.x - sprite.anchorX * w) * px).roundToInt(), ((at.y - sprite.anchorY * h) * px).roundToInt()),
+                        dstSize = IntSize((w * px).roundToInt().coerceAtLeast(1), (h * px).roundToInt().coerceAtLeast(1)),
+                    )
+                }
             }
         }
 
@@ -299,7 +317,7 @@ fun ReceiverScreen(
                     controlAsCommand = { controller.store.current.controlKeyAsCommand },
                 ).also { view ->
                     controller.inputView = view
-                    view.onHardwarePointer = { p -> workspace?.hover(p?.x, p?.y) }
+                    view.onHardwarePointer = { p -> mouseHovering = p != null; workspace?.hover(p?.x, p?.y) }
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -572,3 +590,7 @@ private fun hapticConstant(haptic: ReceiverHaptic): Int? {
         ReceiverHaptic.RotationSnap -> HapticFeedbackConstants.CLOCK_TICK
     }
 }
+
+/** Window mode's cursor bounds (dp, longest side): visible in a narrow pane, never huge when zoomed 8x. */
+private const val PANE_CURSOR_MIN_DP = 16.0
+private const val PANE_CURSOR_MAX_DP = 44.0

@@ -1344,6 +1344,10 @@ final class StreamReceiver: ObservableObject {
     // and normalized coordinates use a TOP-LEFT origin (video space).
     var onCursor: ((_ x: Double, _ y: Double, _ visible: Bool) -> Void)?
     var onCursorImage: ((_ image: CGImage, _ anchor: CGPoint, _ normSize: CGSize) -> Void)?
+    /// Window mode: the cursor sprite's size in the pane under it (normalized to the picture) and
+    /// that pane's rotation; nil in Mirror/Extend, where the sprite's own `normSize` applies.
+    var onCursorPaneSize: ((CursorPaneSize?) -> Void)?
+    private(set) var cursorPaneSize: CursorPaneSize?
     var onDisplayStateChange: ((DisplayState) -> Void)?
     // The video view attaches only once frames are on screen — usually AFTER
     // the connect-time sprite already arrived (the sender re-sends it only
@@ -2544,6 +2548,7 @@ final class StreamReceiver: ObservableObject {
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
         lastTextCaretSeq = 0
+        cursorPointSize = nil; cursorPaneScale = nil; publishedCursorPaneSize = nil
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
@@ -2735,6 +2740,12 @@ final class StreamReceiver: ObservableObject {
             }
             let anchor = CGPoint(x: obj["ax"] as? Double ?? 0, y: obj["ay"] as? Double ?? 0)
             let normSize = CGSize(width: nw, height: nh)
+            if let pw = obj["pw"] as? Double, let ph = obj["ph"] as? Double, pw > 0, ph > 0, pw < 1024, ph < 1024 {
+                cursorPointSize = CGSize(width: pw, height: ph)
+            } else {
+                cursorPointSize = nil
+            }
+            publishCursorPaneSizeIfChanged()
             #if DEBUG
             Log.info("cursorTrace: cursorImg received bytes=\(png.count) nw=\(nw) nh=\(nh) anchor=\(anchor)")
             #endif
@@ -2912,6 +2923,23 @@ final class StreamReceiver: ObservableObject {
     /// channel switch a TCP frame queued behind video would otherwise land
     /// after (and override) a newer UDP position. Old senders put no `s` on
     /// TCP frames; those apply unconditionally, as before.
+    /// `queue` only. Window mode sizes the cursor sprite from its size in Mac points and the
+    /// scale of the pane under it, never from the Mac display's shape (the canvas has another).
+    private var cursorPointSize: CGSize?
+    private var cursorPaneScale: (kx: Double, ky: Double, rotation: Int)?
+    private var publishedCursorPaneSize: CursorPaneSize?
+
+    private func publishCursorPaneSizeIfChanged() {
+        var next: CursorPaneSize?
+        if let s = cursorPaneScale, let p = cursorPointSize {
+            next = CursorPaneSize(normSize: CGSize(width: p.width * s.kx, height: p.height * s.ky), rotation: s.rotation)
+        }
+        guard next != publishedCursorPaneSize else { return }
+        publishedCursorPaneSize = next
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishCursorPaneSize(next) }
+    }
+
     private func applyCursor(_ obj: [String: Any]) {
         if let seq = (obj["s"] as? NSNumber)?.uint64Value {
             guard seq > lastCursorSeq else { return }
@@ -2920,6 +2948,15 @@ final class StreamReceiver: ObservableObject {
         let visible = (obj["v"] as? Int ?? 0) == 1
         let x = obj["x"] as? Double ?? 0
         let y = obj["y"] as? Double ?? 0
+        if visible {
+            // Window mode: the pane's scale and rotation under the cursor (absent in Mirror/Extend).
+            if let kx = obj["kx"] as? Double, let ky = obj["ky"] as? Double, kx > 0, ky > 0, kx < 1, ky < 1 {
+                cursorPaneScale = (kx, ky, (obj["r"] as? Int).map { (($0 % 360) + 360) % 360 } ?? 0)
+            } else {
+                cursorPaneScale = nil
+            }
+            publishCursorPaneSizeIfChanged()
+        }
         cursorUpdatesThisWindow += 1
         #if DEBUG
         logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
@@ -5799,6 +5836,8 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorReset() {
         cursorState = (0.5, 0.5, false)
         cursorSprite = nil
+        cursorPaneSize = nil
+        onCursorPaneSize?(nil)
         onCursor?(0.5, 0.5, false)
     }
 
@@ -5811,6 +5850,11 @@ final class StreamReceiver: ObservableObject {
         guard rect != textCaret else { return }
         textCaret = rect
         onTextCaret?(rect)
+    }
+
+    @MainActor func applyCursorPaneSizeUpdate(_ size: CursorPaneSize?) {
+        cursorPaneSize = size
+        onCursorPaneSize?(size)
     }
 
     @MainActor func applyCursorSpriteUpdate(image: CGImage, anchor: CGPoint, normSize: CGSize) {

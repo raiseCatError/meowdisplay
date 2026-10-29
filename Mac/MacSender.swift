@@ -2755,6 +2755,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             _ = updateCaptureState { $0.captureStarted() }
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
             startCursorEcho()
             sendDisplayState(captureStateSnapshot().receiverDisplayState)
             sendDisplayModeState()
@@ -2860,6 +2861,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         audioEnabled = plan.capturesAudio
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
         startCursorEcho()
         // A capture that came back through any path (recovery, rotation,
         // identity fallback) earns the full recovery budget again — without
@@ -4741,10 +4743,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if mode == .window {
             // One workspace pointer: the Mac cursor in canvas coordinates
             // while it is over a tile's window, hidden elsewhere.
-            if let p = workspaceEngine?.cursorCanvasPoint(forGlobal: loc) {
-                if !lastCursorSent.visible || abs(p.x - lastCursorSent.x) > 0.0004 || abs(p.y - lastCursorSent.y) > 0.0004 {
+            if let p = workspaceEngine?.cursorPlacement(forGlobal: loc) {
+                // With the pane's scale and rotation: the canvas isn't the Mac display's shape, so
+                // the sprite's display-normalized size would stretch it (PROTOCOL.md 6.10).
+                let scaleChanged = lastCursorPane.map { abs($0.kx - p.kx) > $0.kx * 0.01 || $0.rotation != p.rotation } ?? true
+                if !lastCursorSent.visible || abs(p.x - lastCursorSent.x) > 0.0004 || abs(p.y - lastCursorSent.y) > 0.0004 || scaleChanged {
                     lastCursorSent = (p.x, p.y, true)
-                    sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1", p.x, p.y))
+                    lastCursorPane = (p.kx, p.rotation)
+                    sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
+                                      p.x, p.y, p.kx, p.ky, p.rotation))
                 }
             } else if lastCursorSent.visible {
                 lastCursorSent.visible = false
@@ -4792,6 +4799,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Cursor position over the authenticated main transport. The sequence
     /// lets the receiver drop reordered frames (e.g. around a path switch).
+    /// Window mode: the pane scale and rotation last sent with the cursor.
+    private var lastCursorPane: (kx: Double, rotation: Int)?
+
     private func sendCursor(_ fields: String) {
         cursorSeq &+= 1
         sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
@@ -4869,9 +4879,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Normalized against the display so the phone can size/anchor the
         // sprite without knowing capture scale or HiDPI factor.
         let msg = String(format:
-            "{\"type\":\"cursorImg\",\"nw\":%.5f,\"nh\":%.5f,\"ax\":%.3f,\"ay\":%.3f,\"png\":\"%@\"}",
+            "{\"type\":\"cursorImg\",\"nw\":%.5f,\"nh\":%.5f,\"pw\":%.2f,\"ph\":%.2f,\"ax\":%.3f,\"ay\":%.3f,\"png\":\"%@\"}",
             size.width / displaySize.width,
             size.height / displaySize.height,
+            size.width, size.height,   // points: Window mode sizes the sprite with the pane's scale
             size.width > 0 ? hot.x / size.width : 0,
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
@@ -5691,6 +5702,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if audioEnabled { beginAudioGeneration() }
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
             sendAllowInputState()
             if deferredRotationRebuild, let info = lastHello {
                 deferredRotationRebuild = false
@@ -6878,6 +6890,7 @@ extension MacSender: MacSenderTransportDelegate {
         // the fresh peer — the cursor analogue of forcing a keyframe.
         lastCursorPNGHash = 0
         lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
         lastReceived = Date()  // fresh grace period for the watchdog
         lastSendCompletionAt = Date()   // fresh grace period for the outbound-stall watchdog
         sendStallReported = false

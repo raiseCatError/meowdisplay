@@ -2207,6 +2207,9 @@ struct VideoLayerView: UIViewRepresentable {
         receiver.onCursorImage = { [weak view] image, anchor, normSize in
             view?.setCursorSprite(image, anchor: anchor, normSize: normSize)
         }
+        receiver.onCursorPaneSize = { [weak view] size in
+            view?.setCursorPaneSize(size)
+        }
         // The Mac's focused text caret steers Zoom While Typing while the
         // keyboard is open. Not replayed: a new view starts with the
         // keyboard closed, and the Mac sends the caret as it opens.
@@ -2219,6 +2222,7 @@ struct VideoLayerView: UIViewRepresentable {
         if let sprite = receiver.cursorSprite {
             view.setCursorSprite(sprite.image, anchor: sprite.anchor, normSize: sprite.normSize)
         }
+        view.setCursorPaneSize(receiver.cursorPaneSize)
         let state = receiver.cursorState
         view.moveCursor(x: state.x, y: state.y, visible: state.visible)
         return view
@@ -2424,6 +2428,8 @@ struct VideoLayerView: UIViewRepresentable {
             return layer
         }()
         private var cursorNormSize = CGSize.zero
+        /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
+        private var cursorPaneSize: CursorPaneSize?
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
 
@@ -2843,6 +2849,9 @@ struct VideoLayerView: UIViewRepresentable {
                 guard let self, self.zoomPreviewClip != nil else { return }
                 let live = self.workspaceZoomPreview?()
                 if live?.composed ?? true || CACurrentMediaTime() > deadline {
+                    // Sharp catch-up after the fingers lift (the gesture itself is drawn locally at once).
+                    let waited = Int((CACurrentMediaTime() - (deadline - 1.5)) * 1000)
+                    Log.info("workspace: zoom sharp after \(waited) ms\(live?.composed ?? true ? "" : " (timed out)") backdrop=\(live?.backdrop != nil)")
                     let settle = DispatchWorkItem { [weak self] in self?.removeZoomPreview(animated: true) }
                     self.zoomPreviewFade = settle
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.07, execute: settle)
@@ -3370,16 +3379,36 @@ struct VideoLayerView: UIViewRepresentable {
         /// (correctly) landing outside the clipped view when the Mac
         /// cursor itself is currently outside the visible crop.
         private func updateCursorLayout() {
-            guard currentTransform.isValid, cursorNormSize != .zero else { return }
+            guard currentTransform.isValid else { return }
             let displayedRect = currentTransform.displayedRect
             let crop = currentTransform.remoteCrop
             let scaleX = displayedRect.width / crop.width
             let scaleY = displayedRect.height / crop.height
-            cursorLayer.bounds = CGRect(x: 0, y: 0,
-                                        width: cursorNormSize.width * scaleX,
-                                        height: cursorNormSize.height * scaleY)
+            var size: CGSize
+            var paneTurn: CGFloat = 0
+            if let pane = cursorPaneSize {
+                // Window mode: sized by the pane under it (its Fit/Fill and zoom), so it keeps its
+                // shape in a pane of any shape; bounded so it stays visible in a small pane and
+                // doesn't swamp a zoomed one. Turned with the pane.
+                size = CGSize(width: pane.normSize.width * scaleX, height: pane.normSize.height * scaleY)
+                size = PaneCursorSizing.bounded(size)
+                paneTurn = CGFloat(pane.rotation) * .pi / 180
+            } else {
+                guard cursorNormSize != .zero else { return }
+                size = CGSize(width: cursorNormSize.width * scaleX, height: cursorNormSize.height * scaleY)
+            }
+            cursorLayer.bounds = CGRect(origin: .zero, size: size)
             cursorLayer.position = currentTransform.viewPoint(forRemote: cursorNorm)
-            cursorLayer.setAffineTransform(CGAffineTransform(rotationAngle: currentTransform.rotationRadians))
+            cursorLayer.setAffineTransform(CGAffineTransform(rotationAngle: currentTransform.rotationRadians + paneTurn))
+        }
+
+        func setCursorPaneSize(_ size: CursorPaneSize?) {
+            guard size != cursorPaneSize else { return }
+            cursorPaneSize = size
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updateCursorLayout()
+            CATransaction.commit()
         }
 
         // Maps a view-local point into normalized remote-display space
