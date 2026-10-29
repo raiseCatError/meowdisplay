@@ -111,57 +111,89 @@ enum SecurityPresentationCoordinator {
 
     // MARK: - Remote Finder ("<Device Name> wants to browse your approved folders")
 
+    private struct FilesConsentRequest {
+        let sessionID: String
+        let name: String
+        var decide: (Bool) -> Void
+    }
+
     private static var filesConsentPanel: NSPanel?
     private static var filesConsentPanelDelegate: FilesConsentPanelWindowDelegate?
-    /// The open request: who asked and how to answer. Answered exactly once.
-    private static var filesConsentPending: (sessionID: String, decide: (Bool) -> Void)?
+    /// The request on screen (answered exactly once), then the ones waiting their turn.
+    /// A new request never replaces the one on screen, so a click can't land on a
+    /// different device's question.
+    private static var filesConsentShown: FilesConsentRequest?
+    private static var filesConsentQueue: [FilesConsentRequest] = []
 
     /// Asks the Mac owner whether this session may browse the approved folders. Closing the
-    /// panel is Not Now. A second request while one is open answers the first Not Now.
-    /// Doesn't activate the app, so the owner's front app keeps focus until they click.
+    /// panel is Not Now. Doesn't activate the app, so the owner's front app keeps focus.
     static func presentFilesConsent(name: String, sessionID: String, decide: @escaping (Bool) -> Void) {
-        answerFilesConsent(false)
-        filesConsentPending = (sessionID, decide)
-        let panel: NSPanel
-        if let existing = filesConsentPanel {
-            panel = existing
-        } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Files Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
-            filesConsentPanel = panel
+        // The same session asking again (a new connection): its newest answer target wins.
+        if filesConsentShown?.sessionID == sessionID {
+            filesConsentShown?.decide = decide
+            return
         }
+        if let i = filesConsentQueue.firstIndex(where: { $0.sessionID == sessionID }) {
+            filesConsentQueue[i].decide = decide
+            return
+        }
+        filesConsentQueue.append(FilesConsentRequest(sessionID: sessionID, name: name, decide: decide))
+        showNextFilesConsent()
+    }
+
+    /// The session ended or its connection changed: its question no longer stands.
+    static func dismissFilesConsent(sessionID: String) {
+        filesConsentQueue.removeAll { $0.sessionID == sessionID }
+        guard filesConsentShown?.sessionID == sessionID else { return }
+        filesConsentShown = nil
+        closeFilesConsentPanel()
+        showNextFilesConsent()
+    }
+
+    fileprivate static func answerFilesConsent(_ allowed: Bool) {
+        guard let shown = filesConsentShown else { return }
+        filesConsentShown = nil
+        closeFilesConsentPanel()
+        shown.decide(allowed)
+        // The next device's question comes as a new panel, a moment later.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNextFilesConsent() }
+    }
+
+    private static func closeFilesConsentPanel() {
+        guard let panel = filesConsentPanel else { return }
+        filesConsentPanel = nil
+        panel.delegate = nil
+        filesConsentPanelDelegate = nil
+        panel.orderOut(nil)
+        panel.close()
+    }
+
+    private static func showNextFilesConsent() {
+        guard filesConsentShown == nil, !filesConsentQueue.isEmpty else { return }
+        let request = filesConsentQueue.removeFirst()
+        filesConsentShown = request
+        // A fresh panel per question.
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
+            styleMask: [.titled, .closable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title = String(localized: "Files Request")
+        panel.isFloatingPanel = true
+        panel.level = .modalPanel
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        filesConsentPanel = panel
         let delegate = FilesConsentPanelWindowDelegate()
         filesConsentPanelDelegate = delegate
         panel.delegate = delegate
-        let hostingController = NSHostingController(rootView: FilesConsentPanelView(name: name) { allowed in
+        let hostingController = NSHostingController(rootView: FilesConsentPanelView(name: request.name) { allowed in
             answerFilesConsent(allowed)
-            panel.orderOut(nil)
         })
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
         panel.center()
         panel.orderFrontRegardless()
         panel.makeKey()
-    }
-
-    /// The session ended or its connection changed: its question no longer stands.
-    static func dismissFilesConsent(sessionID: String) {
-        guard filesConsentPending?.sessionID == sessionID else { return }
-        filesConsentPending = nil
-        filesConsentPanel?.orderOut(nil)
-    }
-
-    fileprivate static func answerFilesConsent(_ allowed: Bool) {
-        guard let pending = filesConsentPending else { return }
-        filesConsentPending = nil
-        pending.decide(allowed)
     }
 
     // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
@@ -484,6 +516,9 @@ private final class FilesConsentPanelWindowDelegate: NSObject, NSWindowDelegate 
 private struct FilesConsentPanelView: View {
     let name: String
     let decide: (Bool) -> Void
+    /// The buttons wake up a moment after the panel appears, so a click meant for whatever
+    /// was under the pointer can't answer it.
+    @State private var armed = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -503,9 +538,11 @@ private struct FilesConsentPanelView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Allow for This Session") { decide(true) }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!armed)
             }
         }
         .padding(24)
         .frame(width: 380)
+        .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { armed = true } }
     }
 }

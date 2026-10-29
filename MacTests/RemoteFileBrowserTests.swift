@@ -54,6 +54,11 @@ final class RemoteFileBrowserTests: XCTestCase {
         XCTAssertNil(RemoteFilesPolicy.resolve(root: home, components: ["Library", "Keychains"], home: home))
         XCTAssertNil(RemoteFilesPolicy.resolve(root: home, components: [".ssh"], home: home))
         XCTAssertNotNil(RemoteFilesPolicy.resolve(root: home, components: ["Projects", "App"], home: home))
+        // A different spelling of the same folder on a case-insensitive volume.
+        XCTAssertNil(RemoteFilesPolicy.resolve(root: home, components: ["library", "Keychains"], home: home))
+        XCTAssertNil(RemoteFilesPolicy.resolve(root: home, components: ["LIBRARY"], home: home))
+        XCTAssertNil(RemoteFilesPolicy.resolve(root: home, components: ["LiBrArY", "keychains", "login.keychain-db"], home: home))
+        XCTAssertFalse(RemoteFilesPolicy.isAllowedRoot(home.appendingPathComponent("library"), home: home))
     }
 
     private func browser(_ sent: @escaping ([String: Any]) -> Void) -> RemoteFileBrowser {

@@ -26,14 +26,19 @@ enum RemoteFilesPolicy {
     static func isAllowedRoot(_ url: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         let path = canonical(url).path
         let homePath = canonical(home).path
-        if path == homePath { return true }
+        if fold(path) == fold(homePath) { return path == homePath }
         if path.hasPrefix(homePath + "/") {
-            let rest = path.dropFirst(homePath.count + 1)
-            return !(rest == "Library" || rest.hasPrefix("Library/")) && !rest.split(separator: "/").contains { $0.hasPrefix(".") }
+            return !isProtected(URL(fileURLWithPath: path), home: home)
+                && !path.dropFirst(homePath.count + 1).split(separator: "/").contains { $0.hasPrefix(".") }
         }
         let parts = path.split(separator: "/")
         return parts.count >= 2 && parts[0] == "Volumes" && !parts.contains { $0.hasPrefix(".") }
+            && !isProtected(URL(fileURLWithPath: path), home: home)
     }
+
+    /// Mac volumes are usually case-insensitive: `library` is `Library`. Protected locations
+    /// are compared case-folded so a different spelling can't reach them.
+    static func fold(_ s: some StringProtocol) -> String { String(s).folding(options: [.caseInsensitive], locale: nil) }
 
     static func canonical(_ url: URL) -> URL { url.resolvingSymlinksInPath().standardizedFileURL }
 
@@ -61,11 +66,11 @@ enum RemoteFilesPolicy {
     /// Never shown, even inside an approved folder: the home folder's Library (Keychains,
     /// app data, mail, messages) and other users' homes.
     static func isProtected(_ url: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
-        let path = url.path
-        let homePath = canonical(home).path
-        if path == homePath + "/Library" || path.hasPrefix(homePath + "/Library/") { return true }
+        let path = fold(url.path)
+        let homePath = fold(canonical(home).path)
+        if path == homePath + "/library" || path.hasPrefix(homePath + "/library/") { return true }
         let parts = path.split(separator: "/")
-        if parts.count >= 2, parts[0] == "Users", "/Users/\(parts[1])" != homePath, parts[1] != "Shared" { return true }
+        if parts.count >= 2, parts[0] == "users", "/users/\(parts[1])" != homePath, parts[1] != "shared" { return true }
         return false
     }
 
