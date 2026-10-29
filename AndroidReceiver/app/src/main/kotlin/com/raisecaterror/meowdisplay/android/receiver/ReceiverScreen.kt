@@ -364,6 +364,7 @@ fun ReceiverScreen(
                 StagePeekOverlay(
                     controller = workspace,
                     edge = prefs.stagePeekEdge,
+                    dock = prefs.stagePeekDock,
                     frame = peekFrame,
                     safe = peekSafe,
                     avoiding = (occupied + folds + workspace.hostChrome.value).map { it.offsetBy(-peekFrame.minX, -peekFrame.minY) },

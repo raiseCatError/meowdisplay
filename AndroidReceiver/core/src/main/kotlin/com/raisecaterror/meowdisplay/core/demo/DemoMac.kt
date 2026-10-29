@@ -179,6 +179,7 @@ class DemoMac(
                 publish()
             }
             WorkspaceWire.WINDOW_ACTION -> if (admitted && inputGranted && windowModeOffered) windowAction(obj)
+            WorkspaceWire.WINDOW_CLOSE -> if (admitted && windowModeOffered) closeSample(obj)
             AppMenuWire.REQUEST, AppMenuWire.PRESS -> if (admitted && windowModeOffered && mode == DisplayMode.Window) {
                 val app = tiles.firstOrNull { it.id == obj.str("tile") }?.kind?.title
                 send(DemoMenus.answer(obj, app, inputGranted) { what -> show(DemoFeedback.Local("Chose $what in $app on the demo Mac")) })
@@ -209,7 +210,7 @@ class DemoMac(
                 put("features", buildJsonArray {
                     if (receiverSpeaksWorkspace) {
                         add(JsonPrimitive(WorkspaceWire.WELCOME_FEATURE)); add(JsonPrimitive(RemoteFilesWire.WELCOME_FEATURE))
-                        add(JsonPrimitive(AppMenuWire.WELCOME_FEATURE))
+                        add(JsonPrimitive(AppMenuWire.WELCOME_FEATURE)); add(JsonPrimitive(WorkspaceWire.CLOSE_FEATURE))
                     }
                 })
             })
@@ -423,7 +424,7 @@ class DemoMac(
             put("type", WorkspaceWire.CATALOG)
             put("host", PEER_ID)
             put("windows", buildJsonArray {
-                DemoWindowKind.entries.forEach { kind ->
+                DemoWindowKind.entries.filter { it !in closedSamples }.forEach { kind ->
                     add(buildJsonObject {
                         put("id", kind.windowID); put("gen", GENERATION); put("bundle", kind.bundleID); put("app", kind.title)
                         put("title", windowTitle(kind)); put("w", kind.nativeWidth.toInt()); put("h", kind.nativeHeight.toInt())
@@ -509,6 +510,30 @@ class DemoMac(
     private fun focusActiveTile() {
         val kind = tiles.firstOrNull { it.id == activeTile }?.kind
         if (mode == DisplayMode.Window) desktop.focus(kind)
+    }
+
+    /** Sample windows closed from Stage Peek: gone from the listing until the demo starts again. */
+    private val closedSamples = mutableSetOf<DemoWindowKind>()
+
+    /** Close Window from Stage Peek: like the Mac, only with control and only the listed window. */
+    private fun closeSample(obj: JsonObject) {
+        val id = obj.long("window") ?: return
+        val kind = DemoWindowKind.ofWindow(id)
+        val result = when {
+            !inputGranted -> "control"
+            kind == null || kind in closedSamples || obj.long("gen") != GENERATION -> "stale"
+            else -> "closed"
+        }
+        if (result == "closed" && kind != null) {
+            closedSamples += kind
+            show(DemoFeedback.OnMac("${kind.title} closed on the demo Mac. Sample windows come back when the demo starts again."))
+        }
+        send(buildJsonObject {
+            put("type", WorkspaceWire.WINDOW_CLOSE_RESULT); put("window", id); put("result", result)
+            obj.int("req")?.let { put("req", it) }
+        })
+        if (result == "closed") sendCatalog()
+        publish()
     }
 
     private fun windowAction(obj: JsonObject) {

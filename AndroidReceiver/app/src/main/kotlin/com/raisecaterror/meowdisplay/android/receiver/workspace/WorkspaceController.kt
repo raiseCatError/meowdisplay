@@ -19,6 +19,9 @@ import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import com.raisecaterror.meowdisplay.core.workspace.AppCatalogMessage
 import com.raisecaterror.meowdisplay.core.workspace.AppIcon
 import com.raisecaterror.meowdisplay.core.workspace.AppLaunchResult
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseNotice
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseReply
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseResult
 import com.raisecaterror.meowdisplay.core.workspace.CatalogDisplay
 import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
 import com.raisecaterror.meowdisplay.core.workspace.DisplayThumbnail
@@ -117,6 +120,12 @@ data class WorkspaceUi(
     /** Apps opened from here that haven't shown a window yet. */
     val launching: Set<String> = emptySet(),
     val launchFailed: String? = null,
+    /** The Mac can close a listed window from Stage Peek (`windowClose`). */
+    val canCloseWindows: Boolean = false,
+    /** Windows asked to close that the Mac hasn't answered for yet. */
+    val closingWindows: Set<Long> = emptySet(),
+    /** What happened to the last Close Window (shown briefly over Stage Peek). */
+    val closeNotice: WindowCloseNotice? = null,
     val drag: WorkspaceDrag? = null,
     /** "Fullscreen on This Device": this pane fills the screen locally; the arrangement is kept. */
     val localFullscreen: String? = null,
@@ -243,7 +252,7 @@ class WorkspaceController(
         when (event) {
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
             is SessionEvent.MacFeatures -> {
-                state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
+                state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
                 menus.setAvailable(AppMenuWire.WELCOME_FEATURE in event.features)
             }
@@ -263,7 +272,8 @@ class WorkspaceController(
                 menus.setAvailable(false)
                 state.update {
                     it.copy(windowMode = false, remote = null, available = false, arranging = false, stagePeekOpen = false,
-                        launchpadOpen = false, launching = emptySet(), drag = null)
+                        launchpadOpen = false, launching = emptySet(), drag = null,
+                        canCloseWindows = false, closingWindows = emptySet(), closeNotice = null)
                 }
             }
             is SessionEvent.Control -> when (event.type) {
@@ -301,6 +311,7 @@ class WorkspaceController(
                     (event.body["ok"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true",
                     (event.body["error"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.take(32),
                 )
+                WorkspaceWire.WINDOW_CLOSE_RESULT -> WindowCloseReply.parse(event.body)?.let { finishClose(it.windowID, it.result) }
                 WorkspaceWire.APP_LAUNCH_RESULT -> AppLaunchResult.parse(event.body)?.let { r ->
                     if (!r.ok) state.update { it.copy(launching = it.launching - r.bundleID, launchFailed = r.bundleID) }
                     requestCatalog()
@@ -672,6 +683,51 @@ class WorkspaceController(
             }
         }
     }
+
+    // MARK: Close Window (Stage Peek)
+
+    private var closeRequest = 0
+    private var noticeSerial = 0
+    private val closeNames = mutableMapOf<Long, String>()
+
+    /**
+     * Closes one Mac window as its close button would: never Quit, never the app's other windows.
+     * View Only can't: the Mac refuses without control, and this says so before asking.
+     */
+    fun closeWindow(w: CatalogWindow) {
+        val name = w.title.ifEmpty { w.app }
+        val s = state.value
+        if (!s.canCloseWindows) return notice(WindowCloseNotice(w.id, name, null, unsupported = true))
+        if (!inputAllowed) return notice(WindowCloseNotice(w.id, name, WindowCloseResult.Control))
+        if (w.id in s.closingWindows) return
+        closeRequest++
+        closeNames[w.id] = name
+        state.update { it.copy(closingWindows = it.closingWindows + w.id, closeNotice = null) }
+        media.session.sendWorkspace(WorkspaceWire.windowClose(w.id, w.generation, closeRequest))
+        main.postDelayed({
+            if (w.id in state.value.closingWindows) {
+                state.update { it.copy(closingWindows = it.closingWindows - w.id) }
+                notice(WindowCloseNotice(w.id, closeNames.remove(w.id) ?: name, null))
+            }
+        }, 8_000)
+    }
+
+    private fun finishClose(id: Long, result: WindowCloseResult) {
+        val name = closeNames.remove(id) ?: state.value.catalog?.windows?.firstOrNull { it.id == id }?.let { it.title.ifEmpty { it.app } } ?: ""
+        state.update { s ->
+            val catalog = if (result.removesCard) s.catalog?.let { c -> c.copy(windows = c.windows.filter { it.id != id }) } else s.catalog
+            s.copy(closingWindows = s.closingWindows - id, catalog = catalog)
+        }
+        notice(WindowCloseNotice(id, name, result))
+    }
+
+    private fun notice(n: WindowCloseNotice) {
+        val serial = ++noticeSerial
+        state.update { it.copy(closeNotice = n.copy(serial = serial)) }
+        main.postDelayed({ if (state.value.closeNotice?.serial == serial) state.update { it.copy(closeNotice = null) } }, if (n.isError) 6_000 else 3_000)
+    }
+
+    fun dismissCloseNotice() = state.update { it.copy(closeNotice = null) }
 
     /** Opens an app on the Mac without activating it (explicit action; needs control). */
     fun launch(bundleID: String) {

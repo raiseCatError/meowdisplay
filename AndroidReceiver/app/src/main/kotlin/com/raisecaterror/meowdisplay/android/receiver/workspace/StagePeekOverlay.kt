@@ -60,6 +60,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -146,6 +147,20 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.foundation.layout.fillMaxHeight
+import com.raisecaterror.meowdisplay.core.controls.StagePeekConfig
+import com.raisecaterror.meowdisplay.core.controls.StagePeekDockStyle
+import com.raisecaterror.meowdisplay.core.controls.StagePeekGalleryLayout
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseNotice
 
 /** MeowDisplay blue: the Stage Peek focus ring. */
 private val StagePeekAccent = Color(0xFF5499FF)
@@ -185,13 +200,15 @@ private const val TOP_CONTROLS = 12.0 + 44 + 10 + 66 + 14
 fun StagePeekOverlay(
     controller: WorkspaceController,
     edge: StagePeekEdge,
+    /** Compact: the stack stays in a fading band between the controls above and below. */
+    dock: StagePeekDockStyle = StagePeekDockStyle.Compact,
     frame: CGRect,
     safe: CGRect,
     avoiding: List<CGRect>,
     hapticsEnabled: Boolean,
     /** A tablet-class window (the iPad layout metrics). */
     isExpanded: Boolean,
-    /** This session may change the Mac ("Open on Mac"). */
+    /** This session may change the Mac ("Open on Mac", Close Window). */
     inputAllowed: Boolean,
     /** A display card in Mirror/Extend (the desktop already shows: nothing to do by default). */
     onFullDesktop: () -> Unit,
@@ -234,6 +251,11 @@ fun StagePeekOverlay(
     host.displays = displays
     host.onFullDesktop = onFullDesktop
     host.haptics = { haptic -> if (hapticsEnabled) view.performHapticFeedback(haptic.feedbackConstant()) }
+    host.announce = { message -> view.announceForAccessibility(message) }
+    host.canClose = ui.canCloseWindows
+    // The Compact Dock's band: under the search and app carousel, above the buttons.
+    val region = if (dock == StagePeekDockStyle.Compact) StagePeekLayout.dockRegion(safe, safe.minY + TOP_CONTROLS - 14, safe.maxY - 30 - 20) else null
+    host.region = region
 
     LaunchedEffect(frame) { controller.desktopFrame = frame }
     LaunchedEffect(windows, displays, ui.currentWindowID, ui.windowMode) {
@@ -281,7 +303,7 @@ fun StagePeekOverlay(
     val appear by animateFloatAsState(if (visible) 1f else 0f, if (visible) tween(if (reduceMotion) 120 else 200) else snap(), label = "stagePeekAppear")
     val dragging = ui.drag != null
 
-    val cards = StagePeekLayout.cards(host.aspects(), shownPosition, shownExpansion, edge, safe, isExpanded, reduceMotion)
+    val cards = host.revealShifted(StagePeekLayout.cards(host.aspects(), shownPosition, shownExpansion, edge, safe, isExpanded, reduceMotion, region))
     val strip = if (machine.ids.isNotEmpty() && !ui.overviewOpen && !host.launchpad) StagePeekLayout.strip(edge, safe, avoiding) else null
     LaunchedEffect(strip == null) { if (strip == null) onStripFrame(null) }
     // Cards near the highlight first (compact); the gallery reports its own visible cards.
@@ -304,7 +326,20 @@ fun StagePeekOverlay(
                     Modifier.fillMaxSize().graphicsLayer {
                         alpha = appear * (1f - shownExpansion.toFloat())
                         if (!reduceMotion) translationX = (1f - appear) * 48.dp.toPx() * (if (edge == StagePeekEdge.Left) -1f else 1f)
-                    },
+                        // Compact Dock: the cards fade and clip at the band's edges, never under the controls.
+                        if (region != null) compositingStrategy = CompositingStrategy.Offscreen
+                    }.then(if (region == null) Modifier else Modifier.drawWithContent {
+                        drawContent()
+                        val e = shownExpansion.toFloat()
+                        // Expanding releases the band smoothly.
+                        val top = (region.minY * (1 - e)).toFloat() * density
+                        val bottom = (region.maxY + (frame.height - region.maxY) * e).toFloat() * density
+                        val f = (StagePeekConfig.dockFade.toFloat() * density / (bottom - top).coerceAtLeast(1f)).coerceAtMost(0.4f) * (1 - e)
+                        drawRect(
+                            Brush.verticalGradient(0f to Color.Transparent, f to Color.Black, (1 - f) to Color.Black, 1f to Color.Transparent, startY = top, endY = bottom),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    }),
                 ) {
                     for (card in cards) key(card.index) {
                         val id = machine.ids.getOrNull(card.index)
@@ -324,6 +359,12 @@ fun StagePeekOverlay(
                         val display = id?.let(PeekIDs::displayIndex)?.let { displays.getOrNull(it) }
                         TitleChip(focus, window, display, window?.let { icons[it.bundleID] }, safe, edge)
                     }
+                }
+                if (shownExpansion < 0.5) machine.closeRevealed?.let { rid ->
+                    val index = machine.ids.indexOf(rid)
+                    val card = cards.firstOrNull { it.index == index }
+                    val w = windows.firstOrNull { it.id == rid }
+                    if (card != null && w != null) CompactCloseButton(w, card, inputAllowed) { host.hideClose(); controller.closeWindow(w) }
                 }
             }
             if (shownExpansion > 0.001) {
@@ -349,6 +390,51 @@ fun StagePeekOverlay(
             if (d != null && d.item is WorkspaceDrag.Item.Window) DragPreview(d.item.window, controller.still(d.item.window), icons[d.item.window.bundleID], d.location, frame)
         }
         if (strip != null) StripView(strip, edge, host, onStripFrame)
+        ui.closeNotice?.let { CloseToast(it, safe) { controller.dismissCloseNotice() } }
+    }
+}
+
+private const val COMPACT_REVEAL = 92.0
+
+/** Close Window beside a swiped compact card. Without control it says so instead. */
+@Composable
+private fun CompactCloseButton(w: CatalogWindow, card: StagePeekCard, inputAllowed: Boolean, onClose: () -> Unit) {
+    val height = card.size.height.coerceIn(48.0, 96.0)
+    val x = card.center.x + card.size.width / 2 + 4
+    val d = LocalDensity.current.density
+    val name = w.title.ifEmpty { w.app }
+    Box(
+        Modifier.offset { IntOffset((x * d).roundToInt(), ((card.center.y - height / 2) * d).roundToInt()) }
+            .size((COMPACT_REVEAL - 8).dp, height.dp)
+            .background(if (inputAllowed) CloseRed else Color(0xFF6B6B70), RoundedCornerShape(11.dp))
+            .clickable(role = Role.Button, onClickLabel = "Close Window", onClick = onClose)
+            .semantics { contentDescription = if (inputAllowed) "Close Window $name" else "Close Window needs control" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(if (inputAllowed) "✕" else "🔒", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(if (inputAllowed) "Close Window" else "Needs Control", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center, maxLines = 2)
+        }
+    }
+}
+
+private val CloseRed = Color(0xFFE5483B)
+
+/** What happened to the last Close Window, for a few seconds (tap to dismiss). */
+@Composable
+private fun CloseToast(notice: WindowCloseNotice, safe: CGRect, onDismiss: () -> Unit) {
+    val view = LocalView.current
+    LaunchedEffect(notice.serial) { view.announceForAccessibility(notice.message) }
+    CenteredAt(safe.midX, max(safe.maxY - 30 - 64, safe.minY + 160), min(460.0, safe.width - 32)) {
+        Row(
+            Modifier.background(Color(0xF01C1C1E), RoundedCornerShape(14.dp)).border(0.75.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
+                .clickable(onClick = onDismiss).padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(if (notice.isError) "⚠︎" else "✓", color = if (notice.isError) Color(0xFFFFA94D) else Color(0xFF4CD964), fontSize = 15.sp)
+            Text(notice.message, color = Color.White, fontSize = 13.sp)
+        }
     }
 }
 
@@ -626,7 +712,10 @@ private fun DragPreview(w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap
 
 // MARK: - Gallery (expanded)
 
-/** Every window (and display) as a vertical gallery, two columns at most; search results; an app's windows or its empty state. */
+/**
+ * Every window (and display) as a vertical gallery, as many columns as fit (phones two at most);
+ * search results; an app's windows or its empty state.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Gallery(
@@ -635,8 +724,16 @@ private fun Gallery(
     inputAllowed: Boolean, safe: CGRect, modifier: Modifier, enabled: Boolean, topExtra: Double = 0.0,
 ) {
     val d = LocalDensity.current.density
-    val columns = if (safe.width - 40 >= 2 * 176 + 14) 2 else 1
+    val configuration = LocalConfiguration.current
+    // Phones (and narrow split screens) by size, never by device name; larger text, wider cards.
+    val compactSize = min(configuration.screenWidthDp, configuration.screenHeightDp) < 600
+    val columns = StagePeekGalleryLayout.columns(safe.width, compactSize, LocalDensity.current.fontScale.toDouble())
     val grid = rememberLazyGridState()
+    var menuWindow by remember { mutableStateOf<CatalogWindow?>(null) }
+    var confirmClose by remember { mutableStateOf<CatalogWindow?>(null) }
+    // Scrolling the gallery puts a swiped card back.
+    LaunchedEffect(grid.isScrollInProgress) { if (grid.isScrollInProgress) host.galleryRevealed = null }
+    LaunchedEffect(ui.closingWindows) { if (host.galleryRevealed in ui.closingWindows) host.galleryRevealed = null }
     val tiled = ui.layout.tiles.values.mapNotNull { it.source?.windowID }.toSet()
     val query = host.query.trim()
     val results = if (query.isEmpty()) null else WorkspaceSearch.search(query, ui.apps, allWindows)
@@ -652,17 +749,23 @@ private fun Gallery(
         modifier = modifier
             .offset { IntOffset((safe.minX * d).roundToInt(), (safe.minY * d).roundToInt()) }.size(safe.width.dp, safe.height.dp)
             .pointerInput(host.edge) {
+                // Not a swipe or hold that a card took (those consume their moves, or just ended).
                 detectHorizontalDragGestures(onDragStart = { flick = 0f }, onDragEnd = {
                     val toward = if (host.edge == StagePeekEdge.Left) -flick else flick
-                    if (toward / density > 90) host.compact()
+                    if (toward / density > 90 && !host.cardGestureRecent()) host.compact()
                 }) { _, amount -> flick += amount }
             }
             .padding(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(StagePeekGalleryLayout.spacing.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height((TOP_CONTROLS + topExtra).dp)) }
         fun windowCards(list: List<CatalogWindow>) = items(list, key = { "w" + it.id }) { w ->
-            GalleryCard(controller, host, w, thumbnails[w.id], icons[w.bundleID], inTile = w.id in tiled, current = ui.windowMode && ui.currentWindowID == w.id)
+            GalleryCard(
+                controller, host, w, thumbnails[w.id], icons[w.bundleID], inTile = w.id in tiled, current = ui.windowMode && ui.currentWindowID == w.id,
+                closable = ui.canCloseWindows, inputAllowed = inputAllowed, closing = w.id in ui.closingWindows,
+                revealed = host.galleryRevealed == w.id, onReveal = { open -> host.galleryRevealed = if (open) w.id else host.galleryRevealed.takeIf { it != w.id } },
+                onConfirmClose = { confirmClose = w }, onMenu = { menuWindow = w },
+            )
         }
         when {
             results != null -> {
@@ -737,6 +840,31 @@ private fun Gallery(
         }
         item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(64.dp)) }
     }
+    menuWindow?.let { w ->
+        // Held in place: the window's actions.
+        AlertDialog(
+            onDismissRequest = { menuWindow = null },
+            title = { Text(w.title.ifEmpty { w.app }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(onClick = { menuWindow = null; host.pick(w) }) { Text("Show in Pane") }
+                    if (ui.canAddTile && w.id !in tiled) TextButton(onClick = { menuWindow = null; controller.choose(w, asNewTile = true); host.closeAfterPick() }) { Text("Add as New Pane") }
+                    if (ui.canCloseWindows) TextButton(onClick = { menuWindow = null; controller.closeWindow(w) }) { Text("Close Window on Mac", color = CloseRed) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { menuWindow = null }) { Text("Cancel") } },
+        )
+    }
+    confirmClose?.let { w ->
+        AlertDialog(
+            onDismissRequest = { confirmClose = null },
+            title = { Text("Close “${w.title.ifEmpty { w.app }}” on the Mac?") },
+            text = { Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.") },
+            confirmButton = { TextButton(onClick = { confirmClose = null; controller.closeWindow(w) }) { Text("Close Window", color = CloseRed) } },
+            dismissButton = { TextButton(onClick = { confirmClose = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
@@ -768,56 +896,191 @@ private fun EmptyApp(controller: WorkspaceController, ui: WorkspaceUi, app: MacA
     }
 }
 
-/** Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits. Coordinates in window dp. */
-private fun Modifier.dragToPane(controller: WorkspaceController, host: StagePeekHost, item: CatalogWindow, origin: () -> CGPoint): Modifier =
-    pointerInput(item.id) {
-        detectDragGesturesAfterLongPress(
-            onDragStart = { p ->
-                val o = origin()
-                host.haptics(StagePeekHaptic.Activate)
-                controller.beginDrag(WorkspaceDrag.Item.Window(item), CGPoint(o.x + p.x / density, o.y + p.y / density))
-                host.dragStart = CGPoint(o.x + p.x / density, o.y + p.y / density)
-            },
-            onDrag = { change, amount ->
-                change.consume()
-                host.dragStart = CGPoint(host.dragStart.x + amount.x / density, host.dragStart.y + amount.y / density)
-                controller.moveDrag(host.dragStart)
-            },
-            onDragEnd = { host.dropped(controller.endDrag()) },
-            onDragCancel = { controller.cancelDrag() },
-        )
+/**
+ * A card's hold: after the long press the card lifts; moving drags it onto a pane (middle
+ * replaces, its labels add a tab, an edge splits), lifting in place opens its menu ([onMenu]).
+ * Before the hold completes a vertical drag is the gallery's scroll and cancels it.
+ */
+private fun Modifier.holdToDrag(
+    controller: WorkspaceController, host: StagePeekHost, item: CatalogWindow, origin: () -> CGPoint,
+    onLift: (Boolean) -> Unit, onMenu: (() -> Unit)?,
+): Modifier = pointerInput(item.id, onMenu != null) {
+    var at = CGPoint.zero
+    var start = CGPoint.zero
+    var dragging = false
+    detectDragGesturesAfterLongPress(
+        onDragStart = { p ->
+            val o = origin()
+            host.haptics(StagePeekHaptic.Activate)
+            host.markCardGesture()
+            at = CGPoint(o.x + p.x / density, o.y + p.y / density)
+            start = at
+            dragging = false
+            onLift(true)
+        },
+        onDrag = { change, amount ->
+            change.consume()
+            host.markCardGesture()
+            at = CGPoint(at.x + amount.x / density, at.y + amount.y / density)
+            if (!dragging) {
+                if (hypot(at.x - start.x, at.y - start.y) <= 12) return@detectDragGesturesAfterLongPress
+                dragging = true
+                controller.beginDrag(WorkspaceDrag.Item.Window(item), at)
+            } else {
+                controller.moveDrag(at)
+            }
+        },
+        onDragEnd = {
+            onLift(false)
+            if (dragging) { dragging = false; host.dropped(controller.endDrag()) } else onMenu?.invoke()
+        },
+        onDragCancel = { onLift(false); if (dragging) { dragging = false; controller.cancelDrag() } },
+    )
+}
+
+/**
+ * A deliberate sideways swipe on a card (reveal or hide Close Window). Anything more vertical is
+ * left alone, so the gallery's scroll takes it; once sideways, the swipe consumes the moves so the
+ * gallery neither scrolls nor flicks. [onSwipe] gets the travel in dp; [onEnd] travel and velocity.
+ */
+private fun Modifier.sidewaysSwipe(enabled: Boolean, key: Any, onSwipe: (Float) -> Unit, onEnd: (Float, Float) -> Unit): Modifier =
+    if (!enabled) this else pointerInput(key) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val tracker = VelocityTracker()
+            tracker.addPosition(down.uptimeMillis, down.position)
+            var total = Offset.Zero
+            var swiping = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) {
+                    if (swiping) onEnd(total.x / density, tracker.calculateVelocity().x / density)
+                    break
+                }
+                if (!swiping && change.isConsumed) break   // the scroll or a hold took it
+                total += change.positionChange()
+                tracker.addPosition(change.uptimeMillis, change.position)
+                if (!swiping && total.getDistance() > viewConfiguration.touchSlop) {
+                    if (abs(total.x) > abs(total.y) * 1.6f) swiping = true else break
+                }
+                if (swiping) { change.consume(); onSwipe(total.x / density) }
+            }
+        }
     }
 
+private const val GALLERY_REVEAL = 96f
+
+/**
+ * One window card: tap shows it, hold lifts it (drag to a pane, or lift in place for its menu), a
+ * swipe left reveals Close Window, and the X asks before closing. Vertical drags scroll the gallery.
+ */
 @Composable
-private fun GalleryCard(controller: WorkspaceController, host: StagePeekHost, w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap?, inTile: Boolean, current: Boolean) {
+private fun GalleryCard(
+    controller: WorkspaceController, host: StagePeekHost, w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap?, inTile: Boolean, current: Boolean,
+    closable: Boolean, inputAllowed: Boolean, closing: Boolean, revealed: Boolean, onReveal: (Boolean) -> Unit,
+    onConfirmClose: () -> Unit, onMenu: () -> Unit,
+) {
     val d = LocalDensity.current.density
     var origin by remember { mutableStateOf(CGPoint.zero) }
-    Column(
-        Modifier
-            .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
-            .dragToPane(controller, host, w) { origin }
-            .clickable { if (controller.ui.value.drag == null) host.pick(w) }
-            .semantics {
-                contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (w.availability == WindowAvailability.Offscreen) ", minimized" else "") + (if (inTile) ", in a pane" else "")
-                customActions = listOf(CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true })
-            },
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(12.dp))
-                .border(if (current) 2.5.dp else 0.6.dp, if (current) StagePeekAccent else Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (still != null) Image(still, null, Modifier.fillMaxSize().padding(6.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
-            else AppIconView(icon, w.app, 44.0)
-            Row(Modifier.align(Alignment.TopStart).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (w.availability == WindowAvailability.Offscreen) Badge("Minimized")
-                if (inTile) Badge("In Pane")
+    var swipe by remember(w.id) { mutableStateOf<Float?>(null) }
+    var lifted by remember(w.id) { mutableStateOf(false) }
+    // The swipe handler outlives recompositions: it reads the current reveal state through this.
+    val revealedNow by rememberUpdatedState(revealed)
+    val target = swipe ?: if (revealed) -GALLERY_REVEAL else 0f
+    val shown by animateFloatAsState(target, if (swipe != null) snap() else spring(dampingRatio = 0.85f, stiffness = 500f), label = "cardSwipe")
+    val lift by animateFloatAsState(if (lifted) 1.04f else 1f, label = "cardLift")
+    val name = w.title.ifEmpty { w.app }
+    Box(Modifier.fillMaxWidth()) {
+        if (shown < -1f) {
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
+                val width = min(-shown, GALLERY_REVEAL + 40f)
+                Column(
+                    Modifier.width((width - 8f).coerceAtLeast(0f).dp).fillMaxHeight().graphicsLayer { alpha = min(1f, width / 60f) }
+                        .background(if (inputAllowed) CloseRed else Color(0xFF6B6B70), RoundedCornerShape(12.dp))
+                        .clickable(role = Role.Button, onClickLabel = "Close Window") { onReveal(false); controller.closeWindow(w) }
+                        .semantics { contentDescription = if (inputAllowed) "Close Window $name" else "Close Window needs control" },
+                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(if (inputAllowed) "✕" else "🔒", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text(if (inputAllowed) "Close Window" else "Needs Control", color = Color.White, fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, maxLines = 2)
+                }
             }
-            if (icon != null && still != null) Image(icon, null, Modifier.align(Alignment.BottomStart).padding(8.dp).size(26.dp))
         }
-        Text(w.title.ifEmpty { w.app }, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (w.title.isNotEmpty()) Text(w.app, color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, maxLines = 1)
+        Column(
+            Modifier
+                .offset { IntOffset((shown * d).roundToInt(), 0) }
+                .graphicsLayer { scaleX = lift; scaleY = lift }
+                .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
+                .sidewaysSwipe(closable && !closing, w.id,
+                    onSwipe = { dx ->
+                        host.markCardGesture()
+                        val base = if (revealedNow) -GALLERY_REVEAL else 0f
+                        var x = base + dx
+                        if (x > 0) x *= 0.25f
+                        if (x < -GALLERY_REVEAL) x = -GALLERY_REVEAL + (x + GALLERY_REVEAL) * 0.3f
+                        swipe = x
+                    },
+                    onEnd = { _, velocity ->
+                        host.markCardGesture()
+                        val x = swipe ?: 0f
+                        val open = velocity < -400f || (x < -GALLERY_REVEAL / 2 && velocity < 300f)
+                        swipe = null
+                        onReveal(open)
+                        if (open) host.haptics(StagePeekHaptic.Tick)
+                    })
+                .holdToDrag(controller, host, w, { origin }, onLift = { lifted = it; if (it) onReveal(false) }, onMenu = onMenu)
+                .clickable {
+                    if (controller.ui.value.drag != null) return@clickable
+                    // A tap while a Close Window button shows only puts the card back.
+                    if (host.galleryRevealed != null) { host.galleryRevealed = null; return@clickable }
+                    host.pick(w)
+                }
+                .semantics {
+                    contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (w.availability == WindowAvailability.Offscreen) ", minimized" else "") +
+                        (if (inTile) ", in a pane" else "") + (if (closing) ", closing" else "")
+                    customActions = listOfNotNull(
+                        CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true },
+                        if (closable) CustomAccessibilityAction("Close Window") { onConfirmClose(); true } else null,
+                    )
+                },
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Box(
+                Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color.White.copy(alpha = 0.07f), RoundedCornerShape(12.dp))
+                    .border(if (current) 2.5.dp else 0.6.dp, if (current) StagePeekAccent else Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (still != null) Image(still, null, Modifier.fillMaxSize().padding(6.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
+                else AppIconView(icon, w.app, 44.0)
+                Row(Modifier.align(Alignment.TopEnd).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (w.availability == WindowAvailability.Offscreen) Badge("Minimized")
+                    if (inTile) Badge("In Pane")
+                }
+                if (icon != null && still != null) Image(icon, null, Modifier.align(Alignment.BottomStart).padding(8.dp).size(26.dp))
+                if (closing) {
+                    Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                        Text("Closing…", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                if (closable && inputAllowed && !closing && shown == 0f) {
+                    // Small to look at, comfortable to hit; away from the title and the badges.
+                    Box(
+                        Modifier.align(Alignment.TopStart).size(40.dp).clickable(role = Role.Button, onClickLabel = "Close Window", onClick = onConfirmClose)
+                            .semantics { contentDescription = "Close Window $name" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            Modifier.size(22.dp).background(Color.Black.copy(alpha = 0.6f), CircleShape).border(0.6.dp, Color.White.copy(alpha = 0.35f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                    }
+                }
+            }
+            Text(w.title.ifEmpty { w.app }, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (w.title.isNotEmpty()) Text(w.app, color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, maxLines = 1)
+        }
     }
 }
 
@@ -825,11 +1088,14 @@ private fun GalleryCard(controller: WorkspaceController, host: StagePeekHost, w:
 private fun DisplayCard(controller: WorkspaceController, host: StagePeekHost, disp: CatalogDisplay, still: ImageBitmap?, current: Boolean) {
     val d = LocalDensity.current.density
     var origin by remember { mutableStateOf(CGPoint.zero) }
+    var lifted by remember(disp.id) { mutableStateOf(false) }
+    val lift by animateFloatAsState(if (lifted) 1.04f else 1f, label = "displayLift")
     val name = if (disp.isMain) "Full Desktop" else disp.name
     Column(
         Modifier
+            .graphicsLayer { scaleX = lift; scaleY = lift }
             .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
-            .dragToPane(controller, host, controller.displayWindow(disp)) { origin }
+            .holdToDrag(controller, host, controller.displayWindow(disp), { origin }, onLift = { lifted = it }, onMenu = null)
             .clickable { if (controller.ui.value.drag == null) host.pickDisplay(disp) }
             .semantics { contentDescription = if (disp.isMain) "Full Desktop, ${disp.name}" else disp.name },
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -1054,6 +1320,11 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     var displays: List<CatalogDisplay> = emptyList()
     var onFullDesktop: () -> Unit = {}
     var haptics: (StagePeekHaptic) -> Unit = {}
+    var announce: (String) -> Unit = {}
+    /** The Mac can close windows from here (swipe left on a compact card). */
+    var canClose = false
+    /** The Compact Dock's band (null: Normal). */
+    var region: CGRect? = null
     var stripOrigin = CGPoint.zero
     var query by mutableStateOf("")
     var appFilter by mutableStateOf<String?>(null)
@@ -1061,6 +1332,12 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     var searchFocused = false
     /** A gallery card's drag position (window dp). */
     var dragStart = CGPoint.zero
+    /** The gallery card showing its Close Window button (swiped left). */
+    var galleryRevealed by mutableStateOf<Long?>(null)
+    private var cardGestureAt = 0L
+    /** A card swiped or was held just now: the gallery's own flick ignores that touch. */
+    fun markCardGesture() { cardGestureAt = SystemClock.uptimeMillis() }
+    fun cardGestureRecent() = SystemClock.uptimeMillis() - cardGestureAt < 800
     private var poll: Job? = null
     /** Compact peek: a still finger on a card lifts it after a moment, then drags it. */
     private var hold: Job? = null
@@ -1077,7 +1354,18 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     }
 
     /** The cards as laid out from the machine's state right now: what a tap lands on. */
-    private fun hitCards() = StagePeekLayout.cards(aspects(), machine.position, machine.expansion, edge, safe, isExpanded, reduceMotion)
+    private fun hitCards() = revealShifted(StagePeekLayout.cards(aspects(), machine.position, machine.expansion, edge, safe, isExpanded, reduceMotion, region))
+
+    /** Hit testing for the compact stack: only inside the Compact Dock's band. */
+    private fun hitRegion() = if (machine.expansion < 0.5) region else null
+
+    /** The card whose Close Window shows slides aside to make room for the button. */
+    fun revealShifted(cards: List<StagePeekCard>): List<StagePeekCard> {
+        val index = machine.closeRevealed?.let { machine.ids.indexOf(it) }?.takeIf { it >= 0 } ?: return cards
+        return cards.map { c -> if (c.index == index) c.copy(center = CGPoint(c.center.x - COMPACT_REVEAL, c.center.y)) else c }
+    }
+
+    fun hideClose() { machine.hideClose(); changed() }
 
     private fun window(at: CGPoint) = CGPoint(frame.minX + at.x, frame.minY + at.y)
 
@@ -1089,7 +1377,11 @@ private class StagePeekHost(private val controller: WorkspaceController, private
 
     fun began(id: Long, at: CGPoint, time: Double, onStrip: Boolean) {
         val wasOpen = machine.phase == StagePeekMachine.Phase.Open
-        machine.touchBegan(id, at, time, onStrip)
+        // A compact window card this Mac can close: a swipe left on it reveals Close Window.
+        val closable = if (!onStrip && wasOpen && canClose && machine.expansion < 0.5) {
+            StagePeekLayout.hit(at, hitCards(), hitRegion())?.takeIf { i -> machine.ids.getOrNull(i)?.let { PeekIDs.displayIndex(it) == null } == true }
+        } else null
+        machine.touchBegan(id, at, time, onStrip, closable)
         if (machine.phase == StagePeekMachine.Phase.Arming) {
             controller.setStagePeekOpen(true) // fresh catalog and thumbnails while the hold completes
             schedulePoll()
@@ -1100,7 +1392,7 @@ private class StagePeekHost(private val controller: WorkspaceController, private
 
     private fun armHold(id: Long, at: CGPoint) {
         hold?.cancel()
-        val index = StagePeekLayout.hit(at, hitCards()) ?: return
+        val index = StagePeekLayout.hit(at, hitCards(), hitRegion()) ?: return
         val item = itemAt(index) ?: return
         holdTouch = id; holdStart = at
         hold = scope.launch {
@@ -1138,7 +1430,8 @@ private class StagePeekHost(private val controller: WorkspaceController, private
         }
         poll?.cancel()
         val cards = hitCards()
-        finish(machine.touchEnded(id, at, time) { StagePeekLayout.hit(it, cards) })
+        val region = hitRegion()
+        finish(machine.touchEnded(id, at, time) { StagePeekLayout.hit(it, cards, region) })
         if (machine.phase == StagePeekMachine.Phase.Arming) schedulePoll() // another finger lifted; the hold goes on
     }
 
@@ -1254,6 +1547,9 @@ private class StagePeekHost(private val controller: WorkspaceController, private
                 else windows.firstOrNull { it.id == effect.id }?.let { controller.switchTo(it) }
             }
             StagePeekEffect.Dismissed -> controller.setStagePeekOpen(false)
+            is StagePeekEffect.RevealClose -> effect.id?.let { rid ->
+                windows.firstOrNull { it.id == rid }?.let { announce("Close Window for ${it.title.ifEmpty { it.app }}") }
+            }
         }
     }
 }

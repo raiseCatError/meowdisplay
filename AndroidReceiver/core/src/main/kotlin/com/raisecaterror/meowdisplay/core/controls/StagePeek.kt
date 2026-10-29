@@ -39,6 +39,19 @@ enum class StagePeekEdge(val raw: String) {
     }
 }
 
+/** How the compact peek's window Dock sits on screen. Persisted as `stagePeekDock`; stable raw values. */
+enum class StagePeekDockStyle(val raw: String, val title: String) {
+    /** A bounded column between the search and app carousel above and the buttons below (the default). */
+    Compact("compact", "Compact"),
+
+    /** The open column across the whole edge (controls stay on top). */
+    Normal("normal", "Normal");
+
+    companion object {
+        fun of(raw: String?): StagePeekDockStyle? = entries.firstOrNull { it.raw == raw }
+    }
+}
+
 /** Thresholds, in dp and seconds. Tests and both apps share them. */
 object StagePeekConfig {
     /** The hold strip: this wide, just inside the safe area. */
@@ -82,6 +95,12 @@ object StagePeekConfig {
 
     /** Camera distance (dp) for the card tilt: renderers and hit testing. */
     const val perspective: CGFloat = 900.0
+
+    /** Compact Dock: the fade at the top and bottom of its region. */
+    const val dockFade: CGFloat = 28.0
+
+    /** Compact Dock: room kept between the region and the controls above and below it. */
+    const val dockGap: CGFloat = 8.0
 }
 
 enum class StagePeekHaptic(val raw: String) { Activate("activate"), Tick("tick"), Boundary("boundary"), Select("select") }
@@ -95,6 +114,9 @@ sealed interface StagePeekEffect {
 
     /** Closed without choosing anything. */
     data object Dismissed : StagePeekEffect
+
+    /** A sideways swipe on this window's card: show (or, null, hide) its Close Window button. */
+    data class RevealClose(val id: Long?) : StagePeekEffect
 }
 
 /**
@@ -136,6 +158,13 @@ class StagePeekMachine {
     private var lastHighlighted = 0
     private var overrunSignalled = false
 
+    /** Open phase: the card the touch started on, when that card can be closed. */
+    private var startCard: Int? = null
+
+    /** The window whose Close Window button shows (after a swipe left on its card). */
+    var closeRevealed: Long? = null
+        private set
+
     private class Mark(val point: CGPoint, val time: TimeInterval)
     private class Anchor(val point: CGPoint, val position: Double)
 
@@ -158,6 +187,7 @@ class StagePeekMachine {
         val kept = keep?.let { k -> new.indexOf(k).takeIf { it >= 0 } }
         position = if (kept != null) kept.toDouble() + fraction else clampPosition(if (isVisible) position else currentIndex.toDouble())
         lastHighlighted = highlighted
+        if (closeRevealed != null && closeRevealed !in new) closeRevealed = null
         if (isVisible && ids.isEmpty()) closeAll()
     }
 
@@ -167,7 +197,11 @@ class StagePeekMachine {
      * Returns whether Stage Peek owns this touch. Owned touches never reach the Mac: anything
      * starting on the edge strip, and everything while open.
      */
-    fun touchBegan(id: Any, at: CGPoint, time: TimeInterval, onStrip: Boolean): Boolean {
+    /**
+     * [closableCard]: while open, the card under the touch when it is a window that can be closed
+     * (a swipe left on it reveals Close Window instead of flicking the peek).
+     */
+    fun touchBegan(id: Any, at: CGPoint, time: TimeInterval, onStrip: Boolean, closableCard: Int? = null): Boolean {
         when (phase) {
             Phase.Closed -> {
                 if (!onStrip || ids.isEmpty()) return false
@@ -186,6 +220,7 @@ class StagePeekMachine {
                 start = Mark(at, time)
                 anchor = Anchor(at, position)
                 tapCandidate = true
+                startCard = closableCard
                 return true
             }
         }
@@ -213,8 +248,16 @@ class StagePeekMachine {
                 // A sideways flick while open: inward expands, outward compacts (or closes when compact).
                 val dx = to.x - start.point.x; val dy = to.y - start.point.y
                 if (abs(dx) > StagePeekConfig.flickDistance && abs(dx) > abs(dy) * 1.5) {
+                    val card = startCard?.let { ids.getOrNull(it) }
                     consumed.add(id)
                     resetTouch()
+                    // On a closable window's card a swipe left reveals Close Window; a swipe right on
+                    // the revealed card hides it. Everywhere else the flick works as before.
+                    if (card != null && !expanded) {
+                        if (dx < 0) { closeRevealed = card; return listOf(StagePeekEffect.Haptic(StagePeekHaptic.Tick), StagePeekEffect.RevealClose(card)) }
+                        if (closeRevealed == card) { closeRevealed = null; return listOf(StagePeekEffect.RevealClose(null)) }
+                    }
+                    if (closeRevealed != null) { closeRevealed = null; return listOf(StagePeekEffect.RevealClose(null)) }
                     val inward = if (edge == StagePeekEdge.Left) dx else -dx
                     if (inward > 0) { expand(); return listOf(StagePeekEffect.Haptic(StagePeekHaptic.Select)) }
                     if (expanded) { compact(); return listOf(StagePeekEffect.Haptic(StagePeekHaptic.Select)) }
@@ -224,7 +267,9 @@ class StagePeekMachine {
                 if (!(hypot(to.x - start.point.x, to.y - start.point.y) > StagePeekConfig.tapSlop)) return emptyList()
                 tapCandidate = false
                 phase = Phase.Scrubbing
-                return scrub(to, time, edge)
+                val hid = closeRevealed != null
+                closeRevealed = null
+                return (if (hid) listOf(StagePeekEffect.RevealClose(null)) else emptyList()) + scrub(to, time, edge)
             }
             Phase.Scrubbing -> return scrub(to, time, edge)
             Phase.Closed -> return emptyList()
@@ -253,6 +298,8 @@ class StagePeekMachine {
                 val wasTap = tapCandidate && (start?.let { time - it.time <= StagePeekConfig.tapMaxDuration } ?: false)
                 resetTouch()
                 if (!wasTap) return emptyList()
+                // A tap while Close Window shows only hides it (like a swiped list row).
+                if (closeRevealed != null) { closeRevealed = null; return listOf(StagePeekEffect.RevealClose(null)) }
                 val i = cardAt(at)
                 if (i != null && i in ids.indices) {
                     val chosen = ids[i]
@@ -346,7 +393,11 @@ class StagePeekMachine {
         if (!isVisible) return
         expanded = true
         expansion = 1.0
+        closeRevealed = null
     }
+
+    /** Hides Close Window (it was used, or the window went away). */
+    fun hideClose() { closeRevealed = null }
 
     fun compact() {
         if (!isVisible) return
@@ -425,10 +476,12 @@ class StagePeekMachine {
         start = null
         anchor = null
         tapCandidate = false
+        startCard = null
     }
 
     private fun closeAll() {
         phase = Phase.Closed
+        closeRevealed = null
         expansion = 0.0
         expanded = false
         resetTouch()
@@ -490,10 +543,26 @@ object StagePeekLayout {
         return CGRect(x, center - height / 2, width, height)
     }
 
-    /** Visible cards, back to front. [aspects] are width / height per window. */
+    /**
+     * The Compact Dock's region: between the controls above (their bottom edge) and below (their
+     * top edge), with a small gap to each. Never shorter than two cards' worth.
+     */
+    fun dockRegion(safe: CGRect, controlsAbove: Double, controlsBelow: Double): CGRect {
+        val top = min(max(controlsAbove + StagePeekConfig.dockGap, safe.minY), safe.maxY)
+        val bottom = max(min(controlsBelow - StagePeekConfig.dockGap, safe.maxY), top)
+        val minimum = min(160.0, safe.height)
+        if (bottom - top >= minimum) return CGRect(safe.minX, top, safe.width, bottom - top)
+        val mid = min(max((top + bottom) / 2, safe.minY + minimum / 2), safe.maxY - minimum / 2)
+        return CGRect(safe.minX, mid - minimum / 2, safe.width, minimum)
+    }
+
+    /**
+     * Visible cards, back to front. [aspects] are width / height per window. [region]: the
+     * Compact Dock's band (the compact stack centres in it); null for the Normal Dock.
+     */
     fun cards(
         aspects: List<Double>, position: Double, expansion: Double, edge: StagePeekEdge,
-        safe: CGRect, isPad: Boolean, reduceMotion: Boolean,
+        safe: CGRect, isPad: Boolean, reduceMotion: Boolean, region: CGRect? = null,
     ): List<StagePeekCard> {
         if (aspects.isEmpty() || !(safe.width > 0) || !(safe.height > 0)) return emptyList()
         val e = min(max(expansion, 0.0), 1.0)
@@ -513,7 +582,9 @@ object StagePeekLayout {
         val focusSize = cardSize(focus)
         val margin = 16.0
         // Room for the title under the highlighted card.
-        val centerY = safe.midY - 18
+        // Room for the title under the highlighted card. The Compact Dock centres in its band.
+        val dockCenterY = (region?.midY ?: safe.midY) - 18
+        val flowCenterY = safe.midY - 18
         // Compact (e = 0) is Dock magnification: the highlighted card full size and popped out,
         // the rest shrinking smoothly with distance, upright, edge-aligned and not overlapping.
         // Expanded (e = 1) is the layered Cover Flow stack. Positions blend between the two.
@@ -539,14 +610,14 @@ object StagePeekLayout {
             // Cover Flow (expanded).
             val flowScale = 1 - 0.16 * near - 0.07 * far
             val step = if (u <= 1) u * 0.58 else 0.58 + (u - 1) * 0.30
-            val flowY = centerY + (if (k < 0) -1.0 else 1.0) * step * focusSize.height
+            val flowY = flowCenterY + (if (k < 0) -1.0 else 1.0) * step * focusSize.height
             val flowTilt = if (reduceMotion) 0.0 else min(16 * near + 3 * far, 22.0)
             // Dock (compact).
             val ds = dockScale(u)
             val dw = size.width * ds
             val pop = 10 * max(0.0, 1 - u).pow(2) // only the highlighted card pops out
             val dockX = if (edge == StagePeekEdge.Left) safe.minX + margin + dw / 2 + pop else safe.maxX - margin - dw / 2 - pop
-            val dy = centerY + dockY[i] - shift
+            val dy = dockCenterY + dockY[i] - shift
             val scale = lerp(ds, flowScale)
             out.add(
                 StagePeekCard(
@@ -578,8 +649,12 @@ object StagePeekLayout {
         }
     }
 
-    /** The frontmost card containing [p] (cards fully faded out are ignored). */
-    fun hit(p: CGPoint, cards: List<StagePeekCard>): Int? {
+    /**
+     * The frontmost card containing [p] (cards fully faded out are ignored). With a Compact Dock
+     * [region], nothing outside it (or in its faded edges' outer half) is a card.
+     */
+    fun hit(p: CGPoint, cards: List<StagePeekCard>, region: CGRect? = null): Int? {
+        if (region != null && !region.insetBy(0.0, StagePeekConfig.dockFade / 2).contains(p)) return null
         for (c in cards.sortedByDescending { it.z }) {
             if (c.opacity > 0.05 && contains(corners(c), p)) return c.index
         }
@@ -596,5 +671,24 @@ object StagePeekLayout {
             if (sign == 0.0) sign = cross else if ((sign > 0) != (cross > 0)) return false
         }
         return true
+    }
+}
+
+/**
+ * How many columns the expanded gallery uses: as many as fit at a readable card width, wider
+ * cards with larger text. Compact sizes (phones, narrow split screens) stop at two, the phone
+ * default when it fits. Sizes only, never device names.
+ */
+object StagePeekGalleryLayout {
+    const val spacing = 14.0
+    const val sidePadding = 20.0
+    const val minimumCompactCard = 150.0
+    const val minimumRegularCard = 200.0
+    const val maximumColumns = 6
+
+    fun columns(width: Double, compactSize: Boolean, textScale: Double = 1.0): Int {
+        val card = (if (compactSize) minimumCompactCard else minimumRegularCard) * min(max(textScale, 1.0), 2.0)
+        val fit = floor((width - 2 * sidePadding + spacing) / (card + spacing)).toInt()
+        return min(max(fit, 1), if (compactSize) 2 else maximumColumns)
     }
 }

@@ -64,6 +64,7 @@ import com.raisecaterror.meowdisplay.core.controls.PointerInputMode
 import com.raisecaterror.meowdisplay.core.controls.ReceiverControlPreferences
 import com.raisecaterror.meowdisplay.core.controls.ReceiverGestureTarget
 import com.raisecaterror.meowdisplay.core.controls.ShareCodeResult
+import com.raisecaterror.meowdisplay.core.controls.StagePeekDockStyle
 import com.raisecaterror.meowdisplay.core.controls.StagePeekEdge
 import com.raisecaterror.meowdisplay.core.controls.WindowSwitcherStyle
 import com.raisecaterror.meowdisplay.core.controls.activeCustomLayout
@@ -311,10 +312,16 @@ private fun SettingsPageContent(
                 Choice("Stage Peek Edge", StagePeekEdge.entries, prefs.stagePeekEdge, { if (it == StagePeekEdge.Left) "Left" else "Right" }) { edge ->
                     set { it.stagePeekEdge = edge }
                 }
+                Choice("Dock", StagePeekDockStyle.entries, prefs.stagePeekDock, { it.title }) { dock ->
+                    set { it.stagePeekDock = dock }
+                }
             }
             Caption(
                 (if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) "Touch and hold the screen edge to see your windows. Tap one to switch."
-                else "A compact strip of windows along one edge.") + " Used in Window view."
+                else "A compact strip of windows along one edge.") + " Used in Window view." +
+                    (if (prefs.windowSwitcher != WindowSwitcherStyle.StagePeek) ""
+                    else if (prefs.stagePeekDock == StagePeekDockStyle.Compact) " Compact keeps the windows between the search bar and the buttons below."
+                    else " Normal uses the whole edge.")
             )
             StreamingSection(media, stream, live)
         }

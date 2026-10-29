@@ -30,6 +30,10 @@ object WorkspaceWire {
     const val APP_CATALOG = "appCatalog"
     const val APP_LAUNCH = "appLaunch"
     const val APP_LAUNCH_RESULT = "appLaunchResult"
+    /** Close Window from Stage Peek (PROTOCOL.md 6.10): any display mode, control only. */
+    const val CLOSE_FEATURE = "windowClose"
+    const val WINDOW_CLOSE = "windowClose"
+    const val WINDOW_CLOSE_RESULT = "windowCloseResult"
     const val DISPLAY_THUMBNAIL = "displayThumbnail"
     /** Mac -> receiver: `{tiles: {id: view epoch}}` once a frame with that pane view went out. */
     const val WORKSPACE_VIEW = "workspaceView"
@@ -62,6 +66,10 @@ object WorkspaceWire {
     fun appCatalogRequest(revision: Int?) = buildJsonObject { put("type", APP_CATALOG_REQUEST); revision?.let { put("rev", it) } }
     /** Opens an app on the Mac without activating it. The Mac refuses it without control. */
     fun appLaunch(bundleID: String) = buildJsonObject { put("type", APP_LAUNCH); put("bundle", bundleID) }
+    /** Presses that listed window's own close button on the Mac (never Quit). Needs control. */
+    fun windowClose(windowID: Long, generation: Long, req: Int) = buildJsonObject {
+        put("type", WINDOW_CLOSE); put("window", windowID); put("gen", generation); put("req", req)
+    }
 
     /** The tiles this host shows, at their normalized frames. Tiles of other hosts are not sent here. */
     fun workspaceRequest(layout: WLayout, frames: WFrames, host: String, focus: String?, displayID: (WSource) -> Long? = { null },
@@ -266,6 +274,41 @@ data class AppCatalogMessage(val revision: Int, val apps: List<MacApp>?) {
             }
             return AppCatalogMessage(rev, apps)
         }
+    }
+}
+
+/** What the Mac reports after `windowClose`. */
+enum class WindowCloseResult(val raw: String) {
+    Closed("closed"), SaveDialog("saveDialog"), StillOpen("stillOpen"), Stale("stale"),
+    Control("control"), Accessibility("accessibility"), NoButton("noButton"), Ambiguous("ambiguous");
+
+    /** The card can go: the window is closed (or was already gone). */
+    val removesCard: Boolean get() = this == Closed || this == Stale
+
+    companion object { fun of(raw: String?) = entries.firstOrNull { it.raw == raw } }
+}
+
+data class WindowCloseReply(val windowID: Long, val result: WindowCloseResult) {
+    companion object {
+        fun parse(obj: JsonObject): WindowCloseReply? =
+            WindowCloseReply(obj.long("window")?.takeIf { it in 0..0xFFFF_FFFFL } ?: return null,
+                WindowCloseResult.of(obj.str("result")?.take(32)) ?: return null)
+    }
+}
+
+/** The outcome of one Close Window, worded for the person who asked. [result] null: no answer. */
+data class WindowCloseNotice(val windowID: Long, val name: String, val result: WindowCloseResult?, val unsupported: Boolean = false, val serial: Int = 0) {
+    val isError: Boolean get() = result != WindowCloseResult.Closed && result != WindowCloseResult.Stale
+    val message: String get() = if (unsupported) "Update MeowDisplay on the Mac to close windows from here." else when (result) {
+        WindowCloseResult.Closed -> "Closed “$name”."
+        WindowCloseResult.SaveDialog -> "“$name” has unsaved changes. Choose Save or Don’t Save on the Mac."
+        WindowCloseResult.StillOpen -> "“$name” stayed open. Its app may be busy or asking something on the Mac."
+        WindowCloseResult.Stale -> "“$name” was already closed."
+        WindowCloseResult.Control -> "Closing windows needs control of the Mac. Use Request Control first."
+        WindowCloseResult.Accessibility -> "The Mac needs Accessibility permission for MeowDisplay to close windows."
+        WindowCloseResult.NoButton -> "“$name” can’t be closed: it has no close button."
+        WindowCloseResult.Ambiguous -> "The Mac couldn’t tell which window to close, so nothing was closed."
+        null -> "The Mac didn’t confirm closing “$name”."
     }
 }
 

@@ -33,6 +33,7 @@ class StagePeekVectorsTest {
             is StagePeekEffect.Haptic -> "haptic ${it.haptic.raw}"
             is StagePeekEffect.Select -> "select ${it.id}"
             StagePeekEffect.Dismissed -> "dismissed"
+            is StagePeekEffect.RevealClose -> "revealClose ${it.id?.toString() ?: "none"}"
         }
     }
 
@@ -140,6 +141,79 @@ class StagePeekVectorsTest {
             near(s[1].num(), strip.minY, "$label strip y")
             near(s[2].num(), strip.width, "$label strip w")
             near(s[3].num(), strip.height, "$label strip h")
+        }
+    }
+
+    @Test
+    fun closeSwipeSessionMatchesStepByStep() {
+        val session = root.getValue("machine").jsonObject
+        val ids = session.getValue("ids").jsonArray.map { it.jsonPrimitive.long }
+        val machine = StagePeekMachine().apply { naturalScrolling = false }
+        machine.setItems(ids, session.getValue("current").jsonPrimitive.long)
+        machine.openDirectly()
+        val steps = root.getValue("closeSwipe").jsonArray
+        assertTrue(steps.size >= 10)
+        for ((n, element) in steps.withIndex()) {
+            val step = element.jsonObject
+            val op = step.getValue("op").jsonPrimitive.content
+            val label = "close step $n ($op)"
+            val point = CGPoint(step.getValue("x").num(), step.getValue("y").num())
+            val time = step.getValue("t").num()
+            val touch = step.getValue("id").jsonPrimitive.int
+            val card = step["card"]?.jsonPrimitive?.int?.takeIf { it >= 0 }
+            val effects = when (op) {
+                "began" -> { machine.touchBegan(touch, point, time, onStrip = false, closableCard = card); emptyList() }
+                "moved" -> machine.touchMoved(touch, point, time, StagePeekEdge.Left)
+                "ended" -> machine.touchEnded(touch, point, time) { card }
+                else -> error("unknown op $op")
+            }
+            assertEquals("$label effects", step.getValue("effects").jsonArray.map { it.jsonPrimitive.content }, render(effects))
+            assertEquals("$label phase", step.getValue("phase").jsonPrimitive.content, machine.phase.raw)
+            assertEquals("$label revealed", step.getValue("revealed").jsonPrimitive.long, machine.closeRevealed ?: -1L)
+            assertEquals("$label expanded", step.getValue("expanded").jsonPrimitive.boolean, machine.expanded)
+        }
+    }
+
+    @Test
+    fun compactDocksMatchRegionCardsAndHits() {
+        val docks = root.getValue("docks").jsonArray
+        assertEquals(3, docks.size)
+        for (element in docks) {
+            val dock = element.jsonObject
+            val name = dock.getValue("name").jsonPrimitive.content
+            val safe = rect(dock.getValue("safe").jsonArray)
+            val region = StagePeekLayout.dockRegion(safe, dock.getValue("above").num(), dock.getValue("below").num())
+            val r = dock.getValue("region").jsonArray
+            near(r[0].num(), region.minX, "$name region x"); near(r[1].num(), region.minY, "$name region y")
+            near(r[2].num(), region.width, "$name region w"); near(r[3].num(), region.height, "$name region h")
+            val cards = StagePeekLayout.cards(listOf(1.6, 0.75, 1.33, 2.0, 1.0, 1.78), 2.0, 0.0, StagePeekEdge.Left, safe,
+                dock.getValue("isPad").jsonPrimitive.boolean, reduceMotion = false, region = region)
+            val expected = dock.getValue("cards").jsonArray
+            assertEquals("$name card count", expected.size, cards.size)
+            for ((card, e) in cards.zip(expected)) {
+                near(e.jsonObject.getValue("cx").num(), card.center.x, "$name card ${card.index} cx")
+                near(e.jsonObject.getValue("cy").num(), card.center.y, "$name card ${card.index} cy")
+                near(e.jsonObject.getValue("h").num(), card.size.height, "$name card ${card.index} h")
+            }
+            for (hit in dock.getValue("hits").jsonArray) {
+                val h = hit.jsonObject
+                val p = CGPoint(h.getValue("x").num(), h.getValue("y").num())
+                assertEquals("$name hit at $p", h.getValue("card").jsonPrimitive.int, StagePeekLayout.hit(p, cards, region) ?: -1)
+            }
+        }
+    }
+
+    @Test
+    fun galleryColumnsMatch() {
+        val rows = root.getValue("galleryColumns").jsonArray
+        assertTrue(rows.size >= 10)
+        for (row in rows) {
+            val o = row.jsonObject
+            val width = o.getValue("width").num()
+            val compact = o.getValue("compact").jsonPrimitive.boolean
+            val scale = o.getValue("textScale").num()
+            assertEquals("width=$width compact=$compact scale=$scale", o.getValue("columns").jsonPrimitive.int,
+                StagePeekGalleryLayout.columns(width, compact, scale))
         }
     }
 }

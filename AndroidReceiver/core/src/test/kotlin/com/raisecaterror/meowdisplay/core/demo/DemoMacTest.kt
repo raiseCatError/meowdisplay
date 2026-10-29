@@ -11,6 +11,9 @@ import com.raisecaterror.meowdisplay.core.workspace.WPaneZoom
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceBackdrop
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceViewEcho
+import com.raisecaterror.meowdisplay.core.workspace.WindowCatalog
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseReply
+import com.raisecaterror.meowdisplay.core.workspace.WindowCloseResult
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -205,6 +208,27 @@ class DemoMacTest {
         session.sendWorkspace(WorkspaceWire.retry("a"))
         drain()
         assertEquals(states + 1, events.count { it is SessionEvent.Control && it.type == WorkspaceWire.WORKSPACE_STATE })
+    }
+
+    @Test
+    fun closeWindowFromStagePeekClosesOnlyThatSampleAndAnswers() {
+        connect()
+        assertTrue(events.any { it is SessionEvent.MacFeatures && WorkspaceWire.CLOSE_FEATURE in it.features })
+        fun results() = events.filterIsInstance<SessionEvent.Control>().filter { it.type == WorkspaceWire.WINDOW_CLOSE_RESULT }
+            .mapNotNull { WindowCloseReply.parse(it.body) }
+        session.sendWorkspace(WorkspaceWire.windowClose(DemoWindowKind.Notes.windowID, 1, 1))
+        drain()
+        assertEquals(WindowCloseResult.Closed, results().last().result)
+        session.sendWorkspace(WorkspaceWire.CATALOG_REQUEST.let { buildJsonObject { put("type", it) } })
+        drain()
+        val catalog = WindowCatalog.parse(events.filterIsInstance<SessionEvent.Control>().last { it.type == WorkspaceWire.CATALOG }.body)
+        assertFalse(catalog.windows.any { it.id == DemoWindowKind.Notes.windowID })
+        assertTrue(catalog.windows.any { it.id == DemoWindowKind.Files.windowID })
+        // Again, or a different generation: not that window any more.
+        session.sendWorkspace(WorkspaceWire.windowClose(DemoWindowKind.Notes.windowID, 1, 2))
+        session.sendWorkspace(WorkspaceWire.windowClose(DemoWindowKind.Files.windowID, 7, 3))
+        drain()
+        assertEquals(listOf(WindowCloseResult.Stale, WindowCloseResult.Stale), results().takeLast(2).map { it.result })
     }
 
     @Test

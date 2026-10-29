@@ -129,6 +129,28 @@ class WorkspaceWireTest {
     }
 
     @Test
+    fun closeWindowFromStagePeekAndItsResults() {
+        val close = WorkspaceWire.windowClose(10, 2, 5)
+        assertEquals("windowClose", close.getValue("type").jsonPrimitive.content)
+        assertEquals(10L, close.getValue("window").jsonPrimitive.long)
+        assertEquals(2L, close.getValue("gen").jsonPrimitive.long)
+        assertEquals(5L, close.getValue("req").jsonPrimitive.long)
+        fun parse(json: String) = WindowCloseReply.parse(Json.parseToJsonElement(json).jsonObject)
+        assertEquals(WindowCloseReply(10, WindowCloseResult.SaveDialog), parse("""{"window":10,"req":5,"result":"saveDialog"}"""))
+        assertNull(parse("""{"window":10,"result":"quit"}"""))
+        assertNull(parse("""{"result":"closed"}"""))
+        assertNull(parse("""{"window":-1,"result":"closed"}"""))
+        // Every result reads as a sentence; only closed (or already gone) removes the card.
+        for (r in WindowCloseResult.entries) {
+            val n = WindowCloseNotice(10, "Report.txt", r)
+            assertTrue(n.message.isNotBlank())
+            assertEquals(r == WindowCloseResult.Closed || r == WindowCloseResult.Stale, r.removesCard)
+            assertEquals(!r.removesCard, n.isError)
+        }
+        assertTrue(WindowCloseNotice(10, "x", null, unsupported = true).message.contains("Update"))
+    }
+
+    @Test
     fun aTileIsMissingOnlyWhileItsWindowIsUnlisted() {
         fun window(id: Long, bundle: String) = CatalogWindow(id, 1, bundle, bundle, "t", 800, 600, WindowAvailability.Visible, false)
         val catalog = WindowCatalog("m", listOf(window(10, "dev.zed.Zed"), window(12, "dev.qa.probe")), emptyList(), emptyList(), false)

@@ -69,6 +69,8 @@ data class ReceiverControlPreferences(
     var windowSwitcher: WindowSwitcherStyle = WindowSwitcherStyle.StagePeek,
     /** The edge Stage Peek opens from. */
     var stagePeekEdge: StagePeekEdge = StagePeekEdge.Left,
+    /** Compact (a bounded, fading column between the controls) or Normal (the open column). */
+    var stagePeekDock: StagePeekDockStyle = StagePeekDockStyle.Compact,
     /**
      * Hardware keyboards: Control sends ⌘. Android keeps Meta-key (⌘) combinations for its own
      * shortcuts and never passes them to apps, so this is the only way to type ⌘ shortcuts from a
@@ -168,6 +170,7 @@ data class ReceiverControlPreferences(
         put("naturalTouchHintShown", jsonOf(naturalTouchHintShown))
         put("windowSwitcher", jsonOf(windowSwitcher.raw))
         put("stagePeekEdge", jsonOf(stagePeekEdge.raw))
+        put("stagePeekDock", jsonOf(stagePeekDock.raw))
         put("controlKeyAsCommand", jsonOf(controlKeyAsCommand))
         put("autoReconnectEnabled", jsonOf(autoReconnectEnabled))
         put("profiles", jsonArrayOf(profiles.map { it.toJson() }))
@@ -255,6 +258,8 @@ data class ReceiverControlPreferences(
                 // Absent (schema < 20): Stage Peek from the left edge.
                 p.windowSwitcher = value("windowSwitcher", fallback.windowSwitcher) { WindowSwitcherStyle.of(it.str()) }
                 p.stagePeekEdge = value("stagePeekEdge", fallback.stagePeekEdge) { StagePeekEdge.of(it.str()) }
+                // Absent (added 2026-10-30): Compact.
+                p.stagePeekDock = value("stagePeekDock", fallback.stagePeekDock) { StagePeekDockStyle.of(it.str()) }
                 p.controlKeyAsCommand = value("controlKeyAsCommand", fallback.controlKeyAsCommand) { it.bool() }
                 p.autoReconnectEnabled = value("autoReconnectEnabled", fallback.autoReconnectEnabled) { it.bool() }
                 p.pictureInPictureEnabled = value("pictureInPictureEnabled", fallback.pictureInPictureEnabled) { it.bool() }
