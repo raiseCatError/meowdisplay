@@ -104,6 +104,8 @@ data class StreamSettings(
     val mirrorDisplays: MirrorDisplayState? = null,
     /** The Mac has no usable physical display to mirror (a headless Mac): offer Extend. */
     val mirrorUnavailable: Boolean = false,
+    /** Mirror was asked for while already extending: nothing to offer, only to explain (iOS `mirrorRejectedWhileExtending`). */
+    val mirrorRejectedWhileExtending: Boolean = false,
     /** Video on/off as the Mac confirmed it (`videoState`); null until it says. */
     val videoEnabled: Boolean? = null,
 ) {
@@ -238,6 +240,7 @@ class StreamSettingsModel {
 
     /** A new connection: nothing is known about the new Mac. The Custom frame rate choice stays. */
     fun reset() {
+        confirmedMode = null
         state = StreamSettings(customFrameRate = state.customFrameRate)
     }
 
@@ -249,9 +252,16 @@ class StreamSettingsModel {
         state = state.copy(videoEnabled = enabled)
     }
 
+    private var confirmedMode: DisplayMode? = null
+
     fun displayModeConfirmed(mode: DisplayMode) {
+        confirmedMode = mode
         // A confirmed mode answers a "no physical display" offer either way.
         if (state.mirrorUnavailable && mode != DisplayMode.Mirror) state = state.copy(mirrorUnavailable = false)
+    }
+
+    fun dismissMirrorRejection() {
+        state = state.copy(mirrorRejectedWhileExtending = false)
     }
 
     fun apply(update: StreamSettingsUpdate) {
@@ -261,7 +271,9 @@ class StreamSettingsModel {
             is StreamSettingsUpdate.ExtendShapeConfirmed -> state.copy(extendShape = update.preference, pendingExtendShape = null)
             is StreamSettingsUpdate.MaxFPS -> state.copy(maxFPS = update.state.preference, pendingMaxFPS = null, maxFPSState = update.state)
             is StreamSettingsUpdate.MirrorDisplays -> state.copy(mirrorDisplays = update.state, mirrorUnavailable = false)
-            StreamSettingsUpdate.MirrorUnavailable -> state.copy(mirrorUnavailable = true)
+            // Already on Extend: the Mac stayed there by itself, so explain instead of offering it.
+            StreamSettingsUpdate.MirrorUnavailable ->
+                if (confirmedMode == DisplayMode.Extend) state.copy(mirrorRejectedWhileExtending = true) else state.copy(mirrorUnavailable = true)
         }
     }
 

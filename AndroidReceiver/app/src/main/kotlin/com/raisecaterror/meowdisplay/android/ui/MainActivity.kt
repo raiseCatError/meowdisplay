@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverOverlayHost
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverScreen
 import com.raisecaterror.meowdisplay.android.receiver.ReceiverSettings
+import com.raisecaterror.meowdisplay.android.receiver.MirrorRejectedNotice
 import com.raisecaterror.meowdisplay.android.receiver.MirrorUnavailableOffer
 import com.raisecaterror.meowdisplay.android.receiver.UpdateRequiredNotice
 import com.raisecaterror.meowdisplay.android.MeowReceiverApplication
@@ -101,6 +102,7 @@ class MainActivity : ComponentActivity() {
                         onStartPictureInPicture = if (supportsPictureInPicture) ({ enterPictureInPicture() }) else null,
                         onResyncAudio = { app.pipeline.resyncAudio() })
                     MirrorUnavailableOffer(app.media)
+                    MirrorRejectedNotice(app.media)
                 } else {
                     homeShown = false
                     ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote, onOpenSettings = { settingsOpen = true },

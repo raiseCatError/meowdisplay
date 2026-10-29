@@ -53,6 +53,19 @@ fun MirrorUnavailableOffer(media: SessionHost) {
     )
 }
 
+/** Mirror was asked for while already extending: the Mac stayed on Extend; this only explains (iOS). */
+@Composable
+fun MirrorRejectedNotice(media: SessionHost) {
+    val stream by media.session.streamSettings.collectAsState()
+    if (!stream.mirrorRejectedWhileExtending) return
+    AlertDialog(
+        onDismissRequest = { media.session.dismissMirrorRejection() },
+        title = { Text("Mirror isn't available") },
+        text = { Text("Mirror needs an active physical display on your Mac.") },
+        confirmButton = { TextButton(onClick = { media.session.dismissMirrorRejection() }) { Text("OK") } },
+    )
+}
+
 /**
  * The Mac said this app is too old to work with it (`updateRequired`, iOS `UpdateRequiredView`):
  * a full-screen notice whose main action gets the update. Unlike iOS it can be put aside, because

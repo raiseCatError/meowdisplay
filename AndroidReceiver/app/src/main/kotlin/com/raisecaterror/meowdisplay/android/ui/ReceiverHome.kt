@@ -1,6 +1,9 @@
 package com.raisecaterror.meowdisplay.android.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.res.painterResource
 import com.raisecaterror.meowdisplay.android.receiver.overlay.GlyphIcon
 import com.raisecaterror.meowdisplay.android.receiver.overlay.OverlayGlyph
@@ -106,6 +109,8 @@ fun ReceiverHome(
     var showDetails by remember { mutableStateOf(false) }
     var showAddRemote by rememberSaveable { mutableStateOf(false) }
     var editAddressFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var policyFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var forgetFor by rememberSaveable { mutableStateOf<String?>(null) }
     var securityFor by rememberSaveable { mutableStateOf<String?>(null) }
     var showSteps by rememberSaveable { mutableStateOf(false) }
     // Short phones (landscape) keep the links in the scrolling list so the Macs keep their room.
@@ -202,8 +207,9 @@ fun ReceiverHome(
                                 }
                                 add((if (saved != null) "Edit Address" else "Add Address") to { editAddressFor = mac.peerID })
                                 if (saved != null) add("Remove Address" to { remote.store.remove(mac.peerID); remote.coordinator.cancel(mac.peerID) })
+                                add("Connection Requests…" to { policyFor = mac.peerID })
                                 add("Security Details" to { securityFor = mac.peerID })
-                                add("Forget This Mac" to { remote.forget(mac.peerID) })
+                                add("Forget This Mac…" to { forgetFor = mac.peerID })
                             },
                         )
                     }
@@ -274,6 +280,20 @@ fun ReceiverHome(
         )
     }
 
+    policyFor?.let { peerID ->
+        val changes by media.connectionPolicyChanges.collectAsState()
+        ConnectionPolicyDialog(media.macName(peerID), media.connectionPolicy(peerID).also { changes }, media.automaticallyAllowConnections,
+            onChoose = { media.setConnectionPolicy(peerID, it); policyFor = null }, onDismiss = { policyFor = null })
+    }
+    forgetFor?.let { peerID ->
+        AlertDialog(
+            onDismissRequest = { forgetFor = null },
+            title = { Text("Forget \u201C${media.macName(peerID)}\u201D?") },
+            text = { Text("This removes the pairing and its saved address. To use this Mac again, pair it again.") },
+            confirmButton = { TextButton(onClick = { remote.forget(peerID); forgetFor = null }) { Text("Forget", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { forgetFor = null }) { Text("Cancel") } },
+        )
+    }
     securityFor?.let { peerID ->
         val mac = paired.firstOrNull { it.peerID == peerID }
         if (mac == null) securityFor = null else SecurityDetailsDialog(
@@ -392,7 +412,17 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
         title = { Text("This Device") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Name: ${DeviceIdentity.displayName(context)}")
+                var name by remember { mutableStateOf(DeviceIdentity.customName(context) ?: "") }
+                OutlinedTextField(
+                    name, { name = it.take(40) }, label = { Text("Device Name") }, singleLine = true,
+                    placeholder = { Text(DeviceIdentity.systemName(context)) },
+                    supportingText = { Text("Shown on your Mac. Macs see a new name the next time they find this device.") },
+                    keyboardActions = KeyboardActions(onDone = { DeviceIdentity.setCustomName(context, name) }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if ((DeviceIdentity.customName(context) ?: "") != name.trim()) {
+                    TextButton(onClick = { DeviceIdentity.setCustomName(context, name) }) { Text("Save Name") }
+                }
                 Text("Security key", style = MaterialTheme.typography.labelLarge)
                 Text(
                     if (revealed) fingerprint.chunked(4).joinToString(" ") else "Hidden",
@@ -520,4 +550,35 @@ private fun MacRow(
             actions()
         }
     }
+}
+
+
+/** iOS per-Mac "Connection Requests": Default follows Automatically Allow Connections. */
+@Composable
+private fun ConnectionPolicyDialog(
+    mac: String, current: com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy?, automaticallyAllow: Boolean,
+    onChoose: (com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy?) -> Unit, onDismiss: () -> Unit,
+) {
+    val options = listOf(
+        null to (if (automaticallyAllow) "Default (Allow)" else "Default (Ask)"),
+        com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy.AlwaysAllow to "Always Allow",
+        com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy.Blocked to "Blocked",
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Connection Requests") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("When $mac asks to start a session on this device.", style = MaterialTheme.typography.bodyMedium)
+                options.forEach { (policy, label) ->
+                    Row(Modifier.fillMaxWidth().clickable { onChoose(policy) }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.RadioButton(selected = current == policy, onClick = { onChoose(policy) })
+                        Text(label)
+                    }
+                }
+                Text("Blocked ends any session with this Mac now and declines its requests until you change this.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }

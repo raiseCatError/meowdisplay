@@ -451,6 +451,11 @@ class ReceiverSession(
 
     /** Video on or off for this device. The Mac decides (it may ask its user) and confirms with `videoState`. */
     @Synchronized
+    fun dismissMirrorRejection() {
+        streamModel.dismissMirrorRejection()
+        publishStreamSettings()
+    }
+
     fun requestVideo(enabled: Boolean): Boolean {
         if (!settingsRequestsAllowed(WireProtocol.VIDEO_CONTROL)) return false
         return send(ReceiverMessages.videoRequest(enabled))

@@ -43,13 +43,24 @@ class SharedPreferenceBlobStore(context: Context, name: String = "receiverContro
  * never reads, so a window that grows past compact opens on the iPad's
  * default and a user's own layout choice is kept across every transition.
  */
-class ReceiverControlStore(blobs: PreferenceBlobStore) {
+class ReceiverControlStore(private val blobs: PreferenceBlobStore) {
     private val repository = ReceiverControlPreferencesRepository(blobs)
     private val handler = Handler(Looper.getMainLooper())
     private val prefsState = MutableStateFlow(repository.load(ReceiverControlPreferences.initial(isPad = true)).atProcessStart())
     private val transientState = MutableStateFlow(Transient())
 
     val preferences: StateFlow<ReceiverControlPreferences> = prefsState.asStateFlow()
+
+    // iOS keeps Zoom While Typing beside the control preferences (its own AppStorage key), so it isn't in their JSON.
+    private val zoomWhileTypingState = MutableStateFlow(blobs.read(ZOOM_WHILE_TYPING) != "false")
+
+    /** Input → Zoom While Typing: enlarge the area being typed in while the keyboard is open. */
+    val zoomWhileTyping: StateFlow<Boolean> = zoomWhileTypingState.asStateFlow()
+
+    fun setZoomWhileTyping(on: Boolean) {
+        blobs.write(ZOOM_WHILE_TYPING, on.toString())
+        zoomWhileTypingState.value = on
+    }
     val transient: StateFlow<Transient> = transientState.asStateFlow()
 
     /** Called whenever held input must be released (tray off, profile change, input off, input-mode change). */
@@ -183,6 +194,7 @@ class ReceiverControlStore(blobs: PreferenceBlobStore) {
     }
 
     companion object {
+        private const val ZOOM_WHILE_TYPING = "zoomWhileTyping"
         const val AUTO_HIDE_DELAY_MS = 9_000L
     }
 }

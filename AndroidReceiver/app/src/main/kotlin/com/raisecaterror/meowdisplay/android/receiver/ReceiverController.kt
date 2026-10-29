@@ -349,7 +349,7 @@ class ReceiverController(
             args.keyboardVisibleRect != null -> {
                 // The Mac's text caret (both axes) steers the view; the touch anchor is not tracked on Android.
                 val placed = RemoteViewportCalculator.keyboardOpen(
-                    args.canvas, video, args.keyboardVisibleRect, null, zoomEnabled = true,
+                    args.canvas, video, args.keyboardVisibleRect, null, zoomEnabled = store.zoomWhileTyping.value,
                     caret = caret, previous = lastCaretDisplayed,
                 )
                 lastCaretDisplayed = if (caret == null) null else placed.displayedRect

@@ -69,8 +69,26 @@ class DeviceIdentity private constructor(
         }
 
         /** The name shown to Macs: the device name the user set, else the model. */
-        fun displayName(context: Context): String =
+        /** The name Macs show: the one set in This Device, else the system's device name, else the model. */
+        fun displayName(context: Context): String = customName(context) ?: systemName(context)
+
+        fun systemName(context: Context): String =
             Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() }
                 ?: android.os.Build.MODEL
+
+        fun customName(context: Context): String? =
+            context.getSharedPreferences(NAME_PREFS, Context.MODE_PRIVATE).getString(NAME_KEY, null)?.takeIf { it.isNotBlank() }
+
+        /** iOS Device Name: blank goes back to the system name. At most 40 characters, one line. */
+        @android.annotation.SuppressLint("ApplySharedPref", "UseKtx")
+        fun setCustomName(context: Context, name: String) {
+            val trimmed = name.replace('\n', ' ').trim().take(40)
+            context.getSharedPreferences(NAME_PREFS, Context.MODE_PRIVATE).edit().apply {
+                if (trimmed.isEmpty()) remove(NAME_KEY) else putString(NAME_KEY, trimmed)
+            }.commit()
+        }
+
+        private const val NAME_PREFS = "deviceName"
+        private const val NAME_KEY = "name"
     }
 }

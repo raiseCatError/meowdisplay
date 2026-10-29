@@ -1,6 +1,7 @@
 package com.raisecaterror.meowdisplay.core
 
 import com.raisecaterror.meowdisplay.core.session.CustomFrameRate
+import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.ExtendShape
 import com.raisecaterror.meowdisplay.core.session.ExtendShapePreference
 import com.raisecaterror.meowdisplay.core.session.HelloFields
@@ -238,5 +239,19 @@ class StreamSettingsTest {
 
     private companion object {
         const val MAC = "mac-install-id"
+    }
+
+    @Test
+    fun mirrorUnavailableWhileExtendingOnlyExplains() {
+        val model = StreamSettingsModel()
+        model.displayModeConfirmed(DisplayMode.Extend)
+        model.apply(StreamSettingsUpdate.MirrorUnavailable)
+        assertFalse("nothing to offer: already extending", model.state.mirrorUnavailable)
+        assertTrue(model.state.mirrorRejectedWhileExtending)
+        model.dismissMirrorRejection()
+        assertFalse(model.state.mirrorRejectedWhileExtending)
+        model.reset()
+        model.apply(StreamSettingsUpdate.MirrorUnavailable)
+        assertTrue("a new connection with no confirmed mode gets the offer", model.state.mirrorUnavailable)
     }
 }

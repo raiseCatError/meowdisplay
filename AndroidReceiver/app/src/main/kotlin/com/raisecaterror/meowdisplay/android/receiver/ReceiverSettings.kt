@@ -175,6 +175,10 @@ private fun SettingsPageContent(
                 OutlinedButton(onClick = { controller.requestInput(false) }, enabled = view.inputState == InputWireState.Allowed) { Text("Turn Off") }
             }
             Caption("Your Mac decides. Every session starts View Only; control stops the moment the Mac revokes it.")
+            Section("Keyboard")
+            val zoomWhileTyping by controller.store.zoomWhileTyping.collectAsState()
+            Toggle("Zoom While Typing", zoomWhileTyping) { on -> controller.store.setZoomWhileTyping(on) }
+            Caption("Enlarge the area you're typing in when the keyboard is open.")
             Section("Pointer")
             Choice("Input Mode", PointerInputMode.entries, prefs.inputMode, { it.title }) { mode -> set { it.inputMode = mode } }
             if (prefs.inputMode == PointerInputMode.Trackpad) {
@@ -343,6 +347,12 @@ private fun SettingsPageContent(
             val mediaUi by media.ui.collectAsState()
             val view by controller.view.collectAsState()
             val mac = media.macName(mediaUi.peerID)
+            (media as? com.raisecaterror.meowdisplay.android.session.MediaController)?.let { real ->
+                @Suppress("UNUSED_VARIABLE") val changes by real.connectionPolicyChanges.collectAsState()
+                Section("Connection Requests")
+                Toggle("Automatically Allow Connections", real.automaticallyAllowConnections) { on -> real.automaticallyAllowConnections = on }
+                Caption("On, a paired Mac can start a session on this device without asking. Off, you approve each one. Choose per Mac from its ••• menu on Home.")
+            }
             Section("Status")
             LabeledRow("Connection", if (media.isDemo) "Demo: a sample Mac on this device. Nothing is connected." else com.raisecaterror.meowdisplay.android.ui.sessionStatus(mediaUi, mac))
             if (view.videoSize.width > 0) {

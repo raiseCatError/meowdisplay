@@ -243,6 +243,26 @@ class MediaController(
         session.revoke(peerID, blocked = false)
     }
 
+    private val policyChanges = MutableStateFlow(0)
+
+    /** Bumps on every Connection Requests change, so Compose re-reads [connectionPolicy]. */
+    val connectionPolicyChanges: StateFlow<Int> = policyChanges
+
+    fun connectionPolicy(peerID: String): PeerSessionPolicy? = policies.policy(peerID)
+
+    /** iOS "Connection Requests": Default (follows Automatically Allow), Always Allow, or Blocked. */
+    fun setConnectionPolicy(peerID: String, policy: PeerSessionPolicy?) {
+        if (policy == PeerSessionPolicy.Blocked) block(peerID) else policies.setPolicy(peerID, policy)
+        policyChanges.value++
+    }
+
+    var automaticallyAllowConnections: Boolean
+        get() = policies.automaticallyAllow
+        set(value) {
+            (policies as? SessionPolicyPrefs)?.automaticallyAllow = value
+            policyChanges.value++
+        }
+
     fun block(peerID: String) {
         connectRequests.clear(peerID)
         policies.setPolicy(peerID, PeerSessionPolicy.Blocked)
