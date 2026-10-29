@@ -280,8 +280,6 @@ final class WorkspaceModel: ObservableObject {
     /// catalog and thumbnails fresh. Read-only requests; never a layout,
     /// capture or focus change.
     @Published var stagePeekOpen = false { didSet { if stagePeekOpen, !oldValue { startRefreshing() } } }
-    /// The Stage Peek bar was used in Mirror/Extend: open the peek once Window mode lists windows.
-    @Published var openStagePeekWhenReady = false
     @Published var railEdge: WorkspaceRailEdge { didSet { defaults.set(railEdge.rawValue, forKey: Self.railKey) } }
     @Published var arranging = false
     @Published private(set) var hovered: String?

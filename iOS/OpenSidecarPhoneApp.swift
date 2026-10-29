@@ -70,6 +70,8 @@ struct ReceiverScreen: View {
     @State private var keyboardActive = false
     /// "Switch to Window view?" answered (either way) for this launch.
     @State private var windowPromptAnswered = false
+    /// Mirror or Extend, whichever showed last: where "View Full Screen" returns from Window mode.
+    @State private var lastDesktopMode: ReceiverDisplayMode = .mirror
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
     // Demo Mode (see DemoMode.swift): a sample session with its own
@@ -420,20 +422,10 @@ struct ReceiverScreen: View {
                             .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
                             .transition(.opacity)
                     }
-                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
-                       !model.workspace.windowMode, !model.workspace.overviewOpen {
-                        // Mirror/Extend: the same edge bar. Using it switches to Window mode and opens the peek
-                        // once the Mac lists its windows (window titles are only shared in Window mode).
-                        StagePeekDesktopBar(edge: controlStore.preferences.stagePeekEdge, hapticsEnabled: controlStore.preferences.hapticsEnabled) {
-                            model.workspace.openStagePeekWhenReady = true
-                            _ = model.receiver.requestWindowMode()
-                        }
-                        .frame(width: canvas.width, height: canvas.height)
-                        .position(x: canvas.midX, y: canvas.midY)
-                    }
-                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.windowMode {
-                        // Window mode only: in Mirror/Extend the edge belongs to the Mac (its own
-                        // Stage Manager). Above the controls; only the edge strip takes touches until it opens.
+                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                        // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
+                        // Opening, browsing, searching and expanding never change the mode; only
+                        // tapping a window switches (to Window mode, with that window).
                         let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
                                                 width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
                                                 height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
@@ -447,8 +439,12 @@ struct ReceiverScreen: View {
                                 .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
-                            // Full Desktop from Window mode shows Mirror (the whole Mac screen as it is).
-                            onFullDesktop: { _ = model.receiver.requestDisplayMode(.mirror) })
+                            inputAllowed: inputReachesMac,
+                            onDisplay: { _ in
+                                // In Mirror/Extend the desktop already shows: nothing changes. From Window
+                                // mode this is "View Full Screen": back to the desktop mode used before.
+                                if model.workspace.windowMode { _ = model.receiver.requestDisplayMode(lastDesktopMode) }
+                            })
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
                        !showSettings, !model.workspace.overviewOpen {
@@ -544,6 +540,7 @@ struct ReceiverScreen: View {
         }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
+            if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
         }
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
