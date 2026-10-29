@@ -379,7 +379,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
     /// Remote Finder: this connection asks to browse the approved folders; answer with
     /// `resolveFilesConsent(_:generation:)` after the owner decides.
-    @MainActor var onFilesConsentRequest: ((_ generation: UInt64) -> Void)?
+    @MainActor var onFilesConsentRequest: ((_ generation: UInt64, _ capabilities: Set<FilesCapability>?) -> Void)?
     /// Fires when the connection changes, so a pending control-request
     /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
     @MainActor var onInputAuthorityReset: (() -> Void)? {
@@ -1381,13 +1381,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { selfBox.currentOnQueue()?.sendAllowInputState(state: .requesting) }
     }
 
-    /// The owner's answer to a Remote Finder prompt, for the connection that asked.
-    func resolveFilesConsent(_ allowed: Bool, generation: UInt64) {
+    /// The owner's answer to a Remote Finder prompt (or the device's stored policy), for the
+    /// connection that asked: the grant, or nil for no.
+    func resolveFilesConsent(_ grant: FilesGrant?, generation: UInt64) {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
-            self.fileBrowser?.consentDecided(allowed)
+            self.fileBrowser?.consentDecided(grant)
         }
+    }
+
+    /// The owner's answer to a request for more Files capabilities: those granted, or nil for no.
+    func resolveFilesAccess(_ granted: Set<FilesCapability>?, generation: UInt64) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
+            self.fileBrowser?.accessDecided(granted)
+        }
+    }
+
+    /// The owner revoked this device's Files access in Settings: running transfers end now.
+    func revokeFiles() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.fileBrowser?.revoke() }
     }
 
     /// A Mac-owner (or auto-policy) decision granted control to the
@@ -7093,8 +7109,12 @@ extension MacSender {
                 sender.sendJSONObject(box.value)
             }
         }
-        browser.askConsent = {
-            Task { @MainActor in selfBox.resolve()?.onFilesConsentRequest?(generation) }
+        browser.askConsent = { capabilities in
+            Task { @MainActor in selfBox.resolve()?.onFilesConsentRequest?(generation, capabilities) }
+        }
+        // The device's stored policy, read on every request: an owner's change applies at once.
+        if let peerID = lastHello?.id {
+            browser.livePolicy = { FilesDevicePolicyStore.policy(peerID: peerID) }
         }
         fileBrowser = browser
         return browser

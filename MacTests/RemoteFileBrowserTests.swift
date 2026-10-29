@@ -82,7 +82,7 @@ final class RemoteFileBrowserTests: XCTestCase {
         let b = browser { m in lock.lock(); sent.append(m); lock.unlock() }
         func all() -> [[String: Any]] { lock.lock(); defer { lock.unlock() }; return sent }
         var asked = 0
-        b.askConsent = { asked += 1 }
+        b.askConsent = { _ in asked += 1 }
         b.handle(["op": "list", "root": "r1", "path": ["Projects"], "req": 1], inputGranted: true)
         wait(all, for: 1)
         XCTAssertEqual(all()[0]["error"] as? String, "asking", "a list never asks the owner by itself")

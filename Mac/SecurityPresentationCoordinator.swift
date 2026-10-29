@@ -114,7 +114,12 @@ enum SecurityPresentationCoordinator {
     private struct FilesConsentRequest {
         let sessionID: String
         let name: String
-        var decide: (Bool) -> Void
+        /// nil: browsing at all; otherwise the extra capabilities asked for.
+        let capabilities: Set<FilesCapability>?
+        /// False while any device has control of this Mac: a grant that outlives the session
+        /// could then be clicked by that device itself.
+        let alwaysAllowed: Bool
+        var decide: (FilesConsentDecision) -> Void
     }
 
     private static var filesConsentPanel: NSPanel?
@@ -127,7 +132,8 @@ enum SecurityPresentationCoordinator {
 
     /// Asks the Mac owner whether this session may browse the approved folders. Closing the
     /// panel is Not Now. Doesn't activate the app, so the owner's front app keeps focus.
-    static func presentFilesConsent(name: String, sessionID: String, decide: @escaping (Bool) -> Void) {
+    static func presentFilesConsent(name: String, sessionID: String, capabilities: Set<FilesCapability>? = nil,
+                                    alwaysAllowed: Bool, decide: @escaping (FilesConsentDecision) -> Void) {
         // The same session asking again (a new connection): its newest answer target wins.
         if filesConsentShown?.sessionID == sessionID {
             filesConsentShown?.decide = decide
@@ -137,7 +143,8 @@ enum SecurityPresentationCoordinator {
             filesConsentQueue[i].decide = decide
             return
         }
-        filesConsentQueue.append(FilesConsentRequest(sessionID: sessionID, name: name, decide: decide))
+        filesConsentQueue.append(FilesConsentRequest(sessionID: sessionID, name: name, capabilities: capabilities,
+                                                     alwaysAllowed: alwaysAllowed, decide: decide))
         showNextFilesConsent()
     }
 
@@ -150,11 +157,11 @@ enum SecurityPresentationCoordinator {
         showNextFilesConsent()
     }
 
-    fileprivate static func answerFilesConsent(_ allowed: Bool) {
+    fileprivate static func answerFilesConsent(_ decision: FilesConsentDecision) {
         guard let shown = filesConsentShown else { return }
         filesConsentShown = nil
         closeFilesConsentPanel()
-        shown.decide(allowed)
+        shown.decide(decision)
         // The next device's question comes as a new panel, a moment later.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNextFilesConsent() }
     }
@@ -186,8 +193,9 @@ enum SecurityPresentationCoordinator {
         let delegate = FilesConsentPanelWindowDelegate()
         filesConsentPanelDelegate = delegate
         panel.delegate = delegate
-        let hostingController = NSHostingController(rootView: FilesConsentPanelView(name: request.name) { allowed in
-            answerFilesConsent(allowed)
+        let hostingController = NSHostingController(rootView: FilesConsentPanelView(
+            name: request.name, capabilities: request.capabilities, alwaysAllowed: request.alwaysAllowed) { decision in
+            answerFilesConsent(decision)
         })
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
@@ -508,41 +516,98 @@ private struct SessionApprovalPanelView: View {
 @MainActor
 private final class FilesConsentPanelWindowDelegate: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        SecurityPresentationCoordinator.answerFilesConsent(false)
+        SecurityPresentationCoordinator.answerFilesConsent(.deny)
     }
 }
 
 /// "<Device Name> wants to browse your approved folders": Allow for This Session / Not Now.
 private struct FilesConsentPanelView: View {
     let name: String
-    let decide: (Bool) -> Void
+    let capabilities: Set<FilesCapability>?
+    let alwaysAllowed: Bool
+    let decide: (FilesConsentDecision) -> Void
     /// The buttons wake up a moment after the panel appears, so a click meant for whatever
     /// was under the pointer can't answer it.
     @State private var armed = false
+    /// Second step for the broad choice: its scope and risk, confirmed separately.
+    @State private var confirmingAll = false
+
+    private var title: String {
+        guard let caps = capabilities else { return String(localized: "\(name) wants to browse your files") }
+        let what = caps.sorted().map { Self.verb($0) }.joined(separator: ", ")
+        return String(localized: "\(name) wants to \(what)")
+    }
+
+    static func verb(_ c: FilesCapability) -> String {
+        switch c {
+        case .browse: return String(localized: "browse files")
+        case .download: return String(localized: "save copies of files")
+        case .upload: return String(localized: "add files and folders")
+        case .modify: return String(localized: "rename, move and copy files")
+        case .delete: return String(localized: "move files to the Trash")
+        }
+    }
 
     var body: some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 6) {
-                Text("\(name) wants to browse your approved folders")
-                    .font(.headline)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.center)
-                Text("It can see file names and previews in the folders you chose in MeowDisplay Settings, read-only, until this session ends. Opening a file on this Mac also needs control.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.center)
-            }
-            HStack(spacing: 8) {
-                Button("Not Now") { decide(false) }
-                    .keyboardShortcut(.cancelAction)
-                Button("Allow for This Session") { decide(true) }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!armed)
+        VStack(spacing: 18) {
+            if confirmingAll {
+                VStack(spacing: 6) {
+                    Text("Allow \(name) to read all your accessible files?")
+                        .font(.headline).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                    Text("From now on it can browse, preview and save copies of everything in your home folder and on connected drives that macOS lets MeowDisplay read — without asking again, until you change it in Settings ▸ Devices. ~/Library, other users' files and protected locations stay out of reach, and macOS may still ask you before MeowDisplay reads Desktop, Documents, Downloads or a drive. It can't change or delete anything unless you allow that separately.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Button("Back") { confirmingAll = false }.keyboardShortcut(.cancelAction)
+                    Button("Allow All Accessible Files") { decide(.alwaysAllAccessible) }.disabled(!armed)
+                }
+            } else {
+                VStack(spacing: 6) {
+                    Text(title)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.center)
+                    Text(capabilities == nil
+                         ? "It can see the files in the folders you approved in MeowDisplay Settings, preview them and save copies on the device. It can't change anything. Opening a file on this Mac also needs control."
+                         : "Only in the folders it may browse. Replaced and deleted items go to the Trash.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.center)
+                    if !alwaysAllowed {
+                        Text("Always Allow isn't available while a device controls this Mac.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                }
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button("Not Now") { decide(.deny) }
+                            .keyboardShortcut(.cancelAction)
+                        Button("Allow This Session") { decide(.session) }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(!armed)
+                    }
+                    if capabilities == nil {
+                        HStack(spacing: 8) {
+                            Button("Always Allow Approved Folders") { decide(.alwaysSelectedFolders) }
+                                .disabled(!armed || !alwaysAllowed)
+                            Button("All Files…") { confirmingAll = true }
+                                .disabled(!armed || !alwaysAllowed)
+                        }
+                    } else {
+                        Button("Always Allow for This Device") { decide(.alwaysSelectedFolders) }
+                            .disabled(!armed || !alwaysAllowed)
+                    }
+                }
             }
         }
         .padding(24)
-        .frame(width: 380)
+        .frame(width: 420)
         .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { armed = true } }
+        .onChange(of: confirmingAll) { _, _ in
+            armed = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { armed = true }
+        }
     }
 }

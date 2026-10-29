@@ -1456,54 +1456,107 @@ display is focused.
 
 ### 6.12 Remote Finder (`filesRequest` / `files`)
 
-Optional and additive: no `pv` bump. A receiver browses folders the Mac owner
-approved, on its own screen, read-only.
+Optional and additive: no `pv` bump. A receiver browses, previews, downloads
+and — only when the Mac owner allows it — uploads and changes files on the
+Mac, on its own screen.
 
 * **Capability.** A sender that can answer lists `"files"` in
   `welcome.features`. A receiver sends `filesRequest` only to such a sender;
   a peer that doesn't know the types ignores them.
-* **Gates (sender).** Answered only for an admitted, unpaused session. The Mac
-  owner turns the feature on (off by default) and chooses the folders: inside
-  their home folder (never `~/Library`) or on a mounted volume. Each
-  connection then asks the owner once: the first `filesRequest` with
-  `op` `"state"` shows the prompt; every other op before the answer gets the
-  error `asking`. The approval ends with the connection.
-* **Paths.** A request names a `root` (an approved folder's opaque id) and a
-  `path` (array of names below it). The sender rejects `.`, `..`, separators
-  and hidden names, resolves symlinks and answers only if the result stays
-  inside that folder and outside `~/Library` and other users' homes. Hidden
-  files are never listed.
+* **Grants (sender).** Answered only for an admitted, unpaused session, with
+  the Mac's Files switch on (off by default). Each paired device (by its
+  authenticated install id, never its name or address) has a policy: *ask*
+  (default), *always* or *block*; a *scope*: the folders the owner approved
+  (in the home folder, never `~/Library`, or on a mounted volume) or *all
+  accessible* files (the home folder and mounted volumes, only what macOS
+  lets the Mac app read; never other users, `~/Library` or credential
+  dot-folders); and *capabilities*: `browse` (list, search, thumbnails,
+  in-app previews), `download` (save or share a copy), `upload` (files,
+  folders, new folders), `modify` (rename, move, copy, duplicate, compress,
+  expand, put back) and `delete` (move to the Trash). With *ask*, the first
+  `state` request of a connection shows the owner's prompt (Not Now, Allow
+  This Session, Always Allow Approved Folders, All Files…); every other op
+  before the answer gets `asking`. A prompt grants `browse` + `download`.
+  More is asked for with `requestAccess`. Every request is checked again
+  against the switch and the live policy: *block* refuses at once, turning
+  *always* off makes the session ask again (`revoked`), and the owner's
+  Revoke ends the grant and every transfer. The policy is never widened
+  while any device controls the Mac; Forget removes it. Files access and
+  control are independent.
+* **Paths.** A request names a `root` (an opaque id from `state`) and a
+  `path` (array of names below it). The sender rejects `.`, `..`,
+  separators, `:` and hidden names (unless the policy shows hidden files),
+  resolves symlinks and answers only if the result stays inside that root
+  and outside protected locations. Destinations of uploads, copies and
+  moves are checked the same way.
 * **`filesRequest`** (receiver to sender): `{"type":"filesRequest","op":…,"req":7,…}`.
-  `req` is echoed in the reply. Ops:
-  * `state`: whether browsing is possible, and the folders.
-  * `list` (`root`, `path`): one folder, folders first, at most 2000 entries.
-  * `search` (`root`, `path`, `q` ≤ 100 chars): names containing `q` below
-    `path`, at most 200 results, bounded in time; a newer search replaces an
-    older one.
-  * `preview` (`root`, `path`, optional `max` side ≤ 1024): a text excerpt
-    (≤ 32 KB) or a Quick Look JPEG. Only the newest preview is answered.
-  * `thumbs` (`root`, `path`, `names` ≤ 48, optional `max` ≤ 256): grid
-    thumbnails, one `thumb` reply each; a newer `thumbs` cancels the rest.
-  * `open` (`root`, `path`, optional `with` bundle id): opens the file on the
-    Mac, in its default app or in that app, without bringing it forward.
-    Needs the input grant (6.1 `allowInputState`), else error `control`.
+  `req` is echoed in the reply. Ops (capability needed):
+  * `state`: whether browsing is possible, the roots and the grant.
+  * `list` (`root`, `path`), `search` (`root`, `path`, `q` ≤ 100 chars),
+    `preview` (`root`, `path`, optional `max` side ≤ 1600), `thumbs`
+    (`root`, `path`, `names` ≤ 48, optional `max` ≤ 256), `info` (`root`,
+    `path`), `openWithApps` (`root`, `path`): browse.
+  * `open` (`root`, `path`, optional `with` bundle id): browse, and the input
+    grant (6.1 `allowInputState`), else error `control`.
+  * `requestAccess` (`caps: [..]`): asks the owner for more capabilities.
+  * `download` (`root`, `path`, `purpose`: `view` or `save`): opens a file
+    for reading — `view` (shown inside the receiver app) needs browse, `save`
+    (saved, shared or copied out) needs download. Then `read` (`x`, `o`
+    offset, `n` ≤ 1 MiB) for each range, paced by the receiver, and `close`
+    (`x`). At most 6 open; idle ones close after 120 s. The capability is
+    checked on every `read`.
+  * `uploadBegin` (`root`, `path` folder, `name`, `size`, `conflict`:
+    `ask` | `rename` | `replace` | `skip`, optional `sha` hex prefix ≥ 16 of
+    the file's SHA-256, `mod`): upload; `replace` also needs delete. Then
+    `uploadData` (`x`, `o`, `d` base64 of ≤ 96 KiB, in order) and
+    `uploadEnd` (`x`), or `uploadCancel` (`x`). At most 4 at once.
+  * `mkdir` (`root`, `path`, `name`, `conflict`; `skip` uses an existing
+    folder): upload.
+  * `rename` (`root`, `path`, `name`), `copy` / `move` (`root`, `path`,
+    `toRoot`, `toPath` folder, `conflict`), `duplicate` (`root`, `path`),
+    `zip` (`root`, `path` folder, `names`), `unzip` (`root`, `path`),
+    `putBack` (`token`): modify; `replace` also needs delete.
+  * `trash` (`root`, `path`): delete.
 * **`files`** (sender to receiver): `{"type":"files","op":…,"req":7,"ok":true,…}`.
-  * `state`: `state` is `off`, `asking`, `denied`, `noFolders` or `ready`;
-    `ready` carries `roots: [{id, name}]`. Sent again when the owner answers.
+  * `state`: `state` is `off`, `asking`, `denied`, `noFolders`, `ready` or
+    `revoked`; `ready` carries `roots: [{id, name}]` and `grant: {duration:
+    session|always, scope, caps, hidden}`. Sent again when the owner answers.
   * `list`: `root`, `path`, `entries`, optional `truncated`. An entry is
-    `{name, dir, kind, size?, mod?}`: `kind` is `folder`, `app`, `image`,
-    `video`, `audio`, `pdf`, `archive`, `text`, `document` or `file`; `size`
-    in bytes for files; `mod` in Unix seconds.
+    `{name, dir, kind, size?, mod?, made?, hidden?, ro?}`: `kind` is
+    `folder`, `app`, `image`, `video`, `audio`, `pdf`, `archive`, `text`,
+    `document` or `file`; `size` in bytes for files; dates in Unix seconds;
+    `ro` when the Mac can't write it.
   * `search`: `root`, `q`, `entries` (each with `in`, the folder path below
     the root), `complete`.
   * `preview`: `root`, `path`, then `text` (+ `truncated`) or `jpeg` (base64)
-    with `w`, `h`.
+    with `w`, `h` (in parts, 6.14, when long).
   * `thumb`: `root`, `path`, `name`, then `jpeg`, `w`, `h` or `ok:false`.
-  * Errors: `ok:false` with `error` `off`, `asking`, `denied`, `notFound`,
+  * `download`: `x`, `size`, `name`, `mod`, `uti`, `mime`. Each `read` is
+    answered by `data` messages (`x`, `o`, `d` base64 of ≤ 22000 bytes, each
+    under the control limit) and then `read` (`x`, `o`, `n`, `sha`: the
+    first 16 hex digits of the range's SHA-256). A file that changes while
+    open (size, date or inode) fails with `changed`.
+  * `uploadBegin`: `x` and the `name` it will get, or `skipped`; error
+    `exists` carries `suggest`. `uploadAck` (`x`, `o` bytes written) answers
+    each `uploadData`. `uploadEnd`: the final `name`. The file is written to
+    a hidden temporary file in the destination folder and moved into place
+    only when its size (and digest, if given) match; another item that
+    appeared meanwhile is kept (the upload gets a new name). A replaced item
+    goes to the Trash.
+  * `mkdir`, `rename`, `copy`, `move`, `duplicate`, `zip`, `unzip`,
+    `putBack`: the resulting `name` (or `skipped`). `trash`: a `token` for
+    `putBack` (this session only). `info`: `info {name, kind, size, items?,
+    made, mod, used, perm, owner, writable, locked, cloud?}`.
+    `openWithApps`: `apps [{bundle, name, default}]`. `requestAccess`: `ok`.
+  * Errors: `ok:false` with `error` `off`, `asking`, `denied`, `revoked`,
+    `notAllowed` (with `need`, the missing capability), `notFound`,
     `permission` (macOS refused this app), `control`, `badQuery`,
-    `noPreview` or `unsupported`.
-* **Never.** No writes, deletes, renames, uploads or downloads of whole files;
-  no Finder windows on the Mac and no change of display mode or focus.
+    `noPreview`, `exists`, `noSpace`, `tooLarge`, `busy`, `changed`,
+    `digest`, `short`, `badRange`, `intoItself`, `readOnly`, `failed` or
+    `unsupported`.
+* **Never.** No Finder windows on the Mac, no change of display mode or
+  focus, nothing deleted outright (only the Trash), nothing overwritten
+  without an explicit `replace`, no network file server.
 
 ### 6.13 Pane menus (`menuRequest` / `menu` / `menuPress` / `menuResult`)
 

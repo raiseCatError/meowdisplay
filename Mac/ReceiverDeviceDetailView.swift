@@ -96,6 +96,8 @@ struct ReceiverDeviceDetailView: View {
                 }
             }
 
+            filesSection
+
             networkTransportSection
 
             Section {
@@ -125,6 +127,75 @@ struct ReceiverDeviceDetailView: View {
         // Forgotten while open: return to the Devices page.
         .onChange(of: isPaired) { _, paired in
             if !paired { dismiss() }
+        }
+    }
+
+    /// Remote Finder for this device: how long (Ask each session / Always / Block), where
+    /// (approved folders / all accessible files) and what (browse, download, upload, modify,
+    /// delete). Widening is refused while any device controls this Mac; narrowing and Revoke
+    /// always work and apply to a live session at its next request (Revoke: at once).
+    @ViewBuilder
+    private var filesSection: some View {
+        let policy = FilesDevicePolicyStore.policy(peerID: peerID)
+        let locked = controller.anySessionHasEffectiveInput
+        let session = controller.sessions.first { $0.deviceID == peerID && $0.applicationAuthenticated }
+        Section {
+            Picker("Access", selection: Binding(
+                get: { policy.access },
+                set: { var p = policy; p.access = $0; controller.setFilesPolicy(p, peerID: peerID) })) {
+                Text("Ask Every Session").tag(FilesAccess.ask)
+                Text("Always Allow").tag(FilesAccess.always)
+                Text("Block").tag(FilesAccess.block)
+            }
+            if policy.access == .always {
+                Picker("Reaches", selection: Binding(
+                    get: { policy.scope },
+                    set: { var p = policy; p.scope = $0; controller.setFilesPolicy(p, peerID: peerID) })) {
+                    Text("Approved Folders").tag(FilesScope.selectedFolders)
+                    Text("All Accessible Files").tag(FilesScope.allAccessible)
+                }
+                ForEach(FilesCapability.allCases, id: \.self) { c in
+                    Toggle(Self.capabilityTitle(c), isOn: Binding(
+                        get: { policy.capabilities.contains(c) },
+                        set: { on in
+                            var p = policy
+                            if on { p.capabilities.insert(c) } else { p.capabilities.remove(c) }
+                            if !p.capabilities.contains(.browse) { p.capabilities = [] }   // nothing works without browsing
+                            controller.setFilesPolicy(p, peerID: peerID)
+                        }))
+                    .disabled(locked && !policy.capabilities.contains(c))
+                }
+                Toggle("Show Hidden Files", isOn: Binding(
+                    get: { policy.showHidden },
+                    set: { var p = policy; p.showHidden = $0; controller.setFilesPolicy(p, peerID: peerID) }))
+                    .disabled(locked && !policy.showHidden)
+            }
+            if let session, session.filesAllowedEpoch != nil || policy.access == .always {
+                Button("Revoke Files Access Now", role: .destructive) { controller.revokeFilesAccess(peerID: peerID) }
+            }
+        } header: {
+            Text("Files")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if locked {
+                    Text("Files access can't be widened while a device controls this Mac. Narrowing and Revoke always work.")
+                }
+                Text(policy.scope == .allAccessible && policy.access == .always
+                     ? "All Accessible Files: the home folder and connected drives, only where macOS lets MeowDisplay read (it may ask you first). Never ~/Library, other users' files or protected locations."
+                     : "Approved folders are chosen in Settings ▸ Displays. Replaced and deleted items go to the Trash. Files access never gives control of this Mac, and control never gives Files access.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    static func capabilityTitle(_ c: FilesCapability) -> String {
+        switch c {
+        case .browse: return String(localized: "Browse and Preview")
+        case .download: return String(localized: "Save to Device and Share")
+        case .upload: return String(localized: "Upload and New Folders")
+        case .modify: return String(localized: "Rename, Move, Copy, Compress")
+        case .delete: return String(localized: "Move to Trash")
         }
     }
 

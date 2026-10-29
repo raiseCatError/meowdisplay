@@ -299,6 +299,8 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// the Files switch stayed as it was: `RemoteFilesPolicy.epoch`). A transport swap within it
     /// (hotspot TCP, cable) doesn't ask again; a new session, or turning Files off and on, does.
     var filesAllowedEpoch: Int?
+    /// Remote Finder capabilities the owner added for this session only (upload, modify, …).
+    var filesSessionCapabilities: Set<FilesCapability> = []
     // This session's control-request dedup/cooldown/timeout — MainActor-
     // confined (unlike the grant bit) since it's only ever touched from
     // `SenderController`'s consent-flow methods, all MainActor.
@@ -1920,7 +1922,11 @@ final class SenderController: ObservableObject {
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
             removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0, role: .sender) },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0, role: .sender) },
-            removeInputAuthorization: { ReceiverInputAuthorizationStore.removePolicy(peerID: $0) },
+            removeInputAuthorization: {
+                ReceiverInputAuthorizationStore.removePolicy(peerID: $0)
+                // Files grants belong to this trust relationship too.
+                FilesDevicePolicyStore.removePolicy(peerID: $0)
+            },
             removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender) },
             removeNetworkTransportState: {
                 NetworkTransportPreferenceStore.remove(peerID: $0)
@@ -2708,17 +2714,10 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.handleInputControlRequested(session: session, connectionGeneration: generation)
         }
-        sender.onFilesConsentRequest = { [weak self, weak session] generation in
-            // Remote Finder: the Mac owner approves browsing once per session, for this connection.
+        sender.onFilesConsentRequest = { [weak self, weak session] generation, capabilities in
+            // Remote Finder: the device's stored policy answers, or the Mac owner does (per session).
             guard let self, let session, self.owns(session) else { return }
-            if session.filesAllowedEpoch == RemoteFilesPolicy.epoch() {
-                session.sender.resolveFilesConsent(true, generation: generation)
-                return
-            }
-            SecurityPresentationCoordinator.presentFilesConsent(name: session.name, sessionID: session.id) { [weak session] allowed in
-                if allowed { session?.filesAllowedEpoch = RemoteFilesPolicy.epoch() }
-                session?.sender.resolveFilesConsent(allowed, generation: generation)
-            }
+            self.handleFilesConsentRequest(session: session, generation: generation, capabilities: capabilities)
         }
         sender.onSessionInputGrantChanged = { [weak session] granted in
             session?.sessionInputGranted = granted
@@ -3234,6 +3233,98 @@ final class SenderController: ObservableObject {
     /// doc comment): a remote peer with live screen control could otherwise
     /// click any device's row in Settings to widen its own or another
     /// peer's permanent policy.
+    /// Remote Finder: a session asked to browse (`capabilities` nil) or for more capabilities.
+    /// Block refuses, Always grants from the device's policy, Ask prompts the owner. An Always
+    /// answer is stored only while no device controls this Mac (it could click it itself).
+    func handleFilesConsentRequest(session: DeviceSession, generation: UInt64, capabilities: Set<FilesCapability>?) {
+        let peerID = session.deviceID
+        let policy = peerID.map { FilesDevicePolicyStore.policy(peerID: $0) } ?? .default
+        if let caps = capabilities {
+            if policy.access == .block { return session.sender.resolveFilesAccess(nil, generation: generation) }
+            if policy.access == .always, caps.isSubset(of: policy.capabilities) {
+                return session.sender.resolveFilesAccess(caps, generation: generation)
+            }
+            SecurityPresentationCoordinator.presentFilesConsent(
+                name: session.name, sessionID: session.id, capabilities: caps,
+                alwaysAllowed: peerID != nil && !anySessionHasEffectiveInput) { [weak self, weak session] decision in
+                guard let self, let session else { return }
+                switch decision {
+                case .deny:
+                    session.sender.resolveFilesAccess(nil, generation: generation)
+                case .session:
+                    session.filesSessionCapabilities.formUnion(caps)
+                    session.sender.resolveFilesAccess(caps, generation: generation)
+                case .alwaysSelectedFolders, .alwaysAllAccessible:
+                    if let peerID {
+                        var p = FilesDevicePolicyStore.policy(peerID: peerID)
+                        p.capabilities.formUnion(caps)
+                        if p.access != .always { p.access = .always }
+                        if !FilesDevicePolicyStore.setPolicy(p, peerID: peerID, anySessionHasEffectiveInput: self.anySessionHasEffectiveInput) {
+                            Log.info("files: Always Allow not stored (a device controls this Mac); allowed for this session")
+                        }
+                    }
+                    session.filesSessionCapabilities.formUnion(caps)
+                    session.sender.resolveFilesAccess(caps, generation: generation)
+                }
+            }
+            return
+        }
+        switch policy.access {
+        case .block:
+            return session.sender.resolveFilesConsent(nil, generation: generation)
+        case .always:
+            var g = FilesGrant.always(policy)
+            g.capabilities.formUnion(session.filesSessionCapabilities)
+            return session.sender.resolveFilesConsent(g, generation: generation)
+        case .ask:
+            break
+        }
+        // Allowed for this session already (a hotspot TCP or cable swap): no new prompt.
+        if session.filesAllowedEpoch == RemoteFilesPolicy.epoch() {
+            return session.sender.resolveFilesConsent(.session(FilesCapability.readOnly.union(session.filesSessionCapabilities)),
+                                                      generation: generation)
+        }
+        SecurityPresentationCoordinator.presentFilesConsent(
+            name: session.name, sessionID: session.id,
+            alwaysAllowed: peerID != nil && !anySessionHasEffectiveInput) { [weak self, weak session] decision in
+            guard let self, let session else { return }
+            switch decision {
+            case .deny:
+                session.sender.resolveFilesConsent(nil, generation: generation)
+            case .session:
+                session.filesAllowedEpoch = RemoteFilesPolicy.epoch()
+                session.sender.resolveFilesConsent(.session(), generation: generation)
+            case .alwaysSelectedFolders, .alwaysAllAccessible:
+                guard let peerID,
+                      let next = FilesDevicePolicyStore.policy(after: decision, from: FilesDevicePolicyStore.policy(peerID: peerID)),
+                      FilesDevicePolicyStore.setPolicy(next, peerID: peerID, anySessionHasEffectiveInput: self.anySessionHasEffectiveInput) else {
+                    // Couldn't be stored: this session only.
+                    Log.info("files: Always Allow not stored (a device controls this Mac or no identity); allowed for this session")
+                    session.filesAllowedEpoch = RemoteFilesPolicy.epoch()
+                    return session.sender.resolveFilesConsent(.session(), generation: generation)
+                }
+                session.sender.resolveFilesConsent(.always(next), generation: generation)
+            }
+        }
+    }
+
+    /// Settings ▸ Devices ▸ Files: the owner changed a device's policy. Narrowing applies to its
+    /// live session at once (the next request re-reads the policy); Revoke ends it now.
+    @discardableResult
+    func setFilesPolicy(_ policy: FilesDevicePolicy, peerID: String) -> Bool {
+        let ok = FilesDevicePolicyStore.setPolicy(policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
+        objectWillChange.send()
+        return ok
+    }
+
+    func revokeFilesAccess(peerID: String) {
+        for session in sessions where session.deviceID == peerID {
+            session.filesAllowedEpoch = nil
+            session.filesSessionCapabilities = []
+            session.sender.revokeFiles()
+        }
+    }
+
     var anySessionHasEffectiveInput: Bool {
         sessions.contains { EffectiveInputAuthorization.allowed(masterEnabled: allowInput, sessionGranted: $0.sender.hasSessionInputGrant) }
     }
