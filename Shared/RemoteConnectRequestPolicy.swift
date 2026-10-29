@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// Bounds how often an authenticated remote connect-request "knock" (see
 /// `WireCrypto.remoteRequestPort`) from a given peer is allowed to trigger a
@@ -36,6 +37,15 @@ enum RemoteConnectRequestPolicy {
     /// phone that left the Wi-Fi without a goodbye stays listed, and a dial to
     /// its old address never fails fast, so it would shadow the route that
     /// works. Routing only — every route still ends in the pinned handshake.
+    /// Whether a knock came in over a tunnel (Tailscale's or another VPN's
+    /// utun/ipsec interface) rather than the local Wi-Fi or Ethernet, judged
+    /// by the interface the connection actually uses. (`NWPath.usesInterfaceType(.wifi)`
+    /// is also true for a tunnel carried over Wi-Fi, so it can't tell them apart.)
+    static func arrivedOverTunnel(interfaceType: NWInterface.InterfaceType?, interfaceName: String?) -> Bool {
+        guard interfaceType == .other, let name = interfaceName else { return false }
+        return name.hasPrefix("utun") || name.hasPrefix("ipsec")
+    }
+
     static func dialOrder(arrivedOverTunnel: Bool) -> [DialRoute] {
         arrivedOverTunnel
             ? [.observedSource, .savedHint, .localBonjour]

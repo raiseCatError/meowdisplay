@@ -1,4 +1,5 @@
 import XCTest
+import Network
 
 final class RemoteConnectRequestPolicyTests: XCTestCase {
     func testFirstKnockFromAPeerIsAlwaysHandled() {
@@ -41,5 +42,22 @@ final class RemoteConnectRequestPolicyTests: XCTestCase {
     func testKnockOnTheLocalNetworkKeepsBonjourFirst() {
         XCTAssertEqual(RemoteConnectRequestPolicy.dialOrder(arrivedOverTunnel: false),
                        [.localBonjour, .savedHint, .observedSource])
+    }
+
+    // Tailscale and other VPNs surface as utun/ipsec interfaces of type .other.
+    func testTunnelInterfacesAreRecognised() {
+        XCTAssertTrue(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .other, interfaceName: "utun4"))
+        XCTAssertTrue(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .other, interfaceName: "ipsec0"))
+    }
+
+    // The local network, loopback, other virtual interfaces and an unknown
+    // path keep the local order.
+    func testLocalAndUnknownInterfacesAreNotTunnels() {
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .wifi, interfaceName: "en0"))
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .wiredEthernet, interfaceName: "en5"))
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .loopback, interfaceName: "lo0"))
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .other, interfaceName: "bridge0"))
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .wifi, interfaceName: "utun4"))
+        XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: nil, interfaceName: nil))
     }
 }

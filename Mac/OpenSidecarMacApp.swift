@@ -1585,14 +1585,11 @@ final class SenderController: ObservableObject {
     /// receiver's own recovery) is judged as a background attempt: it never
     /// raises an approval prompt, never clears this Mac's own disconnect
     /// suppression, and follows the Auto-Reconnect preference.
-    /// Whether a knock came in over a tunnel (Tailscale's or another VPN's
-    /// utun) rather than the local Wi-Fi or Ethernet. Judged by the interface
-    /// the connection actually uses: `usesInterfaceType(.wifi)` is also true
-    /// for a tunnel carried over Wi-Fi, so it can't tell the two apart.
+    /// See `RemoteConnectRequestPolicy.arrivedOverTunnel`.
     private static func arrivedOverTunnel(_ path: NWPath?) -> Bool {
-        guard let interface = path?.availableInterfaces.first else { return false }
-        return interface.type == .other
-            && (interface.name.hasPrefix("utun") || interface.name.hasPrefix("ipsec"))
+        let interface = path?.availableInterfaces.first
+        return RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: interface?.type,
+                                                           interfaceName: interface?.name)
     }
 
     private func handleRemoteConnectRequest(peerID: String, observedHost: String?,
