@@ -172,6 +172,7 @@ struct WorkspaceChromeView: View {
             : (!remoteName.isEmpty ? remoteName : (model.catalog?.windows.first { $0.id == tile.source?.windowID }?.app ?? "Window"))
         return Menu {
             Button("Change Window…") { model.openOverview(replacing: id) }
+            if tile.crop != nil { Button("Reset Zoom") { model.resetZoom(id) } }
             Button("Rotate") { model.rotate(id) }
             Button(tile.fit == .fill ? "Show Whole Window" : "Fill Tile") { model.toggleFit(id) }
             Button(model.layout.maximized == id ? "Restore Layout" : "Maximize") { model.toggleMaximize(id) }

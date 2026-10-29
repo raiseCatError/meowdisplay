@@ -105,6 +105,9 @@ struct TileContentTransform: Equatable, Sendable {
     let source: WorkspaceSize
     let rotation: WorkspaceRotation
     let fit: WorkspaceFit
+    /// Per-tile zoom: where `source` (the zoomed-in part) starts inside the
+    /// whole window, in window pixels. Zero when the tile shows the whole window.
+    var origin = WorkspacePoint(x: 0, y: 0)
 
     /// The rotated image's size before scaling.
     var rotatedSourceSize: WorkspaceSize {
@@ -129,9 +132,9 @@ struct TileContentTransform: Equatable, Sendable {
     /// The part of the tile that actually shows window pixels.
     var visibleRect: WorkspaceRect? { contentRect.intersection(tile) }
 
-    /// Source pixel -> canvas.
-    func canvasPoint(fromSource p: WorkspacePoint) -> WorkspacePoint {
-        let r = rotated(p)
+    /// Source pixel (whole-window coordinates) -> canvas.
+    func canvasPoint(fromSource window: WorkspacePoint) -> WorkspacePoint {
+        let r = rotated(WorkspacePoint(x: window.x - origin.x, y: window.y - origin.y))
         let c = contentRect, s = scale
         return WorkspacePoint(x: c.x + r.x * s, y: c.y + r.y * s)
     }
@@ -145,8 +148,8 @@ struct TileContentTransform: Equatable, Sendable {
         guard s > 0 else { return nil }
         let r = WorkspacePoint(x: (q.x - c.x) / s, y: (q.y - c.y) / s)
         let p = unrotated(r)
-        // Clamp float residue at the far edges into the window.
-        return WorkspacePoint(x: min(max(p.x, 0), source.width), y: min(max(p.y, 0), source.height))
+        // Clamp float residue at the far edges into the (zoomed-in part of the) window.
+        return WorkspacePoint(x: min(max(p.x, 0), source.width) + origin.x, y: min(max(p.y, 0), source.height) + origin.y)
     }
 
     /// Canvas -> source for a point that may lie outside the tile (a drag that
@@ -220,6 +223,28 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     var source: WorkspaceSource?
     var rotation: WorkspaceRotation = .none
     var fit: WorkspaceFit = .fit
+    /// Per-tile zoom: the part of the window shown, normalized to the window. Nil = whole window.
+    var crop: WorkspaceRect?
+}
+
+/// Pinch and pan inside one tile, as a change to the part of its window it shows.
+enum WorkspaceZoom {
+    static let maximum = 8.0
+
+    /// `crop` zoomed by `scale` (>1 zooms in) around `anchor` (a point in the tile, 0..1),
+    /// then moved by `pan` (the fingers' travel as a share of the tile). The anchor stays
+    /// under the fingers. Clamped to the window; whole window (nil) at 1x.
+    static func apply(_ crop: WorkspaceRect?, scale: Double, anchor: WorkspacePoint, pan: WorkspacePoint) -> WorkspaceRect? {
+        let c = crop ?? WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        guard scale.isFinite, scale > 0, [anchor.x, anchor.y, pan.x, pan.y].allSatisfy(\.isFinite) else { return crop }
+        let w = min(max(c.width / scale, 1 / maximum), 1), h = min(max(c.height / scale, 1 / maximum), 1)
+        // The window point under the anchor before, kept under the anchor after.
+        let ax = c.x + anchor.x * c.width, ay = c.y + anchor.y * c.height
+        var x = ax - anchor.x * w - pan.x * w, y = ay - anchor.y * h - pan.y * h
+        x = min(max(x, 0), 1 - w); y = min(max(y, 0), 1 - h)
+        if w >= 1 - 1e-6, h >= 1 - 1e-6 { return nil }
+        return WorkspaceRect(x: x, y: y, width: w, height: h)
+    }
 }
 
 // MARK: - Layout tree
@@ -421,7 +446,16 @@ struct WorkspaceLayout: Equatable, Sendable {
     /// Change what a tile shows without moving the tile.
     func replacingSource(of id: String, with source: WorkspaceSource?) -> WorkspaceLayout {
         guard var tile = tiles[id] else { return self }
+        if tile.source != source { tile.crop = nil }   // zoom belongs to the window it was set on
         tile.source = source
+        var copy = self
+        copy.tiles[id] = tile
+        return copy
+    }
+
+    func zooming(_ id: String, to crop: WorkspaceRect?) -> WorkspaceLayout {
+        guard var tile = tiles[id], tile.crop != crop else { return self }
+        tile.crop = crop
         var copy = self
         copy.tiles[id] = tile
         return copy

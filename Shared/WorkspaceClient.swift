@@ -176,6 +176,7 @@ enum WorkspaceRequests {
                                     "window": Int(source.windowID), "follow": source.follow.rawValue,
                                     "rotation": tile.rotation.rawValue, "fit": tile.fit.rawValue]
             if let gen = generation(source) { t["gen"] = Int(gen) }
+            if let c = tile.crop { t["crop"] = [c.x, c.y, c.width, c.height] }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
@@ -379,6 +380,55 @@ final class WorkspaceModel: ObservableObject {
     }
 
     // MARK: Editing
+
+    // MARK: Per-tile zoom
+
+    private var zoomGesture: (tile: String, crop: WorkspaceRect?, anchor: WorkspacePoint, rect: WorkspaceRect)?
+
+    /// Two-finger pinch/pan in Window mode. Points are normalized to the picture.
+    /// Only the tile under the fingers where the gesture began changes.
+    /// A pinch zooms that tile; a two-finger pan (not a pinch) only pans a tile that is already
+    /// zoomed in, otherwise it stays a scroll on the Mac. Returns whether the tile took it.
+    @discardableResult
+    func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double) -> Bool {
+        if began || zoomGesture == nil {
+            guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
+                  let tile = layout.tiles[id], tile.source != nil, isPinch || tile.crop != nil else { zoomGesture = nil; return false }
+            let content = contentRect(of: id, in: rect)
+            let anchor = WorkspacePoint(x: min(max((initial.x - content.x) / max(content.width, 1e-6), 0), 1),
+                                        y: min(max((initial.y - content.y) / max(content.height, 1e-6), 0), 1))
+            zoomGesture = (id, tile.crop, anchor, content)
+        }
+        guard let g = zoomGesture else { return false }
+        let pan = WorkspacePoint(x: (current.x - initial.x) / max(g.rect.width, 1e-6),
+                                 y: (current.y - initial.y) / max(g.rect.height, 1e-6))
+        let crop = WorkspaceZoom.apply(g.crop, scale: scale, anchor: g.anchor, pan: pan)
+        let next = saved.zooming(g.tile, to: crop)
+        if next != saved {
+            saved = next
+            publish(); scheduleSend()
+        }
+        if ended {
+            zoomGesture = nil
+            persist()
+        }
+        return true
+    }
+
+    func resetZoom(_ id: String) { edit { $0.zooming(id, to: nil) } }
+
+    /// Where the window's picture sits inside a tile (normalized to the canvas), for a fitted window.
+    private func contentRect(of id: String, in tile: WorkspaceRect) -> WorkspaceRect {
+        guard let tileItem = layout.tiles[id], tileItem.fit == .fit, !tileItem.rotation.isQuarterTurn,
+              let source = tileItem.source, let w = catalog?.windows.first(where: { $0.id == source.windowID }),
+              w.width > 0, w.height > 0, size.width > 0, size.height > 0 else { return tile }
+        let c = tileItem.crop ?? WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        let srcW = Double(w.width) * c.width, srcH = Double(w.height) * c.height
+        let tw = tile.width * size.width, th = tile.height * size.height
+        let s = min(tw / srcW, th / srcH)
+        let cw = srcW * s / size.width, ch = srcH * s / size.height
+        return WorkspaceRect(x: tile.midX - cw / 2, y: tile.midY - ch / 2, width: cw, height: ch)
+    }
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
         let next = change(layout)

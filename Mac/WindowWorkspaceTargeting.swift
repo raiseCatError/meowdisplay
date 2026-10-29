@@ -31,9 +31,26 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     var follow: WorkspaceSource.Follow
     var rotation: WorkspaceRotation
     var fit: WorkspaceFit
+    /// Per-tile zoom: the part of the window this tile shows, normalized to the
+    /// window (whole window by default).
+    var crop = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
     /// Bumped whenever this tile's window changes: frames, held input and
     /// focus from an older generation are discarded.
     var assignmentGeneration: UInt64
+}
+
+/// Per-tile zoom from a request: `[x, y, w, h]` normalized to the window.
+/// Anything malformed shows the whole window; zoom is capped at 8x.
+enum WorkspaceCrop {
+    static let full = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+    static let minimumSide = 1.0 / 8
+
+    static func parse(_ value: Any?) -> WorkspaceRect {
+        guard let a = value as? [Double], a.count == 4, a.allSatisfy(\.isFinite) else { return full }
+        let w = min(max(a[2], minimumSide), 1), h = min(max(a[3], minimumSide), 1)
+        let x = min(max(a[0], 0), 1 - w), y = min(max(a[1], 0), 1 - h)
+        return WorkspaceRect(x: x, y: y, width: w, height: h)
+    }
 }
 
 enum WorkspaceRequestValidator {
@@ -98,7 +115,8 @@ enum WorkspaceRequestValidator {
             }
             accepted.append(WorkspaceTileAssignment(
                 tileID: id, rect: rect, windowID: entry.windowID, windowGeneration: entry.generation, pid: entry.pid,
-                bundleID: entry.bundleID, follow: follow, rotation: rotation, fit: fit, assignmentGeneration: generation))
+                bundleID: entry.bundleID, follow: follow, rotation: rotation, fit: fit,
+                crop: WorkspaceCrop.parse(item["crop"]), assignmentGeneration: generation))
         }
         return Result(assignments: accepted, rejected: rejected)
     }
@@ -152,8 +170,10 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     func transform(for a: WorkspaceTileAssignment) -> TileContentTransform? {
         guard let frame = windowFrames[a.windowID], frame.width > 0, frame.height > 0 else { return nil }
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
-        return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
-                                    rotation: a.rotation, fit: a.fit)
+        let c = a.crop
+        return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width * c.width, height: frame.height * c.height),
+                                    rotation: a.rotation, fit: a.fit,
+                                    origin: WorkspacePoint(x: frame.width * c.x, y: frame.height * c.y))
     }
 
     func tile(at p: WorkspacePoint) -> WorkspaceTileAssignment? {

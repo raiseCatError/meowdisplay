@@ -303,10 +303,16 @@ struct ReceiverScreen: View {
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: controlStore.moveViewActive,
                                    viewportResetGeneration: controlStore.viewportResetGeneration,
-                                   // Window mode: the picture is every tile at once, so zooming it would
-                                   // pull the windows out from under their tiles. Tiles zoom on their own.
-                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation
-                                       && !model.workspace.windowMode,
+                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
+                                   // Window mode: the picture is every tile at once, so pinch and pan go to
+                                   // the tile under the fingers instead of zooming the whole picture.
+                                   onWorkspacePinch: model.workspace.windowMode
+                                       ? { began, ended, pinch, initial, current, scale in
+                                           model.workspace.pinch(began: began, ended: ended, isPinch: pinch,
+                                                                 initial: WorkspacePoint(x: initial.x, y: initial.y),
+                                                                 current: WorkspacePoint(x: current.x, y: current.y),
+                                                                 scale: Double(scale)) }
+                                       : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -2031,6 +2037,9 @@ struct VideoLayerView: UIViewRepresentable {
     var viewportResetGeneration = 0
     /// Local View Navigation — see `LocalViewNavigationPolicy`.
     var allowLocalViewNavigation = true
+    /// Window mode's per-tile pinch/pan: (began, ended, isPinch, initial, current, scale) with
+    /// points normalized to the picture; returns whether a tile took the gesture.
+    var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
     /// See `VideoView.onBlockedInputAttempt`.
@@ -2057,6 +2066,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setTouchStyle(touchStyle)
         view.setAllowInput(allowInput)
         view.setLocalNavigationAllowed(allowLocalViewNavigation)
+        view.setWorkspacePinch(onWorkspacePinch)
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -2195,6 +2205,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setTouchStyle(touchStyle)
         uiView.setAllowInput(allowInput)
         uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
+        uiView.setWorkspacePinch(onWorkspacePinch)
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -2650,6 +2661,49 @@ struct VideoLayerView: UIViewRepresentable {
         private var localNavigationAllowed = true
 
         fileprivate var remoteInputAllowed: Bool { allowsInput }
+
+        private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
+        /// The current two-finger gesture belongs to a tile (decided when it begins).
+        private var workspaceGestureOwned = false
+
+        func setWorkspacePinch(_ handler: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?) {
+            let entering = workspacePinch == nil && handler != nil
+            workspacePinch = handler
+            if handler == nil { workspaceGestureOwned = false }
+            // Entering Window mode: drop any whole-picture zoom so the picture lines up with its tiles.
+            if entering, !manualZoom.isIdentity {
+                manualZoom = .identity
+                navigationSession.end()
+                animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+            }
+        }
+
+        /// Window mode: a pinch (or a two-finger pan over a zoomed tile) goes to that tile.
+        /// Returns true when the tile owns this gesture and nothing else may act on it.
+        private func routeWorkspaceGesture(_ recognizer: TwoFingerViewportGestureRecognizer) -> Bool {
+            guard let workspacePinch, videoEnabled else { return false }
+            let base = unzoomedBaseTransform().displayedRect
+            guard base.width > 0, base.height > 0 else { return false }
+            func norm(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height) }
+            let pinch = recognizer.intent == .viewportZoomPan
+            switch recognizer.state {
+            case .began:
+                workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                                       pinch ? recognizer.scaleRatio : 1)
+                return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
+            case .changed:
+                guard workspaceGestureOwned else { return pinch }
+                _ = workspacePinch(false, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                   pinch ? recognizer.scaleRatio : 1)
+                return true
+            default:
+                guard workspaceGestureOwned else { return pinch }
+                workspaceGestureOwned = false
+                _ = workspacePinch(false, true, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                   pinch ? recognizer.scaleRatio : 1)
+                return true
+            }
+        }
 
         func setLocalNavigationAllowed(_ allowed: Bool) {
             guard allowed != localNavigationAllowed else { return }
@@ -3309,6 +3363,7 @@ struct VideoLayerView: UIViewRepresentable {
                      + "systemGestureSequenceOwned=\(systemGestureSequenceOwned)")
             #endif
             guard !systemGestureSequenceOwned else { return }
+            if routeWorkspaceGesture(recognizer) { return }
             // Remote scroll and App Gesture Commands need Allow Input; the
             // local viewport needs Local View Navigation.
             let routes = TwoFingerRoutingPolicy.routes(

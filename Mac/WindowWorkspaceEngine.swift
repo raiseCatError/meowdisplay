@@ -34,10 +34,12 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         self.assignmentGeneration = assignmentGeneration
     }
 
-    func start(window: SCWindow, size: CGSize, fps: Int) async throws {
+    func start(window: SCWindow, size: CGSize, fps: Int, sourceRect: CGRect? = nil) async throws {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         config.width = Int(size.width)
         config.height = Int(size.height)
+        // Per-tile zoom: capture only the zoomed-in part, at the tile's resolution (sharp).
+        config.sourceRect = sourceRect ?? .null
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
         config.showsCursor = false   // the receiver draws one workspace pointer
         config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -51,12 +53,15 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     }
 
     /// Re-size or re-rate without restarting: the window's last frame stays.
-    func update(size: CGSize, fps: Int) async {
+    func update(size: CGSize, fps: Int, sourceRect: CGRect? = nil) async {
         guard let s = lock.withLock({ stream }) else { return }
         let newInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
-        guard Int(size.width) != config.width || Int(size.height) != config.height || newInterval != config.minimumFrameInterval else { return }
+        let rect = sourceRect ?? .null
+        guard Int(size.width) != config.width || Int(size.height) != config.height || newInterval != config.minimumFrameInterval
+              || rect != config.sourceRect else { return }
         config.width = Int(size.width)
         config.height = Int(size.height)
+        config.sourceRect = rect
         config.minimumFrameInterval = newInterval
         try? await s.updateConfiguration(config)
     }
@@ -157,7 +162,8 @@ final class WorkspaceCompositor {
             // Map three buffer corners (CoreImage: origin bottom-left) through
             // source points (window points, top-left) into the canvas.
             func toCanvas(_ u: Double, _ v: Double) -> CGPoint {
-                let src = WorkspacePoint(x: u / w * fw, y: (1 - v / h) * fh)
+                // The buffer holds only the zoomed-in part: offset into whole-window coordinates.
+                let src = WorkspacePoint(x: u / w * fw + t.origin.x, y: (1 - v / h) * fh + t.origin.y)
                 let c = t.canvasPoint(fromSource: src)
                 return CGPoint(x: c.x, y: size.height - c.y)
             }
@@ -532,6 +538,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { keyboardCheckedAt = 0 }
         dirty = true
         ensureCaptures()
+        retuneCaptures()   // zoom or tile size changed for a running capture
         sendState(force: true)
     }
 
@@ -574,11 +581,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             captures[a.tileID] = capture
             setState(a.tileID, "waiting")
             let size = captureSize(for: a)
+            let rect = cropRect(for: a)
             let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
                                                  streamFPS: streamFPS, available: true)
             Task { [weak self] in
                 do {
-                    try await capture.start(window: window, size: size, fps: fps)
+                    try await capture.start(window: window, size: size, fps: fps, sourceRect: rect)
                     // Superseded while starting (stopped, replaced): don't leave it running.
                     let current = await self?.isCurrent(capture) ?? false
                     if !current { await capture.stop() }
@@ -611,13 +619,23 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
                                                  streamFPS: streamFPS, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
-            Task { await capture.update(size: size, fps: max(fps, 1)) }
+            let rect = cropRect(for: a)
+            Task { await capture.update(size: size, fps: max(fps, 1), sourceRect: rect) }
         }
+    }
+
+    /// The zoomed-in part of the window in its own points, or nil for the whole window.
+    private func cropRect(for a: WorkspaceTileAssignment) -> CGRect? {
+        guard a.crop != WorkspaceCrop.full, let frame = catalog[a.windowID]?.frame.size else { return nil }
+        return CGRect(x: frame.width * a.crop.x, y: frame.height * a.crop.y,
+                      width: frame.width * a.crop.width, height: frame.height * a.crop.height)
     }
 
     private func captureSize(for a: WorkspaceTileAssignment) -> CGSize {
         let tilePx = CGSize(width: a.rect.width * canvas.width, height: a.rect.height * canvas.height)
-        let frame = catalog[a.windowID]?.frame.size ?? tilePx
+        let whole = catalog[a.windowID]?.frame.size ?? tilePx
+        // Zoomed in: the captured part is smaller, so it gets more pixels per point (up to the display's own).
+        let frame = CGSize(width: whole.width * a.crop.width, height: whole.height * a.crop.height)
         let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
         let scale = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
         return WorkspaceCaptureBudget.captureSize(tilePixels: tilePx, window: frame, backingScale: scale,
@@ -634,7 +652,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 "id": a.tileID, "window": Int(a.windowID), "gen": Int(a.windowGeneration),
                 "state": tileState[a.tileID] ?? "waiting", "app": entry?.appName ?? "", "bundle": a.bundleID,
                 "title": String((entry?.title ?? "").prefix(120)), "follow": a.follow.rawValue,
-                "rotation": a.rotation.rawValue, "fit": a.fit.rawValue,
+                "rotation": a.rotation.rawValue, "fit": a.fit.rawValue, "crop": [a.crop.x, a.crop.y, a.crop.width, a.crop.height],
             ]
         }
         var msg: [String: Any] = [

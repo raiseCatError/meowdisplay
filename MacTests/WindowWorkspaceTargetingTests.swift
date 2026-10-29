@@ -442,3 +442,46 @@ extension WindowWorkspaceTargetingTests {
         }
     }
 }
+
+/// Per-tile zoom: the request's crop, the zoom math and exact input mapping.
+final class WorkspaceZoomTests: XCTestCase {
+    func testCropParsesAndClamps() {
+        XCTAssertEqual(WorkspaceCrop.parse(nil), WorkspaceCrop.full)
+        XCTAssertEqual(WorkspaceCrop.parse([0.25, 0.25, 0.5, 0.5]), WorkspaceRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
+        let tiny = WorkspaceCrop.parse([0.99, 0.99, 0.001, 0.001])
+        XCTAssertEqual(tiny.width, WorkspaceCrop.minimumSide, "zoom is capped at 8x")
+        XCTAssertLessThanOrEqual(tiny.maxX, 1)
+        XCTAssertEqual(WorkspaceCrop.parse([Double.nan, 0, 1, 1]), WorkspaceCrop.full)
+    }
+
+    func testPinchKeepsTheAnchorUnderTheFingersAndPansWithinTheWindow() throws {
+        let anchor = WorkspacePoint(x: 0.25, y: 0.75)
+        let crop = try XCTUnwrap(WorkspaceZoom.apply(nil, scale: 2, anchor: anchor, pan: WorkspacePoint(x: 0, y: 0)))
+        XCTAssertEqual(crop.width, 0.5, accuracy: 1e-9)
+        // The window point under the anchor (0.25, 0.75) stays under it.
+        XCTAssertEqual(crop.x + anchor.x * crop.width, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(crop.y + anchor.y * crop.height, 0.75, accuracy: 1e-9)
+        let panned = try XCTUnwrap(WorkspaceZoom.apply(crop, scale: 1, anchor: anchor, pan: WorkspacePoint(x: -5, y: 0)))
+        XCTAssertEqual(panned.maxX, 1, accuracy: 1e-9, "never pans past the window's edge")
+        XCTAssertNil(WorkspaceZoom.apply(crop, scale: 0.25, anchor: anchor, pan: WorkspacePoint(x: 0, y: 0)), "back to the whole window")
+    }
+
+    func testZoomedTileMapsInputToTheRightWindowPoint() {
+        // A 1000x500 window, zoomed to its right half, in a 500x500 tile.
+        let t = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: 500, height: 500),
+                                     source: WorkspaceSize(width: 500, height: 500), rotation: .none, fit: .fit,
+                                     origin: WorkspacePoint(x: 500, y: 0))
+        let p = t.sourcePoint(fromCanvas: WorkspacePoint(x: 250, y: 250))
+        XCTAssertEqual(p?.x ?? 0, 750, accuracy: 1e-9)
+        let back = t.canvasPoint(fromSource: WorkspacePoint(x: 750, y: 250))
+        XCTAssertEqual(back.x, 250, accuracy: 1e-9)
+    }
+
+    func testChangingATilesWindowDropsItsZoom() {
+        var layout = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "a", source: WorkspaceSource(host: "h", windowID: 1))])
+        layout = layout.zooming("a", to: WorkspaceRect(x: 0, y: 0, width: 0.5, height: 0.5))
+        XCTAssertNotNil(layout.tiles["a"]?.crop)
+        layout = layout.replacingSource(of: "a", with: WorkspaceSource(host: "h", windowID: 2))
+        XCTAssertNil(layout.tiles["a"]?.crop)
+    }
+}
