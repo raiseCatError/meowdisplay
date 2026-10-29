@@ -12,6 +12,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WPoint
 import com.raisecaterror.meowdisplay.core.workspace.WRect
 import com.raisecaterror.meowdisplay.core.workspace.WRotation
 import com.raisecaterror.meowdisplay.core.workspace.WSize
+import com.raisecaterror.meowdisplay.core.workspace.AppMenuWire
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesWire
 import com.raisecaterror.meowdisplay.core.workspace.WorkspaceWire
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -169,6 +170,10 @@ class DemoMac(
                 publish()
             }
             WorkspaceWire.WINDOW_ACTION -> if (admitted && inputGranted && windowModeOffered) windowAction(obj)
+            AppMenuWire.REQUEST, AppMenuWire.PRESS -> if (admitted && windowModeOffered && mode == DisplayMode.Window) {
+                val app = tiles.firstOrNull { it.id == obj.str("tile") }?.kind?.title
+                send(DemoMenus.answer(obj, app, inputGranted) { what -> show(DemoFeedback.Local("Chose $what in $app on the demo Mac")) })
+            }
             RemoteFilesWire.REQUEST -> if (admitted && windowModeOffered) {
                 DemoFiles.answer(obj, inputGranted) { name -> show(DemoFeedback.Local("Opened $name on the demo Mac")) }.forEach(::send)
             }
@@ -193,7 +198,10 @@ class DemoMac(
                 put("pv", WireProtocol.VERSION)
                 put("min", 1)
                 put("features", buildJsonArray {
-                    if (receiverSpeaksWorkspace) { add(JsonPrimitive(WorkspaceWire.WELCOME_FEATURE)); add(JsonPrimitive(RemoteFilesWire.WELCOME_FEATURE)) }
+                    if (receiverSpeaksWorkspace) {
+                        add(JsonPrimitive(WorkspaceWire.WELCOME_FEATURE)); add(JsonPrimitive(RemoteFilesWire.WELCOME_FEATURE))
+                        add(JsonPrimitive(AppMenuWire.WELCOME_FEATURE))
+                    }
                 })
             })
             invite()

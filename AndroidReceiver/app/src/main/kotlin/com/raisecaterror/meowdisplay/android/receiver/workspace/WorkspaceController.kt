@@ -23,6 +23,9 @@ import com.raisecaterror.meowdisplay.core.workspace.CatalogDisplay
 import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
 import com.raisecaterror.meowdisplay.core.workspace.DisplayThumbnail
 import com.raisecaterror.meowdisplay.core.workspace.MacApp
+import com.raisecaterror.meowdisplay.core.workspace.AppMenuModel
+import com.raisecaterror.meowdisplay.core.workspace.AppMenuReply
+import com.raisecaterror.meowdisplay.core.workspace.AppMenuWire
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesModel
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesReply
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesStyle
@@ -216,6 +219,14 @@ class WorkspaceController(
         onStyle = { prefs.edit().putString(FILES_STYLE, it.name).apply() },
     )
 
+    /** The focused pane's app menus (a bar under its label). */
+    val menus = AppMenuModel(
+        send = { media.session.sendWorkspace(it) },
+        scheduler = { ms, block -> val r = Runnable(block); main.postDelayed(r, ms); { main.removeCallbacks(r) } },
+        barShown = prefs.getBoolean(MENU_BAR, true),
+        onBarShown = { prefs.edit().putBoolean(MENU_BAR, it).apply() },
+    )
+
     // MARK: Session
 
     fun onSessionEvent(event: SessionEvent) {
@@ -224,6 +235,7 @@ class WorkspaceController(
             is SessionEvent.MacFeatures -> {
                 state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
+                menus.setAvailable(AppMenuWire.WELCOME_FEATURE in event.features)
             }
             is SessionEvent.DisplayModeConfirmed -> {
                 val window = event.mode == DisplayMode.Window
@@ -237,6 +249,7 @@ class WorkspaceController(
                 fullDisplayMode = DisplayMode.Extend
                 planner.reset()
                 files.setAvailable(false)
+                menus.setAvailable(false)
                 state.update {
                     it.copy(windowMode = false, remote = null, available = false, arranging = false, stagePeekOpen = false,
                         launchpadOpen = false, launching = emptySet(), drag = null)
@@ -265,6 +278,11 @@ class WorkspaceController(
                     requestIcons()
                 }
                 RemoteFilesWire.REPLY -> RemoteFilesReply.parse(event.body)?.let(files::apply)
+                AppMenuWire.MENU -> menus.apply(AppMenuReply.parse(event.body))
+                AppMenuWire.RESULT -> menus.applyResult(
+                    (event.body["ok"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true",
+                    (event.body["error"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.take(32),
+                )
                 WorkspaceWire.APP_LAUNCH_RESULT -> AppLaunchResult.parse(event.body)?.let { r ->
                     if (!r.ok) state.update { it.copy(launching = it.launching - r.bundleID, launchFailed = r.bundleID) }
                     requestCatalog()
@@ -1023,6 +1041,7 @@ class WorkspaceController(
         const val SAVED = "savedLayouts."
         const val RAIL_EDGE = "railEdge"
         const val FILES_STYLE = "files.style"
+        const val MENU_BAR = "menuBar"
         const val MAX_THUMBS = 72
         const val MAX_ICONS = 400
         const val MAX_THUMB_SIDE = 640

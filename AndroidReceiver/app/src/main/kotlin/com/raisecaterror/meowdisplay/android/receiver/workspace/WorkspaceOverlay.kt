@@ -10,6 +10,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -247,6 +251,18 @@ fun WorkspaceChrome(
                     )
                 }
             }
+        }
+
+        // The focused pane's app menus, as a bar under its label (control only).
+        val activeSource = ui.active?.let { ui.layout.tiles[it]?.source }
+        LaunchedEffect(ui.active, activeSource?.bundleID, activeSource?.isDisplay, inputAllowed, ui.windowMode) {
+            controller.menus.sync(ui.active, activeSource?.takeIf { !it.isDisplay }?.bundleID, inputAllowed && ui.windowMode)
+        }
+        val activeRect = ui.active?.let { frames.tiles[it] }?.let { transform.viewRect(it) }
+        if (activeRect != null && !ui.arranging && ui.drag == null && (multi || ui.localFullscreen == ui.active)) {
+            val nominal = CGRect(activeRect.minX + 6, maxOf(activeRect.minY, topInset) + 6, minOf(activeRect.width - 12, 200.0), 30.0)
+            val clear = (avoid + listOfNotNull(railHandle)).filter { it.intersects(nominal) }.maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
+            PaneMenuBar(controller, activeRect, top = nominal.minY + clear + 30 + 4, bounds = picture)
         }
 
         // Landing areas and Cancel while a label (or a window from Stage Peek) is dragged.
@@ -523,6 +539,10 @@ private fun PaneMenu(
         row("Arrange Panes") { controller.setArranging(true) }
         m.tab?.let { tab -> row("Remove This Tab") { controller.removeTab(m.tile, tab) } }
         row("Remove from Layout") { controller.removeTile(m.tile) }
+        val menus by controller.menus.ui.collectAsState()
+        if (window && menus.available && inputAllowed) {
+            row(if (menus.barShown) "Hide Menu Bar" else "Show Menu Bar") { controller.menus.setBarShown(!menus.barShown) }
+        }
         if (window) {
             Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(0.5.dp).background(Color.White.copy(alpha = 0.25f)))
             row("Minimize on Mac", enabled = inputAllowed) { controller.minimizeRemoteWindow(m.tile) }
@@ -857,3 +877,94 @@ fun LayoutPresets(capacity: Int, tileCount: Int, onPick: (WPreset) -> Unit) {
     }
 }
 
+
+// MARK: - Pane menu bar (PROTOCOL.md 6.13)
+
+/** The focused pane's app menus (File, Edit, …) as a slim bar across the pane under its label; a title opens its drop-down. */
+@Composable
+private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Double, bounds: CGRect) {
+    val m by controller.menus.ui.collectAsState()
+    if (!m.barShown || m.tile == null || pane.width < 120) return
+    val density = LocalDensity.current.density
+    val titleX = remember { mutableStateMapOf<Int, Double>() }
+    var barOrigin by remember { mutableStateOf(0.0) }
+    Box(Modifier.fillMaxSize()) {
+        if (m.open.isNotEmpty()) {
+            // Tap anywhere else to close; nothing reaches the Mac while a menu is open.
+            Box(Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controller.menus.close() })
+        }
+        Row(
+            Modifier.offset { IntOffset(((pane.minX + 6) * density).roundToInt(), (top * density).roundToInt()) }
+                .size((pane.width - 12).dp, 30.dp).background(Chip, RoundedCornerShape(8.dp))
+                .onGloballyPositioned { c -> barOrigin = c.positionInParent().x / density.toDouble() }
+                .horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // The app's own menu comes first and is bold, as on a Mac; its name alone while loading or unavailable.
+            if (m.app.isNotEmpty() && m.top.isEmpty()) Text(m.app, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 8.dp))
+            m.topError?.let { Text(menuMessage(it), color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp)) }
+            if (m.topError == null && m.top.isEmpty()) Text("…", color = Color.White.copy(alpha = 0.6f), modifier = Modifier.padding(horizontal = 8.dp))
+            for (item in m.top) {
+                val open = m.open.firstOrNull()?.path == listOf(item.index)
+                Text(
+                    item.title, color = Color.White.copy(alpha = if (item.enabled) 1f else 0.4f), fontSize = 13.sp,
+                    fontWeight = if (item == m.top.first()) FontWeight.Bold else FontWeight.Normal,
+                    modifier = Modifier.onGloballyPositioned { c -> titleX[item.index] = c.positionInParent().x / density.toDouble() }
+                        .clip(RoundedCornerShape(6.dp)).background(if (open) Accent.copy(alpha = 0.85f) else Color.Transparent)
+                        .clickable(enabled = item.enabled) { controller.menus.openMenu(item) }
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                )
+            }
+        }
+        m.open.lastOrNull()?.let { level ->
+            val width = 270.0
+            val anchor = pane.minX + 6 + (titleX[level.path.firstOrNull() ?: -1] ?: 0.0)
+            val y = top + 30 + 4
+            val x = anchor.coerceIn(bounds.minX + 6, maxOf(bounds.minX + 6, bounds.maxX - width - 6))
+            Column(
+                Modifier.offset { IntOffset((x * density).roundToInt(), (y * density).roundToInt()) }.width(width.dp)
+                    .heightIn(max = maxOf(120.0, minOf(460.0, bounds.maxY - y - 8)).dp)
+                    .background(Color(0xF2232326), RoundedCornerShape(12.dp)).border(0.75.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(12.dp))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
+            ) {
+                if (m.open.size > 1) {
+                    Text("‹  " + level.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1,
+                        modifier = Modifier.fillMaxWidth().clickable { controller.menus.back() }.padding(horizontal = 12.dp, vertical = 9.dp))
+                    Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color.White.copy(alpha = 0.2f)))
+                }
+                when {
+                    level.loading -> Text("Loading…", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp, modifier = Modifier.padding(14.dp))
+                    level.error != null -> Text(menuMessage(level.error.orEmpty()), color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp, modifier = Modifier.padding(14.dp))
+                    level.items.isEmpty() -> Text("No items", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp, modifier = Modifier.padding(14.dp))
+                    else -> Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 4.dp)) {
+                        for (item in level.items) {
+                            if (item.separator) {
+                                Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(0.5.dp).background(Color.White.copy(alpha = 0.2f)))
+                            } else {
+                                Row(
+                                    Modifier.fillMaxWidth().clickable(enabled = item.enabled) {
+                                        if (item.hasSubmenu) controller.menus.openSubmenu(item) else controller.menus.press(item)
+                                    }.padding(horizontal = 10.dp, vertical = 8.dp).graphicsLayer { alpha = if (item.enabled) 1f else 0.4f },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(if (item.checked) "✓" else "", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(18.dp))
+                                    Text(item.title, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    item.shortcut?.let { Text(it, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp)) }
+                                    if (item.hasSubmenu) Text("›", color = Color.White.copy(alpha = 0.6f), fontSize = 16.sp, modifier = Modifier.padding(start = 8.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                m.failed?.let { Text(menuMessage(it), color = Color(0xFFFFB347), fontSize = 12.sp, modifier = Modifier.padding(10.dp)) }
+            }
+        }
+    }
+}
+
+private fun menuMessage(error: String) = when (error) {
+    "accessibility" -> "Allow Accessibility for MeowDisplay on the Mac to use menus."
+    "control" -> "Menus need control of the Mac."
+    "changed" -> "That menu changed on the Mac. Try again."
+    else -> "This app's menus aren't available."
+}

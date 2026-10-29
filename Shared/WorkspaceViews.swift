@@ -1058,7 +1058,8 @@ struct PaneMenuBar: View {
     private var bar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
-                if !menus.app.isEmpty {
+                // The app's own menu comes first and is bold, as on a Mac; its name alone while loading or unavailable.
+                if !menus.app.isEmpty, menus.top.isEmpty {
                     Text(menus.app).font(.caption.weight(.bold)).padding(.horizontal, 8)
                 }
                 if let error = menus.topError {
@@ -1068,7 +1069,7 @@ struct PaneMenuBar: View {
                 }
                 ForEach(menus.top) { item in
                     Button { menus.openMenu(item) } label: {
-                        Text(item.title).font(.caption)
+                        Text(item.title).font(item.id == menus.top.first?.id ? .caption.weight(.bold) : .caption)
                             .padding(.horizontal, 8).padding(.vertical, 5)
                             .background(menus.open.first?.path == [item.index] ? workspaceAccent.opacity(0.85) : .clear,
                                         in: RoundedRectangle(cornerRadius: 6))

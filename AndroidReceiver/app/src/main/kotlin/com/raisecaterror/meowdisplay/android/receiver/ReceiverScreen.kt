@@ -313,7 +313,7 @@ fun ReceiverScreen(
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
             }
             WorkspaceChrome(
-                workspace, transform, state.inputAllowed, avoid = occupied, onSettings = onOpenSettings,
+                workspace, transform, state.inputAllowed, avoid = occupied + workspace.hostChrome.value, onSettings = onOpenSettings,
                 onViewFullScreen = { onMode(workspace.fullDisplayMode) },
             )
             if (wsUi.available && prefs.windowSwitcher == WindowSwitcherStyle.Rail) WindowRail(workspace)
