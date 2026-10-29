@@ -148,6 +148,8 @@ fun WorkspaceChrome(
             ) {
                 val status = when {
                     id in ui.missing || tile.source == null -> "Choose a window for this tile"
+                    // Refused by the Mac (e.g. that window already shows in another tile).
+                    ui.remote?.rejected?.containsKey(id) == true -> "Tap to choose a window for this tile"
                     remote == null -> null
                     remote.state == TileStatus.Waiting -> "Waiting for ${remote.app.ifEmpty { "the window" }}…"
                     remote.state == TileStatus.Offscreen -> "${remote.app.ifEmpty { "This window" }} is minimized or hidden on the Mac"

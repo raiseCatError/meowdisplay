@@ -102,6 +102,8 @@ struct WorkspaceChromeView: View {
 
     private func status(for id: String, tile: WorkspaceTile) -> String? {
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
+        // Refused by the Mac (e.g. that window already shows in another tile).
+        if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
         guard let remote = model.tileState(id) else { return nil }
         let app = remote.app.isEmpty ? "This window" : remote.app
         switch remote.status {
