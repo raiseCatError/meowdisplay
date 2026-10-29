@@ -222,9 +222,9 @@ enum WindowWorkspaceWire {
     static let mode = "window"
 }
 
-/// Remote Finder (PROTOCOL.md 6.12): read-only browsing of folders the Mac's owner approved.
+/// Remote Finder (PROTOCOL.md 6.12): folders the Mac's owner approved for this device.
 /// Offered only when the Mac lists `welcomeFeature`; every request also needs the owner's
-/// per-session approval on the Mac. No write, delete, upload or transfer operation exists.
+/// grant on the Mac, and each write, upload or transfer needs that grant's capability.
 enum RemoteFilesWire {
     static let welcomeFeature = "files"
     static let version = 1
@@ -234,6 +234,35 @@ enum RemoteFilesWire {
 /// pressed through Accessibility. Only for a session with control; never the Apple menu.
 enum AppMenuWire {
     static let welcomeFeature = "menus"
+}
+
+/// Close Window from Stage Peek (PROTOCOL.md 6.10), in any display mode: presses one listed
+/// window's own close button through Accessibility. Needs control; never quits the app.
+enum WindowCloseWire {
+    static let welcomeFeature = "windowClose"
+}
+
+/// What the Mac reports after `windowClose`.
+enum WindowCloseResult: String, Sendable, CaseIterable {
+    /// The window is gone.
+    case closed
+    /// The app asked first (unsaved changes): answer it on the Mac.
+    case saveDialog
+    /// The app kept the window open.
+    case stillOpen
+    /// Not the listed window any more (closed already, or the id was reused).
+    case stale
+    /// This session has no control (View Only).
+    case control
+    /// MeowDisplay needs Accessibility permission on the Mac.
+    case accessibility
+    /// The window has no close button.
+    case noButton
+    /// More than one window matched: nothing was pressed.
+    case ambiguous
+
+    /// The card can go: the window is closed (or was already gone).
+    var removesCard: Bool { self == .closed || self == .stale }
 }
 
 enum WireMessage {
@@ -264,6 +293,8 @@ enum WireMessage {
     static let appCatalog = "appCatalog"                       // Mac -> receiver: {rev, apps|same}
     static let appLaunch = "appLaunch"                         // receiver -> Mac: open an app without activating it (needs control)
     static let appLaunchResult = "appLaunchResult"             // Mac -> receiver: {bundle, ok}
+    static let windowClose = "windowClose"                     // receiver -> Mac: {window, gen, req}: close one listed window (control)
+    static let windowCloseResult = "windowCloseResult"         // Mac -> receiver: {window, req, result}
     static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
     static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
     static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)

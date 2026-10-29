@@ -447,6 +447,7 @@ struct ReceiverScreen: View {
                                 .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                            dock: controlStore.preferences.stagePeekDock,
                             inputAllowed: inputReachesMac,
                             onDisplay: { _ in
                                 // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts

@@ -886,12 +886,20 @@ private struct ControlSettingsPage: View {
                     .accessibilityIdentifier("stagePeekEdgePicker")
                     Toggle("Natural Scrolling", isOn: preferenceBinding(controlStore, \.stagePeekNaturalScrolling))
                         .accessibilityIdentifier("stagePeekNaturalScrolling")
+                    Picker("Dock", selection: preferenceBinding(controlStore, \.stagePeekDock)) {
+                        ForEach(StagePeekDockStyle.allCases) { Text($0.title).tag($0) }
+                    }
+                    .accessibilityIdentifier("stagePeekDockPicker")
                 }
             } header: {
                 Text("Window Switcher")
             } footer: {
                 Text(controlStore.preferences.windowSwitcher.explanation
-                     + " " + String(localized: "Used in Window view."))
+                     + " " + String(localized: "Used in Window view.")
+                     + (controlStore.preferences.windowSwitcher == .stagePeek
+                        ? " " + (controlStore.preferences.stagePeekDock == .compact
+                                 ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
+                                 : String(localized: "Normal uses the whole edge.")) : ""))
             }
             Section {
                 Picker("Control Profile", selection: Binding(

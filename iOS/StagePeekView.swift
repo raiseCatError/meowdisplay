@@ -33,7 +33,9 @@ struct StagePeekOverlay: View {
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
     var naturalScrolling = true
-    /// Whether this session may change the Mac ("Open on Mac").
+    /// Compact: the stack stays in a fading band between the controls above and below.
+    var dock: StagePeekDockStyle = .compact
+    /// Whether this session may change the Mac ("Open on Mac", Close Window).
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
     let onDisplay: (CatalogDisplayItem?) -> Void
@@ -79,7 +81,7 @@ struct StagePeekOverlay: View {
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     var body: some View {
-        let cards = layout()
+        let cards = revealShifted(layout())
         ZStack(alignment: .topLeading) {
             if machine.isVisible {
                 backdrop
@@ -89,13 +91,24 @@ struct StagePeekOverlay: View {
                     .opacity(model.drag != nil ? 0.001 : 1)
                     .transition(.opacity)
                 if machine.expansion < 0.999 {
-                    ForEach(cards, id: \.index) { card in
-                        cardView(card)
-                            .opacity(model.drag != nil ? 0 : 1 - machine.expansion)
-                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(x: edge == .left ? -48 : 48)))
+                    ZStack(alignment: .topLeading) {
+                        ForEach(cards, id: \.index) { card in
+                            cardView(card)
+                                .opacity(model.drag != nil ? 0 : 1 - machine.expansion)
+                                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(x: edge == .left ? -48 : 48)))
+                        }
                     }
+                    .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+                    // Compact Dock: cards fade and clip at the band's edges, never under the controls.
+                    .mask(alignment: .topLeading) { dockMask }
+                    .animation(.spring(response: 0.3, dampingFraction: 0.85), value: machine.closeRevealed)
                     if machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
                         title(for: focus)
+                    }
+                    if machine.expansion < 0.5, model.drag == nil, let id = machine.closeRevealed,
+                       let i = machine.ids.firstIndex(of: id), let card = cards.first(where: { $0.index == i }),
+                       let w = windows.first(where: { $0.id == id }) {
+                        compactCloseButton(w, card: card)
                     }
                 }
                 if machine.expansion > 0.001 {
@@ -106,6 +119,9 @@ struct StagePeekOverlay: View {
                 toolbar(cards: cards)
                     .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
+                if let notice = model.closeNotice {
+                    closeToast(notice)
+                }
                 topControls
                     .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
@@ -174,7 +190,99 @@ struct StagePeekOverlay: View {
             return Double(w.width) / Double(w.height)
         }
         return StagePeekLayout.cards(aspects: aspects, position: machine.position, expansion: machine.expansion,
-                                     edge: edge, safe: safe, isPad: isPad, reduceMotion: reduceMotion)
+                                     edge: edge, safe: safe, isPad: isPad, reduceMotion: reduceMotion, region: dockRegion)
+    }
+
+    /// The Compact Dock's band: under the search and app carousel, above the buttons.
+    private var dockRegion: CGRect? {
+        guard dock == .compact else { return nil }
+        let compactWidth = min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+        let column = edge == .left ? safe.minX + 16 + compactWidth / 2 : safe.maxX - 16 - compactWidth / 2
+        return StagePeekLayout.dockRegion(safe: safe, controlsAbove: safe.minY + Self.topControlsBottom,
+                                          controlsBelow: toolbarY(column) - Self.toolbarHalfHeight)
+    }
+
+    /// Hit testing for the compact stack: only inside the Compact Dock's band.
+    private var hitRegion: CGRect? { machine.expansion < 0.5 ? dockRegion : nil }
+
+    private static let topControlsBottom: CGFloat = 12 + 42 + 10 + 64
+    private static let toolbarHalfHeight: CGFloat = 20
+
+    /// Opaque inside the band, fading over its top and bottom edges (Normal: everything shows).
+    @ViewBuilder private var dockMask: some View {
+        if let r = dockRegion, machine.expansion < 0.999 {
+            let e = CGFloat(machine.expansion)
+            // Expanding releases the band smoothly.
+            let top = r.minY * (1 - e), bottom = r.maxY + (frame.height - r.maxY) * e
+            let height = max(bottom - top, 1)
+            let f = min(StagePeekConfig.dockFade / height, 0.4) * (1 - e)
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: f),
+                                   .init(color: .black, location: 1 - f), .init(color: .clear, location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(width: frame.width, height: height)
+                .offset(y: top)
+        } else {
+            Color.black.frame(width: frame.width, height: frame.height)
+        }
+    }
+
+    /// The card whose Close Window shows slides aside to make room for the button.
+    private func revealShifted(_ cards: [StagePeekCard]) -> [StagePeekCard] {
+        guard let id = machine.closeRevealed, let i = machine.ids.firstIndex(of: id) else { return cards }
+        return cards.map { c in
+            guard c.index == i else { return c }
+            var moved = c
+            moved.center.x -= Self.compactRevealWidth
+            return moved
+        }
+    }
+
+    private static let compactRevealWidth: CGFloat = 92
+
+    /// Close Window beside a swiped compact card. Without control it says so instead.
+    private func compactCloseButton(_ w: CatalogWindowItem, card: StagePeekCard) -> some View {
+        let height = max(min(card.size.height, 96), 48)
+        return Button {
+            animate { machine.hideClose() }
+            model.closeWindow(w)
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: inputAllowed ? "xmark.square" : "lock").font(.system(size: 17, weight: .semibold))
+                Text(inputAllowed ? String(localized: "Close Window") : String(localized: "Needs Control"))
+                    .font(.caption2.weight(.semibold)).multilineTextAlignment(.center).lineLimit(2)
+            }
+            .foregroundStyle(.white)
+            .frame(width: Self.compactRevealWidth - 8, height: height)
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(inputAllowed ? Color.red : Color.gray))
+        }
+        .buttonStyle(.plain)
+        .position(x: card.center.x + card.size.width / 2 + Self.compactRevealWidth / 2, y: card.center.y)
+        .transition(.opacity)
+        .zIndex(9)
+        .accessibilityLabel(inputAllowed ? String(localized: "Close Window \(w.title.isEmpty ? w.app : w.title)")
+                                         : String(localized: "Close Window needs control"))
+    }
+
+    /// What happened to the last Close Window, for a few seconds.
+    private func closeToast(_ notice: WindowCloseNotice) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(notice.isError ? Color.orange : Color.green)
+            Text(notice.message).font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: min(460, safe.width - 32))
+        .position(x: safe.midX, y: max(toolbarY(safe.midX) - 64, safe.minY + 160))
+        .transition(.opacity)
+        .zIndex(35)
+        .accessibilityElement(children: .combine)
+        .task(id: notice) {
+            UIAccessibility.post(notification: .announcement, argument: notice.message)
+            try? await Task.sleep(nanoseconds: notice.isError ? 6_000_000_000 : 3_000_000_000)
+            if model.closeNotice == notice { withAnimation(.easeOut(duration: 0.2)) { model.closeNotice = nil } }
+        }
+        .onTapGesture { model.closeNotice = nil }
     }
 
     private func window(at index: Int) -> CatalogWindowItem? {
@@ -313,15 +421,12 @@ struct StagePeekOverlay: View {
                              // Dropped on a pane: done. Dropped nowhere: the peek comes back as it was.
                              if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false }
                          },
-                         onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil)
+                         onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
+                         // A flick toward the edge (off the cards) compacts the gallery again.
+                         edge: edge, onCompact: { animate { machine.compact() } })
             .frame(width: safe.width, height: safe.height)
             .position(x: safe.midX, y: safe.midY)
             .environment(\.colorScheme, .dark)
-            // A flick toward the edge compacts the gallery again.
-            .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { v in
-                let toward = edge == .left ? -v.translation.width : v.translation.width
-                if toward > 90, toward > abs(v.translation.height) * 1.5 { animate { machine.compact() } }
-            })
             .zIndex(5)
     }
 
@@ -591,7 +696,8 @@ struct StagePeekOverlay: View {
                     openTouch += 1
                     openStart = v.startLocation
                     let wasOpen = machine.phase == .open
-                    _ = machine.touchBegan(id: "open\(openTouch)", at: v.startLocation, time: t, onStrip: false)
+                    _ = machine.touchBegan(id: "open\(openTouch)", at: v.startLocation, time: t, onStrip: false,
+                                           closableCard: closableCard(at: v.startLocation, cards: cards))
                     if wasOpen, machine.expansion < 0.5 { armCardHold(at: v.startLocation, cards: cards) }
                 }
                 if hypot(v.location.x - openStart.x, v.location.y - openStart.y) > StagePeekConfig.tapSlop { holdTask?.cancel() }
@@ -617,11 +723,19 @@ struct StagePeekOverlay: View {
 
     private func global(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + overlayOrigin.x, y: p.y + overlayOrigin.y) }
 
+    /// The compact card under `p` when it's a Mac window this Mac can close (not a display).
+    private func closableCard(at p: CGPoint, cards: [StagePeekCard]) -> Int? {
+        guard model.canCloseWindows, machine.expansion < 0.5,
+              let i = StagePeekLayout.hit(p, cards: cards, region: hitRegion), machine.ids.indices.contains(i),
+              StagePeekIDs.displayIndex(machine.ids[i]) == nil else { return nil }
+        return i
+    }
+
     /// A still finger on a compact card for a moment lifts it: from then on the finger drags it
     /// over the panes (or the desktop), and lifting drops it. Scrubbing or a tap never lifts.
     private func armCardHold(at p: CGPoint, cards: [StagePeekCard]) {
         holdTask?.cancel()
-        guard let index = StagePeekLayout.hit(p, cards: cards), machine.ids.indices.contains(index) else { return }
+        guard let index = StagePeekLayout.hit(p, cards: cards, region: hitRegion), machine.ids.indices.contains(index) else { return }
         let id = machine.ids[index]
         let item: CatalogWindowItem? = {
             if let d = StagePeekIDs.displayIndex(id) {
@@ -658,7 +772,7 @@ struct StagePeekOverlay: View {
     private func end(_ id: String, _ p: CGPoint, _ t: TimeInterval, cards: [StagePeekCard]) {
         pollTask?.cancel()
         var effects: [StagePeekEffect] = []
-        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards) }) }
+        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion) }) }
         finish(effects)
     }
 
@@ -715,6 +829,11 @@ struct StagePeekOverlay: View {
                 }
             case .dismissed:
                 model.stagePeekOpen = false
+            case .revealClose(let id):
+                if let id, let w = windows.first(where: { $0.id == id }) {
+                    UIAccessibility.post(notification: .announcement,
+                                         argument: String(localized: "Close Window for \(w.title.isEmpty ? w.app : w.title)"))
+                }
             }
         }
     }

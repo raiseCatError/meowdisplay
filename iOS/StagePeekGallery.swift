@@ -2,10 +2,10 @@ import SwiftUI
 import UIKit
 
 // Stage Peek's floating pieces: the search pill, the Dock-like app carousel,
-// the expanded window gallery (two columns at most) and Launchpad. Each is its
+// the expanded window gallery (as many columns as fit) and Launchpad. Each is its
 // own floating glass element over the unchanged Mac picture: no container
 // panel behind them. Browsing here only reads; the Mac changes only through
-// an explicit window tap (show it) or "Open on Mac" (needs control).
+// an explicit window tap (show it), "Open on Mac" or Close Window (both need control).
 
 /// MeowDisplay blue.
 let meowAccent = Color(red: 0.33, green: 0.60, blue: 1.0)
@@ -153,6 +153,7 @@ struct StagePeekWindowCard: View {
     let window: CatalogWindowItem
     let inTile: Bool
     let current: Bool
+    var closing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -166,6 +167,17 @@ struct StagePeekWindowCard: View {
             }
             .aspectRatio(16 / 10, contentMode: .fit)
             .overlay(alignment: .topTrailing) { badges.padding(6) }
+            .overlay {
+                if closing {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.55))
+                        VStack(spacing: 6) {
+                            ProgressView().tint(.white)
+                            Text("Closing…").font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        }
+                    }
+                }
+            }
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(current ? meowAccent : Color.white.opacity(0.14), lineWidth: current ? 2.5 : 0.6))
             Text(window.title.isEmpty ? window.app : window.title)
@@ -178,7 +190,8 @@ struct StagePeekWindowCard: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(window.title.isEmpty ? window.app : window.title), \(window.app)")
-        .accessibilityValue(inTile ? String(localized: "Showing in a tile") : (window.minimized ? String(localized: "Minimized") : ""))
+        .accessibilityValue(closing ? String(localized: "Closing")
+                            : inTile ? String(localized: "Showing in a tile") : (window.minimized ? String(localized: "Minimized") : ""))
         .accessibilityAddTraits(.isButton)
     }
 
@@ -261,16 +274,36 @@ struct StagePeekGallery: View {
     var onDragEnded: (Bool) -> Void = { _ in }
     /// Search the Mac's approved folders for the query (Remote Finder), when the Mac offers it.
     var onSearchFiles: ((String) -> Void)?
+    /// The peek's edge: a sideways flick toward it (off the cards) compacts the gallery.
+    var edge: StagePeekEdge = .left
+    var onCompact: () -> Void = {}
     @State private var visible: [UInt32] = []
+    /// The card showing its Close Window button (swiped left), and a swipe in progress.
+    @State private var revealed: UInt32?
+    @State private var swipe: (id: UInt32, dx: CGFloat)?
+    /// The card lifted by a hold, and the point the hold began (window coordinates).
+    @State private var held: UInt32?
+    @State private var heldAt: CGPoint = .zero
+    @State private var menuWindow: CatalogWindowItem?
+    @State private var confirmClose: CatalogWindowItem?
+    @State private var cardGestureClock = CardGestureClock()
+    @Environment(\.horizontalSizeClass) private var horizontalSize
+    @Environment(\.verticalSizeClass) private var verticalSize
+    @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
 
-    /// Two columns at most; one when two would make cards too small.
-    static func columns(for width: CGFloat) -> Int { width - 40 >= 2 * 176 + 14 ? 2 : 1 }
+    static let revealWidth: CGFloat = 96
+
+    /// As many columns as fit at a readable size; phones and narrow split views two at most.
+    private var columnCount: Int {
+        StagePeekGalleryLayout.columns(width: width, compactSize: horizontalSize == .compact || verticalSize == .compact,
+                                       textScale: textScale)
+    }
 
     private var allWindows: [CatalogWindowItem] { model.catalog?.windows ?? [] }
     private var tiled: Set<UInt32> { Set(model.layout.tiles.values.compactMap { $0.source?.windowID }) }
 
     var body: some View {
-        let cols = Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: Self.columns(for: width))
+        let cols = Array(repeating: GridItem(.flexible(), spacing: StagePeekGalleryLayout.spacing, alignment: .top), count: columnCount)
         let results = WorkspaceSearch.search(query, apps: model.apps, windows: allWindows)
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 18) {
@@ -311,13 +344,14 @@ struct StagePeekGallery: View {
                         sectionTitle(String(localized: "Displays"))
                         LazyVGrid(columns: cols, spacing: 16) {
                             ForEach(displays) { d in
+                                let source = model.displayWindow(d)
                                 StagePeekDisplayCard(model: model, display: d,
                                                      current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { if model.drag == nil { onDisplay(d) } }
+                                    .scaleEffect(held == source.id ? 1.04 : 1)
                                     // The desktop is a pane source too: hold and drag it onto a pane.
-                                    .simultaneousGesture(dragToPane(model.displayWindow(d)))
+                                    .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
                                     .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction { onDisplay(d) }
                                     .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
                             }
                         }
@@ -336,43 +370,166 @@ struct StagePeekGallery: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .scrollDisabled(model.drag != nil)
+        // A sideways flick toward the peek's edge compacts the gallery: not one that swiped
+        // or held a card (those are the card's).
+        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { v in
+            guard !cardGestureClock.recent, model.drag == nil else { return }
+            let toward = edge == .left ? -v.translation.width : v.translation.width
+            if toward > 90, toward > abs(v.translation.height) * 1.5 { onCompact() }
+        })
         .onChange(of: visible) { model.thumbnailPriority = $0 }
+        .onChange(of: model.closingWindows) { closing in if let r = revealed, closing.contains(r) { revealed = nil } }
+        .confirmationDialog(menuWindow.map { $0.title.isEmpty ? $0.app : $0.title } ?? "",
+                            isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
+                            titleVisibility: .visible, presenting: menuWindow) { w in
+            Button("Show in Pane") { onWindow(w) }
+            if model.canAddTile, !tiled.contains(w.id) { Button("Add as New Pane") { onAddTile(w) } }
+            if model.canCloseWindows { Button("Close Window on Mac", role: .destructive) { model.closeWindow(w) } }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(confirmClose.map { String(localized: "Close “\($0.title.isEmpty ? $0.app : $0.title)” on the Mac?") } ?? "",
+                            isPresented: Binding(get: { confirmClose != nil }, set: { if !$0 { confirmClose = nil } }),
+                            titleVisibility: .visible, presenting: confirmClose) { w in
+            Button("Close Window", role: .destructive) { model.closeWindow(w) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
+        }
     }
 
     private func grid(_ windows: [CatalogWindowItem], _ cols: [GridItem]) -> some View {
         LazyVGrid(columns: cols, spacing: 16) {
-            ForEach(windows) { w in
-                StagePeekWindowCard(model: model, window: w, inTile: tiled.contains(w.id), current: model.currentWindowID == w.id && model.windowMode)
-                    .onTapGesture { if model.drag == nil { onWindow(w) } }
-                    .simultaneousGesture(dragToPane(w))
-                    .accessibilityAction(named: "Show in Pane") { onWindow(w) }
-                    .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
-                    .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
-                    .onDisappear { visible.removeAll { $0 == w.id } }
-            }
+            ForEach(windows) { w in windowCell(w) }
         }
     }
 
-    /// Hold, then drag onto a pane: middle replaces, its labels add a tab, an edge splits.
-    /// Dropped on Cancel (or outside the picture): nothing changes.
-    private func dragToPane(_ w: CatalogWindowItem) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.35)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if model.drag == nil {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    model.beginDrag(.window(w), at: drag?.location ?? .zero)
-                } else if let drag {
-                    model.moveDrag(to: drag.location)
+    /// One window card: tap shows it, hold lifts it (drag to a pane, or lift in place for its
+    /// menu), a swipe left reveals Close Window, and the X asks before closing.
+    private func windowCell(_ w: CatalogWindowItem) -> some View {
+        let closable = model.canCloseWindows
+        let dx = swipe?.id == w.id ? swipe!.dx : (revealed == w.id ? -Self.revealWidth : 0)
+        let closing = model.closingWindows.contains(w.id)
+        let name = w.title.isEmpty ? w.app : w.title
+        return ZStack(alignment: .trailing) {
+            if dx < -1 {
+                closeAction(w, width: min(-dx, Self.revealWidth + 40))
+            }
+            StagePeekWindowCard(model: model, window: w, inTile: tiled.contains(w.id),
+                                current: model.currentWindowID == w.id && model.windowMode, closing: closing)
+                .accessibilityAction { onWindow(w) }
+                .accessibilityAction(named: "Show in Pane") { onWindow(w) }
+                .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+                .accessibilityAction(named: "Close Window") { if closable { confirmClose = w } }
+                .scaleEffect(held == w.id ? 1.04 : 1)
+                .overlay(cardGestures(w, onTap: { onWindow(w) }, swipe: closable && !closing))
+                .overlay(alignment: .topLeading) {
+                    if closable, inputAllowed, !closing, dx == 0 {
+                        Button { confirmClose = w } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Circle().fill(Color.black.opacity(0.6)))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 0.6))
+                                .frame(width: 40, height: 40)   // a comfortable target, drawn small
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: -6, y: -6)
+                        .accessibilityLabel("Close Window \(name)")
+                    }
                 }
+                .offset(x: dx)
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: revealed)
+        .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
+        .onDisappear { visible.removeAll { $0 == w.id }; if revealed == w.id { revealed = nil } }
+    }
+
+    /// The red Close Window button a swipe left reveals. Without control it explains instead.
+    private func closeAction(_ w: CatalogWindowItem, width: CGFloat) -> some View {
+        Button {
+            revealed = nil
+            model.closeWindow(w)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: inputAllowed ? "xmark.square" : "lock").font(.system(size: 18, weight: .semibold))
+                Text(inputAllowed ? String(localized: "Close Window") : String(localized: "Needs Control"))
+                    .font(.caption2.weight(.semibold)).multilineTextAlignment(.center).lineLimit(2)
             }
-            .onEnded { _ in
-                guard model.drag != nil else { return }
-                let dropped = model.endDrag()
-                if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
-                onDragEnded(dropped)
-            }
+            .foregroundStyle(.white)
+            .frame(width: max(width - 8, 0))
+            .frame(maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(inputAllowed ? Color.red : Color.gray))
+        }
+        .buttonStyle(.plain)
+        .opacity(min(1, width / 60))
+        .accessibilityLabel(inputAllowed ? String(localized: "Close Window") : String(localized: "Close Window needs control"))
+    }
+
+    /// The UIKit gestures for one card (they share each touch with the scroll view).
+    private func cardGestures(_ w: CatalogWindowItem, onTap: @escaping () -> Void, swipe swipeEnabled: Bool) -> some View {
+        StagePeekCardGestures(
+            onTap: {
+                guard model.drag == nil else { return }
+                // A tap while a Close Window button shows only puts the card back.
+                if revealed != nil { revealed = nil; return }
+                onTap()
+            },
+            onHold: { p in
+                cardGestureClock.mark()
+                revealed = nil
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { held = w.id }
+                heldAt = p
+            },
+            onHoldMove: { p in
+                cardGestureClock.mark()
+                if model.drag == nil {
+                    // Moving after the hold drags the card: over a pane, an edge splits, the
+                    // middle replaces, its labels add a tab. Cancel (or nowhere) changes nothing.
+                    guard hypot(p.x - heldAt.x, p.y - heldAt.y) > StagePeekCardGestures.Coordinator.moveSlop else { return }
+                    model.beginDrag(.window(w), at: p)
+                } else {
+                    model.moveDrag(to: p)
+                }
+            },
+            onHoldEnd: { p, moved in
+                cardGestureClock.mark()
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { held = nil }
+                if model.drag != nil {
+                    model.moveDrag(to: p)
+                    let dropped = model.endDrag()
+                    if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
+                    onDragEnded(dropped)
+                } else if !moved, allWindows.contains(where: { $0.id == w.id }) {
+                    menuWindow = w   // held in place: the window's actions
+                }
+            },
+            onHoldCancel: {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { held = nil }
+                if model.drag != nil { model.cancelDrag() }
+            },
+            swipeEnabled: swipeEnabled,
+            onSwipe: { dx in
+                cardGestureClock.mark()
+                if let r = revealed, r != w.id { revealed = nil }
+                let base: CGFloat = revealed == w.id ? -Self.revealWidth : 0
+                var x = base + dx
+                if x > 0 { x *= 0.25 }
+                if x < -Self.revealWidth { x = -Self.revealWidth + (x + Self.revealWidth) * 0.3 }
+                swipe = (w.id, x)
+            },
+            onSwipeEnd: { _, velocity in
+                cardGestureClock.mark()
+                let x = swipe?.id == w.id ? swipe!.dx : 0
+                let open = velocity < -400 || (x < -Self.revealWidth / 2 && velocity < 300)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    revealed = open ? w.id : (revealed == w.id ? nil : revealed)
+                    swipe = nil
+                }
+                if open { UISelectionFeedbackGenerator().selectionChanged() }
+            })
     }
 
     private func sectionTitle(_ text: String) -> some View {
@@ -443,6 +600,13 @@ struct StagePeekGallery: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
     }
+}
+
+/// When a card last swiped or was held, so the gallery's own flick ignores that touch.
+final class CardGestureClock {
+    private var last: TimeInterval = 0
+    func mark() { last = ProcessInfo.processInfo.systemUptime }
+    var recent: Bool { ProcessInfo.processInfo.systemUptime - last < 0.8 }
 }
 
 // MARK: - Launchpad

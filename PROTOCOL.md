@@ -1398,6 +1398,17 @@ listed) and `close {window, gen}` (closes the real Mac window; receivers
 send it only from its own explicit, confirmed action — removing a tile is
 just a smaller `workspaceRequest`).
 
+**Close Window from Stage Peek** (welcome feature `windowClose`, any
+display mode): `windowClose {window, gen, req}` presses that listed
+window's own close button through Accessibility — never Quit, never
+activating the app or moving the window. Only for a window listed to this
+session with the same `gen`. The Mac answers `windowCloseResult {window,
+req, result}`: `closed`, `saveDialog` (the app asked about unsaved changes;
+the owner answers on the Mac), `stillOpen`, `stale` (not that window any
+more), `control` (no input grant: View Only cannot close), `accessibility`
+(the Mac lacks the permission), `noButton` or `ambiguous` (more than one
+window matched; nothing was pressed). A fresh `windowCatalog` follows.
+
 **Input.** Unchanged messages, canvas coordinates. The Mac maps a point to
 the tile under it, through that tile's fit and rotation, to the window. A
 press binds to its tile until release (a drag never crosses into another
@@ -1894,3 +1905,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |
 | 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
+| 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12) |

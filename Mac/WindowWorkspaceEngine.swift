@@ -1340,27 +1340,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     static func pressClose(pid: Int32, frame: CGRect, title: String) {
-        guard AXIsProcessTrusted() else { return }
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.15)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return }
-        let matches = windows.filter { w in
-            guard let f = axFrame(w), framesMatch(f, frame) else { return false }
-            var t: CFTypeRef?
-            AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &t)
-            return title.isEmpty || (t as? String) == title
-        }
-        guard matches.count == 1, let window = matches.first else {
-            Log.info("workspace: close refused, \(matches.count) matching windows")
-            return
-        }
-        var button: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success, let button {
-            // swiftlint:disable:next force_cast
-            AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
-        }
+        WindowCloser.close(pid: pid, frame: frame, title: title) { _ in }
     }
 
     /// Minimizes the one window with this frame and title (Minimize on Mac). Never activates its app.

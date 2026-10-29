@@ -160,9 +160,38 @@ final class WindowBrowserService: @unchecked Sendable {
                         self?.queue.asyncAfter(deadline: .now() + 0.8) { self?.refresh(sendCatalog: true) }
                     }
                 }
+            case WireMessage.windowClose:
+                closeWindow(obj, inputGranted: inputGranted)
             default:
                 break
             }
+        }
+    }
+
+    // MARK: Close Window (Stage Peek)
+
+    /// Closes one listed window as its close button would. Needs control; only the window
+    /// this session was shown (same id and `gen`); the app is never quit or activated.
+    private func closeWindow(_ obj: [String: Any], inputGranted: Bool) {
+        guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }) else { return }
+        let req = obj["req"] as? Int
+        let reply: @Sendable (WindowCloseResult) -> Void = { [weak self] result in
+            self?.queue.async {
+                guard let self, !self.stopped else { return }
+                var m: [String: Any] = ["type": WireMessage.windowCloseResult, "window": Int(id), "result": result.rawValue]
+                if let req { m["req"] = req }
+                self.sendMessage?(m)
+                if result != .control, result != .accessibility { self.refresh(sendCatalog: true) }
+            }
+        }
+        guard inputGranted else { return reply(.control) }
+        guard let gen = (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }),
+              let entry = snapshot?.windows.first(where: { $0.windowID == id }), entry.generation == gen,
+              knows(windowID: id, generation: gen) else { return reply(.stale) }
+        Log.info("workspace: close window \(id) requested from Stage Peek")
+        WindowCloser.close(pid: entry.pid, frame: entry.frame, title: entry.title) { result in
+            Log.info("workspace: close window \(id): \(result.rawValue)")
+            reply(result)
         }
     }
 

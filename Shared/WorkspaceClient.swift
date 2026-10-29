@@ -21,6 +21,32 @@ struct CatalogWindowItem: Equatable, Sendable, Identifiable {
     var active: Bool
 }
 
+/// The outcome of one Close Window, worded for the person who asked.
+struct WindowCloseNotice: Equatable, Sendable {
+    var windowID: UInt32
+    var name: String
+    /// nil: no answer from the Mac (or it can't close windows from here).
+    var result: WindowCloseResult?
+    var unsupported = false
+
+    var isError: Bool { result != .closed && result != .stale }
+
+    var message: String {
+        if unsupported { return String(localized: "Update MeowDisplay on the Mac to close windows from here.") }
+        switch result {
+        case .closed: return String(localized: "Closed “\(name)”.")
+        case .saveDialog: return String(localized: "“\(name)” has unsaved changes. Choose Save or Don’t Save on the Mac.")
+        case .stillOpen: return String(localized: "“\(name)” stayed open. Its app may be busy or asking something on the Mac.")
+        case .stale: return String(localized: "“\(name)” was already closed.")
+        case .control: return String(localized: "Closing windows needs control of the Mac. Use Request Control first.")
+        case .accessibility: return String(localized: "The Mac needs Accessibility permission for MeowDisplay to close windows.")
+        case .noButton: return String(localized: "“\(name)” can’t be closed: it has no close button.")
+        case .ambiguous: return String(localized: "The Mac couldn’t tell which window to close, so nothing was closed.")
+        case nil: return String(localized: "The Mac didn’t confirm closing “\(name)”.")
+        }
+    }
+}
+
 struct CatalogAppItem: Equatable, Sendable { var bundleID: String; var name: String; var hasWindows: Bool }
 struct InstalledAppItem: Equatable, Sendable { var bundleID: String; var name: String }
 
@@ -84,6 +110,8 @@ enum WorkspaceEvent: Sendable {
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
     case launchResult(bundleID: String, ok: Bool)
+    /// Close Window from Stage Peek (PROTOCOL.md 6.10).
+    case closeResult(windowID: UInt32, result: WindowCloseResult)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Pane menus (PROTOCOL.md 6.13).
@@ -165,6 +193,9 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
             return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
+        case WireMessage.windowCloseResult:
+            guard let id = u32(obj, "window"), let r = str(obj, "result", 32).flatMap(WindowCloseResult.init(rawValue:)) else { return nil }
+            return .closeResult(windowID: id, result: r)
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case WireMessage.menu:
@@ -293,6 +324,11 @@ enum WorkspaceRequests {
 
     static func launch(_ bundle: String) -> [String: Any] { ["type": WireMessage.windowAction, "action": "launch", "bundle": bundle] }
 
+    /// Close Window from Stage Peek: presses that window's close button (any mode, needs control).
+    static func windowClose(_ id: UInt32, generation: UInt64, req: Int) -> [String: Any] {
+        ["type": WireMessage.windowClose, "window": Int(id), "gen": Int(generation), "req": req]
+    }
+
     /// Closes the real Mac window: only from its own explicit confirm.
     static func closeWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
         ["type": WireMessage.windowAction, "action": "close", "window": Int(id), "gen": Int(generation)]
@@ -365,6 +401,13 @@ final class WorkspaceModel: ObservableObject {
     /// Apps opened from this device that haven't shown a window yet.
     @Published private(set) var launching: Set<String> = []
     @Published private(set) var launchFailed: String?
+    /// The Mac can close a listed window from Stage Peek (`windowClose`).
+    @Published private(set) var canCloseWindows = false
+    /// Windows asked to close that the Mac hasn't answered for yet.
+    @Published private(set) var closingWindows: Set<UInt32> = []
+    /// What happened to the last Close Window (shown briefly over Stage Peek).
+    @Published var closeNotice: WindowCloseNotice?
+    private var closeRequest = 0
     /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
     @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
     /// Cards on screen now, most important first: their stills are asked for first.
@@ -452,6 +495,7 @@ final class WorkspaceModel: ObservableObject {
             available = f.contains(WindowWorkspaceWire.welcomeFeature)
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
+            canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
         case .files(let reply):
             files.apply(reply)
         case .menu(let reply):
@@ -516,10 +560,13 @@ final class WorkspaceModel: ObservableObject {
         case .launchResult(let bundle, let ok):
             if !ok { launching.remove(bundle); launchFailed = bundle }
             requestCatalog()
+        case .closeResult(let id, let result):
+            finishClose(id, result: result)
         case .disconnected:
             sendTask?.cancel()
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
+            canCloseWindows = false; closingWindows = []; closeNotice = nil
             files.setAvailable(false)
             menus.setAvailable(false)
             // A new session's frames carry no echo of this one's views; stills are re-asked.
@@ -1079,6 +1126,41 @@ final class WorkspaceModel: ObservableObject {
             }
             return l.orderedTileIDs.last.map { l.replacingSource(of: $0, with: source) } ?? l
         }
+    }
+
+    // MARK: Close Window (Stage Peek)
+
+    /// Closes one Mac window as its close button would: never Quit, never the app's other windows.
+    /// View Only can't: the Mac refuses without control, and this says so before asking.
+    func closeWindow(_ w: CatalogWindowItem) {
+        let name = w.title.isEmpty ? w.app : w.title
+        guard canCloseWindows else { closeNotice = WindowCloseNotice(windowID: w.id, name: name, result: nil, unsupported: true); return }
+        guard inputAllowed() else { closeNotice = WindowCloseNotice(windowID: w.id, name: name, result: .control); return }
+        guard !closingWindows.contains(w.id) else { return }
+        closeRequest += 1
+        closingWindows.insert(w.id)
+        closeNotice = nil
+        closeNames[w.id] = name
+        _ = send(WorkspaceRequests.windowClose(w.id, generation: w.generation, req: closeRequest))
+        let id = w.id
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, self.closingWindows.contains(id) else { return }
+            self.closingWindows.remove(id)
+            self.closeNotice = WindowCloseNotice(windowID: id, name: self.closeNames.removeValue(forKey: id) ?? name, result: nil)
+        }
+    }
+
+    private var closeNames: [UInt32: String] = [:]
+
+    private func finishClose(_ id: UInt32, result: WindowCloseResult) {
+        closingWindows.remove(id)
+        let name = closeNames.removeValue(forKey: id) ?? catalog?.windows.first { $0.id == id }.map { $0.title.isEmpty ? $0.app : $0.title } ?? ""
+        if result.removesCard, var c = catalog {
+            c.windows.removeAll { $0.id == id }
+            catalog = c
+        }
+        closeNotice = WindowCloseNotice(windowID: id, name: name, result: result)
     }
 
     /// Opens an app on the Mac (explicit action; the Mac refuses it without control and never activates it).

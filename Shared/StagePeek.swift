@@ -40,6 +40,23 @@ enum StagePeekEdge: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How the compact peek's window Dock sits on screen. Persisted as `stagePeekDock`.
+enum StagePeekDockStyle: String, Codable, CaseIterable, Identifiable {
+    /// A bounded column between the search and app carousel above and the buttons below:
+    /// cards fade and clip at its edges and never pass under those controls (the default).
+    case compact
+    /// The open column across the whole edge (cards may pass behind the controls, which stay on top).
+    case normal
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .compact: return String(localized: "Compact", comment: "Stage Peek Dock style.")
+        case .normal: return String(localized: "Normal", comment: "Stage Peek Dock style.")
+        }
+    }
+}
+
 /// Thresholds, in points and seconds. Tests and both apps share them.
 enum StagePeekConfig {
     /// The hold strip: this wide, just inside the safe area.
@@ -74,6 +91,10 @@ enum StagePeekConfig {
     static let boundaryOverrun: Double = 0.25
     /// Camera distance (points) for the card tilt: renderers and hit testing.
     static let perspective: CGFloat = 900
+    /// Compact Dock: the fade at the top and bottom of its region.
+    static let dockFade: CGFloat = 28
+    /// Compact Dock: room kept between the region and the controls above and below it.
+    static let dockGap: CGFloat = 8
 }
 
 enum StagePeekHaptic: String, Equatable { case activate, tick, boundary, select }
@@ -83,6 +104,8 @@ enum StagePeekEffect: Equatable {
     case haptic(StagePeekHaptic)
     /// A tap chose this window. Stage Peek is closed.
     case select(UInt32)
+    /// A sideways swipe on this window's card: show (or, nil, hide) its Close Window button.
+    case revealClose(UInt32?)
     /// Closed without choosing anything.
     case dismissed
 }
@@ -118,10 +141,14 @@ struct StagePeekMachine: Equatable {
     private var lastTickTime: TimeInterval = -.infinity
     private var lastHighlighted = 0
     private var overrunSignalled = false
+    /// Open phase: the card the touch started on, when that card can be closed.
+    private var startCard: Int?
+    /// The window whose Close Window button shows (after a swipe left on its card).
+    private(set) var closeRevealed: UInt32?
 
     static func == (a: Self, b: Self) -> Bool {
         a.phase == b.phase && a.ids == b.ids && a.position == b.position && a.expansion == b.expansion
-            && a.expanded == b.expanded && a.touchID == b.touchID
+            && a.expanded == b.expanded && a.touchID == b.touchID && a.closeRevealed == b.closeRevealed
     }
 
     var isVisible: Bool { phase == .scrubbing || phase == .open }
@@ -145,6 +172,7 @@ struct StagePeekMachine: Equatable {
             position = clampPosition(isVisible ? position : Double(currentIndex))
         }
         lastHighlighted = highlighted
+        if let r = closeRevealed, !new.contains(r) { closeRevealed = nil }
         if isVisible && ids.isEmpty { closeAll() }
     }
 
@@ -152,7 +180,10 @@ struct StagePeekMachine: Equatable {
 
     /// Returns whether Stage Peek owns this touch. Owned touches never reach
     /// the Mac: anything starting on the edge strip, and everything while open.
-    mutating func touchBegan(id: AnyHashable, at point: CGPoint, time: TimeInterval, onStrip: Bool) -> Bool {
+    /// `closableCard`: while open, the card under the touch when it is a window that can be
+    /// closed (a swipe left on it reveals Close Window instead of flicking the peek).
+    mutating func touchBegan(id: AnyHashable, at point: CGPoint, time: TimeInterval, onStrip: Bool,
+                             closableCard: Int? = nil) -> Bool {
         switch phase {
         case .closed:
             guard onStrip, !ids.isEmpty else { return false }
@@ -169,6 +200,7 @@ struct StagePeekMachine: Equatable {
             start = (point, time)
             anchor = (point, position)
             tapCandidate = true
+            startCard = closableCard
             return true
         }
     }
@@ -193,8 +225,16 @@ struct StagePeekMachine: Equatable {
             // A sideways flick while open: inward expands, outward compacts (or closes when compact).
             let dx = point.x - start.point.x, dy = point.y - start.point.y
             if abs(dx) > StagePeekConfig.flickDistance, abs(dx) > abs(dy) * 1.5 {
+                let card = startCard.flatMap { ids.indices.contains($0) ? ids[$0] : nil }
                 consumed.insert(id)
                 resetTouch()
+                // On a closable window's card a swipe left reveals Close Window; a swipe right
+                // on the revealed card hides it. Everywhere else the flick works as before.
+                if let card, !expanded {
+                    if dx < 0 { closeRevealed = card; return [.haptic(.tick), .revealClose(card)] }
+                    if closeRevealed == card { closeRevealed = nil; return [.revealClose(nil)] }
+                }
+                if closeRevealed != nil { closeRevealed = nil; return [.revealClose(nil)] }
                 let inward = edge == .left ? dx : -dx
                 if inward > 0 { expand(); return [.haptic(.select)] }
                 if expanded { compact(); return [.haptic(.select)] }
@@ -204,7 +244,9 @@ struct StagePeekMachine: Equatable {
             guard hypot(point.x - start.point.x, point.y - start.point.y) > StagePeekConfig.tapSlop else { return [] }
             tapCandidate = false
             phase = .scrubbing
-            return scrub(to: point, time: time, edge: edge)
+            let hid = closeRevealed != nil
+            closeRevealed = nil
+            return (hid ? [.revealClose(nil)] : []) + scrub(to: point, time: time, edge: edge)
         case .scrubbing:
             return scrub(to: point, time: time, edge: edge)
         case .closed:
@@ -233,6 +275,8 @@ struct StagePeekMachine: Equatable {
             let wasTap = tapCandidate && (start.map { time - $0.time <= StagePeekConfig.tapMaxDuration } ?? false)
             resetTouch()
             guard wasTap else { return [] }
+            // A tap while Close Window shows only hides it (like a swiped list row).
+            if closeRevealed != nil { closeRevealed = nil; return [.revealClose(nil)] }
             if let i = cardAt(point), ids.indices.contains(i) {
                 let chosen = ids[i]
                 closeAll()
@@ -317,7 +361,10 @@ struct StagePeekMachine: Equatable {
         return [.haptic(.select), .select(chosen)]
     }
 
-    mutating func expand() { guard isVisible else { return }; expanded = true; expansion = 1 }
+    mutating func expand() { guard isVisible else { return }; expanded = true; expansion = 1; closeRevealed = nil }
+
+    /// Hides Close Window (it was used, or the window went away).
+    mutating func hideClose() { closeRevealed = nil }
     mutating func compact() { guard isVisible else { return }; expanded = false; expansion = 0 }
 
     /// Dismiss without choosing (Escape, back, tap outside handled above).
@@ -388,10 +435,12 @@ struct StagePeekMachine: Equatable {
         start = nil
         anchor = nil
         tapCandidate = false
+        startCard = nil
     }
 
     private mutating func closeAll() {
         phase = .closed
+        closeRevealed = nil
         expansion = 0
         expanded = false
         resetTouch()
@@ -444,9 +493,21 @@ enum StagePeekLayout {
         return CGRect(x: x, y: center - height / 2, width: width, height: height)
     }
 
-    /// Visible cards, back to front. `aspects` are width / height per window.
+    /// The Compact Dock's region: between the controls above (their bottom edge) and below
+    /// (their top edge), with a small gap to each. Never shorter than two cards' worth.
+    static func dockRegion(safe: CGRect, controlsAbove: CGFloat, controlsBelow: CGFloat) -> CGRect {
+        let top = min(max(controlsAbove + StagePeekConfig.dockGap, safe.minY), safe.maxY)
+        let bottom = max(min(controlsBelow - StagePeekConfig.dockGap, safe.maxY), top)
+        let minimum = min(160, safe.height)
+        if bottom - top >= minimum { return CGRect(x: safe.minX, y: top, width: safe.width, height: bottom - top) }
+        let mid = min(max((top + bottom) / 2, safe.minY + minimum / 2), safe.maxY - minimum / 2)
+        return CGRect(x: safe.minX, y: mid - minimum / 2, width: safe.width, height: minimum)
+    }
+
+    /// Visible cards, back to front. `aspects` are width / height per window. `region`: the
+    /// Compact Dock's band (the compact stack centres in it); nil for the Normal Dock.
     static func cards(aspects: [Double], position: Double, expansion: Double, edge: StagePeekEdge,
-                      safe: CGRect, isPad: Bool, reduceMotion: Bool) -> [StagePeekCard] {
+                      safe: CGRect, isPad: Bool, reduceMotion: Bool, region: CGRect? = nil) -> [StagePeekCard] {
         guard !aspects.isEmpty, safe.width > 0, safe.height > 0 else { return [] }
         let e = CGFloat(min(max(expansion, 0), 1))
         func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * e }
@@ -465,8 +526,9 @@ enum StagePeekLayout {
         let margin: CGFloat = 16
         let compactX = edge == .left ? safe.minX + margin + compactWidth / 2 : safe.maxX - margin - compactWidth / 2
         let centerX = lerp(compactX, safe.midX)
-        // Room for the title under the highlighted card.
-        let centerY = safe.midY - 18
+        // Room for the title under the highlighted card. The Compact Dock centres in its band.
+        let dockCenterY = (region?.midY ?? safe.midY) - 18
+        let flowCenterY = safe.midY - 18
         // Compact (e = 0) is Dock magnification: the highlighted card full size and popped out,
         // the rest shrinking smoothly with distance, upright, edge-aligned and not overlapping.
         // Expanded (e = 1) is the layered Cover Flow stack. Positions blend between the two.
@@ -494,14 +556,14 @@ enum StagePeekLayout {
             // Cover Flow (expanded).
             let flowScale = CGFloat(1 - 0.16 * near - 0.07 * far)
             let step = CGFloat(u <= 1 ? u * 0.58 : 0.58 + (u - 1) * 0.30)
-            let flowY = centerY + (k < 0 ? -1 : 1) * step * focusSize.height
+            let flowY = flowCenterY + (k < 0 ? -1 : 1) * step * focusSize.height
             let flowTilt = reduceMotion ? 0 : min(16 * near + 3 * far, 22)
             // Dock (compact).
             let ds = dockScale(u)
             let dw = size.width * ds
             let pop = CGFloat(10 * pow(max(0, 1 - u), 2))   // only the highlighted card pops out
             let dockX = edge == .left ? safe.minX + margin + dw / 2 + pop : safe.maxX - margin - dw / 2 - pop
-            let dy = centerY + dockY[i] - shift
+            let dy = dockCenterY + dockY[i] - shift
             let scale = lerp(ds, flowScale)
             out.append(StagePeekCard(
                 index: i,
@@ -530,8 +592,10 @@ enum StagePeekLayout {
         }
     }
 
-    /// The frontmost card containing `p` (cards fully faded out are ignored).
-    static func hit(_ p: CGPoint, cards: [StagePeekCard]) -> Int? {
+    /// The frontmost card containing `p` (cards fully faded out are ignored). With a Compact
+    /// Dock `region`, nothing outside it (or in its faded edges' outer half) is a card.
+    static func hit(_ p: CGPoint, cards: [StagePeekCard], region: CGRect? = nil) -> Int? {
+        if let region, !region.insetBy(dx: 0, dy: StagePeekConfig.dockFade / 2).contains(p) { return nil }
         for c in cards.sorted(by: { $0.z > $1.z }) where c.opacity > 0.05 {
             if contains(corners(c), p) { return c.index }
         }
@@ -547,5 +611,25 @@ enum StagePeekLayout {
             if sign == 0 { sign = cross } else if (sign > 0) != (cross > 0) { return false }
         }
         return true
+    }
+}
+
+// MARK: - Expanded gallery columns
+
+/// How many columns the expanded gallery uses: as many as fit at a readable card width,
+/// wider cards with larger text. Compact size classes (phones, narrow split views) stop at
+/// two, which is the phone default when it fits. Sizes only, never device names.
+enum StagePeekGalleryLayout {
+    static let spacing: CGFloat = 14
+    static let sidePadding: CGFloat = 20
+    /// Narrowest readable card: phones, and everything else.
+    static let minimumCompactCard: CGFloat = 150
+    static let minimumRegularCard: CGFloat = 200
+    static let maximumColumns = 6
+
+    static func columns(width: CGFloat, compactSize: Bool, textScale: CGFloat = 1) -> Int {
+        let card = (compactSize ? minimumCompactCard : minimumRegularCard) * min(max(textScale, 1), 2)
+        let fit = Int(((width - 2 * sidePadding + spacing) / (card + spacing)).rounded(.down))
+        return min(max(fit, 1), compactSize ? 2 : maximumColumns)
     }
 }
