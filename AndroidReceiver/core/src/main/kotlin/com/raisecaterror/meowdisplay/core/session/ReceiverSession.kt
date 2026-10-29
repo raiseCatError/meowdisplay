@@ -5,6 +5,9 @@ import com.raisecaterror.meowdisplay.core.video.DecodableSample
 import com.raisecaterror.meowdisplay.core.video.ParameterSetTracker
 import com.raisecaterror.meowdisplay.core.wire.AudioMediaFrame
 import com.raisecaterror.meowdisplay.core.wire.IncomingFrame
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -125,6 +128,13 @@ class ReceiverSession(
      */
     private val heldState = LinkedHashMap<String, SessionEvent>()
 
+    /** Stream and display settings for this connection (Mac-authoritative). */
+    private val streamModel = StreamSettingsModel()
+    private val streamSettingsFlow = MutableStateFlow(StreamSettings())
+
+    /** What Settings shows: empty until this connection is admitted. */
+    val streamSettings: StateFlow<StreamSettings> = streamSettingsFlow.asStateFlow()
+
     /** This receiver's own audio preference, reasserted on every `welcome`. */
     @Volatile var audioPreferred = false
 
@@ -228,6 +238,8 @@ class ReceiverSession(
         incompatible = false
         macPV = null
         macFeatures = emptySet()
+        streamModel.reset()
+        publishStreamSettings()
         video.reset(StreamCodec.H264)
         lastCursorSequence = 0
         lastTextCaretSequence = 0
@@ -357,6 +369,7 @@ class ReceiverSession(
             }
             emit(SessionEvent.ApprovalDismissed(expired.id))
         }
+        if (streamModel.expire(t)) publishStreamSettings()
         advanceReconnect(t)
     }
 
@@ -436,6 +449,49 @@ class ReceiverSession(
         return send(ReceiverMessages.audioRequest(enabled))
     }
 
+    /** Video on or off for this device. The Mac decides (it may ask its user) and confirms with `videoState`. */
+    @Synchronized
+    fun requestVideo(enabled: Boolean): Boolean {
+        if (!settingsRequestsAllowed(WireProtocol.VIDEO_CONTROL)) return false
+        return send(ReceiverMessages.videoRequest(enabled))
+    }
+
+    @Synchronized
+    fun requestStreamingProfile(profile: StreamingProfile, customFrameRate: CustomFrameRate = streamModel.state.customFrameRate): Boolean =
+        sendSetting(WireProtocol.STREAMING_PROFILE_REQUEST) { streamModel.requestProfile(profile, customFrameRate) }
+
+    @Synchronized
+    fun requestStreamingPriority(priority: StreamingPriority): Boolean =
+        sendSetting(WireProtocol.STREAMING_PRIORITY) { streamModel.requestPriority(priority) }
+
+    /** Null: Auto. Only a display the Mac listed can be chosen. */
+    @Synchronized
+    fun requestMirrorDisplay(uuid: String?): Boolean =
+        sendSetting(WireProtocol.MIRROR_DISPLAY) { streamModel.requestMirrorDisplay(uuid) }
+
+    @Synchronized
+    fun requestExtendShape(preference: ExtendShapePreference): Boolean =
+        sendSetting(WireProtocol.EXTEND_SHAPE) { streamModel.requestExtendShape(preference, now()) }
+
+    @Synchronized
+    fun requestMaxFPS(preference: MaxFPSPreference): Boolean =
+        sendSetting(WireProtocol.MAX_FPS) { streamModel.requestMaxFPS(preference, now()) }
+
+    /** The Mac takes these only from an admitted connection that speaks [minimumPV]. */
+    private fun settingsRequestsAllowed(minimumPV: Int) = link != null && admission.admitted && (macPV ?: 0) >= minimumPV
+
+    private fun sendSetting(minimumPV: Int, build: () -> JsonObject?): Boolean {
+        if (!settingsRequestsAllowed(minimumPV)) return false
+        val message = build() ?: return false
+        publishStreamSettings()
+        return send(message)
+    }
+
+    private fun publishStreamSettings() {
+        streamSettingsFlow.value = if (link != null && admission.admitted) streamModel.state
+        else StreamSettings(customFrameRate = streamModel.state.customFrameRate)
+    }
+
     @Synchronized
     fun requestKeyframe(): Boolean = link != null && send(ReceiverMessages.keyframeRequest()).also { lastKeyframeRequestMs = now() }
 
@@ -490,6 +546,8 @@ class ReceiverSession(
             is SenderMessage.Welcome -> {
                 macPV = message.pv
                 macFeatures = message.features
+                streamModel.peerVersion(message.pv)
+                publishStreamSettings()
                 deliver("features", SessionEvent.MacFeatures(message.features))
                 if (message.pv < WireProtocol.SESSION_INVITATION) admitLegacySenderOrClose(from)
                 if (link !== from) return
@@ -514,6 +572,7 @@ class ReceiverSession(
                     input.forget()
                     inputGranted = false
                     endSenderApproval()
+                    publishStreamSettings()
                     emit(SessionEvent.AdmissionWithdrawn)
                     emit(SessionEvent.InputState(InputWireState.Off, false))
                 }
@@ -528,6 +587,8 @@ class ReceiverSession(
             }
             is SenderMessage.VideoState -> {
                 if (!message.enabled) video.reset()
+                streamModel.videoState(message.enabled)
+                publishStreamSettings()
                 deliver("videoState", SessionEvent.VideoState(message.enabled, message.width?.takeIf(::isSaneDimension), message.height?.takeIf(::isSaneDimension)))
             }
             is SenderMessage.AudioState -> deliver("audioState", SessionEvent.AudioState(message.enabled))
@@ -544,7 +605,11 @@ class ReceiverSession(
                 if (changed) reportPhase()
                 deliver("displayState", SessionEvent.DisplayPaused(message.paused))
             }
-            is SenderMessage.DisplayModeState -> deliver("displayMode", SessionEvent.DisplayModeConfirmed(message.mode))
+            is SenderMessage.DisplayModeState -> {
+                streamModel.displayModeConfirmed(message.mode)
+                publishStreamSettings()
+                deliver("displayMode", SessionEvent.DisplayModeConfirmed(message.mode))
+            }
             is SenderMessage.Cursor -> {
                 // No cursor before admission (6.9): it is not state worth holding.
                 if (!admission.admitted) return
@@ -570,7 +635,15 @@ class ReceiverSession(
                 emit(SessionEvent.InputReset)
             }
             SenderMessage.Closing -> closeCurrent(SessionLossReason.PeerClosed)
-            is SenderMessage.Other -> deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
+            is SenderMessage.Other -> {
+                val setting = StreamSettingsWire.parse(message.type, message.body)
+                if (setting != null) {
+                    streamModel.apply(setting)
+                    publishStreamSettings()
+                } else {
+                    deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
+                }
+            }
         }
     }
 
@@ -667,6 +740,7 @@ class ReceiverSession(
         // The decoder starts from scratch: the next keyframe carries its parameter sets again.
         video.reset()
         emit(SessionEvent.Admitted(peerID))
+        publishStreamSettings()
         heldState.values.forEach(::emit)
         heldState.clear()
         // Frames before admission were dropped: ask for a keyframe so a static screen appears at once.
@@ -718,6 +792,8 @@ class ReceiverSession(
         inputGranted = false
         paused = false
         heldState.clear()
+        streamModel.reset()
+        publishStreamSettings()
         senderApprovalPending = false
         dismissApprovals(answer = null)
         val effective = if (incompatible && reason.automaticallyRecoverable) SessionLossReason.ProtocolIncompatible else reason

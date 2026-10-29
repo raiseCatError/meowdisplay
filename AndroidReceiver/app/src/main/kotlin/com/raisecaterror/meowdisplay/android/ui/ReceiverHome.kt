@@ -113,7 +113,7 @@ fun ReceiverHome(
     val compactHeight = windowHeight < 500.dp
     // One row per Mac, however it was found: a paired Mac that is nearby, saved remotely or both is a single
     // row in the Macs card. Bonjour names only: a nearby Mac with a paired Mac's name is not offered to pair again.
-    val rows = HomeRows.build(paired.map { HomeRows.Paired(it.peerID, it.name) }, nearby.map { it.serviceName })
+    val rows = HomeRows.buildFromNearby(paired.map { HomeRows.Paired(it.peerID, it.name) }, nearby.map { HomeRows.Nearby(it.serviceName, it.advert) })
     val toPair = nearby.filter { it.serviceName in rows.toPair }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
@@ -172,6 +172,7 @@ fun ReceiverHome(
                                 peerID = mac.peerID, name = mac.name, nearby = isNearby, remote = saved, connected = live,
                                 route = mediaUi.route.takeIf { live }, awaitingMacApproval = awaiting,
                                 localConnectPending = mediaUi.connectingTo == mac.peerID, attempt = attempts[mac.peerID],
+                                switchedOut = isNearby && remote.switchedOut(mac.peerID),
                             ),
                         ) { id -> paired.firstOrNull { it.peerID == id }?.name }
                         val busy = status is MacStatus.Connecting || status is MacStatus.NeedsMacApproval
@@ -185,10 +186,11 @@ fun ReceiverHome(
                                 RowAction.Cancel -> "Cancel" to { remote.cancel(mac.peerID) }
                                 RowAction.Retry -> "Retry" to { remote.connect(mac.peerID) }
                                 RowAction.Connect -> "Connect" to { remote.connect(mac.peerID) }
+                                RowAction.None -> null
                             },
                             enabled = mediaUi.listening || live || busy,
                             menu = buildList {
-                                if (!live && !busy) {
+                                if (!live && !busy && status != MacStatus.SwitchedOut) {
                                     add("Connect with Mirror" to { remote.connect(mac.peerID, DisplayMode.Mirror) })
                                     add("Connect with Extend" to { remote.connect(mac.peerID, DisplayMode.Extend) })
                                     if (isNearby && saved != null) add("Connect over Remote" to { remote.connectRemotely(mac.peerID) })
@@ -206,9 +208,11 @@ fun ReceiverHome(
                     }
                     toPair.forEach { mac ->
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        // Switched out: that session can't share, so there is nothing to pair with yet (iOS).
+                        val switchedOut = mac.advert?.switchedOut == true
                         MacRow(
-                            title = mac.serviceName, subtitle = "Not paired",
-                            primary = (if (ui.pairingWith == mac.serviceName) "Pairing…" else "Pair") to { pairing.pair(mac) },
+                            title = mac.advert?.sessionTitle ?: mac.serviceName, subtitle = if (switchedOut) "Switched Out" else "Not paired",
+                            primary = if (switchedOut) null else (if (ui.pairingWith == mac.serviceName) "Pairing…" else "Pair") to { pairing.pair(mac) },
                             enabled = ui.pairingWith == null, menu = emptyList(),
                         )
                     }

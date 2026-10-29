@@ -89,6 +89,8 @@ data class MediaUiState(
     val approval: PendingSessionApproval? = null,
     val updateMessage: String? = null,
     val updateLink: String? = null,
+    /** The Mac said this app is too old for it (`updateRequired`): the full-screen update notice. */
+    val receiverUpdateRequired: Boolean = false,
     val listening: Boolean = false,
     val listenerError: String? = null,
     /** A Connect this device sent and is waiting on (the Mac dials in). */
@@ -257,7 +259,8 @@ class MediaController(
             is SessionEvent.Connected -> {
                 val route = event.remoteAddress?.let { routeOf?.invoke(it, event.localAddress, event.peerID) }
                 state.update {
-                    it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null, route = route, awaitingMacApproval = false)
+                    it.copy(peerID = event.peerID, admitted = false, updateMessage = null, updateLink = null, receiverUpdateRequired = false,
+                        route = route, awaitingMacApproval = false)
                 }
             }
             is SessionEvent.Disconnected -> state.update { it.copy(admitted = false, approval = null, source = null, route = null, awaitingMacApproval = false) }
@@ -276,7 +279,8 @@ class MediaController(
             is SessionEvent.InputState -> state.update { it.copy(input = event.state) }
             is SessionEvent.DisplayModeConfirmed -> state.update { it.copy(source = event.mode.wire) }
             is SessionEvent.UpdateRequired -> state.update {
-                it.copy(updateMessage = event.message ?: "Update MeowDisplay to keep using your second display.", updateLink = event.storeUrl)
+                it.copy(updateMessage = event.message ?: "Update MeowDisplay to keep using your second display.", updateLink = event.storeUrl,
+                    receiverUpdateRequired = true)
             }
             SessionEvent.UpdateMac -> state.update { it.copy(updateMessage = "Update MeowDisplay on your Mac to reconnect.") }
             else -> Unit

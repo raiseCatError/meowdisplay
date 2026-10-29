@@ -52,6 +52,27 @@ class AudioPlayer(avSyncOffsetMs: () -> Int = { 0 }) {
         }
     }
 
+    /**
+     * Settings → Audio → Resync: drop what is queued and anchor afresh on the next packet, keeping
+     * the format and the user's A/V Sync value (iOS `StreamReceiver.resync`). Nothing is reconnected.
+     */
+    fun resync() = handler.post {
+        val active = track ?: return@post
+        try {
+            active.pause()
+            active.flush()
+            active.play()
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "resync: $e")
+            release()
+            return@post
+        }
+        framesWritten = 0
+        headBaseline = active.playbackHeadPosition.toLong() and 0xFFFF_FFFFL
+        planner.reset()
+        Log.i(TAG, "resync: queue flushed, next packet re-anchors")
+    }
+
     /** Audio off, paused or a new session: stop and forget the format. */
     fun stop() = handler.post { release() }
 

@@ -55,6 +55,8 @@ data class MacFacts(
     /** A local Connect (the Bonjour `cr` token) is waiting for this Mac. */
     val localConnectPending: Boolean = false,
     val attempt: RemoteAttempt? = null,
+    /** Bonjour shows this Mac's login session as switched out (Fast User Switching). */
+    val switchedOut: Boolean = false,
 )
 
 enum class ConnectingStep(val text: String) {
@@ -105,6 +107,12 @@ sealed interface MacStatus {
         override val action get() = RowAction.Retry
     }
 
+    /** The Mac's user switched to another account: this session can't share until they switch back. */
+    data object SwitchedOut : MacStatus {
+        override val text get() = "Switched Out"
+        override val action get() = RowAction.None
+    }
+
     /** Bonjour sees the Mac (the local path). */
     data object AvailableLocally : MacStatus {
         override val text get() = "Nearby"
@@ -129,13 +137,18 @@ sealed interface MacStatus {
                 (otherName?.let { ", but it is $it" } ?: "") + ". Check the address. Nothing was connected."
             NotAccepted -> "Forget it here and pair again, or pair it again from the Mac."
             DialBackMissed -> "Is your Mac awake, with Auto-Reconnect on? A firewall on the Mac can also block the connection."
+            SwitchedOut -> "Another user is using this Mac. It can share again once its user switches back to this account."
             else -> null
         }
 
     val isFailure: Boolean get() = this is Offline || this is DifferentMac || this == NotAccepted || this == DialBackMissed
 }
 
-enum class RowAction(val label: String) { Connect("Connect"), Retry("Retry"), Cancel("Cancel"), Show("Show") }
+enum class RowAction(val label: String) {
+    Connect("Connect"), Retry("Retry"), Cancel("Cancel"), Show("Show"),
+    /** Nothing to tap (the Mac can't share right now). */
+    None(""),
+}
 
 object MacStatusReducer {
     /**
@@ -153,6 +166,7 @@ object MacStatusReducer {
             else -> Unit
         }
         if (facts.localConnectPending) return MacStatus.Connecting(ConnectingStep.LocalRequest)
+        if (facts.nearby && facts.switchedOut) return MacStatus.SwitchedOut
         if (facts.nearby) return MacStatus.AvailableLocally
         return when (val attempt = facts.attempt) {
             is RemoteAttempt.Offline -> MacStatus.Offline(attempt.reason)
@@ -180,4 +194,28 @@ object HomeRows {
         val pairedNames = unique.map { it.name }.toSet()
         return Result(unique, nearbyNames.filter { it !in pairedNames }.distinct())
     }
+
+    /** One nearby Bonjour entry: its service name and what its TXT said (null until resolved). */
+    data class Nearby(val serviceName: String, val advert: MacAdvertisement? = null)
+
+    /**
+     * Like [build], but a nearby entry whose TXT names a paired Mac's install ID is that Mac, whatever
+     * its service name (two sessions of one Mac share a name). Only an entry without an ID falls back
+     * to the name match.
+     */
+    fun buildFromNearby(paired: List<Paired>, nearby: List<Nearby>): Result {
+        val unique = paired.distinctBy { it.peerID }
+        val pairedIDs = unique.map { it.peerID }.toSet()
+        val pairedNames = unique.map { it.name }.toSet()
+        val toPair = nearby.filter { entry ->
+            val id = entry.advert?.installID
+            if (id != null) id !in pairedIDs else entry.serviceName !in pairedNames
+        }.map { it.serviceName }.distinct()
+        return Result(unique, toPair)
+    }
+
+    /** The nearby entry for paired Mac [peerID] (by install ID, else by the name it was paired under). */
+    fun nearbyEntry(peerID: String, pairedName: String?, nearby: List<Nearby>): Nearby? =
+        nearby.firstOrNull { it.advert?.installID == peerID }
+            ?: pairedName?.let { name -> nearby.firstOrNull { it.advert?.installID == null && it.serviceName == name } }
 }

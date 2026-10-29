@@ -31,6 +31,9 @@ class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
         media.mediaEvents = ::onEvent
     }
 
+    /** Settings → Audio → Resync. */
+    fun resyncAudio() = audio.resync()
+
     private fun onEvent(event: SessionEvent) {
         when (event) {
             is SessionEvent.Video -> video.submit(event.sample)

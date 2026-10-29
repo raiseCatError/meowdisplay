@@ -27,8 +27,15 @@ object WireProtocol {
     const val VIDEO_CONTROL = 9
     const val NATIVE_APP_GESTURE = 10
     const val AUDIO = 12
+    const val MIRROR_DISPLAY = 13
+    const val EXTEND_SHAPE = 14
+    const val MAX_FPS = 15
+    const val STREAMING_PRIORITY = 16
+    const val MIRROR_UNAVAILABLE = 17
     const val SMART_TOUCH = 20
     const val SESSION_INVITATION = 21
+    /** The oldest receiver pv whose `streamingProfileRequest` the Mac honors (pinned at 21). */
+    const val STREAMING_PROFILE_REQUEST = 21
     const val MEDIA_PORT = 9001
     const val DEVICE_KIND = "Android"
 }

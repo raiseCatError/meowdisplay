@@ -12,6 +12,7 @@ import com.raisecaterror.meowdisplay.core.remote.RemoteKnockClient
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnocker
 import com.raisecaterror.meowdisplay.core.remote.RemoteMacStore
 import com.raisecaterror.meowdisplay.core.remote.RouteClassifier
+import com.raisecaterror.meowdisplay.core.remote.HomeRows
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
@@ -71,10 +72,15 @@ class RemoteAccess(
         scope.launch { bonjour.nearbyMacs.drop(1).collect { coordinator.onNearbyChanged() } }
     }
 
-    /** Bonjour shows the Mac by the name it was paired under (the existing match on the home screen). */
-    fun nearby(peerID: String): Boolean {
-        val name = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: return false
-        return bonjour.nearbyMacs.value.any { it.serviceName == name }
+    /** Bonjour shows the Mac: by its TXT install ID, else by the name it was paired under. */
+    fun nearby(peerID: String): Boolean = nearbyEntry(peerID) != null
+
+    /** The Mac's login session is on Bonjour but switched out (Fast User Switching): it can't share now. */
+    fun switchedOut(peerID: String): Boolean = nearbyEntry(peerID)?.advert?.switchedOut == true
+
+    private fun nearbyEntry(peerID: String): HomeRows.Nearby? {
+        val name = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: return null
+        return HomeRows.nearbyEntry(peerID, name, bonjour.nearbyMacs.value.map { HomeRows.Nearby(it.serviceName, it.advert) })
     }
 
     /**

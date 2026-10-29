@@ -4,6 +4,17 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
+import com.raisecaterror.meowdisplay.core.remote.MacAdvertisement
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,7 +41,8 @@ object ServiceTypes {
         mapOf("id" to installID, "pv" to protocolVersion.toString(), "pp" to pairingVersion.toString())
 }
 
-data class NearbyMac(val serviceName: String)
+/** A Mac Bonjour shows nearby; [advert] is its TXT once resolved (null until then). */
+data class NearbyMac(val serviceName: String, val advert: MacAdvertisement? = null)
 
 data class ResolvedMac(val serviceName: String, val host: InetAddress, val port: Int, val installID: String?)
 
@@ -41,6 +53,16 @@ class Bonjour(context: Context) {
     private var browse: NsdManager.DiscoveryListener? = null
     private val found = MutableStateFlow<List<NearbyMac>>(emptyList())
     private val callbackExecutor = Executors.newSingleThreadExecutor()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Before Android 14 NsdManager resolves one service at a time: every resolve takes this. */
+    private val resolveLock = Mutex()
+
+    /** Android 14+: one live TXT watcher per nearby Mac (switched out/in arrives as an update). */
+    private val txtWatchers = mutableMapOf<String, NsdManager.ServiceInfoCallback>()
+
+    /** Before Android 14: TXT is re-read every [TXT_REFRESH_MS] while browsing. */
+    private var txtRefresh: Job? = null
 
     val nearbyMacs: StateFlow<List<NearbyMac>> = found.asStateFlow()
 
@@ -74,23 +96,90 @@ class Bonjour(context: Context) {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { browse = null }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onServiceFound(info: NsdServiceInfo) {
+                val name = info.serviceName
                 found.update { macs ->
-                    (macs.filterNot { it.serviceName == info.serviceName } + NearbyMac(info.serviceName))
-                        .sortedBy { it.serviceName.lowercase() }
+                    val known = macs.firstOrNull { it.serviceName == name }
+                    (macs.filterNot { it.serviceName == name } + (known ?: NearbyMac(name))).sortedBy { it.serviceName.lowercase() }
                 }
+                watchTxt(name)
             }
             override fun onServiceLost(info: NsdServiceInfo) {
                 found.update { macs -> macs.filterNot { it.serviceName == info.serviceName } }
+                unwatchTxt(info.serviceName)
             }
         }
         browse = listener
         nsd.discoverServices(ServiceTypes.MAC_PAIRING, NsdManager.PROTOCOL_DNS_SD, listener)
+        if (Build.VERSION.SDK_INT < 34) {
+            txtRefresh = scope.launch {
+                while (isActive) {
+                    delay(TXT_REFRESH_MS)
+                    found.value.map { it.serviceName }.forEach { refreshTxt(it) }
+                }
+            }
+        }
     }
 
     fun stopBrowsing() {
         browse?.let { runCatching { nsd.stopServiceDiscovery(it) } }
         browse = null
+        txtRefresh?.cancel()
+        txtRefresh = null
+        synchronized(txtWatchers) { txtWatchers.keys.toList() }.forEach(::unwatchTxt)
         found.value = emptyList()
+    }
+
+    private fun applyTxt(serviceName: String, info: NsdServiceInfo) {
+        val txt = info.attributes.mapValues { (_, value) -> value?.toString(Charsets.UTF_8) }
+        val advert = MacAdvertisement.parse(txt)
+        found.update { macs -> macs.map { if (it.serviceName == serviceName) it.copy(advert = advert) else it } }
+    }
+
+    private fun watchTxt(serviceName: String) {
+        if (Build.VERSION.SDK_INT < 34) {
+            scope.launch { refreshTxt(serviceName) }
+            return
+        }
+        synchronized(txtWatchers) {
+            if (serviceName in txtWatchers) return
+            val callback = object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    synchronized(txtWatchers) { txtWatchers.remove(serviceName) }
+                }
+                override fun onServiceUpdated(info: NsdServiceInfo) = applyTxt(serviceName, info)
+                override fun onServiceLost() {}
+                override fun onServiceInfoCallbackUnregistered() {}
+            }
+            txtWatchers[serviceName] = callback
+            val query = NsdServiceInfo().apply { this.serviceName = serviceName; serviceType = ServiceTypes.MAC_PAIRING }
+            runCatching { nsd.registerServiceInfoCallback(query, callbackExecutor, callback) }
+                .onFailure { txtWatchers.remove(serviceName) }
+        }
+    }
+
+    private fun unwatchTxt(serviceName: String) {
+        if (Build.VERSION.SDK_INT < 34) return
+        val callback = synchronized(txtWatchers) { txtWatchers.remove(serviceName) } ?: return
+        runCatching { nsd.unregisterServiceInfoCallback(callback) }
+    }
+
+    /** Before Android 14: one resolve, in turn with every other. */
+    private suspend fun refreshTxt(serviceName: String) {
+        if (found.value.none { it.serviceName == serviceName }) return
+        resolveInfo(serviceName)?.let { applyTxt(serviceName, it) }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun resolveInfo(serviceName: String): NsdServiceInfo? = resolveLock.withLock {
+        withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val query = NsdServiceInfo().apply { this.serviceName = serviceName; serviceType = ServiceTypes.MAC_PAIRING }
+                nsd.resolveService(query, object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) { if (continuation.isActive) continuation.resume(null) }
+                    override fun onServiceResolved(info: NsdServiceInfo) { if (continuation.isActive) continuation.resume(info) }
+                })
+            }
+        }
     }
 
     /** Resolves one Mac's address and TXT `id` when the user asks to pair with it. */
@@ -119,11 +208,14 @@ class Bonjour(context: Context) {
             nsd.registerServiceInfoCallback(query, callbackExecutor, callback)
             continuation.invokeOnCancellation { runCatching { nsd.unregisterServiceInfoCallback(callback) } }
         } else {
-            @Suppress("DEPRECATION")
-            nsd.resolveService(query, object : NsdManager.ResolveListener {
-                override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = finish(null)
-                override fun onServiceResolved(info: NsdServiceInfo) = finish(info)
-            })
+            // In turn with the TXT refreshes: NsdManager rejects a second resolve in flight.
+            val job = scope.launch { finish(resolveInfo(mac.serviceName)) }
+            continuation.invokeOnCancellation { job.cancel() }
         }
+    }
+
+    private companion object {
+        const val TXT_REFRESH_MS = 30_000L
+        const val RESOLVE_TIMEOUT_MS = 10_000L
     }
 }

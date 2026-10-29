@@ -73,6 +73,15 @@ import com.raisecaterror.meowdisplay.core.controls.createCustomLayout
 import com.raisecaterror.meowdisplay.core.controls.deleteCustomLayout
 import com.raisecaterror.meowdisplay.core.controls.importCustomLayout
 import com.raisecaterror.meowdisplay.core.session.InputWireState
+import com.raisecaterror.meowdisplay.core.session.CustomFrameRate
+import com.raisecaterror.meowdisplay.core.session.ExtendShape
+import com.raisecaterror.meowdisplay.core.session.MaxFPSPreference
+import com.raisecaterror.meowdisplay.core.session.StreamSettings
+import com.raisecaterror.meowdisplay.core.session.StreamingPriority
+import com.raisecaterror.meowdisplay.core.session.StreamingProfile
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.LinearProgressIndicator
 import kotlin.math.roundToInt
 
 /** The receiver categories of the iOS Settings (MobileSettingsCategory), plus the session actions. */
@@ -91,6 +100,8 @@ enum class SettingsPage(val title: String) {
 fun ReceiverSettings(
     controller: ReceiverController, media: SessionHost, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)? = null,
     diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs? = null,
+    /** Audio → Resync: re-establish audio timing without reconnecting. Null: no live audio here. */
+    onResyncAudio: (() -> Unit)? = null,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -133,7 +144,7 @@ fun ReceiverSettings(
                         }
                         page?.let { current ->
                             Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                SettingsPageContent(current, controller, media, onDismiss, onStartPictureInPicture, diagnostics)
+                                SettingsPageContent(current, controller, media, onDismiss, onStartPictureInPicture, diagnostics, onResyncAudio)
                             }
                         }
                     }
@@ -147,6 +158,7 @@ fun ReceiverSettings(
 private fun SettingsPageContent(
     page: SettingsPage, controller: ReceiverController, media: SessionHost, onDismiss: () -> Unit, onStartPictureInPicture: (() -> Unit)?,
     diagnostics: com.raisecaterror.meowdisplay.android.media.DiagnosticsPrefs?,
+    onResyncAudio: (() -> Unit)?,
 ) {
     val store = controller.store
     val prefs by store.preferences.collectAsState()
@@ -252,6 +264,13 @@ private fun SettingsPageContent(
             val ws = controller.workspace
             val wsUi = ws?.ui?.collectAsState()?.value
             val mediaUi by media.ui.collectAsState()
+            val stream by media.session.streamSettings.collectAsState()
+            val live = mediaUi.admitted && !media.isDemo
+            Toggle("Video", stream.videoEnabled ?: true, enabled = live && stream.supportsVideoControl) { on -> media.session.requestVideo(on) }
+            Caption(
+                if (live && !stream.supportsVideoControl) "This Mac's MeowDisplay can't turn video off. Update it to use this."
+                else "Turning video off keeps the connection, keyboard, controls, and selected input mode active."
+            )
             Section("Display Mode")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOfNotNull(DisplayMode.Mirror, DisplayMode.Extend, DisplayMode.Window.takeIf { wsUi?.available == true }).forEach { mode ->
@@ -268,6 +287,8 @@ private fun SettingsPageContent(
                 OutlinedButton(onClick = { onDismiss(); ws.openOverview() }) { Text("Choose Windows…") }
                 Caption("Tip: hold three fingers still on the picture to open your windows.")
             }
+            if (live && mediaUi.source == "mirror" && stream.supportsMirrorDisplay) MirrorDisplayPicker(media, stream)
+            if (live && mediaUi.source == "extend" && stream.supportsExtendShape) ExtendShapePicker(media, stream)
             Toggle("Show Surface Grid", prefs.showSurfaceGrid) { on -> set { it.showSurfaceGrid = on } }
             Caption("Shown while Video is off.")
             OutlinedButton(onClick = { controller.resetViewport() }) { Text("Reset View") }
@@ -293,6 +314,7 @@ private fun SettingsPageContent(
                 (if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) "Touch and hold the screen edge to see your windows. Tap one to switch."
                 else "A compact strip of windows along one edge.") + " Used in Window view."
             )
+            StreamingSection(media, stream, live)
         }
         SettingsPage.Audio -> {
             Toggle("Audio", prefs.audioPreferred) { on ->
@@ -313,6 +335,10 @@ private fun SettingsPageContent(
                 modifier = Modifier.semantics { contentDescription = "A/V Sync" },
             )
             Caption("Adjust if sound plays slightly before or after the picture. Right delays the sound; left delays the picture.")
+            if (onResyncAudio != null) {
+                OutlinedButton(onClick = onResyncAudio, enabled = media.ui.collectAsState().value.admitted && prefs.audioPreferred) { Text("Resync") }
+                Caption("If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above.")
+            }
         }
         SettingsPage.Help -> HelpPage()
         SettingsPage.Session -> {
@@ -444,15 +470,139 @@ private fun Section(title: String) {
 private fun Caption(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 @Composable
-private fun Toggle(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
-        Text(title, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChange)
+private fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, Modifier.weight(1f), color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+    }
+}
+
+/** A choice among more options than fit a segmented row: chips that wrap. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun <T> ChipChoice(title: String, options: List<T>, selected: T?, label: (T) -> String, enabled: Boolean = true, onSelect: (T) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(title)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { option ->
+                FilterChip(selected = option == selected, onClick = { onSelect(option) }, enabled = enabled, label = { Text(label(option), maxLines = 1) })
+            }
+        }
     }
 }
 
 @Composable
-private fun <T> Choice(title: String, options: List<T>, selected: T, label: (T) -> String, onSelect: (T) -> Unit) {
+private fun Updating(text: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Caption(text)
+        LinearProgressIndicator(Modifier.fillMaxWidth())
+    }
+}
+
+/** Remote control for the Mac's own Mirror source (Auto, or one display it listed). The Mac confirms. */
+@Composable
+private fun MirrorDisplayPicker(media: SessionHost, stream: StreamSettings) {
+    val state = stream.mirrorDisplays
+    Section("Mirror Display")
+    if (state == null) {
+        Caption("Waiting for Mac")
+        return
+    }
+    val manual = state.selectedUUID != null
+    Choice("Mirror Display", listOf(false, true), manual, { if (it) "Manual" else "Auto" }) { wantManual ->
+        if (!wantManual) media.session.requestMirrorDisplay(null)
+        else (state.displays.firstOrNull { it.isMain } ?: state.displays.firstOrNull())?.let { media.session.requestMirrorDisplay(it.uuid) }
+    }
+    if (!manual) {
+        Caption("Auto mirrors your Mac's main display.")
+    } else if (state.displays.isEmpty()) {
+        Caption("No displays reported.")
+    } else {
+        state.displays.forEach { display ->
+            val selected = display.uuid == state.selectedUUID
+            Row(
+                Modifier.fillMaxWidth().clickable { media.session.requestMirrorDisplay(display.uuid) }.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(if (display.isMain) "${display.name} (Main)" else display.name)
+                    if (display.pixelWidth != null && display.pixelHeight != null) Caption("${display.pixelWidth}×${display.pixelHeight}")
+                }
+                if (selected) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            }
+        }
+        if (state.selectionUnavailable) Text("Selected display unavailable", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    }
+}
+
+/** The Extend display's shape (PROTOCOL.md 6.7). Requests only; the shown value is the Mac's, or this device's request in flight. */
+@Composable
+private fun ExtendShapePicker(media: SessionHost, stream: StreamSettings) {
+    Section("Extend Shape")
+    val current = stream.shownExtendShape
+    if (current == null) {
+        Caption("Waiting for Mac")
+        return
+    }
+    val busy = stream.pendingExtendShape != null
+    ChipChoice("Extend Shape", ExtendShape.entries, current.shape, { it.title }, enabled = !busy) { shape ->
+        media.session.requestExtendShape(current.copy(shape = shape))
+    }
+    if (current.shape == ExtendShape.Automatic) {
+        Toggle("Use Full Display", current.useFullDisplay, enabled = !busy) { on -> media.session.requestExtendShape(current.copy(useFullDisplay = on)) }
+        Caption("Automatic uses a standard 16:10 desktop. Use Full Display matches this screen's shape instead.")
+    }
+    if (busy) Updating("Updating Extend shape…")
+    stream.fpsLimitationText?.let { Caption(it) }
+}
+
+/** Streaming Profile, Priority and Maximum FPS: the Mac's own settings, asked for from here. */
+@Composable
+private fun StreamingSection(media: SessionHost, stream: StreamSettings, live: Boolean) {
+    Section("Streaming")
+    if (!live) {
+        Caption("Available while connected to a Mac.")
+        return
+    }
+    if (!stream.supportsProfileRequest) {
+        Caption("Update MeowDisplay on your Mac to change streaming settings from here.")
+    } else {
+        val profile = stream.profile
+        Choice<StreamingProfile>("Streaming Profile", StreamingProfile.entries, profile, { it.title }) { picked -> media.session.requestStreamingProfile(picked) }
+        Caption(profile?.explanation ?: "Waiting for Mac")
+        if (profile == StreamingProfile.Custom) {
+            Choice("Frame Rate", CustomFrameRate.entries, stream.customFrameRate, { it.title }) { rate ->
+                media.session.requestStreamingProfile(StreamingProfile.Custom, rate)
+            }
+        }
+        Caption("Applies to every device this Mac streams to.")
+    }
+    if (stream.supportsPriority) {
+        val priority = stream.priority
+        Choice<StreamingPriority>("Streaming Priority", StreamingPriority.entries, priority, { it.title }) { picked -> media.session.requestStreamingPriority(picked) }
+        Caption(priority?.explanation ?: "Waiting for Mac")
+    }
+    if (stream.supportsMaxFPS) {
+        val current = stream.shownMaxFPS
+        if (current == null) {
+            LabeledRow("Maximum FPS", "Waiting for Mac")
+        } else {
+            val busy = stream.pendingMaxFPS != null
+            Toggle("Enforce Maximum FPS", current.enabled, enabled = !busy) { on -> media.session.requestMaxFPS(current.copy(enabled = on)) }
+            if (current.enabled) {
+                val tiers = stream.maxFPSTiers
+                ChipChoice("Maximum FPS", tiers, StreamSettings.tierFor(current.maxFPS, tiers), { "$it" }, enabled = !busy) { fps ->
+                    media.session.requestMaxFPS(MaxFPSPreference(true, fps))
+                }
+            }
+            if (busy) Updating("Updating Maximum FPS…")
+            Caption("Caps how fast this Mac streams to this device, on top of its normal profile and display limits.")
+        }
+    }
+}
+
+@Composable
+private fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T) -> String, onSelect: (T) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
