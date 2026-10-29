@@ -158,6 +158,15 @@ struct WindowIdentityLedger: Sendable {
     }
 }
 
+/// A sheet ("Save changes?", an alert sheet, an Open panel) open on a listed window.
+/// macOS draws it as a separate window, so a pane shows and clicks it as part of its window.
+struct AttachedSheet: @unchecked Sendable {
+    var windowID: UInt32
+    /// Global points, top-left origin.
+    var frame: CGRect
+    var scWindow: SCWindow?
+}
+
 /// SCWindow values are immutable snapshots, safe to hand between queues.
 struct WindowCatalogSnapshot: @unchecked Sendable {
     var windows: [WindowCatalogEntry]
@@ -165,6 +174,52 @@ struct WindowCatalogSnapshot: @unchecked Sendable {
     /// SCWindow by id, for starting captures without another enumeration.
     var scWindows: [UInt32: SCWindow]
     var takenAt: TimeInterval
+    /// Sheets open on listed windows, by the window they belong to (front-most first).
+    var sheets: [UInt32: [AttachedSheet]] = [:]
+}
+
+/// Which on-screen windows are sheets of which window. A sheet is an untitled normal-layer
+/// window of the same app, ordered directly above its window and horizontally centred on it,
+/// starting inside it (attached under the title bar, or centred as on macOS 26 and later).
+/// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510).
+enum WindowSheetMatcher {
+    struct Window: Equatable, Sendable {
+        var id: UInt32
+        var pid: Int32
+        var frame: CGRect
+        var title: String?
+        var layer: Int
+    }
+
+    /// `frontToBack`: on-screen windows in window-server order (CGWindowList order).
+    /// Returns sheet ids by the id of the window they belong to.
+    static func sheets(frontToBack: [Window]) -> [UInt32: [UInt32]] {
+        var parentOf: [UInt32: UInt32] = [:]
+        for (i, w) in frontToBack.enumerated() where isSheetShaped(w) {
+            // Its window: the next window of the same app below it that it sits on.
+            guard let parent = frontToBack[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.id != w.id }),
+                  sits(w.frame, on: parent.frame) else { continue }
+            parentOf[w.id] = parent.id
+        }
+        // A sheet on a sheet (an alert over a Save panel) belongs to the same window. Front-most first.
+        var result: [UInt32: [UInt32]] = [:]
+        for w in frontToBack {
+            guard var owner = parentOf[w.id] else { continue }
+            var hops = 0
+            while let up = parentOf[owner], hops < 8 { owner = up; hops += 1 }
+            result[owner, default: []].append(w.id)
+        }
+        return result
+    }
+
+    static func isSheetShaped(_ w: Window) -> Bool {
+        w.layer == 0 && (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty && w.frame.width >= 40 && w.frame.height >= 30
+    }
+
+    static func sits(_ sheet: CGRect, on window: CGRect) -> Bool {
+        abs(sheet.midX - window.midX) <= 3 && sheet.width < window.width + 1
+            && sheet.minY > window.minY && sheet.minY < window.maxY - 20
+    }
 }
 
 enum WindowCatalogBuilder {
@@ -210,6 +265,13 @@ enum WindowCatalogBuilder {
             scByID[window.windowID] = window
             windowPIDs.insert(candidate.pid)
         }
+        // Sheets belong to their window: shown and clicked in its pane, never listed on their own.
+        let sheetMap = sheetsOfListedWindows(content: content, cgList: cgList, listed: Set(entries.map(\.windowID)))
+        let sheetIDs = Set(sheetMap.values.flatMap { $0.map(\.windowID) })
+        if !sheetIDs.isEmpty {
+            entries.removeAll { sheetIDs.contains($0.windowID) }
+            for id in sheetIDs { scByID[id] = nil }
+        }
         ledger.retain(Set(entries.map(\.windowID)))
         let apps = content.applications.compactMap { app -> RunningAppEntry? in
             let bundle = app.bundleIdentifier
@@ -222,7 +284,32 @@ enum WindowCatalogBuilder {
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return (WindowCatalogSnapshot(windows: entries, apps: apps, scWindows: scByID,
-                                      takenAt: ProcessInfo.processInfo.systemUptime), ledger)
+                                      takenAt: ProcessInfo.processInfo.systemUptime, sheets: sheetMap), ledger)
+    }
+
+    private static func sheetsOfListedWindows(content: SCShareableContent, cgList: [[String: Any]],
+                                              listed: Set<UInt32>) -> [UInt32: [AttachedSheet]] {
+        var scByID: [UInt32: SCWindow] = [:]
+        for w in content.windows { scByID[w.windowID] = w }
+        let order = cgList.compactMap { info -> WindowSheetMatcher.Window? in
+            guard (info[kCGWindowIsOnscreen as String] as? Bool) == true,
+                  let id = info[kCGWindowNumber as String] as? UInt32,
+                  let pid = info[kCGWindowOwnerPID as String] as? Int32,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dict) else { return nil }
+            // CGWindowList hides names without Screen Recording; ScreenCaptureKit's title is the one used for listing.
+            let title = scByID[id]?.title ?? (info[kCGWindowName as String] as? String)
+            return WindowSheetMatcher.Window(id: id, pid: pid, frame: frame, title: title,
+                                             layer: (info[kCGWindowLayer as String] as? Int) ?? 0)
+        }
+        var result: [UInt32: [AttachedSheet]] = [:]
+        for (parent, ids) in WindowSheetMatcher.sheets(frontToBack: order) where listed.contains(parent) {
+            result[parent] = ids.compactMap { id in
+                guard let sc = scByID[id] else { return nil }
+                return AttachedSheet(windowID: id, frame: sc.frame, scWindow: sc)
+            }
+        }
+        return result.filter { !$0.value.isEmpty }
     }
 
     /// Installed apps the receiver may ask to open: /Applications only,

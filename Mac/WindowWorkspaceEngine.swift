@@ -126,6 +126,13 @@ final class WorkspaceCompositor {
         var frame: CVPixelBuffer?
         var sourceSize: CGSize
         var dimmed: Bool
+        /// A sheet open on the window: its frame and where it sits, in whole-window points.
+        var overlay: Overlay? = nil
+    }
+
+    struct Overlay {
+        var frame: CVPixelBuffer
+        var rect: CGRect
     }
 
     private let context: CIContext
@@ -185,6 +192,19 @@ final class WorkspaceCompositor {
             let affine = CGAffineTransform(a: (p1.x - p0.x) / w, b: (p1.y - p0.y) / w,
                                            c: (p2.x - p0.x) / h, d: (p2.y - p0.y) / h, tx: p0.x, ty: p0.y)
             var tile = CIImage(cvPixelBuffer: frame).transformed(by: affine).cropped(to: tileCI)
+            if let o = item.overlay {
+                // The sheet, mapped through the same window -> canvas transform (zoom, fit, rotation).
+                let ow = Double(CVPixelBufferGetWidth(o.frame)), oh = Double(CVPixelBufferGetHeight(o.frame))
+                func sheetToCanvas(_ u: Double, _ v: Double) -> CGPoint {
+                    let src = WorkspacePoint(x: o.rect.minX + u / ow * o.rect.width, y: o.rect.minY + (1 - v / oh) * o.rect.height)
+                    let c = t.canvasPoint(fromSource: src)
+                    return CGPoint(x: c.x, y: size.height - c.y)
+                }
+                let q0 = sheetToCanvas(0, 0), q1 = sheetToCanvas(ow, 0), q2 = sheetToCanvas(0, oh)
+                let sheetAffine = CGAffineTransform(a: (q1.x - q0.x) / ow, b: (q1.y - q0.y) / ow,
+                                                    c: (q2.x - q0.x) / oh, d: (q2.y - q0.y) / oh, tx: q0.x, ty: q0.y)
+                tile = CIImage(cvPixelBuffer: o.frame).transformed(by: sheetAffine).cropped(to: tileCI).composited(over: tile)
+            }
             if item.dimmed { tile = dim.cropped(to: tileCI).composited(over: tile) }
             // Letterbox bars match the canvas background: no gray strips beside a fitted window.
             image = tile.composited(over: background.cropped(to: tileCI)).composited(over: image)
@@ -229,6 +249,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var catalog: [UInt32: WindowCatalogEntry] = [:]
     private var assignments: [WorkspaceTileAssignment] = []
     private var captures: [String: WindowTileCapture] = [:]
+    /// A sheet open on a tile's window ("Save changes?"), captured beside it and drawn over it.
+    private var sheetCaptures: [String: WindowTileCapture] = [:]
+    private var sheetFrames: [UInt32: CGRect] = [:]
+    private var sheetFailed = Set<UInt32>()
+    /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
+    private var sheetCovers: [UInt32: Set<UInt32>] = [:]
     private var tileState: [String: String] = [:]
     private var rejected: [String: String] = [:]
     private var nextGeneration: UInt64 = 1
@@ -300,8 +326,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             liveLock.withLock { liveWhole = [:] }
             composeTimer?.cancel(); composeTimer = nil
             refreshTimer?.cancel(); refreshTimer = nil
-            let all = Array(captures.values)
+            let all = Array(captures.values) + Array(sheetCaptures.values)
             captures.removeAll()
+            sheetCaptures.removeAll()
             Self.releaseBudget(all.count)
             Task {
                 for c in all { await c.stop() }
@@ -321,8 +348,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 running = false
                 composeTimer?.cancel(); composeTimer = nil
                 refreshTimer?.cancel(); refreshTimer = nil
-                let all = Array(captures.values)
+                let all = Array(captures.values) + Array(sheetCaptures.values)
                 captures.removeAll()
+                sheetCaptures.removeAll()
                 Self.releaseBudget(all.count)
                 for id in assignments.map(\.tileID) where tileState[id] == "live" { tileState[id] = "waiting" }
                 Task { for c in all { await c.stop() } }
@@ -377,8 +405,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let capture = captures[a.tileID]
             let frame = capture?.assignmentGeneration == a.assignmentGeneration ? capture?.latestFrame() : nil
             let state = tileState[a.tileID]
+            var overlay: WorkspaceCompositor.Overlay?
+            if let sheet = sheetCaptures[a.tileID], sheet.assignmentGeneration == a.assignmentGeneration,
+               let pixels = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.windowFrames[a.windowID] {
+                overlay = .init(frame: pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY))
+            }
             return WorkspaceCompositor.Item(rect: a.rect, transform: targetingNow.transform(for: a), frame: frame,
-                                            sourceSize: .zero, dimmed: state == "offscreen" || state == "closed")
+                                            sourceSize: .zero, dimmed: state == "offscreen" || state == "closed", overlay: overlay)
         }
         if let buffer = compositor.compose(items) { deliverFrame?(buffer) }
     }
@@ -473,7 +506,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
         }
-        inputLock.withLock { targeting.windowFrames = frames }
+        sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
+        let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
+        inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
         ensureCaptures()
         sendState()
     }
@@ -599,12 +634,78 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
         }
         updateLiveWhole()
+        ensureSheetCaptures()
     }
 
     private func isCurrent(_ capture: WindowTileCapture) async -> Bool {
         await withCheckedContinuation { continuation in
             queue.async { [self] in continuation.resume(returning: !stopped && captures[capture.tileID] === capture) }
         }
+    }
+
+    /// One sheet per tiled window (the front-most), at the tile's pixels per point, while its window streams.
+    private func ensureSheetCaptures() {
+        for (id, capture) in sheetCaptures {
+            let a = assignments.first { $0.tileID == id }
+            let want = a.flatMap { snapshot?.sheets[$0.windowID]?.first?.windowID }
+            if a == nil || !running || captures[id] == nil || a?.assignmentGeneration != capture.assignmentGeneration
+                || want != capture.windowID {
+                sheetCaptures[id] = nil
+                Self.releaseBudget(1)
+                dirty = true
+                Task { await capture.stop() }
+            }
+        }
+        guard running else { return }
+        let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        for a in assignments where a.displayID == nil && sheetCaptures[a.tileID] == nil && captures[a.tileID] != nil {
+            guard let sheet = snapshot?.sheets[a.windowID]?.first, let window = sheet.scWindow,
+                  !sheetFailed.contains(sheet.windowID), Self.reserveBudget() else { continue }
+            let capture = WindowTileCapture(tileID: a.tileID, windowID: sheet.windowID, assignmentGeneration: a.assignmentGeneration)
+            capture.onFrame = { [weak self] in self?.queue.async { self?.dirty = true } }
+            capture.onStop = { [weak self] _ in
+                self?.queue.async {
+                    guard let self, self.sheetCaptures[a.tileID] === capture else { return }
+                    self.sheetCaptures[a.tileID] = nil
+                    Self.releaseBudget(1)
+                    self.dirty = true
+                }
+            }
+            sheetCaptures[a.tileID] = capture
+            let size = sheetCaptureSize(sheet.frame.size, for: a)
+            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
+                                                 streamFPS: streamFPS, available: true)
+            let sheetID = sheet.windowID
+            Task { [weak self] in
+                do {
+                    try await capture.start(window: window, size: size, fps: fps)
+                    let current = await self?.isCurrentSheet(capture) ?? false
+                    if !current { await capture.stop() }
+                } catch {
+                    self?.queue.async {
+                        guard let self, self.sheetCaptures[a.tileID] === capture else { return }
+                        Log.info("workspace: sheet capture failed tile=\(a.tileID) code=\((error as NSError).code)")
+                        self.sheetCaptures[a.tileID] = nil
+                        self.sheetFailed.insert(sheetID)   // not retried every second
+                        Self.releaseBudget(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func isCurrentSheet(_ capture: WindowTileCapture) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in continuation.resume(returning: !stopped && sheetCaptures[capture.tileID] === capture) }
+        }
+    }
+
+    /// The sheet at the same pixels per point as its window's capture (sharp when zoomed in too).
+    private func sheetCaptureSize(_ sheet: CGSize, for a: WorkspaceTileAssignment) -> CGSize {
+        let windowPoints = (sourceFrame(a)?.width ?? 0) * a.crop.width
+        let perPoint = windowPoints > 0 ? captureSize(for: a).width / windowPoints : 2
+        func even(_ v: Double) -> Double { max(2, min(4096, (v * perPoint / 2).rounded() * 2)) }
+        return CGSize(width: even(sheet.width), height: even(sheet.height))
     }
 
     private func retuneCaptures() {
@@ -916,7 +1017,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         if cached, let c = topmostCache[windowID], now - c.at < 0.1, c.rect.contains(point) { return c.ok }
         guard let above = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
         var covering: CGRect?
+        let ownSheets = sheetCovers[windowID] ?? []
         for info in above {
+            // The window's own sheet is part of it: a press on "Don't Save" goes through.
+            if let n = info[kCGWindowNumber as String] as? UInt32, ownSheets.contains(n) { continue }
             guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDict),
                   ((info[kCGWindowAlpha as String] as? Double) ?? 1) > 0.01,
