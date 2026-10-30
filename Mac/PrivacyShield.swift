@@ -9,6 +9,12 @@ import SwiftUI
 /// Devices never see it: every one of its windows exists, and is left out of MeowDisplay's
 /// captures, before it appears on screen (the cover waits for the captures to be updated).
 ///
+/// It never blinks: its windows are made once and kept (hidden, still left out of captures), so
+/// mode and layout changes, capture restarts and reconnects don't take it down and put it back.
+/// Once it covers, it stays until someone at the Mac unlocks it: a device disconnecting (or
+/// switching modes, which reconnects) doesn't uncover the Mac. Quitting MeowDisplay while it
+/// covers locks the Mac's screen first.
+///
 /// What it can and can't do (macOS gives no stronger guarantee):
 /// - It covers windows, the menu bar and the Dock at the highest window level apps may use. Some
 ///   system UI (the login window, some alerts) can appear above it.
@@ -26,7 +32,13 @@ final class PrivacyShield {
 
     /// Connected sessions: true = remote.
     private var connected: [String: Bool] = [:]
+    /// The cover on each display, taken from `pool`.
     private var shields: [CGDirectDisplayID: NSWindow] = [:]
+    /// Every cover window ever made. Never closed: their ids stay left out of the captures, so
+    /// showing one again needs no wait.
+    private var pool: [NSWindow] = []
+    /// A covered device disconnected and no one at the Mac has unlocked since: keep covering.
+    private var held = false
     private let revealPanel: NSPanel
     private let noticePanel: NSPanel
     private var noticeHide: DispatchWorkItem?
@@ -40,6 +52,8 @@ final class PrivacyShield {
     private static var topLevel: NSWindow.Level { NSWindow.Level(rawValue: Int(CGShieldingWindowLevel())) }
 
     var isCovering: Bool { showing }
+    /// Covering although no protected device is connected (waiting for an unlock at the Mac).
+    var isHeld: Bool { held }
     var relockAfter: TimeInterval {
         let m = UserDefaults.standard.integer(forKey: PrivacyShieldPolicy.relockMinutesKey)
         return TimeInterval(PrivacyShieldPolicy.relockChoices.contains(m) ? m : PrivacyShieldPolicy.defaultRelockMinutes) * 60
@@ -50,6 +64,8 @@ final class PrivacyShield {
         revealPanel = Self.panel(size: NSSize(width: 240, height: 44), level: Self.topLevel + 1, clicks: true)
         noticePanel = Self.panel(size: NSSize(width: 320, height: 40), level: Self.topLevel + 2, clicks: false)
         revealPanel.contentView = NSHostingView(rootView: RevealButton { [weak self] in self?.revealTapped() })
+        // Covers for every display now plus spares for displays plugged in later.
+        pool = (0..<max(NSScreen.screens.count + 2, 3)).map { _ in Self.makeShield() }
         publishIDs()
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -85,8 +101,20 @@ final class PrivacyShield {
     /// The sessions that still exist (others ended).
     func retain(sessionIDs: Set<String>) {
         guard !Set(connected.keys).isSubset(of: sessionIDs) else { return }
+        let ended = connected.filter { !sessionIDs.contains($0.key) }
         connected = connected.filter { sessionIDs.contains($0.key) }
+        if PrivacyShieldPolicy.holdsAfterDisconnect(showing: showing, endedProtected: ended.values.contains { PrivacyShieldPolicy.isOn(remote: $0) }),
+           !held {
+            held = true
+            Log.info("privacy shield: a covered device disconnected; staying covered until unlocked at this Mac")
+        }
         if connected.isEmpty { revealed = false }
+        update()
+    }
+
+    /// Someone at the Mac confirmed its login password elsewhere (turning the setting off).
+    func unlockedLocally() {
+        held = false
         update()
     }
 
@@ -96,14 +124,16 @@ final class PrivacyShield {
     private var wantsCover: Bool {
         PrivacyShieldPolicy.shouldCover(remoteOn: PrivacyShieldPolicy.isOn(remote: true), localOn: PrivacyShieldPolicy.isOn(remote: false),
                                         sessions: Array(connected.values), revealed: revealed,
-                                        physicalIdle: ProcessInfo.processInfo.systemUptime - lastPhysicalInput, relockAfter: relockAfter)
+                                        physicalIdle: ProcessInfo.processInfo.systemUptime - lastPhysicalInput, relockAfter: relockAfter,
+                                        held: held)
     }
 
     func update() {
         if revealed, ProcessInfo.processInfo.systemUptime - lastPhysicalInput >= relockAfter { revealed = false }
         if wantsCover { if !unlocking { rebuild() } } else { hide() }
         let anyOn = PrivacyShieldPolicy.shouldCover(remoteOn: PrivacyShieldPolicy.isOn(remote: true), localOn: PrivacyShieldPolicy.isOn(remote: false),
-                                                    sessions: Array(connected.values), revealed: false, physicalIdle: 0, relockAfter: 1)
+                                                    sessions: Array(connected.values), revealed: false, physicalIdle: 0, relockAfter: 1,
+                                                    held: held)
         if anyOn { startWatching() } else { stopWatching() }
     }
 
@@ -112,10 +142,10 @@ final class PrivacyShield {
     private func hide() {
         guard showing || !shields.isEmpty else { return }
         showing = false
+        // Hidden, not closed: the windows (and their left-out ids) are reused next time.
         shields.values.forEach { $0.orderOut(nil) }
         shields = [:]
         revealPanel.orderOut(nil)
-        publishIDs()
         Log.info("privacy shield: screens shown")
     }
 
@@ -129,7 +159,14 @@ final class PrivacyShield {
         let wanted = Set(PrivacyShieldPolicy.coveredDisplays(Array(screens.keys), virtual: VirtualDisplayRegistry.shared.displayIDs))
         for (id, w) in shields where !wanted.contains(id) { w.orderOut(nil); shields[id] = nil }
         var fresh = false
-        for id in wanted where shields[id] == nil { shields[id] = Self.makeShield(); fresh = true }
+        for id in wanted.sorted() where shields[id] == nil {
+            if let spare = pool.first(where: { w in !shields.values.contains { $0 === w } }) {
+                shields[id] = spare
+            } else {
+                // More displays than spares: a new window, shown once the captures leave it out.
+                let w = Self.makeShield(); pool.append(w); shields[id] = w; fresh = true
+            }
+        }
         let present = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.showing else { return }
@@ -172,7 +209,7 @@ final class PrivacyShield {
     /// True when the ids changed.
     @discardableResult
     private func publishIDs() -> Bool {
-        let windows: [NSWindow] = Array(shields.values) + [revealPanel, noticePanel]
+        let windows: [NSWindow] = pool + [revealPanel, noticePanel]
         return PrivacyShieldWindows.replace(with: windows.map { CGWindowID($0.windowNumber) }.filter { $0 > 0 })
     }
 
@@ -215,6 +252,7 @@ final class PrivacyShield {
             unlocking = false
             if ok {
                 revealed = true
+                held = false
                 lastPhysicalInput = ProcessInfo.processInfo.systemUptime
                 Log.info("privacy shield: removed with this Mac's login password")
                 hide()
@@ -363,7 +401,7 @@ struct PrivacyShieldSettingsSection: View {
         Task { @MainActor in
             let ok = await PrivacyShield.askForLoginPassword(refresh: { PrivacyShield.shared.onWindowsChanged?({}) })
             authFailed = !ok
-            if ok { apply(off: remote) }
+            if ok { apply(off: remote); PrivacyShield.shared.unlockedLocally() }
         }
     }
 

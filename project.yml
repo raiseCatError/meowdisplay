@@ -273,6 +273,7 @@ targets:
       - Mac/StageManagerSwitch.swift
       - Mac/LocalNetworkAccess.swift
       - Mac/PrivacyShieldPolicy.swift
+      - Mac/MacScreenLock.swift
       - Mac/WindowBrowserService.swift
       - Mac/RemoteFileBrowser.swift
       - Mac/RemoteFileTransfers.swift

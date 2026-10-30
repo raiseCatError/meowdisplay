@@ -10,6 +10,28 @@ final class PrivacyShieldPolicyTests: XCTestCase {
     override func setUp() { for k in keys { saved[k] = UserDefaults.standard.object(forKey: k); UserDefaults.standard.removeObject(forKey: k) } }
     override func tearDown() { for k in keys { if let v = saved[k] ?? nil { UserDefaults.standard.set(v, forKey: k) } else { UserDefaults.standard.removeObject(forKey: k) } } }
 
+    func testACoveredDeviceDisconnectingKeepsTheCoverUntilUnlockedAtTheMac() {
+        // A reconnect or mode switch ends the session: the cover must not drop, even briefly.
+        XCTAssertTrue(PrivacyShieldPolicy.holdsAfterDisconnect(showing: true, endedProtected: true))
+        XCTAssertFalse(PrivacyShieldPolicy.holdsAfterDisconnect(showing: false, endedProtected: true), "nothing covered: nothing to hold")
+        XCTAssertFalse(PrivacyShieldPolicy.holdsAfterDisconnect(showing: true, endedProtected: false), "an unprotected device ended")
+        // Held with no device connected: still covered, whichever settings are on.
+        XCTAssertTrue(PrivacyShieldPolicy.shouldCover(remoteOn: false, localOn: false, sessions: [], revealed: false,
+                                                      physicalIdle: 0, relockAfter: 300, held: true))
+        // Only an unlock at the Mac (a reveal) uncovers it.
+        XCTAssertFalse(PrivacyShieldPolicy.shouldCover(remoteOn: true, localOn: true, sessions: [], revealed: true,
+                                                       physicalIdle: 1, relockAfter: 300, held: true))
+        XCTAssertFalse(PrivacyShieldPolicy.shouldCover(remoteOn: true, localOn: true, sessions: [], revealed: false,
+                                                       physicalIdle: 0, relockAfter: 300, held: false))
+    }
+
+    func testLockMacReportsWhatMacOSDid() {
+        XCTAssertEqual(MacScreenLock.result(posted: true, lockedAfter: true), .locked)
+        XCTAssertEqual(MacScreenLock.result(posted: true, lockedAfter: false), .failed)
+        XCTAssertEqual(MacScreenLock.result(posted: false, lockedAfter: false), .accessibility)
+        XCTAssertEqual(LockMacResult(rawValue: "control"), .control)
+    }
+
     func testRemoteIsOnAndLocalIsOffByDefaultAndChoicesStick() {
         XCTAssertTrue(PrivacyShieldPolicy.isOn(remote: true))
         XCTAssertFalse(PrivacyShieldPolicy.isOn(remote: false))

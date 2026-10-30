@@ -17,6 +17,8 @@ import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import com.raisecaterror.meowdisplay.core.workspace.AppCatalogMessage
+import com.raisecaterror.meowdisplay.core.workspace.LockMacResult
+import com.raisecaterror.meowdisplay.core.workspace.LockMacWire
 import com.raisecaterror.meowdisplay.core.workspace.AppIcon
 import com.raisecaterror.meowdisplay.core.workspace.AppLaunchResult
 import com.raisecaterror.meowdisplay.core.workspace.WindowCloseNotice
@@ -132,6 +134,9 @@ data class WorkspaceUi(
     val launchFailed: String? = null,
     /** The Mac can close a listed window from Stage Peek (`windowClose`). */
     val canCloseWindows: Boolean = false,
+    /** The Mac offers Lock This Mac; [lockMac] null = nothing asked, else locking or the Mac's answer. */
+    val canLockMac: Boolean = false,
+    val lockMac: LockMacState? = null,
     /** Windows asked to close that the Mac hasn't answered for yet. */
     val closingWindows: Set<Long> = emptySet(),
     /** What happened to the last Close Window (shown briefly over Stage Peek). */
@@ -186,8 +191,9 @@ class WorkspaceController(
     /** The full-desktop "Switch to Window view?" offer was answered since the app started (UI only: asked once per launch). */
     val windowPromptAnswered = androidx.compose.runtime.mutableStateOf(false)
 
-    /** The Mirror or Extend mode the Mac last confirmed this session: what "View Full Screen" returns to. */
-    var fullDisplayMode = DisplayMode.Extend
+    /** The Mirror or Extend mode the Mac last confirmed this session: what "View Full Screen" returns to.
+     *  Mirror until the Mac confirms otherwise (a Mac that can't mirror offers Extend). */
+    var fullDisplayMode = DisplayMode.Mirror
         private set
 
     private val thumbs = MutableStateFlow<Map<Long, ImageBitmap>>(emptyMap())
@@ -287,7 +293,7 @@ class WorkspaceController(
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
             is SessionEvent.PrivacyShield -> state.update { it.copy(privacyShieldNotice = event.on, privacyNoticeSeq = it.privacyNoticeSeq + 1) }
             is SessionEvent.MacFeatures -> {
-                state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features) }
+                state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features, canLockMac = LockMacWire.FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
                 clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in event.features)
                 menus.setAvailable(AppMenuWire.WELCOME_FEATURE in event.features)
@@ -301,7 +307,7 @@ class WorkspaceController(
             }
             is SessionEvent.Disconnected, SessionEvent.AdmissionWithdrawn -> {
                 main.removeCallbacks(sendRunnable)
-                fullDisplayMode = DisplayMode.Extend
+                fullDisplayMode = DisplayMode.Mirror
                 planner.reset()
                 clearViews()
                 files.setAvailable(false)
@@ -351,6 +357,7 @@ class WorkspaceController(
                     (event.body["error"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.take(32),
                 )
                 WorkspaceWire.WINDOW_CLOSE_RESULT -> WindowCloseReply.parse(event.body)?.let { finishClose(it.windowID, it.result) }
+                LockMacWire.RESULT -> LockMacResult.parse(event.body)?.let { r -> state.update { it.copy(lockMac = LockMacState(r)) } }
                 WorkspaceWire.APP_LAUNCH_RESULT -> AppLaunchResult.parse(event.body)?.let { r ->
                     if (!r.ok) state.update { it.copy(launching = it.launching - r.bundleID, launchFailed = r.bundleID) }
                     requestCatalog()
@@ -748,6 +755,22 @@ class WorkspaceController(
      * Closes one Mac window as its close button would: never Quit, never the app's other windows.
      * View Only can't: the Mac refuses without control, and this says so before asking.
      */
+    /** Lock This Mac: the Mac shows its lock screen (needs control; the Mac says what happened). */
+    fun lockMac() {
+        val s = state.value
+        if (!s.canLockMac || s.lockMac?.locking == true) return
+        lockRequest++
+        val req = lockRequest
+        state.update { it.copy(lockMac = LockMacState(null)) }
+        media.session.sendWorkspace(LockMacWire.request(req))
+        main.postDelayed({
+            if (lockRequest == req && state.value.lockMac?.locking == true) state.update { it.copy(lockMac = LockMacState(LockMacResult.Failed)) }
+        }, 8_000)
+    }
+
+    fun clearLockMac() { if (state.value.lockMac?.locking != true) state.update { it.copy(lockMac = null) } }
+    private var lockRequest = 0
+
     fun closeWindow(w: CatalogWindow) {
         val name = w.title.ifEmpty { w.app }
         val s = state.value
@@ -1339,3 +1362,6 @@ class WorkspaceController(
         const val MAX_DECODE_PIXELS = 4096L * 4096L
     }
 }
+
+/** Lock This Mac: [result] null while waiting for the Mac. */
+data class LockMacState(val result: LockMacResult?) { val locking: Boolean get() = result == null }

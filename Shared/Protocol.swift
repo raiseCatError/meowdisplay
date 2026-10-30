@@ -236,6 +236,27 @@ enum AppMenuWire {
     static let welcomeFeature = "menus"
 }
 
+/// Lock This Mac (PROTOCOL.md 6.16), in any display mode: the Mac shows macOS's own lock screen,
+/// so its login password is needed to go on. Needs control. The Mac answers with what happened;
+/// the device never assumes it worked.
+enum LockMacWire {
+    static let welcomeFeature = "lockMac"
+    static let request = "lockMac"          // receiver -> Mac: {req}
+    static let result = "lockMacResult"     // Mac -> receiver: {req, result}
+}
+
+/// What the Mac reports after `lockMac`.
+enum LockMacResult: String, Sendable, CaseIterable {
+    /// macOS shows the lock screen.
+    case locked
+    /// This device doesn't have control of the Mac.
+    case control
+    /// MeowDisplay isn't allowed to post keys (Accessibility).
+    case accessibility
+    /// The shortcut was posted but macOS didn't lock (the shortcut may be changed or off).
+    case failed
+}
+
 /// Close Window from Stage Peek (PROTOCOL.md 6.10), in any display mode: presses one listed
 /// window's own close button through Accessibility. Needs control; never quits the app.
 enum WindowCloseWire {

@@ -2047,3 +2047,19 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
 | 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
+### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
+
+Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
+
+- Receiver → Mac: `{"type":"lockMac","req":N}`.
+- Mac → receiver: `{"type":"lockMacResult","req":N,"result":R}` with R one of
+  `locked` (macOS shows its lock screen), `control` (this device doesn't have control),
+  `accessibility` (MeowDisplay may not post keys on this Mac) or `failed` (the Lock Screen
+  shortcut was posted but macOS didn't lock within 3 s).
+
+Needs control (the same grant as remote input) and an admitted session. The Mac posts its own
+Lock Screen shortcut (Control-Command-Q) with public API and reads the session's lock state to
+answer; it never reports `locked` without seeing it. Unlocking needs the Mac's login password.
+Receivers ask before sending and show the answer; with no answer in 8 s they show it as failed.
+The Mac also locks its screen before quitting while the Privacy Shield covers it (not when
+macOS is logging out, restarting or shutting down).

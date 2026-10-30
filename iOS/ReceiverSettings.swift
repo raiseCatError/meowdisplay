@@ -605,6 +605,7 @@ private struct DisplaySettingsPage: View {
 // MARK: - Input
 
 private struct InputSettingsPage: View {
+    @Environment(\.lockMacClient) private var lockMacClient
     @ObservedObject var controlStore: ReceiverControlStore
     /// Demo Mode: Allow Input is a local sample state, never a Mac request.
     let isDemo: Bool
@@ -650,6 +651,7 @@ private struct InputSettingsPage: View {
                     Text("Settings always stays reachable, even in View Only.")
                 }
             }
+            if let lockMacClient { LockMacSection(workspace: lockMacClient) }
             Section {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {
                     ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
@@ -1540,3 +1542,52 @@ private struct DeveloperSettingsPage: View {
     }
 }
 #endif
+
+/// The connected Mac's client, for Lock This Mac in Settings (absent in the demo).
+private struct LockMacClientKey: EnvironmentKey { static let defaultValue: WorkspaceModel? = nil }
+extension EnvironmentValues {
+    var lockMacClient: WorkspaceModel? {
+        get { self[LockMacClientKey.self] }
+        set { self[LockMacClientKey.self] = newValue }
+    }
+}
+
+/// Lock This Mac: macOS's own lock screen on the Mac, so its login password is needed to go on.
+/// Needs control; shows what the Mac reports, never assumes it worked.
+private struct LockMacSection: View {
+    @ObservedObject var workspace: WorkspaceModel
+    @State private var confirming = false
+
+    var body: some View {
+        if workspace.canLockMac {
+            Section {
+                Button(workspace.lockMacStatus == .locking ? String(localized: "Locking…") : String(localized: "Lock Mac")) {
+                    workspace.clearLockMacStatus()
+                    confirming = true
+                }
+                .disabled(workspace.lockMacStatus == .locking)
+                .accessibilityIdentifier("lockMac")
+                if case .done(let result)? = workspace.lockMacStatus {
+                    Text(Self.text(result)).font(.footnote).foregroundStyle(result == .locked ? .primary : .secondary)
+                }
+            } footer: {
+                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Needs control of the Mac.")
+            }
+            .confirmationDialog("Lock the Mac?", isPresented: $confirming, titleVisibility: .visible) {
+                Button("Lock Mac") { workspace.lockMac() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Anyone at the Mac will need its login password.")
+            }
+        }
+    }
+
+    static func text(_ result: LockMacResult) -> String {
+        switch result {
+        case .locked: String(localized: "The Mac is locked.")
+        case .control: String(localized: "Locking needs control of the Mac. Request Control first.")
+        case .accessibility: String(localized: "The Mac can't lock: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac.")
+        case .failed: String(localized: "The Mac didn't lock. Its Lock Screen shortcut (Control-Command-Q) may be changed or off.")
+        }
+    }
+}

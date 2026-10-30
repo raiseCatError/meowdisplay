@@ -232,6 +232,7 @@ struct ReceiverScreen: View {
         } else {
             SettingsView(receiver: model.receiver, controlStore: controlStore,
                          pictureInPicture: model.pictureInPicture, haptics: haptics, clipboard: model.workspace.clipboard)
+            .environment(\.lockMacClient, model.workspace)
         }
     }
 

@@ -14,11 +14,17 @@ enum PrivacyShieldPolicy {
     /// Cover the Mac's own screens: a connected device's kind of connection (remote or local) has
     /// the shield on, and no one at the Mac revealed it recently (revealing lasts until the Mac has
     /// had no physical keyboard, mouse or trackpad input for `relockAfter`).
+    /// `held`: a covered device disconnected and no one at the Mac has unlocked since; the cover
+    /// stays (a reconnect or mode switch never uncovers the Mac, even for a moment).
     static func shouldCover(remoteOn: Bool, localOn: Bool, sessions: [Bool], revealed: Bool,
-                            physicalIdle: TimeInterval, relockAfter: TimeInterval) -> Bool {
-        guard sessions.contains(where: { $0 ? remoteOn : localOn }) else { return false }
+                            physicalIdle: TimeInterval, relockAfter: TimeInterval, held: Bool = false) -> Bool {
+        guard held || sessions.contains(where: { $0 ? remoteOn : localOn }) else { return false }
         return !(revealed && physicalIdle < relockAfter)
     }
+
+    /// A device whose connection had the shield on ended while the cover showed: keep covering
+    /// until someone at the Mac unlocks it (fail closed).
+    static func holdsAfterDisconnect(showing: Bool, endedProtected: Bool) -> Bool { showing && endedProtected }
 
     /// Hardware input carries no posting process; anything posted by a process (MeowDisplay's
     /// remote input, other apps' synthetic events) has its pid. Only hardware counts as someone

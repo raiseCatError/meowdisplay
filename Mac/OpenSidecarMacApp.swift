@@ -72,12 +72,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Quitting while this Mac is a display: tell the sending Mac we're
     // closing (it ends the session instead of redialing a dead peer) before
     // the process goes — the standalone receiver's quit path, unchanged.
+    //
+    // Quitting while the Privacy Shield covers the screens locks this Mac's screen first, so
+    // quitting never uncovers it (not when macOS is logging out, restarting or shutting down).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard ReceiverController.shared.active else { return .terminateNow }
+        let systemEnding = NSAppleEventManager.shared().currentAppleEvent?
+            .attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
+        let lockFirst = PrivacyShield.shared.isCovering && !systemEnding
+        let stopReceiver = ReceiverController.shared.active
+        guard lockFirst || stopReceiver else { return .terminateNow }
+        if lockFirst {
+            Log.info("privacy shield: quitting while covering; locking this Mac's screen first")
+            MacScreenLock.lock(timeout: 2) { _ in MainActor.assumeIsolated { Self.continueQuit(stopReceiver: stopReceiver) } }
+        } else {
+            Self.continueQuit(stopReceiver: stopReceiver)
+        }
+        return .terminateLater
+    }
+
+    private static func continueQuit(stopReceiver: Bool) {
+        guard stopReceiver else { NSApp.reply(toApplicationShouldTerminate: true); return }
         ReceiverController.shared.stop {
             DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
         }
-        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -581,7 +598,9 @@ final class SenderController: ObservableObject {
     // capture differently — never a device with its own choice. A device's
     // own choice goes through `requestMode(_:for:)` instead.
     @Published var mode = VideoModePolicy.normalized(
-        mode: CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend,
+        // Mirror by default: Full Desktop shows this Mac as it is. A Mac with no usable display
+        // offers Extend instead when a device starts (the Mirror-unavailable offer).
+        mode: CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .mirror,
         videoEnabled: UserDefaults.standard.object(forKey: "videoEnabled") == nil
             || UserDefaults.standard.bool(forKey: "videoEnabled")) {
         didSet {

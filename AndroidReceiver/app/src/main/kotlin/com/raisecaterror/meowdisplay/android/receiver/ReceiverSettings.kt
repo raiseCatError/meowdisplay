@@ -176,6 +176,7 @@ private fun SettingsPageContent(
                 OutlinedButton(onClick = { controller.requestInput(false) }, enabled = view.inputState == InputWireState.Allowed) { Text("Turn Off") }
             }
             Caption("Your Mac decides. Every session starts View Only; control stops the moment the Mac revokes it.")
+            controller.workspace?.let { ws -> LockMacSection(ws) }
             Section("Keyboard")
             val zoomWhileTyping by controller.store.zoomWhileTyping.collectAsState()
             Toggle("Zoom While Typing", zoomWhileTyping) { on -> controller.store.setZoomWhileTyping(on) }
@@ -630,5 +631,27 @@ internal fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPoi
     Column {
         Row { Text(title, Modifier.weight(1f)); Text("%.2f×".format(value)) }
         Slider(value = value, onValueChange = onChange, valueRange = range)
+    }
+}
+
+/** Lock This Mac: macOS's own lock screen on the Mac (needs control; shows what the Mac reports). */
+@Composable
+private fun LockMacSection(ws: com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController) {
+    val s by ws.ui.collectAsState()
+    if (!s.canLockMac) return
+    var confirming by remember { mutableStateOf(false) }
+    Section("This Mac")
+    val locking = s.lockMac?.locking == true
+    OutlinedButton(onClick = { ws.clearLockMac(); confirming = true }, enabled = !locking) { Text(if (locking) "Locking…" else "Lock Mac") }
+    s.lockMac?.result?.let { Text(it.message, style = MaterialTheme.typography.bodyMedium) }
+    Caption("Shows the Mac's lock screen. To use it again, type the Mac's login password. Needs control of the Mac.")
+    if (confirming) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Lock the Mac?") },
+            text = { Text("Anyone at the Mac will need its login password.") },
+            confirmButton = { TextButton(onClick = { confirming = false; ws.lockMac() }) { Text("Lock Mac") } },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
     }
 }

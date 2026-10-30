@@ -5458,6 +5458,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let phase = captureStateSnapshot().phase
             guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+        case LockMacWire.request:
+            // Admitted sessions only (gate above), every mode; needs control.
+            let req = obj["req"] as? Int
+            let selfBox = self.selfBox, queue = self.queue
+            let reply: @Sendable (LockMacResult) -> Void = { result in
+                queue.async {
+                    var m: [String: Any] = ["type": LockMacWire.result, "result": result.rawValue]
+                    if let req { m["req"] = req }
+                    selfBox.currentOnQueue()?.sendJSONObject(m)
+                }
+            }
+            guard sessionAuthorization.isAdmitted else { return }
+            guard receiverInputIsAllowed() else { reply(.control); return }
+            Log.info("lock mac: requested by the device")
+            DispatchQueue.main.async { MacScreenLock.lock(done: reply) }
         case WireMessage.filesRequest:
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
@@ -6637,7 +6652,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         welcome["privacyShield"] = PrivacyShieldPolicy.isOn(remote: isRemoteSession)
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
-        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature]
+        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
         if WindowStreamingPolicy.isAllowed() {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)

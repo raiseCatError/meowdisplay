@@ -130,6 +130,8 @@ enum WorkspaceEvent: Sendable {
     case launchResult(bundleID: String, ok: Bool)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
+    /// Lock This Mac (PROTOCOL.md 6.16).
+    case lockResult(LockMacResult)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Unified Clipboard (PROTOCOL.md 6.15).
@@ -218,6 +220,8 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.windowCloseResult:
             guard let id = u32(obj, "window"), let r = str(obj, "result", 32).flatMap(WindowCloseResult.init(rawValue:)) else { return nil }
             return .closeResult(windowID: id, result: r)
+        case LockMacWire.result:
+            return str(obj, "result", 32).flatMap(LockMacResult.init(rawValue:)).map { .lockResult($0) }
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case ClipboardWire.type:
@@ -439,6 +443,11 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var launchFailed: String?
     /// The Mac can close a listed window from Stage Peek (`windowClose`).
     @Published private(set) var canCloseWindows = false
+    /// The Mac offers Lock This Mac (any mode); the last request's outcome.
+    @Published private(set) var canLockMac = false
+    @Published private(set) var lockMacStatus: LockMacStatus?
+    enum LockMacStatus: Equatable { case locking, done(LockMacResult) }
+    private var lockRequest = 0
     /// Windows asked to close that the Mac hasn't answered for yet.
     @Published private(set) var closingWindows: Set<UInt32> = []
     /// What happened to the last Close Window (shown briefly over Stage Peek).
@@ -545,6 +554,7 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -614,11 +624,14 @@ final class WorkspaceModel: ObservableObject {
             requestCatalog()
         case .closeResult(let id, let result):
             finishClose(id, result: result)
+        case .lockResult(let result):
+            lockMacStatus = .done(result)
         case .disconnected:
             sendTask?.cancel()
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
             canCloseWindows = false; closingWindows = []; closeNotice = nil
+            canLockMac = false; lockMacStatus = nil
             files.setAvailable(false)
             menus.setAvailable(false)
             clipboard.setAvailable(false)
@@ -1224,6 +1237,21 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private var closeNames: [UInt32: String] = [:]
+
+    /// Lock This Mac: the Mac shows macOS's lock screen (needs control; the Mac says what happened).
+    func lockMac() {
+        guard canLockMac, lockMacStatus != .locking else { return }
+        lockRequest += 1
+        let req = lockRequest
+        guard send(["type": LockMacWire.request, "req": req]) else { lockMacStatus = .done(.failed); return }
+        lockMacStatus = .locking
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.lockRequest == req, self.lockMacStatus == .locking else { return }
+            self.lockMacStatus = .done(.failed)
+        }
+    }
+
+    func clearLockMacStatus() { if lockMacStatus != .locking { lockMacStatus = nil } }
 
     private func finishClose(_ id: UInt32, result: WindowCloseResult) {
         closingWindows.remove(id)
