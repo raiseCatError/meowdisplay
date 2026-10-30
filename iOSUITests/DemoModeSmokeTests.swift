@@ -164,9 +164,13 @@ extension DemoModeSmokeTests {
         sleep(2)
         snapshot(app, "device-window-mode")
 
-        strip.press(forDuration: 0.7)
+        // Open Stage Peek and keep it open: a hold on the strip shows it only while the finger is
+        // down (lifting closes it), so hold, then pull inward slowly to expand it.
         let close = app.buttons["stagePeekClose"]
-        XCTAssertTrue(close.waitForExistence(timeout: 3), "Stage Peek stays open after the hold")
+        let start = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let inward = app.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
+        start.press(forDuration: 0.7, thenDragTo: inward, withVelocity: 250, thenHoldForDuration: 0.4)
+        XCTAssertTrue(close.waitForExistence(timeout: 3), "Stage Peek opens from its strip")
         XCTAssertTrue(app.descendants(matching: .any)["Full Desktop"].exists, "Full Desktop is a card")
         snapshot(app, "device-stage-peek-open")
 
