@@ -56,7 +56,7 @@ jobs:
             fail "tag v$version already exists: $version is released; start release/<next version>"
           fi
           scripts/release/release-state.sh "$version" init STATE --config .github/release-config.json --version "$version"
-          scripts/release/release-state.sh "$version" candidate STATE --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID"
+          scripts/release/release-state.sh "$version" candidate STATE --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --config .github/release-config.json
           { echo "version=$version"; echo "sha=$GITHUB_SHA"; } >> "$GITHUB_OUTPUT"
 
   mac:

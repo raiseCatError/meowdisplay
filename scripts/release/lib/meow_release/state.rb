@@ -139,7 +139,10 @@ module MeowRelease
 
     # A push to the release branch. The same SHA again (a re-run) keeps
     # everything; a different SHA supersedes all progress of the old one.
-    def begin_candidate(sha, run_id:, now: Time.now.utc)
+    # `required_platforms` (from the release config) is adopted only by a
+    # new candidate: a running candidate's platforms never change under it,
+    # and a mismatch is refused by Coordinator and Publisher instead.
+    def begin_candidate(sha, run_id:, now: Time.now.utc, required_platforms: nil)
       raise Error, "candidate SHA must be 40 hex digits" unless sha.to_s.match?(/\A[0-9a-f]{40}\z/)
       return false if candidate_sha == sha
       raise Error, "#{version} is already published from #{candidate_sha}" if publication_stage == "published"
@@ -148,6 +151,13 @@ module MeowRelease
       if candidate_sha
         @data["superseded"] << { "sha" => candidate_sha, "at" => now.iso8601,
                                  "platforms" => PLATFORMS.map { |p| [p, platform(p).dup] }.to_h }
+      end
+      if required_platforms && required_platforms.sort != self.required_platforms.sort
+        unknown = required_platforms - PLATFORMS
+        raise Error, "unknown platforms #{unknown.join(', ')}" unless unknown.empty?
+
+        log("platforms", now: now, from: self.required_platforms, to: required_platforms)
+        @data["requiredPlatforms"] = required_platforms
       end
       @data["candidate"] = { "sha" => sha, "runId" => run_id, "createdAt" => now.iso8601 }
       PLATFORMS.each { |p| @data["platforms"][p] = { "stage" => "pending", "sha" => sha } }
