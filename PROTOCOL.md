@@ -1645,6 +1645,132 @@ fifth message in progress evicts the oldest. An abandoned message is simply
 lost: every feature that asks for one of these answers already times out
 and can ask again. Vectors: `fixtures/receiver-protocol/control-chunks.json`.
 
+### 6.15 Unified Clipboard (`clip`)
+
+Optional and additive: no `pv` bump. Copy on the Mac and paste on a
+connected iPhone, iPad or Android device, and the other way round. The Mac is
+the hub: devices talk only to the Mac, and the Mac relays between them.
+
+* **Capability.** A sender that takes part lists `"clipboard"` in
+  `welcome.features`. Every message is `{"type":"clip","op":…}`; a peer that
+  doesn't know the type ignores it.
+* **Off by default, on both sides.** The Mac's Clipboard switch is off until
+  the owner turns it on, and each device sends `join` with `on: true` only
+  after the person turns it on there. Demo sessions never join.
+* **Grants (sender).** Per paired device, by its authenticated install id
+  (never its name or address): *ask* (default), *always* or *block*, plus a
+  direction (both, Mac to device, device to Mac) that can only narrow what
+  the device asked for. With *ask*, a device's first `join` shows the owner's
+  prompt (Not Now, Allow This Session, Always Allow). Clipboard grants are
+  separate from input control and from Remote Finder (6.12): neither implies
+  the other. Pause stops every copy at once; Revoke and Block end the grant
+  and every transfer for that device.
+
+#### Messages
+
+```json
+{ "type": "clip", "op": "join", "on": true, "dir": "both", "types": "all", "files": true, "max": 10000000, "seen": { "<origin>": 4 } }
+{ "type": "clip", "op": "leave" }
+{ "type": "clip", "op": "state", "state": "ready", "toDevice": true, "toMac": true, "types": "all", "files": true, "max": 10000000, "duration": "session", "macRead": "default", "seen": { "<origin>": 9 } }
+```
+
+* `join` (device → Mac): what the person chose here (`dir` both / toDevice /
+  toMac; `types` text / all; `files`; `max`, the automatic-transfer limit in
+  bytes, one of 1, 10, 50 or 200 MB) and `seen`, the newest sequence number it
+  has seen from each origin. Sent again whenever a setting changes.
+* `state` (Mac → device): `off` (switch off on the Mac), `idle` (off on the
+  device), `asking`, `denied`, `paused`, `revoked` or `ready`. Only `ready`
+  carries the effective `toDevice` / `toMac` / `types` / `files` / `max`,
+  `duration` (`session` or `always`), `macRead` (whether macOS lets
+  MeowDisplay read the Mac's pasteboard: `default`, `ask`, `allowed`,
+  `denied`) and the Mac's `seen`.
+
+#### Events and ordering
+
+Each genuine copy is one `event`, named by its origin (the device's
+authenticated install id, or the Mac's) and that origin's own sequence number
+`s`, which only increases:
+
+```json
+{ "type": "clip", "op": "event", "o": "<origin>", "s": 12, "lc": 40, "vv": { "<other origin>": 7 }, "ch": "<16 hex>", "at": 1793000000,
+  "items": [ { "reps": [ { "t": "text", "n": 11, "h": "<16 hex>", "d": "<base64>" }, { "t": "png", "n": 812345, "h": "<16 hex>", "b": 0 } ] } ],
+  "files": [ { "p": ["Folder"], "n": 0, "dir": true }, { "p": ["Folder", "a.pdf"], "n": 20480, "b": 1 } ] }
+```
+
+* `lc` is a Lamport counter and `vv` the causal context: the newest event the
+  origin had seen from every other origin when it copied. `ch` hashes the
+  content, so copying what is already the shared clipboard makes no event.
+  `at` is informational and never used for ordering.
+* `items` are the copied items, each with up to 6 representations: `t` one of
+  `text`, `url`, `html`, `rtf`, `png`, `jpeg` (unknown kinds are skipped),
+  `n` its size, `h` the first 16 hex digits of its SHA-256, and either the
+  bytes inline in `d` (at most 16 000 raw bytes across one event, so every
+  frame stays under the 32 KB control limit) or a blob number `b` to fetch.
+  `files` lists copied files and folders by relative path (`p`, every name
+  validated: no separators, `.` or `..`), never a local path.
+* **Ordering, the same on every platform** (vectors in
+  `fixtures/clipboard/vectors.json`): an event whose context includes the
+  current one is newer and wins; one the current already includes is older
+  and is dropped; two that never saw each other are concurrent, and the
+  higher `lc` wins (ties: the larger origin), with the loser kept as an
+  alternative the person can choose. Applying a remote event never creates an
+  event, nothing goes back to its origin, and `join`'s `seen` only marks
+  events as seen, so a reconnect is never a copy.
+* **The Mac's checks.** A device may send only events whose origin is its own
+  install id; context claims about other origins are clamped to what the Mac
+  has seen; a `join`'s `seen` is trusted only for the device's own origin.
+  Declared sizes are capped at parse (200 MB per representation, 1 TiB per
+  file). Events from a device without `toMac`, or while paused, are dropped.
+  An event is relayed to every other ready device that allows it, never back
+  to its origin and never to a device that isn't paired, joined and granted.
+
+#### Fetching larger data
+
+```json
+{ "type": "clip", "op": "read", "req": 3, "o": "<origin>", "s": 12, "b": 0, "off": 0, "n": 262144 }
+{ "type": "clip", "op": "data", "req": 3, "off": 0, "d": "<base64 of ≤ 22000 bytes>" }
+{ "type": "clip", "op": "readEnd", "req": 3, "off": 0, "n": 262144, "sha": "<16 hex of this range>" }
+{ "type": "clip", "op": "readEnd", "req": 3, "error": "gone" }
+```
+
+Either side asks the side that announced the event for a blob range (at most
+256 KiB per `read`), receives it in ordered `data` parts and a `readEnd` with
+the range's digest, and asks for the next range. The asker accepts no more
+bytes than it asked for, checks every range digest and the whole
+representation's `h`, and applies the event only if it is still the shared
+clipboard when the fetch completes. Errors: `gone` (replaced or no longer
+served), `denied`, `changed` (a file changed on the Mac since it was
+copied), `badRange`, `permission`. Representations are fetched automatically
+up to the smaller of the two sides' `max`; copied files are listed at once
+but fetched only when the person asks (Save or Share on a device; Get Files
+on the Mac), keeping their folder structure.
+
+#### Platform rules
+
+* **Mac.** MeowDisplay watches the pasteboard's change count (no content
+  read) only while a device is ready, and reads the content only after a
+  change. On macOS 15.4 and later, macOS may ask the owner before
+  MeowDisplay reads the pasteboard (`macRead`). Items marked concealed,
+  transient or auto-generated (the nspasteboard.org markers, which many
+  password managers set) are never sent. Writes are for this Mac only
+  (`currentHostOnly`, so they don't continue to Universal Clipboard) and
+  carry MeowDisplay's own marker, so they're never sent back as new copies.
+  Received files are staged with the quarantine attribute and removed when
+  replaced, revoked or the app quits.
+* **iOS and iPadOS.** The clipboard is read only while MeowDisplay is in
+  front: through the system Paste button (which never asks), or
+  automatically when the app returns to the front if the person turned on
+  Send Copies Automatically (iOS asks before each read unless they chose
+  Allow in Settings). Writes are local-only (no Universal Clipboard).
+* **Android.** Android lets an app read the clipboard only while it has
+  focus, and shows a notice when it does. Copies whose description has
+  `EXTRA_IS_SENSITIVE` are never read for sending. Writes carry
+  `EXTRA_IS_REMOTE_DEVICE` and MeowDisplay's marker; images are shared as
+  read-only content URIs from the app's own cache.
+* Detection of passwords and other private items depends on the app that
+  copied them marking them; it is never guaranteed. No platform keeps a
+  history: content is held only until it is replaced, and is never logged.
+
 ## 7. Coordinate spaces and units
 
 The most common third-party bug is a unit mismatch, so here is every space
@@ -1912,3 +2038,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
 | 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
+| 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |

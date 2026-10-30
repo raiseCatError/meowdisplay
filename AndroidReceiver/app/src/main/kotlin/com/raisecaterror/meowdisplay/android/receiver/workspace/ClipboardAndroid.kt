@@ -152,17 +152,21 @@ class AndroidClipboardPlatform(private val context: Context) : ClipboardPlatform
                 uri == null -> {}
                 uri.scheme == "http" || uri.scheme == "https" -> if (text == null) reps += ClipKind.Url to uri.toString().toByteArray()
                 uri.scheme == "content" && !textOnly -> run {
-                    // Too large or unreadable: the item's text (if any) still goes.
-                    val size = sizeOf(uri)?.takeIf { it <= maxBytes } ?: return@run
+                    // Too large or unreadable: the item's text (if any) still goes. The reported
+                    // size is only a hint; what is actually read is capped at the limit.
+                    if ((sizeOf(uri) ?: 0) > maxBytes) return@run
                     val type = resolver.getType(uri)
                     if (type == "image/png" || type == "image/jpeg") {
-                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }?.takeIf { it.size.toLong() == size } ?: return@run
-                        reps += (if (type == "image/png") ClipKind.Png else ClipKind.Jpeg) to bytes
+                        val buf = java.io.ByteArrayOutputStream()
+                        val ok = runCatching { resolver.openInputStream(uri)?.use { copyCapped(it, buf, maxBytes.toLong()) } }.getOrNull() == true
+                        if (!ok) return@run
+                        reps += (if (type == "image/png") ClipKind.Png else ClipKind.Jpeg) to buf.toByteArray()
                     } else {
                         val dir = batch ?: File(outDir, UUID.randomUUID().toString()).apply { mkdirs() }.also { batch = it }
                         val name = nameOf(uri)?.takeIf { ClipFiles.isSafeName(it) && files.none { f -> f.name == it } } ?: "Copied File ${files.size + 1}"
                         val f = File(dir, name)
-                        resolver.openInputStream(uri)?.use { input -> f.outputStream().use { input.copyTo(it, 256 * 1024) } } ?: return@run
+                        val ok = runCatching { resolver.openInputStream(uri)?.use { input -> f.outputStream().use { copyCapped(input, it, maxBytes.toLong()) } } }.getOrNull() == true
+                        if (!ok) { f.delete(); return@run }
                         files += ClipLocalFile(name, f)
                     }
                 }
@@ -177,6 +181,19 @@ class AndroidClipboardPlatform(private val context: Context) : ClipboardPlatform
             }
         }
         return if (items.isEmpty() && files.isEmpty()) null else ClipLocalContent(items, files)
+    }
+
+    /** Copies at most [limit] bytes; false (stop) when the source has more. */
+    private fun copyCapped(input: java.io.InputStream, out: java.io.OutputStream, limit: Long): Boolean {
+        val buf = ByteArray(256 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) return true
+            total += n
+            if (total > limit) return false
+            out.write(buf, 0, n)
+        }
     }
 
     private fun nameOf(uri: Uri): String? = runCatching {
