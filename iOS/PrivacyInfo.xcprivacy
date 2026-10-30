@@ -13,7 +13,11 @@
     itself only (UserDefaults.standard / @AppStorage; no App Group).
   - FileTimestamp, C617.1: iOS/Log.swift reads its own connection log's size
     with FileManager.attributesOfItem(atPath:) (which also returns the file's
-    dates) to trim it; the log lives in the app container's Documents.
+    dates) to trim it; the log lives in the app container.
+  - FileTimestamp, 3B52.1: Remote Finder uploads read the size and
+    modification date of files the person picked in the document picker
+    (Shared/RemoteTransferQueue.swift), to show progress and keep the date
+    on the Mac's copy.
 
   No tracking, no tracking domains, and no data collected: nothing leaves the
   device except the user's own session with their own Mac, and the connection
@@ -43,6 +47,7 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>C617.1</string>
+				<string>3B52.1</string>
 			</array>
 		</dict>
 	</array>

@@ -40,11 +40,12 @@ final class PrivacyManifestTests: XCTestCase {
     /// Each code is the one Apple documents for how the app uses the API:
     /// CA92.1 — UserDefaults read and written by the app itself (no App
     /// Group); C617.1 — metadata of a file in the app container (Log.swift
-    /// sizing its own connection log).
+    /// sizing its own connection log); 3B52.1 — metadata of files the person
+    /// picked (Remote Finder uploads).
     func testDeclaresTheRequiredReasonAPIsWithTheirReasons() throws {
         XCTAssertEqual(try declaredReasons(), [
             "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
-            "NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1"],
+            "NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1", "3B52.1"],
         ])
     }
 
