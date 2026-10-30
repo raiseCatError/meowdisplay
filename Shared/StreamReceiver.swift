@@ -1713,6 +1713,10 @@ final class StreamReceiver: ObservableObject {
         TrustStore.receiverRole.forget(peerID: peerID)
         IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
         InputAutoRequestStore.remove(peerID: peerID)
+        // Its saved Remote address and wake target go too: a later re-pair of the same ID
+        // starts without them (the Mac sender and Android already did this).
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
+        WakeMetadataStore.removeMetadata(forPeerID: peerID, role: .receiverRole)
     }
 
     /// The per-Mac Connection Requests override (`IncomingSessionPolicyPicker`).

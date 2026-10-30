@@ -63,7 +63,7 @@ struct RemoteEndpointEditorView: View {
 
     @State private var peerID = ""
     @State private var host = ""
-    @State private var port = String(WireCrypto.remoteRequestPort)
+    @State private var port = String(WireCrypto.tlsPort)
     @State private var errorMessage: String?
     @State private var savedConfirmation = false
 
@@ -125,7 +125,7 @@ struct RemoteEndpointEditorView: View {
 
                 TailscaleSuggestionsView(deviceName: pairedPeers.first { $0.peerID == peerID }?.displayName ?? "") { suggested in
                     host = suggested
-                    port = String(WireCrypto.remoteRequestPort)
+                    port = String(WireCrypto.tlsPort)
                 }
 
                 HStack {
@@ -144,9 +144,9 @@ struct RemoteEndpointEditorView: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) else {
+        guard let hint = RemoteEndpointStore.mediaEndpoint(forPeerID: peerID, role: .sender) else {
             host = ""
-            port = String(WireCrypto.remoteRequestPort)
+            port = String(WireCrypto.tlsPort)
             return
         }
         host = hint.host
@@ -182,7 +182,7 @@ struct RemoteEndpointEditorView: View {
     private func remove() {
         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .sender)
         host = ""
-        port = String(WireCrypto.remoteRequestPort)
+        port = String(WireCrypto.tlsPort)
         errorMessage = nil
         savedConfirmation = false
     }
