@@ -239,7 +239,8 @@ fun WorkspaceChrome(
                         }
                         // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
                         if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop) {
-                            PaneButton("Show on Mac", enabled = inputAllowed) { controller.showOnMac(id) }
+                            if (inputAllowed) PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
+                            else RequestControlInline()
                         }
                         // A closed window's app can open it again (explicit; needs control).
                         val bundle = remote?.bundleID?.ifEmpty { null } ?: tile.source?.bundleID

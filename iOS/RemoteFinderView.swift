@@ -263,6 +263,8 @@ struct RemoteFinderView: View {
                     .glass(Capsule())
                 }
                 .accessibilityLabel(Text("Files access: \(grantDescription(g))"))
+                // Browsing needs only Files access; opening on the Mac needs control: ask here.
+                RequestControlInline(compact: true)
                 if let c = files.clipboard, inFolder {
                     Button { Task { await files.paste() } } label: {
                         Label(c.move ? "Move \(c.names.count) Here" : "Paste \(c.names.count)", systemImage: "doc.on.clipboard")

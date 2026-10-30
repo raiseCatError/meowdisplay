@@ -259,6 +259,8 @@ private fun GrantBar(files: RemoteFilesModel, ui: RemoteFilesUi) {
                 if (missing.size > 1) DropdownMenuItem(text = { Text("Ask the Mac for all of these") }, onClick = { menu = false; files.requestAccess(missing) })
             }
         }
+        // Browsing needs only Files access; opening on the Mac needs control: ask here.
+        RequestControlInline(compact = true)
         ui.clipboard?.let { c ->
             if (ui.location is RemoteFilesLocation.Folder) {
                 Pill(if (c.move) "Move ${c.names.size} Here" else "Paste ${c.names.size}", enabled = ui.canPaste) { files.paste() }

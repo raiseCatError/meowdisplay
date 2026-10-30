@@ -247,6 +247,13 @@ struct WorkspaceChromeView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    #if os(iOS)
+                    // Showing it on the Mac (or reopening a closed window) needs control: ask in place.
+                    if !inputAllowed, let s = model.tileState(id)?.status,
+                       (s == .paused && model.tileState(id)?.inStageStrip == true) || s == .closed {
+                        RequestControlInline()
+                    }
+                    #endif
                     if model.tileState(id)?.status == .closed, inputAllowed, let bundle = tile.source?.bundleID {
                         // The app may reopen a window (needs control; never automatic).
                         Button { model.launch(bundle) } label: {
