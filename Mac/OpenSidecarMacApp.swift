@@ -1802,7 +1802,7 @@ final class SenderController: ObservableObject {
         if let hostOverride, let portOverride {
             resolvedHost = hostOverride
             resolvedPort = portOverride
-        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) {
+        } else if let hint = RemoteEndpointStore.mediaEndpoint(forPeerID: peerID, role: .sender) {
             resolvedHost = hint.host
             resolvedPort = hint.port
         } else {
