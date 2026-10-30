@@ -2612,13 +2612,12 @@ struct VideoLayerView: UIViewRepresentable {
             // The zoomed/panned content layer can extend beyond `bounds` —
             // clip it so it never bleeds into sibling SwiftUI content.
             clipsToBounds = true
-            // VoiceOver: the picture is one element, and direct interaction
-            // passes touches straight through to the Mac instead of VoiceOver
-            // consuming them. Touch handling is unchanged.
+            // VoiceOver: the picture is one element. It takes no touches while
+            // VoiceOver runs unless the user turns on Direct Touch from its
+            // actions — see `ScreenReaderPictureTouch`.
             isAccessibilityElement = true
             accessibilityLabel = String(localized: "Mac screen")
-            accessibilityHint = String(localized: "Touch the picture directly to control your Mac.")
-            accessibilityTraits = [.allowsDirectInteraction]
+            refreshPictureAccessibility()
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
@@ -3034,8 +3033,61 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         @objc private func voiceOverStatusDidChange(_ note: Notification) {
+            if pictureTouch.update(screenReaderRunning: UIAccessibility.isVoiceOverRunning) {
+                if !pictureTouch.picturePassesTouches { clearInputStateForPause() }
+                refreshPictureAccessibility()
+            }
             guard multiFingerGate.update(voiceOverRunning: UIAccessibility.isVoiceOverRunning) else { return }
             applyMultiFingerGate()
+        }
+
+        // MARK: - Screen reader and the picture
+
+        private var pictureTouch = ScreenReaderPictureTouch(screenReaderRunning: UIAccessibility.isVoiceOverRunning)
+
+        /// While VoiceOver runs without Direct Touch, touches pass through
+        /// this view (nothing here sees them, so nothing reaches the Mac).
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            guard pictureTouch.picturePassesTouches else { return nil }
+            return super.hitTest(point, with: event)
+        }
+
+        /// A VoiceOver double tap must never become a tap at the picture's
+        /// centre (UIKit's fallback when this returns false).
+        override func accessibilityActivate() -> Bool {
+            UIAccessibility.post(notification: .announcement, argument: pictureTouch.directTouch
+                ? String(localized: "Direct Touch is on. Touch the picture to control the Mac.")
+                : String(localized: "To control the Mac by touch, choose Turn On Direct Touch from the actions. The keyboard and controls work without it."))
+            return true
+        }
+
+        private func setPictureDirectTouch(_ on: Bool) -> Bool {
+            guard pictureTouch.setDirectTouch(on) else { return false }
+            if !on { clearInputStateForPause() }
+            refreshPictureAccessibility()
+            UIAccessibility.post(notification: .announcement, argument: on
+                ? String(localized: "Direct Touch on. Touches on the picture go to the Mac. To stop, find Mac screen again and choose Turn Off Direct Touch.")
+                : String(localized: "Direct Touch off."))
+            return true
+        }
+
+        private func refreshPictureAccessibility() {
+            accessibilityTraits = pictureTouch.allowsDirectInteraction ? [.allowsDirectInteraction] : []
+            var value: [String] = []
+            if !allowsInput { value.append(String(localized: "Viewing only. Control is off.")) }
+            if pictureTouch.allowsDirectInteraction { value.append(String(localized: "Direct Touch on")) }
+            accessibilityValue = value.isEmpty ? nil : value.joined(separator: ". ")
+            accessibilityHint = pictureTouch.screenReaderRunning && !pictureTouch.directTouch
+                ? String(localized: "Touches here don't reach the Mac. Use the actions to turn on Direct Touch.")
+                : nil
+            if let turnsOn = pictureTouch.directTouchActionTurnsOn {
+                let name = turnsOn ? String(localized: "Turn On Direct Touch") : String(localized: "Turn Off Direct Touch")
+                accessibilityCustomActions = [UIAccessibilityCustomAction(name: name) { [weak self] _ in
+                    self?.setPictureDirectTouch(turnsOn) ?? false
+                }]
+            } else {
+                accessibilityCustomActions = nil
+            }
         }
 
         func installVideoLayer(_ layer: CALayer) {
@@ -3129,7 +3181,7 @@ struct VideoLayerView: UIViewRepresentable {
         func setAllowInput(_ allowed: Bool) {
             guard allowed != allowsInput else { return }
             allowsInput = allowed
-            accessibilityValue = allowed ? nil : String(localized: "Viewing only. Control is off.")
+            refreshPictureAccessibility()
             updateInputGate()
             guard !allowed else { return }
             clearInputStateForPause()

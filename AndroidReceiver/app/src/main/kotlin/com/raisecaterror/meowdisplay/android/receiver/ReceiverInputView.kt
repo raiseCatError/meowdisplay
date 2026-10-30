@@ -17,10 +17,14 @@ import android.view.inputmethod.InputMethodManager
 import android.os.Build
 import android.view.InputDevice
 import android.view.PointerIcon
+import android.view.accessibility.AccessibilityManager
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat
 import com.raisecaterror.meowdisplay.core.controls.CGPoint
 import com.raisecaterror.meowdisplay.core.controls.HardwareMouse
 import com.raisecaterror.meowdisplay.core.controls.RemoteKeyboardBridge
 import com.raisecaterror.meowdisplay.core.controls.ReceiverSurfaceInput
+import com.raisecaterror.meowdisplay.core.controls.ScreenReaderPictureTouch
 import com.raisecaterror.meowdisplay.core.controls.SurfaceTouch
 import com.raisecaterror.meowdisplay.core.controls.SurfaceTouchPhase
 import com.raisecaterror.meowdisplay.core.session.ReceiverInputSender
@@ -93,6 +97,64 @@ class ReceiverInputView(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         requestFocus()
+        accessibilityManager?.let {
+            it.addTouchExplorationStateChangeListener(touchExplorationListener)
+            screenReaderChanged(it.isTouchExplorationEnabled)
+        }
+        refreshPictureAccessibility()
+    }
+
+    // MARK: - Screen reader and the picture (see ScreenReaderPictureTouch)
+
+    private val accessibilityManager get() = context.getSystemService(AccessibilityManager::class.java)
+    private val touchExplorationListener = AccessibilityManager.TouchExplorationStateChangeListener { screenReaderChanged(it) }
+    private var pictureTouch = ScreenReaderPictureTouch(screenReaderRunning = false)
+    private var directTouchActionId: Int? = null
+
+    private fun screenReaderChanged(running: Boolean) {
+        val next = pictureTouch.withScreenReader(running)
+        if (next == pictureTouch) return
+        pictureTouch = next
+        if (!next.picturePassesTouches) surface.cancelAll()
+        refreshPictureAccessibility()
+    }
+
+    private fun setDirectTouch(on: Boolean): Boolean {
+        val next = pictureTouch.withDirectTouch(on)
+        if (next == pictureTouch) return false
+        pictureTouch = next
+        if (!on) surface.cancelAll()
+        refreshPictureAccessibility()
+        announceForAccessibility(if (on) "Direct Touch on. Touches on the picture go to the Mac. To stop, find Mac screen again and choose Turn off Direct Touch."
+                                 else "Direct Touch off.")
+        return true
+    }
+
+    /** TalkBack's double tap and long press are answered here, so they never fall back to a real tap. */
+    private fun refreshPictureAccessibility() {
+        ViewCompat.replaceAccessibilityAction(this, AccessibilityActionCompat.ACTION_CLICK, "Explain") { _, _ ->
+            announceForAccessibility(if (pictureTouch.directTouch) "Direct Touch is on. Touch the picture to control the Mac."
+                else "To control the Mac by touch, choose Turn on Direct Touch from the actions. The keyboard and controls work without it.")
+            true
+        }
+        ViewCompat.replaceAccessibilityAction(this, AccessibilityActionCompat.ACTION_LONG_CLICK, null) { _, _ -> true }
+        directTouchActionId?.let { ViewCompat.removeAccessibilityAction(this, it) }
+        directTouchActionId = pictureTouch.directTouchActionTurnsOn?.let { turnsOn ->
+            ViewCompat.addAccessibilityAction(this, if (turnsOn) "Turn on Direct Touch" else "Turn off Direct Touch") { _, _ -> setDirectTouch(turnsOn) }
+        }
+        refreshStateDescription()
+    }
+
+    private var controlling = false
+
+    /** TalkBack's state for the picture: View only, Controlling, or Controlling with Direct Touch. */
+    fun refreshStateDescription(inputAllowed: Boolean = controlling) {
+        controlling = inputAllowed
+        ViewCompat.setStateDescription(this, when {
+            !inputAllowed -> "View only"
+            pictureTouch.directTouch -> "Controlling, Direct Touch on"
+            else -> "Controlling"
+        })
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
@@ -149,6 +211,9 @@ class ReceiverInputView(
             if (event.actionMasked == MotionEvent.ACTION_CANCEL) mouse.releaseAll() else handleMouse(event)
             return true
         }
+        // TalkBack without Direct Touch: its injected taps and pass-through touches reach nothing.
+        val tool = event.getToolType(event.actionIndex)
+        if (!pictureTouch.picturePassesTouches && tool != MotionEvent.TOOL_TYPE_STYLUS && tool != MotionEvent.TOOL_TYPE_ERASER) return true
         val time = event.eventTime / 1000.0
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
@@ -336,6 +401,7 @@ class ReceiverInputView(
     }
 
     override fun onDetachedFromWindow() {
+        accessibilityManager?.removeTouchExplorationStateChangeListener(touchExplorationListener)
         handler.removeCallbacks(pollRunnable)
         setMomentumRunning(false)
         releaseHardwareInput()

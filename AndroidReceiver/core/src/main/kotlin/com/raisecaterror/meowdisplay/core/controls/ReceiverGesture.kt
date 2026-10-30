@@ -268,3 +268,25 @@ object ReceiverTouchOwnership {
             listOf(ReceiverTouchOwnershipAction.DiscardPendingPress)
         }
 }
+
+/**
+ * What touches on the Mac picture may do while a screen reader (TalkBack) runs. Same rule as iOS
+ * `ScreenReaderPictureTouch`: TalkBack's double tap falls back to a real tap at the picture's
+ * centre, and double-tap-and-hold passes a real touch through; with control granted either would
+ * reach the Mac. So while a screen reader runs the picture takes no touch input until the user
+ * turns on Direct Touch from its actions, activating the picture never clicks, and Direct Touch
+ * ends when the screen reader stops. Mouse and stylus are not affected.
+ */
+data class ScreenReaderPictureTouch(val screenReaderRunning: Boolean, val directTouch: Boolean = false) {
+    val picturePassesTouches: Boolean get() = !screenReaderRunning || directTouch
+
+    /** The action offered on the picture while a screen reader runs (null otherwise). */
+    val directTouchActionTurnsOn: Boolean? get() = if (screenReaderRunning) !directTouch else null
+
+    /** Stopping the screen reader ends Direct Touch. */
+    fun withScreenReader(running: Boolean): ScreenReaderPictureTouch =
+        if (running) copy(screenReaderRunning = true) else ScreenReaderPictureTouch(false)
+
+    /** Only meaningful while a screen reader runs. */
+    fun withDirectTouch(on: Boolean): ScreenReaderPictureTouch = if (screenReaderRunning) copy(directTouch = on) else this
+}

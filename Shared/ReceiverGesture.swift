@@ -286,3 +286,49 @@ enum ReceiverTouchOwnership {
         downWasSent ? [.sendCancellation, .discardPendingPress] : [.discardPendingPress]
     }
 }
+
+/// What touches on the Mac picture may do while a screen reader (VoiceOver, TalkBack) runs.
+///
+/// A screen reader's own gestures land on the picture too: exploring by touch, a double tap
+/// (which falls back to a real tap at the picture's centre when the element doesn't handle
+/// activation), and double-tap-and-hold (which passes a real touch through). With control
+/// granted, each of those would reach the Mac as a click or drag the user never meant. So while
+/// a screen reader runs, the picture takes no touch input at all until the user turns on Direct
+/// Touch from its actions; activating the picture never clicks. The keyboard, the tray and the
+/// pane actions are separate elements and keep working. Direct Touch ends when the screen
+/// reader stops, so it never outlives the choice. The Mac's own control grant still applies on
+/// top: without it nothing reaches the Mac either way.
+struct ScreenReaderPictureTouch: Equatable {
+    private(set) var screenReaderRunning: Bool
+    private(set) var directTouch = false
+
+    init(screenReaderRunning: Bool) {
+        self.screenReaderRunning = screenReaderRunning
+    }
+
+    /// Whether touches on the picture are handled at all (and so can reach the Mac).
+    var picturePassesTouches: Bool { !screenReaderRunning || directTouch }
+
+    /// VoiceOver's direct-interaction trait: on only while the user chose Direct Touch.
+    var allowsDirectInteraction: Bool { screenReaderRunning && directTouch }
+
+    /// The action offered on the picture while a screen reader runs (nil otherwise).
+    var directTouchActionTurnsOn: Bool? { screenReaderRunning ? !directTouch : nil }
+
+    /// Returns whether anything changed. Stopping the screen reader ends Direct Touch.
+    @discardableResult
+    mutating func update(screenReaderRunning running: Bool) -> Bool {
+        guard running != screenReaderRunning else { return false }
+        screenReaderRunning = running
+        if !running { directTouch = false }
+        return true
+    }
+
+    /// Returns whether anything changed. Only meaningful while a screen reader runs.
+    @discardableResult
+    mutating func setDirectTouch(_ on: Bool) -> Bool {
+        guard screenReaderRunning, on != directTouch else { return false }
+        directTouch = on
+        return true
+    }
+}

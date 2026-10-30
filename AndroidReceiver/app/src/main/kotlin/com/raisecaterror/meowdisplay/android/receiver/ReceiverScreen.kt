@@ -332,7 +332,7 @@ fun ReceiverScreen(
             // TalkBack: this view is the Mac's picture and the touch surface. Name it and say whether it controls the Mac.
             update = { view ->
                 view.contentDescription = if (picture != null) "Sample Mac screen" else "Mac screen"
-                androidx.core.view.ViewCompat.setStateDescription(view, if (state.inputAllowed) "Controlling" else "View only")
+                view.refreshStateDescription(state.inputAllowed)
             },
             onRelease = { if (controller.inputView === it) controller.inputView = null },
         )
