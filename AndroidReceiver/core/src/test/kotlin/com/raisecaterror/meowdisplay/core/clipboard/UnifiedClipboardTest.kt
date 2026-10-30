@@ -108,8 +108,20 @@ class UnifiedClipboardTest {
         assertEquals(3, reads)
         assertArrayEquals(bytes, out.toByteArray())
         val wrong = ClipBlobFetch(3, id, 0, 4, "0000000000000000")
+        wrong.nextRead()
         val ok = ClipBlobWire.answer(3, 0, byteArrayOf(1, 2, 3, 4))
         assertEquals(ClipBlobFetch.Step.More, wrong.handle(ok[0]))
         assertEquals(ClipBlobFetch.Step.Failed("digest"), wrong.handle(ok[1]))
+        // More than the outstanding read asked for is refused before it is buffered.
+        val big = ClipBlobFetch(4, id, 0, 5_000_000, null)
+        big.nextRead()
+        var off = 0L
+        var step: ClipBlobFetch.Step = ClipBlobFetch.Step.More
+        while (step == ClipBlobFetch.Step.More && off < 400_000) {
+            step = big.handle(buildJsonObject { put("op", "data"); put("off", off); put("d", java.util.Base64.getEncoder().encodeToString(ByteArray(ClipboardWire.PART_BYTES))) })
+            off += ClipboardWire.PART_BYTES
+        }
+        assertEquals(ClipBlobFetch.Step.Failed("badRange"), step)
+        assertTrue(off <= ClipboardWire.READ_MAX + ClipboardWire.PART_BYTES)
     }
 }

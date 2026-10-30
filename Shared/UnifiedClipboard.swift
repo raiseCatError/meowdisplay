@@ -353,6 +353,8 @@ struct ClipBlobFetch: Sendable {
     let expectedHash: String?
     private(set) var received = 0
     private var range = Data()
+    /// Bytes the outstanding `read` asked for: a peer can't push more than that into memory.
+    private var asked = 0
     private var whole = SHA256()
 
     init(req: Int, id: ClipEventID, blob: Int, size: Int, expectedHash: String?) {
@@ -360,8 +362,11 @@ struct ClipBlobFetch: Sendable {
     }
 
     var done: Bool { received >= size }
-    var nextRead: [String: Any]? {
-        done ? nil : ClipBlobWire.read(req: req, id: id, blob: blob, offset: received, count: min(ClipboardWire.readMax, size - received))
+    /// The next `read` to send (remembers how much it asks for).
+    mutating func nextRead() -> [String: Any]? {
+        guard !done else { return nil }
+        asked = min(ClipboardWire.readMax, size - received)
+        return ClipBlobWire.read(req: req, id: id, blob: blob, offset: received, count: asked)
     }
 
     enum Step: Equatable { case more, rangeDone(Data), failed(String) }
@@ -372,7 +377,7 @@ struct ClipBlobFetch: Sendable {
         case "data":
             guard let off = m["off"] as? Int, off == received + range.count,
                   let d = (m["d"] as? String).flatMap({ Data(base64Encoded: $0) }), d.count <= ClipboardWire.partBytes,
-                  received + range.count + d.count <= size else { return .failed("badRange") }
+                  range.count + d.count <= asked, received + range.count + d.count <= size else { return .failed("badRange") }
             range.append(d)
             return .more
         case "readEnd":

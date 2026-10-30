@@ -253,14 +253,21 @@ class ClipBlobFetch(val req: Int, val id: ClipEventID, val blob: Int, val size: 
     var received = 0L; private set
     private val range = java.io.ByteArrayOutputStream()
     private val whole = MessageDigest.getInstance("SHA-256")
+    /** Bytes the outstanding `read` asked for: a peer can't push more than that into memory. */
+    private var asked = 0
     val done: Boolean get() = received >= size
-    fun nextRead(): JsonObject? = if (done) null else ClipBlobWire.read(req, id, blob, received, minOf(ClipboardWire.READ_MAX.toLong(), size - received).toInt())
+    fun nextRead(): JsonObject? {
+        if (done) return null
+        asked = minOf(ClipboardWire.READ_MAX.toLong(), size - received).toInt()
+        return ClipBlobWire.read(req, id, blob, received, asked)
+    }
 
     fun handle(m: JsonObject): Step = when (m.str("op")) {
         "data" -> {
             val off = m.long("off")
             val d = m.str("d")?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
-            if (off != received + range.size() || d == null || d.size > ClipboardWire.PART_BYTES || received + range.size() + d.size > size) Step.Failed("badRange")
+            if (off != received + range.size() || d == null || d.size > ClipboardWire.PART_BYTES || range.size() + d.size > asked ||
+                received + range.size() + d.size > size) Step.Failed("badRange")
             else { range.write(d); Step.More }
         }
         "readEnd" -> {

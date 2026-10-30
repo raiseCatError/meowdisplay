@@ -204,7 +204,7 @@ final class UnifiedClipboardTests: XCTestCase {
         var fetch = ClipBlobFetch(req: 9, id: id, blob: 0, size: bytes.count, expectedHash: ClipHash.of(bytes))
         var assembled = Data()
         var reads = 0
-        while let read = fetch.nextRead {
+        while let read = fetch.nextRead() {
             reads += 1
             let off = read["off"] as! Int, n = read["n"] as! Int
             XCTAssertLessThanOrEqual(n, ClipboardWire.readMax)
@@ -221,16 +221,30 @@ final class UnifiedClipboardTests: XCTestCase {
 
         // A tampered part fails the range; an error ends the fetch with its code.
         var bad = ClipBlobFetch(req: 1, id: id, blob: 0, size: 10, expectedHash: nil)
+        _ = bad.nextRead()
         var parts = ClipBlobWire.answer(req: 1, offset: 0, bytes: Data(repeating: 1, count: 10))
         parts[0]["d"] = Data(repeating: 2, count: 10).base64EncodedString()
         XCTAssertEqual(bad.handle(parts[0]), .more)
         XCTAssertEqual(bad.handle(parts[1]), .failed("digest"))
         var gone = ClipBlobFetch(req: 2, id: id, blob: 0, size: 10, expectedHash: nil)
+        _ = gone.nextRead()
         XCTAssertEqual(gone.handle(ClipBlobWire.answer(req: 2, offset: 0, bytes: nil, error: "changed")[0]), .failed("changed"))
         // A whole-blob digest that doesn't match fails at the end.
         var wrong = ClipBlobFetch(req: 3, id: id, blob: 0, size: 4, expectedHash: "0000000000000000")
+        _ = wrong.nextRead()
         let ok = ClipBlobWire.answer(req: 3, offset: 0, bytes: Data([1, 2, 3, 4]))
         XCTAssertEqual(wrong.handle(ok[0]), .more)
         XCTAssertEqual(wrong.handle(ok[1]), .failed("digest"))
+        // More than the outstanding read asked for is refused before it is buffered.
+        var big = ClipBlobFetch(req: 4, id: id, blob: 0, size: 5_000_000, expectedHash: nil)
+        let first = big.nextRead()!
+        XCTAssertEqual(first["n"] as? Int, ClipboardWire.readMax)
+        var off = 0, step = ClipBlobFetch.Step.more
+        while step == .more, off < 400_000 {
+            step = big.handle(["op": "data", "off": off, "d": Data(count: ClipboardWire.partBytes).base64EncodedString()])
+            off += ClipboardWire.partBytes
+        }
+        XCTAssertEqual(step, .failed("badRange"))
+        XCTAssertLessThanOrEqual(off, ClipboardWire.readMax + ClipboardWire.partBytes)
     }
 }
