@@ -23,7 +23,8 @@ enum SecurityPresentationCoordinator {
     static func presentPairing(prompt: PairingPromptModel) {
         guard let pending = prompt.pending else { return }
         Log.info("uiDebug: pairing presentation requested peerID=\(pending.peerID)")
-        NSApp.activate(ignoringOtherApps: true)
+        // Never activated or made key: a prompt that grants something must not take the
+        // keyboard from what the person at this Mac is typing (ConsentInputPolicy).
 
         let panel: NSPanel
         if let existing = pairingPanel {
@@ -59,7 +60,7 @@ enum SecurityPresentationCoordinator {
             panel.orderOut(nil)
         }))
         panel.center()
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
         Log.info("uiDebug: pairing panel orderedFront visible=\(panel.isVisible) keyWindow=\(panel.isKeyWindow)")
     }
 
@@ -70,7 +71,8 @@ enum SecurityPresentationCoordinator {
 
     static func presentInputControlRequest(prompt: InputControlRequestPromptModel) {
         guard prompt.pending != nil else { return }
-        NSApp.activate(ignoringOtherApps: true)
+        // Never activated or made key: a prompt that grants something must not take the
+        // keyboard from what the person at this Mac is typing (ConsentInputPolicy).
 
         let panel: NSPanel
         if let existing = inputControlPanel {
@@ -106,7 +108,7 @@ enum SecurityPresentationCoordinator {
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
         panel.center()
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
     }
 
     // MARK: - Remote Finder ("<Device Name> wants to browse your approved folders")
@@ -201,7 +203,6 @@ enum SecurityPresentationCoordinator {
         panel.contentViewController = hostingController
         panel.center()
         panel.orderFrontRegardless()
-        panel.makeKey()
     }
 
     // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
@@ -211,7 +212,8 @@ enum SecurityPresentationCoordinator {
 
     static func presentSessionApproval(prompt: SessionApprovalPromptModel) {
         guard prompt.current != nil else { return }
-        NSApp.activate(ignoringOtherApps: true)
+        // Never activated or made key: a prompt that grants something must not take the
+        // keyboard from what the person at this Mac is typing (ConsentInputPolicy).
 
         let panel: NSPanel
         if let existing = sessionApprovalPanel {
@@ -237,7 +239,7 @@ enum SecurityPresentationCoordinator {
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
         panel.center()
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
     }
 
     // MARK: - Forget Device
@@ -300,6 +302,7 @@ private final class PairingPanelWindowDelegate: NSObject, NSWindowDelegate {
 private struct PairingPanelView: View {
     @ObservedObject var prompt: PairingPromptModel
     let onResolved: () -> Void
+    @State private var armed = false
 
     var body: some View {
         Group {
@@ -327,11 +330,11 @@ private struct PairingPanelView: View {
                     }
                     HStack {
                         Button("Cancel", role: .cancel) { prompt.decide(accept: false) }
+                            .keyboardShortcut(.cancelAction)
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
-                            prompt.decide(accept: true)
+                            if ConsentGrant.allowed() { prompt.decide(accept: true) }
                         }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(prompt.isAuthenticating)
+                        .disabled(prompt.isAuthenticating || !armed)
                     }
                 }
                 .padding(24)
@@ -355,6 +358,7 @@ private struct PairingPanelView: View {
         .frame(minWidth: 360)
         // Stays open while waiting for the other device; closes only when the
         // attempt has neither a pending SAS nor a local confirmation.
+        .modifier(ArmsAfterDelay(armed: $armed, key: prompt.pending?.id))
         .onChange(of: prompt.pending == nil && prompt.confirmedLocally == nil) { _, ended in
             if ended { onResolved() }
         }
@@ -386,6 +390,7 @@ private final class InputControlPanelWindowDelegate: NSObject, NSWindowDelegate 
 private struct InputControlRequestPanelView: View {
     @ObservedObject var prompt: InputControlRequestPromptModel
     let onResolved: () -> Void
+    @State private var armed = false
 
     var body: some View {
         Group {
@@ -403,8 +408,8 @@ private struct InputControlRequestPanelView: View {
                             .multilineTextAlignment(.center)
                     }
                     VStack(spacing: 8) {
-                        Button("Allow for This Session") { prompt.decide(.allowSession) }
-                            .keyboardShortcut(.defaultAction)
+                        Button("Allow for This Session") { if ConsentGrant.allowed() { prompt.decide(.allowSession) } }
+                            .disabled(!armed)
                         HStack(spacing: 8) {
                             Button("Not Now") { prompt.decide(.notNow) }
                                 .keyboardShortcut(.cancelAction)
@@ -413,8 +418,9 @@ private struct InputControlRequestPanelView: View {
                     }
                     Divider()
                     VStack(spacing: 4) {
-                        Button("Always Allow This Device") { prompt.decide(.alwaysAllowDevice) }
+                        Button("Always Allow This Device") { if ConsentGrant.allowed() { prompt.decide(.alwaysAllowDevice) } }
                             .foregroundStyle(.orange)
+                            .disabled(!armed)
                         Text("Skips this prompt for future requests from this device. Change anytime in Settings.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -435,6 +441,7 @@ private struct InputControlRequestPanelView: View {
                 Color.clear.frame(width: 1, height: 1)
             }
         }
+        .modifier(ArmsAfterDelay(armed: $armed, key: prompt.pending?.generation))
         .onChange(of: prompt.pending) { _, newValue in
             if newValue == nil { onResolved() }
         }
@@ -461,6 +468,7 @@ private final class SessionApprovalPanelWindowDelegate: NSObject, NSWindowDelega
 /// reject choices are set apart below.
 private struct SessionApprovalPanelView: View {
     @ObservedObject var prompt: SessionApprovalPromptModel
+    @State private var armed = false
     let onResolved: () -> Void
 
     var body: some View {
@@ -480,12 +488,13 @@ private struct SessionApprovalPanelView: View {
                     }
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
-                            Button("Allow & Mirror") { prompt.decide(.allowMirror, for: pending.id) }
-                                .keyboardShortcut(pending.mode == .mirror ? .defaultAction : nil)
-                            Button("Allow & Extend") { prompt.decide(.allowExtend, for: pending.id) }
-                                .keyboardShortcut(pending.mode == .extend ? .defaultAction : nil)
+                            Button("Allow & Mirror") { if ConsentGrant.allowed() { prompt.decide(.allowMirror, for: pending.id) } }
+                                .disabled(!armed)
+                            Button("Allow & Extend") { if ConsentGrant.allowed() { prompt.decide(.allowExtend, for: pending.id) } }
+                                .disabled(!armed)
                         }
-                        Button("Allow Permanently") { prompt.decide(.allowPermanently, for: pending.id) }
+                        Button("Allow Permanently") { if ConsentGrant.allowed() { prompt.decide(.allowPermanently, for: pending.id) } }
+                            .disabled(!armed)
                         Text("Future requests from this device connect automatically. Change anytime in Settings.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -506,6 +515,7 @@ private struct SessionApprovalPanelView: View {
                 Color.clear.frame(width: 1, height: 1)
             }
         }
+        .modifier(ArmsAfterDelay(armed: $armed, key: prompt.current?.id))
         .onChange(of: prompt.current) { _, newValue in
             if newValue == nil { onResolved() }
         }
@@ -560,7 +570,7 @@ private struct FilesConsentPanelView: View {
                 }
                 HStack(spacing: 8) {
                     Button("Back") { confirmingAll = false }.keyboardShortcut(.cancelAction)
-                    Button("Allow All Accessible Files") { decide(.alwaysAllAccessible) }.disabled(!armed)
+                    Button("Allow All Accessible Files") { if ConsentGrant.allowed() { decide(.alwaysAllAccessible) } }.disabled(!armed)
                 }
             } else {
                 VStack(spacing: 6) {
@@ -584,19 +594,18 @@ private struct FilesConsentPanelView: View {
                     HStack(spacing: 8) {
                         Button("Not Now") { decide(.deny) }
                             .keyboardShortcut(.cancelAction)
-                        Button("Allow This Session") { decide(.session) }
-                            .keyboardShortcut(.defaultAction)
+                        Button("Allow This Session") { if ConsentGrant.allowed() { decide(.session) } }
                             .disabled(!armed)
                     }
                     if capabilities == nil {
                         HStack(spacing: 8) {
-                            Button("Always Allow Approved Folders") { decide(.alwaysSelectedFolders) }
+                            Button("Always Allow Approved Folders") { if ConsentGrant.allowed() { decide(.alwaysSelectedFolders) } }
                                 .disabled(!armed || !alwaysAllowed)
                             Button("All Files…") { confirmingAll = true }
                                 .disabled(!armed || !alwaysAllowed)
                         }
                     } else {
-                        Button("Always Allow for This Device") { decide(.alwaysSelectedFolders) }
+                        Button("Always Allow for This Device") { if ConsentGrant.allowed() { decide(.alwaysSelectedFolders) } }
                             .disabled(!armed || !alwaysAllowed)
                     }
                 }
@@ -609,5 +618,25 @@ private struct FilesConsentPanelView: View {
             armed = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { armed = true }
         }
+    }
+}
+
+/// Grant buttons wake up `ConsentInputPolicy.armDelay` after a prompt appears, and again after
+/// it changes to another request, so a click or key meant for something else can't answer it.
+struct ArmsAfterDelay<Key: Equatable>: ViewModifier {
+    @Binding var armed: Bool
+    let key: Key
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { arm() }
+            .onChange(of: key) { _, _ in
+                armed = false
+                arm()
+            }
+    }
+
+    private func arm() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + ConsentInputPolicy.armDelay) { armed = true }
     }
 }
