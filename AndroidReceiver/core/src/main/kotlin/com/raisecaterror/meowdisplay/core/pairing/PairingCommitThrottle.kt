@@ -50,6 +50,20 @@ class PairingCommitThrottle(private val now: () -> Long = System::currentTimeMil
         }
     }
 
+    /**
+     * A code was shown and nothing was paired (declined, timed out, aborted by the peer or
+     * failed later): counts toward the cooldown like a failed reveal, so a peer can't raise
+     * prompt after prompt by aborting and starting over. Shared/RemotePairing.swift twin.
+     */
+    @Synchronized
+    fun codeShownWithoutPairing() {
+        consecutiveFailures += 1
+        if (consecutiveFailures >= FAILURES_BEFORE_COOLDOWN) {
+            consecutiveFailures = 0
+            cooldownUntil = now() + COOLDOWN_MS
+        }
+    }
+
     /** Only the admission that just completed pairing may clear the history. */
     @Synchronized
     fun pairingSucceeded(token: Long) {

@@ -31,7 +31,8 @@ object PinnedTls {
      * A fresh context per connection or listener: no session cache is shared
      * with another trust decision. `pinnedSPKIs` is read during each handshake
      * and must be an in-memory snapshot. `onPeerKey` only OBSERVES the key the
-     * peer presented (null when it is not a P-256 key), before the pin check
+     * peer presented (its SPKI; for a key that isn't P-256, the certificate's
+     * encoded public key, which can never equal a pin), before the pin check
      * decides; it can name who answered a failed dial, and never trusts it.
      */
     fun context(
@@ -107,7 +108,9 @@ object PinnedTls {
         private fun check(chain: Array<out X509Certificate>?) {
             val leaf = chain?.firstOrNull() ?: throw CertificateException("no peer certificate")
             val spki = spki(leaf)
-            onPeerKey?.invoke(spki)
+            // A key of another kind is still a key someone else presented: the caller
+            // must see a different identity, not a transient failure.
+            onPeerKey?.invoke(spki ?: leaf.publicKey?.encoded ?: ByteArray(0))
             if (spki == null) throw CertificateException("peer key is not P-256")
             if (pinnedSPKIs().none { it.contentEquals(spki) }) throw CertificateException("peer is not pinned")
         }

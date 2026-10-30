@@ -56,7 +56,7 @@ enum Log {
     }()
 
     static func info(_ message: String) {
-        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        let line = "[\(formatter.string(from: Date()))] \(LogRedaction.redact(message))\n"
         print(line, terminator: "")
         guard let data = line.data(using: .utf8) else { return }
         queue.async { writer.append(data) }

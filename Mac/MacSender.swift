@@ -785,6 +785,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // (the user may start the Mac side first); once connected, a device that
     // stays gone past the grace ends the session via onDisconnected.
     private var everConnected = false
+    /// Redials since the transport was last up (`ReconnectPolicy.retryDelay`).
+    private var redialAttempts = 0
     private var disconnectedSince: Date?
     private let disconnectGraceSeconds: TimeInterval = 10
     /// Auto-Reconnect preference (Mac Sender's own local Settings toggle).
@@ -1640,6 +1642,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// other ON -> OFF transition.
     func revokeSessionInput() {
         denySessionInput(state: .off)
+    }
+
+    /// Lets go of anything this session's device holds down (keys, buttons, a drag), without
+    /// changing its grant: the Privacy Shield calls it before the Mac asks for its password.
+    func releaseHeldInput() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.inputInjector?.cancelActiveInput() }
     }
 
     func setVideoEnabled(_ enabled: Bool) {
@@ -4348,6 +4357,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // boundary; it re-reads this queue-confined property once back on
     // `queue` instead. Only touched on `queue`.
     private var activeUSBBridgeTLS: TLSSessionConfig?
+    /// The current QUIC dial's endpoint came from an unauthenticated `_meowdisp-q._udp`
+    /// discovery hint: an identity mismatch there says the hint is wrong, not that the paired
+    /// device's identity changed (transportQUICFailed).
+    private var quicDialUsedDiscoveryHint = false
 
     private func connect() {
         guard !stopped else { return }
@@ -4370,6 +4383,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 connectTCP(endpoint, tls: tls)
             case .quic:
                 guard let quicEndpoint else { return }
+                quicDialUsedDiscoveryHint = QUICDiscoveryHintStore.shared.entry(peerID: tls.peerID)?.endpoint == quicEndpoint
                 dialingProtocol = .quic
                 Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp protocol=quic"
                     + " preference=\(networkPreference.rawValue)")
@@ -4557,7 +4571,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let selfBox = self.selfBox
         Task { @MainActor in
             guard let self = selfBox.resolve() else { return }
-            self.onTrustFailure?("MeowDisplay could not verify this device. Forget it and pair again if its identity was reset.")
+            // Honest about both causes: the address came from the network, and the device that
+            // answered there didn't prove it is the paired one. Nothing is forgotten automatically.
+            self.onTrustFailure?("MeowDisplay couldn't verify the device that answered and didn't connect. If this device's identity was reset (for example after reinstalling MeowDisplay), Forget it and pair again; otherwise another device on this network may be answering in its place.")
         }
     }
 
@@ -4708,10 +4724,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = transportController.resetForRedial()
         pipelineState.resetPendingSendsForNewTransport()
         pipelineState.resetPendingEncodes()
+        // An explicit Connect/Reconnect starts the backoff over.
+        redialAttempts = automatic ? redialAttempts + 1 : 1
+        let delay = ReconnectPolicy.retryDelay(attempt: redialAttempts, everConnected: everConnected)
+        if delay > 1 { Log.info("connectDebug: redial \(redialAttempts) in \(Int(delay))s peer=\(endpointName)") }
         let selfBox = self.selfBox
-        queue.asyncAfter(deadline: .now() + 1.0) {
+        queue.asyncAfter(deadline: .now() + delay) {
             // Generation-guarded so a switchTransport (or another reconnect)
-            // that landed in this 1s window supersedes this dial instead of
+            // that landed in this window supersedes this dial instead of
             // racing it — otherwise the queued connect() re-dials the new
             // transport, briefly running two live connections. (No bare
             // self-rescheduling asyncAfter — the pattern banned in #76.)
@@ -5152,6 +5172,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 pendingPromoteGeneration = activeConnectionGeneration
                 Log.info("wakeDebug: promoteInteractiveWake held until the session is admitted")
             }
+            return
+        }
+        // While the Privacy Shield asks for the login password, nothing a device sends may change
+        // this Mac (PrivacyShieldPolicy.messagesAllowedWhileUnlocking).
+        if PrivacyShieldWindows.isUnlocking, !PrivacyShieldPolicy.handlesWhileUnlocking(type) {
+            Log.info("privacy shield: \(type) from a device dropped while the Mac asks for its password")
             return
         }
         switch type {
@@ -6191,6 +6217,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 lastCaptureAt = Date()   // the carrier is alive; frames come from the workspace
                 return
             }
+            // While the Privacy Shield asks for the login password no new picture leaves this
+            // Mac (the prompt can be in a frame before the capture filter leaves it out):
+            // devices keep the last frame from before. Capture stays alive.
+            if PrivacyShieldWindows.isUnlocking {
+                lastCaptureAt = Date()
+                return
+            }
             let generation = captureGenerationNow
             if wakeCaptureAwaitingFirstFrameGeneration == generation {
                 wakeCaptureAwaitingFirstFrameGeneration = nil
@@ -7069,6 +7102,7 @@ extension MacSender: MacSenderTransportDelegate {
         Task { @MainActor in protocolSink.publishNetworkProtocol(networkProtocol) }
         cursorSeq = 0   // per-session; the receiver rewound its floor with the connection
         consecutiveRefusals = 0
+        redialAttempts = 0
         disconnectedSince = nil
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
         // Keep cached pixels: ScreenCaptureKit stays quiet on a static
@@ -7150,6 +7184,18 @@ extension MacSender: MacSenderTransportDelegate {
         Log.info("quic: policy class=\(failure.failureClass.rawValue) established=\(failure.established)"
             + " preference=\(networkPreference.rawValue) action=\(action)")
         switch action {
+        case .stop(.security) where quicDialUsedDiscoveryHint && !failure.established:
+            // A spoofed or stale discovery record answered: drop the hint and dial again, which
+            // derives the endpoint from the TCP service (still the same pinned mutual TLS). No
+            // trust failure and no "Forget" prompt for what the network claimed.
+            QUICDiscoveryHintStore.shared.remove(peerID: tls.peerID)
+            // Auto then uses secure TCP for the cooldown, so a record that keeps reappearing
+            // can't loop the dial (explicit QUIC ignores the cooldown and uses the derived endpoint).
+            QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+            quicDialUsedDiscoveryHint = false
+            Log.info("SECURITY: the QUIC discovery hint for \(endpointName) answered with another identity; hint dropped")
+            invalidateApplicationSession(reason: "quicHintMismatch")
+            scheduleReconnect()
         case .stop(.security):
             invalidateApplicationSession(reason: "certificateRejected")
             reportTrustFailure()

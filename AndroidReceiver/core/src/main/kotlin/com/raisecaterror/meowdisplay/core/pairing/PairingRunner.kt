@@ -65,8 +65,16 @@ class PairingAttempt(
         decide: suspend (PendingPairing) -> Boolean,
         onPeerAbort: () -> Unit = {},
         onCommitting: () -> Unit = {},
+        onCommitmentReceived: () -> Unit = {},
     ): PendingPairing {
-        val request = transport.receive()
+        // Until its commitment arrives the peer is anyone on the network: it gets
+        // PreAuthSlots.DEADLINE_MS to send it.
+        val request = try {
+            withTimeout(PreAuthSlots.DEADLINE_MS) { transport.receive() }
+        } catch (_: TimeoutCancellationException) {
+            fail(PairingError.MalformedMessage)
+        }
+        onCommitmentReceived()
         val commitment = request.helloCommitment
         if (request.kind != PairingEnvelope.Kind.HelloCommit || commitment == null || commitment.size != 32) {
             fail(PairingError.MalformedMessage)
@@ -92,10 +100,16 @@ class PairingAttempt(
             if (!isCurrent() || gate.isCancelled) fail(PairingError.Rejected)
             throttleResolved = true
             throttle.revealSucceeded()
-            PairingSessionCore.run(
-                PairingRole.Responder, result, pending, transport, gate, abortSlot,
-                decide, onPeerAbort, onCommitting, store, isCurrent,
-            )
+            try {
+                PairingSessionCore.run(
+                    PairingRole.Responder, result, pending, transport, gate, abortSlot,
+                    decide, onPeerAbort, onCommitting, store, isCurrent,
+                )
+            } catch (e: Throwable) {
+                // A code was shown and nothing was paired (declined, timed out, aborted).
+                throttle.codeShownWithoutPairing()
+                throw e
+            }
             // Authenticated trust completion for THIS admission: only now is
             // earlier failure history forgiven.
             throttle.pairingSucceeded(admission.token)

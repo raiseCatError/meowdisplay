@@ -51,6 +51,54 @@ enum PrivacyShieldPolicy {
     /// at the Mac.
     static func isPhysical(sourcePID: Int64) -> Bool { sourcePID == 0 }
 
+    // MARK: Removing the cover takes the person at the Mac
+
+    /// The two settings while the cover is up. Turning one on always counts; turning one off
+    /// counts only when the person at the Mac confirmed it (MeowDisplay's Settings asks for Touch
+    /// ID or the password first), so a change written behind MeowDisplay's back
+    /// (`defaults write`) can't remove the cover.
+    static func latched(_ current: (remote: Bool, local: Bool), stored: (remote: Bool, local: Bool),
+                        ownerConfirmed: Bool) -> (remote: Bool, local: Bool) {
+        if ownerConfirmed { return stored }
+        return (remote: current.remote || stored.remote, local: current.local || stored.local)
+    }
+
+    /// Apple Event quit reasons for a logout, restart or shutdown ('logo', 'rlgo', 'rrst', 'shut').
+    static let systemEndingQuitReasons: Set<UInt32> = [0x6C6F_676F, 0x726C_676F, 0x7272_7374, 0x7368_7574]
+
+    /// A quit while covering locks this Mac's screen first, except when macOS itself is logging
+    /// out, restarting or shutting down: then the quit carries one of those reasons AND comes from
+    /// loginwindow. Any other quit event (one another app sends, with or without a reason) locks first.
+    static func isSystemEnding(quitReason: UInt32?, senderBundleID: String?) -> Bool {
+        guard let quitReason, systemEndingQuitReasons.contains(quitReason) else { return false }
+        return senderBundleID == "com.apple.loginwindow"
+    }
+
+    // MARK: While the Mac asks for its login password
+    // Nothing a device sends may change this Mac: the password comes only from this Mac's own
+    // keyboard, the unlock can't be cancelled or redirected (no window activation, Escape, menu,
+    // app launch, Lock Mac or file opening) and no window list or thumbnail can include the prompt.
+
+    /// Control messages still handled while unlocking: liveness, the handshake and teardown.
+    static let messagesAllowedWhileUnlocking: Set<String> = [
+        "ping", "stats", "kf", "hello", WireMessage.sessionInviteResponse, WireMessage.sleeping, WireMessage.closing,
+    ]
+
+    static func handlesWhileUnlocking(_ type: String) -> Bool { messagesAllowedWhileUnlocking.contains(type) }
+
+    /// Synthetic events still posted while unlocking: only those that let go of what a device was
+    /// holding (a key up, a button up, every modifier released). They can neither type nor click,
+    /// and dropping them would leave keys or buttons stuck down after the unlock.
+    static func postsWhileUnlocking(_ type: CGEventType, flags: CGEventFlags) -> Bool {
+        switch type {
+        case .keyUp, .leftMouseUp, .rightMouseUp, .otherMouseUp: return true
+        case .flagsChanged:
+            let held: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand, .maskSecondaryFn]
+            return flags.intersection(held).isEmpty
+        default: return false
+        }
+    }
+
     /// Every display a person can look at: MeowDisplay's own virtual displays (Extend) are left out.
     static func coveredDisplays(_ all: [CGDirectDisplayID], virtual: Set<CGDirectDisplayID>) -> [CGDirectDisplayID] {
         all.filter { !virtual.contains($0) }

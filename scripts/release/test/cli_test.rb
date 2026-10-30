@@ -10,8 +10,10 @@ class ReleaseCLITest < Minitest::Test
   CLI = File.expand_path("../meow-release", __dir__)
   SHA = "c" * 40
 
-  def run_cli(*args, ok: true)
-    out, err, status = Open3.capture3("ruby", CLI, *args)
+  # The dry run models an Android production release that is explicitly
+  # authorized for 2.0.0 (release config + operator switch).
+  def run_cli(*args, ok: true, env: { "ANDROID_PRODUCTION_AUTHORIZED" => "2.0.0" })
+    out, err, status = Open3.capture3(env, "ruby", CLI, *args)
     assert_equal ok, status.success?, "meow-release #{args.join(' ')}\n#{out}#{err}"
     [out, err]
   end
@@ -23,7 +25,8 @@ class ReleaseCLITest < Minitest::Test
   end
 
   def ios(state, build_state: "VALID", attached: 7)
-    { "build" => 7, "build_state" => build_state, "version_state" => state, "attached_build" => attached, "blockers" => [] }
+    { "build" => 7, "build_state" => build_state, "version_state" => state, "attached_build" => attached, "blockers" => [],
+      "release_type" => "MANUAL" }
   end
 
   def play(state)
@@ -39,7 +42,8 @@ class ReleaseCLITest < Minitest::Test
       File.write(cfg, JSON.generate("publishMode" => "manual-final-approval", "crossPlatformReady" => true,
                                     "requiredPlatforms" => %w[mac ios android],
                                     "ios" => { "appId" => "6817552864", "storeUrl" => "https://apps.apple.com/app/id6817552864" },
-                                    "android" => { "package" => "com.raisecaterror.meowdisplay.android" }))
+                                    "android" => { "package" => "com.raisecaterror.meowdisplay.android",
+                                                   "reviewTrack" => "production", "productionRelease" => "2.0.0" }))
       dmg = File.join(dir, "MeowDisplay.dmg")
       File.write(dmg, "not really a disk image")
 
@@ -55,8 +59,13 @@ class ReleaseCLITest < Minitest::Test
       _, err = run_cli("gate", state, "--branch-head", SHA, ok: false)
       assert_match(/ios: uploaded/, err)
 
-      stores = fixture(dir, "review.json", apple: { "observe" => [ios("PREPARE_FOR_SUBMISSION", attached: nil)] * 2, "submit_for_review" => [true] },
+      stores = fixture(dir, "review.json", apple: { "observe" => [ios("PREPARE_FOR_SUBMISSION", attached: nil)] * 2,
+                                                    "ensure_manual_release" => [true], "submit_for_review" => [true] },
                                            play: { "observe" => [play(nil)], "submit" => [true] })
+      # Without the operator's separate authorization, production is refused
+      # outright and nothing is submitted.
+      _, err = run_cli("monitor", state, "--config", cfg, "--stores", stores, ok: false, env: { "ANDROID_PRODUCTION_AUTHORIZED" => nil })
+      assert_match(/Android production for 2\.0\.0 is not authorized/, err)
       out, = run_cli("monitor", state, "--config", cfg, "--stores", stores)
       assert_match(/submit build 7 for review/, out)
       assert_match(/send versionCode 2000001 to the production track/, out)

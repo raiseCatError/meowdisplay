@@ -28,8 +28,9 @@ protocol SyntheticEventSink: Sendable {
 
 struct HIDEventTapSink: SyntheticEventSink {
     func post(_ event: CGEvent) {
-        // While the Privacy Shield asks for the login password, only this Mac's own input counts.
-        guard !PrivacyShieldWindows.isUnlocking else { return }
+        // While the Privacy Shield asks for the login password, only this Mac's own input counts;
+        // releases still go out so nothing a device held stays stuck down.
+        guard !PrivacyShieldWindows.isUnlocking || PrivacyShieldPolicy.postsWhileUnlocking(event.type, flags: event.flags) else { return }
         event.post(tap: .cghidEventTap)
     }
 }

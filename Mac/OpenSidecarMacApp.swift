@@ -47,7 +47,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updater = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
+    /// `kill`/`killall` (SIGTERM) while the Privacy Shield covers the screens locks this Mac's
+    /// screen before exiting, like a normal Quit. SIGKILL and a crash can't be caught: then the
+    /// cover disappears with the app (SECURITY.md says so).
+    private var terminationSignal: DispatchSourceSignal?
+
+    private func lockOnTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                guard PrivacyShield.shared.isCovering else { exit(0) }
+                Log.info("privacy shield: SIGTERM while covering; locking this Mac's screen first")
+                MacScreenLock.lock(timeout: 2) { _ in exit(0) }
+            }
+        }
+        source.resume()
+        terminationSignal = source
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        lockOnTerminationSignal()
         // Hand the updater to the settings window, which is built outside
         // the SwiftUI App scene (NSHostingView), so it can offer the same
         // button.
@@ -77,8 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Quitting while the Privacy Shield covers the screens locks this Mac's screen first, so
     // quitting never uncovers it (not when macOS is logging out, restarting or shutting down).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let systemEnding = NSAppleEventManager.shared().currentAppleEvent?
-            .attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let reason = event?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
+        let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
+        let sender = senderPID.flatMap { NSRunningApplication(processIdentifier: pid_t($0))?.bundleIdentifier }
+        let systemEnding = PrivacyShieldPolicy.isSystemEnding(quitReason: reason, senderBundleID: sender)
         let lockFirst = PrivacyShield.shared.isCovering && !systemEnding
         let stopReceiver = ReceiverController.shared.active
         guard lockFirst || stopReceiver else { return .terminateNow }
@@ -566,6 +589,9 @@ final class SenderController: ObservableObject {
         didSet {
             ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
+            PrivacyShield.releaseRemoteInput = { [weak self] in
+                for s in self?.sessions ?? [] { s.sender.releaseHeldInput() }
+            }
             PrivacyShield.shared.onWindowsChanged = { [weak self] done in
                 let group = DispatchGroup()
                 for s in self?.sessions ?? [] { group.enter(); s.sender.privacyShieldChanged { group.leave() } }
@@ -1092,11 +1118,15 @@ final class SenderController: ObservableObject {
         // must be seen regardless of Menu Bar/Background presentation or
         // whether the control window happens to be open — it cannot depend
         // on the user already having the Devices list in view.
+        pairingPrompt.onAccepted = { [weak self] pending in
+            self?.beginExplicitPairing(peerID: pending.peerID)
+        }
         pairingPrompt.onPending = { [weak self] pending in
             guard let self else { return }
             Log.info("pairDebug: onPending peerID=\(pending.peerID)")
             Log.info("pairDebug: presenting classification=\(String(describing: pending.classification))")
-            self.beginExplicitPairing(peerID: pending.peerID)
+            // No session is ended for a prompt alone (it can come from any host on the network
+            // naming any device): only an accepted code does (onAccepted above).
             // The confirmation panel is a stable AppKit object owned by the
             // coordinator, not a SwiftUI sheet on a settings page that may
             // not currently exist (Menu Bar presentation with the window
@@ -1528,8 +1558,26 @@ final class SenderController: ObservableObject {
     /// The peer is resolved again after that read, so a Forget landing in
     /// between rejects the knock.
     private func acceptRemoteConnectRequest(_ connection: NWConnection) {
+        // Until its pinned handshake completes the caller is anyone who can
+        // reach the port: it holds one of a few slots, for a few seconds.
+        let slots = PreAuthSlots.remoteKnock
+        guard slots.tryAcquire() else {
+            Log.info("remote connect-request: too many unauthenticated connections — closing this one")
+            connection.cancel()
+            return
+        }
+        let slot = OneShotRelease { slots.release() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + PreAuthSlots.deadline) {
+            guard slot.isHeld else { return }
+            Log.info("remote connect-request: handshake not completed in time — closing")
+            slot.release()
+            connection.cancel()
+        }
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
+                if case .ready = state { slot.release() }
+                if case .failed = state { slot.release() }
+                if case .cancelled = state { slot.release() }
                 guard let self else { connection.cancel(); return }
                 switch state {
                 case .ready:
@@ -1802,7 +1850,7 @@ final class SenderController: ObservableObject {
         if let hostOverride, let portOverride {
             resolvedHost = hostOverride
             resolvedPort = portOverride
-        } else if let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) {
+        } else if let hint = RemoteEndpointStore.mediaEndpoint(forPeerID: peerID, role: .sender) {
             resolvedHost = hint.host
             resolvedPort = hint.port
         } else {
@@ -3671,7 +3719,12 @@ final class SenderController: ObservableObject {
         }
     }
 
+    /// Not Now / timeout cooldowns per device, across its sessions.
+    private var inputControlCooldowns = InputControlRequestCooldowns()
+
     private func presentInputControlPrompt(session: DeviceSession, peerID: String, connectionGeneration: UInt64) {
+        // A device declined (or left unanswered) recently can't reconnect for a new prompt.
+        guard !inputControlCooldowns.isCoolingDown(peerID: peerID) else { return }
         guard let generation = session.inputControlRequest.beginRequest() else {
             // Duplicate while pending (coalesced into the existing prompt)
             // or within the post-decision cooldown — no new prompt, no
@@ -3697,6 +3750,7 @@ final class SenderController: ObservableObject {
             // and a replacement began, or a duplicate resolution raced in).
             return
         }
+        inputControlCooldowns.record(decision, peerID: peerID)
         // `InputControlRequestPlan` fixes a real ordering bug: persisting
         // BEFORE granting means `.alwaysAllowDevice`'s widening is judged
         // by whatever OTHER sessions currently have effective input, never

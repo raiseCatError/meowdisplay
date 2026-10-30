@@ -96,4 +96,14 @@ final class WakeInspectorTests: XCTestCase {
     func testComputedBroadcastRejectsMalformedInput() {
         XCTAssertNil(WakeInspector.computedBroadcast(ipv4: "not-an-ip", subnetMask: "255.255.255.0"))
     }
+
+    // A paired Mac's wake information is stored under the Mac that authenticated the connection;
+    // a message naming any other peer is dropped (it would replace that Mac's wake target).
+    func testWakeInfoIsKeyedByTheAuthenticatedMac() {
+        XCTAssertEqual(WakeMetadataStore.storageKey(claimedPeerID: "mac-a", authenticatedPeerID: "mac-a"), "mac-a")
+        XCTAssertEqual(WakeMetadataStore.storageKey(claimedPeerID: nil, authenticatedPeerID: "mac-a"), "mac-a")
+        XCTAssertNil(WakeMetadataStore.storageKey(claimedPeerID: "mac-b", authenticatedPeerID: "mac-a"), "can't write another Mac's entry")
+        XCTAssertNil(WakeMetadataStore.storageKey(claimedPeerID: "mac-a", authenticatedPeerID: nil), "nothing before authentication")
+    }
+
 }

@@ -123,6 +123,24 @@ class PairingSessionTest {
         }
     }
 
+    /**
+     * A peer whose codes keep being declined can't raise prompt after prompt: each shown-and-declined
+     * code counts toward the listener's cooldown (Swift twin: RemotePairingTests).
+     */
+    @Test
+    fun declinedCodesCountTowardTheCooldown() = runBlocking {
+        val throttle = PairingCommitThrottle()
+        repeat(PairingCommitThrottle.FAILURES_BEFORE_COOLDOWN) {
+            val (macEnd, androidEnd) = pipe()
+            val responder = async {
+                androidEnd.session { attempt(androidEnd, android, InMemoryPeerTrustStore()).runResponder(throttle, decide = { false }) }
+            }
+            macEnd.session { attempt(macEnd, mac, InMemoryPeerTrustStore()).runInitiator(decide = { true }) }
+            assertEquals(PairingError.Rejected, responder.await().pairingError)
+        }
+        assertEquals(PairingCommitThrottle.Admission.CoolingDown, throttle.admitCommitment())
+    }
+
     /** Cancel while the code is on screen: the peer sees an authenticated abort and nothing is pinned. */
     @Test
     fun cancellingDuringTheSasAbortsThePeer() = runBlocking {

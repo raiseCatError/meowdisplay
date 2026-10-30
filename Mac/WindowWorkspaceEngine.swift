@@ -42,6 +42,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     private var latest: Frame?
     private var health = Health()
     private var stream: SCStream?
+    /// Set by `stop()`, never cleared: a capture stopped while it was still starting must
+    /// not come up afterwards with nobody holding its stream.
+    private var stopRequested = false
     private var config = SCStreamConfiguration()
     private let outputQueue = DispatchQueue(label: "meow.workspace.tile", qos: .userInteractive)
     var onFrame: (@Sendable () -> Void)?
@@ -83,8 +86,20 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         if #available(macOS 14.2, *) { config.ignoreShadowsSingleWindow = true }
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
-        lock.withLock { stream = s; health = Health(startedAt: ProcessInfo.processInfo.systemUptime) }
+        let installed = lock.withLock { () -> Bool in
+            guard !stopRequested else { return false }
+            stream = s
+            health = Health(startedAt: ProcessInfo.processInfo.systemUptime)
+            return true
+        }
+        guard installed else { throw CancellationError() }
         try await s.startCapture()
+        // stop() may have run while startCapture was in flight: it took the stream and
+        // asked it to stop before it had started, which doesn't stick. Stop it now.
+        if lock.withLock({ stopRequested }) {
+            try? await s.stopCapture()
+            throw CancellationError()
+        }
     }
 
     /// Re-size or re-rate without restarting: the last frame stays.
@@ -104,7 +119,10 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     var configuredSize: CGSize { CGSize(width: config.width, height: config.height) }
 
     func stop() async {
-        let s = lock.withLock { () -> SCStream? in defer { stream = nil; latest = nil }; return stream }
+        let s = lock.withLock { () -> SCStream? in
+            defer { stream = nil; latest = nil; stopRequested = true }
+            return stream
+        }
         try? await s?.stopCapture()
     }
 
@@ -129,7 +147,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             health.lastStatus = status
             health.lastAnyAt = now
             if let frame {
-                latest = frame
+                // While the Privacy Shield asks for the login password panes keep their last
+                // picture (a Full Desktop pane could show the prompt); health still counts.
+                if !PrivacyShieldWindows.isUnlocking { latest = frame }
                 health.completeFrames += 1
                 health.lastCompleteAt = now
                 if health.firstCompleteAt == nil { health.firstCompleteAt = now }

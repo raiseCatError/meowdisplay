@@ -136,4 +136,52 @@ final class PrivacyShieldPolicyTests: XCTestCase {
         XCTAssertTrue(PrivacyShieldPolicy.unlockPromptBundleIDs.contains("com.apple.LocalAuthentication.UIAgent"))
         XCTAssertTrue(PrivacyShieldPolicy.unlockPromptBundleIDs.contains("com.apple.coreautha"))
     }
+
+    // MARK: While the Mac asks for its password
+
+    func testOnlyLivenessHandshakeAndTeardownAreHandledWhileUnlocking() {
+        for type in ["ping", "stats", "kf", "hello", WireMessage.sessionInviteResponse, WireMessage.sleeping, WireMessage.closing] {
+            XCTAssertTrue(PrivacyShieldPolicy.handlesWhileUnlocking(type), type)
+        }
+        for type in ["touch", "pointer", "scroll", "keyboard", "gesture", "pencil", WireMessage.windowAction, WireMessage.workspaceFocus,
+                     WireMessage.workspaceRequest, LockMacWire.request, WireMessage.filesRequest, ClipboardWire.type,
+                     WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
+                     WireMessage.nativeAppGesture, WireMessage.displayModeRequest, WireMessage.videoRequest, "unknownType"] {
+            XCTAssertFalse(PrivacyShieldPolicy.handlesWhileUnlocking(type), type)
+        }
+    }
+
+    func testOnlyReleasesArePostedWhileUnlocking() {
+        XCTAssertTrue(PrivacyShieldPolicy.postsWhileUnlocking(.keyUp, flags: []))
+        XCTAssertTrue(PrivacyShieldPolicy.postsWhileUnlocking(.leftMouseUp, flags: []))
+        XCTAssertTrue(PrivacyShieldPolicy.postsWhileUnlocking(.rightMouseUp, flags: []))
+        XCTAssertTrue(PrivacyShieldPolicy.postsWhileUnlocking(.flagsChanged, flags: []), "every modifier released")
+        XCTAssertFalse(PrivacyShieldPolicy.postsWhileUnlocking(.flagsChanged, flags: .maskShift), "a modifier going down")
+        XCTAssertFalse(PrivacyShieldPolicy.postsWhileUnlocking(.keyDown, flags: []))
+        XCTAssertFalse(PrivacyShieldPolicy.postsWhileUnlocking(.leftMouseDown, flags: []))
+        XCTAssertFalse(PrivacyShieldPolicy.postsWhileUnlocking(.mouseMoved, flags: []))
+        XCTAssertFalse(PrivacyShieldPolicy.postsWhileUnlocking(.scrollWheel, flags: []))
+    }
+
+    // MARK: Removing the cover takes the person at the Mac
+
+    func testACoveredShieldIgnoresSettingsTurnedOffBehindItsBack() {
+        let up = (remote: true, local: false)
+        let external = PrivacyShieldPolicy.latched(up, stored: (remote: false, local: false), ownerConfirmed: false)
+        XCTAssertTrue(external.remote, "defaults write can't turn the covered shield off")
+        let on = PrivacyShieldPolicy.latched(up, stored: (remote: true, local: true), ownerConfirmed: false)
+        XCTAssertTrue(on.local, "turning one on always counts")
+        let confirmed = PrivacyShieldPolicy.latched(up, stored: (remote: false, local: false), ownerConfirmed: true)
+        XCTAssertFalse(confirmed.remote, "the person at the Mac, confirmed, can turn it off")
+    }
+
+    func testOnlyLoginwindowsLogoutRestartOrShutdownSkipsTheLock() {
+        let logout: UInt32 = 0x6C6F_676F, shutdown: UInt32 = 0x7368_7574
+        XCTAssertTrue(PrivacyShieldPolicy.isSystemEnding(quitReason: logout, senderBundleID: "com.apple.loginwindow"))
+        XCTAssertTrue(PrivacyShieldPolicy.isSystemEnding(quitReason: shutdown, senderBundleID: "com.apple.loginwindow"))
+        XCTAssertFalse(PrivacyShieldPolicy.isSystemEnding(quitReason: logout, senderBundleID: "com.apple.Terminal"), "another app can't skip it")
+        XCTAssertFalse(PrivacyShieldPolicy.isSystemEnding(quitReason: 0x7175_6974, senderBundleID: "com.apple.loginwindow"), "an unknown reason locks")
+        XCTAssertFalse(PrivacyShieldPolicy.isSystemEnding(quitReason: nil, senderBundleID: "com.apple.loginwindow"))
+    }
+
 }

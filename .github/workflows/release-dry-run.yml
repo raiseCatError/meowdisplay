@@ -44,12 +44,13 @@ jobs:
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh release-build
       - name: Missing secrets
         id: secrets
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' }}
         env:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
@@ -61,7 +62,7 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: scripts/release/report-missing.sh DEVELOPMENT_TEAM MATCH_GIT_URL MATCH_DEPLOY_KEY MATCH_PASSWORD APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_CONTENT SPARKLE_PRIVATE_KEY
       - name: Sparkle key continuity (secret == project.yml == published apps)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' }}
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           SPARKLE_TOOLS_VERSION: "2.10.0"
@@ -76,16 +77,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
           printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin" "$RUNNER_TEMP/baseline"
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
-        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         with:
           ruby-version: '3.3'
           bundler-cache: true
       - uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         with:
           ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
       - name: Developer ID certificate in match (read-only)
-        if: ${{ !cancelled() && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         env:
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
@@ -95,7 +96,7 @@ jobs:
             app_identifier:com.raisecaterror.meowdisplay.mac,com.raisecaterror.meowdisplay.mac.receiver \
             team_id:"$DEVELOPMENT_TEAM" platform:macos
       - name: Fail if anything is missing
-        if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
+        if: ${{ !cancelled() && steps.protected.outcome == 'success' && steps.secrets.outputs.missing != '' }}
         env:
           MISSING: ${{ steps.secrets.outputs.missing }}
         run: echo "::error::release-build is missing $MISSING" && exit 1
@@ -126,6 +127,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh release-pr
@@ -146,6 +148,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh ios-upload
@@ -181,6 +184,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh android-upload
@@ -215,6 +219,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -238,6 +243,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Environment is protected
+        id: protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh website-update

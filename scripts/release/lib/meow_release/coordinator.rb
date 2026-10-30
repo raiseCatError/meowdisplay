@@ -21,6 +21,7 @@ module MeowRelease
       @now = now
       @sleeper = sleeper
       @actions = []
+      check_platforms!
     end
 
     def tick
@@ -61,6 +62,12 @@ module MeowRelease
       end
 
       case AppleReview.classify(obs.version_state)
+      when :missing
+        # No App Store version yet: submitting creates it, as a manually
+        # released version, before anything is sent for review.
+        return submit_ios(build) if %w[uploaded blocked].include?(stage)
+
+        block("ios", "App Store Connect has no version #{@state.version}")
       when :preparing
         if Array(obs.blockers).any?
           block("ios", *obs.blockers)
@@ -74,7 +81,15 @@ module MeowRelease
       when :in_review
         advance("ios", "in_review", storeState: obs.version_state)
       when :approved
-        advance("ios", "approved", storeState: obs.version_state)
+        if obs.manual_release?
+          advance("ios", "approved", storeState: obs.version_state)
+        else
+          block("ios", "#{obs.version_state}, but the version's release setting is #{obs.release_settings}, " \
+                       "not manual: set \"Manually release this version\" in App Store Connect")
+        end
+      when :held
+        block("ios", "#{obs.version_state}: Apple holds this version until the OS release it requires; " \
+                     "it is not approved for our release")
       when :published
         advance("ios", "published", storeState: obs.version_state, listingVersion: obs.listing_version)
       when :rejected
@@ -99,6 +114,9 @@ module MeowRelease
       end
 
       begin
+        # Never submit under release settings that would let Apple publish
+        # the version without the publication gate.
+        act("ios: set #{@state.version} to manual release") { @apple.ensure_manual_release(@state.version) }
         act("ios: submit build #{build} for review") { @apple.submit_for_review(@state.version, build) }
       rescue TransientError
         raise
@@ -118,7 +136,7 @@ module MeowRelease
       return if %w[pending built signed published superseded].include?(stage)
 
       code = record["versionCode"]
-      track = @config.android_review_track
+      track = android_review_track!
       obs = observe_android
       unless Array(obs.version_codes).include?(code)
         return note("android: versionCode #{code} isn't visible on Google Play yet") if stage == "uploaded"
@@ -137,7 +155,7 @@ module MeowRelease
     end
 
     def submit_android(code, obs)
-      track = @config.android_review_track
+      track = android_review_track!
       # Another release on the review track still in review or approved is
       # the superseded candidate's: this submission replaces it.
       replacing = Array(obs.releases).any? do |r|
@@ -189,6 +207,9 @@ module MeowRelease
       when :published
         advance("ios", "published", storeState: obs.version_state)
       when :approved
+        problems = ios_approval_problems(obs)
+        raise Error, "iOS #{@state.version} not released: #{problems.join('; ')}" unless problems.empty?
+
         act("ios: release #{@state.version} on the App Store") { @apple.release(@state.version) }
         advance("ios", "published", storeState: "RELEASE_REQUESTED", releasedAt: @now.iso8601)
       else
@@ -205,8 +226,13 @@ module MeowRelease
       return true if record["stage"] == "published"
 
       code = record["versionCode"]
-      release = PlayReview.release_for(observe_android.releases, track: @config.android_review_track, version_code: code)
-      raise Error, "Android versionCode #{code} is not on the #{@config.android_review_track} track" unless release
+      track = android_review_track!
+      unless track == "production"
+        raise Error, "Android is configured for the #{track} testing track: a public release needs production authorization"
+      end
+
+      release = PlayReview.release_for(observe_android.releases, track: track, version_code: code)
+      raise Error, "Android versionCode #{code} is not on the #{track} track" unless release
 
       apply_play_state(release, code)
       return true if @state.stage("android") == "published"
@@ -217,7 +243,61 @@ module MeowRelease
       false
     end
 
+    # The stores' own answer, not the recorded state, on whether every
+    # required store platform is approved (or already public) for exactly
+    # the recorded build. Empty when publication may proceed. Used before
+    # publication starts and again before a resumed publication releases
+    # anything, so a forged or stale release-state record can't stand in for
+    # a store's decision.
+    def live_approval_blockers
+      blockers = []
+      if @state.required_platforms.include?("ios")
+        obs = observe_ios
+        case AppleReview.classify(obs.version_state)
+        when :approved then blockers.concat(ios_approval_problems(obs).map { |p| "ios: #{p}" })
+        when :published then nil
+        else blockers << "ios: App Store Connect shows #{obs.version_state.inspect}, not approved"
+        end
+      end
+      if @state.required_platforms.include?("android")
+        code = @state.platform("android")["versionCode"]
+        track = android_review_track!
+        release = PlayReview.release_for(observe_android.releases, track: track, version_code: code)
+        lifecycle = release && PlayReview.classify(release["releaseLifecycleState"])
+        unless %i[approved published].include?(lifecycle)
+          blockers << "android: versionCode #{code} on #{track} is #{lifecycle || 'absent'}, not approved"
+        end
+        blockers << "android: the #{track} track is a testing track, not a public release" unless track == "production"
+      end
+      blockers
+    end
+
     private
+
+    def ios_approval_problems(obs)
+      problems = []
+      problems << "release setting is #{obs.release_settings}, not manual" unless obs.manual_release?
+      build = @state.platform("ios")["build"]
+      if build.nil? || obs.attached_build.to_s != build.to_s
+        problems << "the approved version carries build #{obs.attached_build.inspect}, not the candidate's #{build.inspect}"
+      end
+      problems
+    end
+
+    # Android's review track, refusing production unless it is explicitly
+    # authorized for this exact version (Config#android_review_track!).
+    def android_review_track!
+      @config.android_review_track!(version: @state.version)
+    end
+
+    def check_platforms!
+      configured = @config.required_platforms.sort
+      recorded = @state.required_platforms.sort
+      return if configured == recorded
+
+      raise Error, "the release config requires #{configured.join(', ')} but this candidate's state records " \
+                   "#{recorded.join(', ')}: push a new candidate so the state follows the config"
+    end
 
     def observe_ios
       build = @state.platform("ios")["build"]
@@ -227,7 +307,7 @@ module MeowRelease
     end
 
     def observe_android
-      tracks = [@config.android_upload_track, @config.android_review_track].uniq
+      tracks = [@config.android_upload_track, android_review_track!].uniq
       Retry.with_backoff(sleeper: @sleeper, on_retry: ->(n, e, _) { note("android: retry #{n} after #{e.message}") }) do
         @play.observe(@config.android_package, tracks: tracks)
       end
