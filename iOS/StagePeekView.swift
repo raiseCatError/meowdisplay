@@ -42,6 +42,7 @@ struct StagePeekOverlay: View {
 
     @State private var machine = StagePeekMachine()
     @State private var query = ""
+    @Environment(\.controlRequest) private var controlRequest
     @State private var appFilter: String?
     @State private var launchpad = false
     @State private var hint = false
@@ -247,11 +248,11 @@ struct StagePeekOverlay: View {
         let height = max(min(card.size.height, 96), 48)
         return Button {
             animate { machine.hideClose() }
-            model.closeWindow(w)
+            if inputAllowed { model.closeWindow(w) } else { controlRequest?.request() }   // never closes after a grant by itself
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: inputAllowed ? "xmark.square" : "lock").font(.system(size: 17, weight: .semibold))
-                Text(inputAllowed ? String(localized: "Close Window") : String(localized: "Needs Control"))
+                Text(inputAllowed ? String(localized: "Close Window") : (controlRequest?.gatedLabel ?? String(localized: "Needs Control")))
                     .font(.caption2.weight(.semibold)).multilineTextAlignment(.center).lineLimit(2)
             }
             .foregroundStyle(.white)
@@ -263,7 +264,7 @@ struct StagePeekOverlay: View {
         .transition(.opacity)
         .zIndex(9)
         .accessibilityLabel(inputAllowed ? String(localized: "Close Window \(w.title.isEmpty ? w.app : w.title)")
-                                         : String(localized: "Close Window needs control"))
+                                         : String(localized: "Close Window needs control. Request Control"))
     }
 
     /// What happened to the last Close Window, for a few seconds.

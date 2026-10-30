@@ -477,7 +477,7 @@ struct NativeAppGestureSessionState: Equatable {
 /// never reads this field and only ever sees the unchanged `allowed` bool,
 /// which stays a correct summary of every one of these: only `.allowed` is
 /// ever sent with `allowed: true`, every other case sends `allowed: false`.
-enum SessionInputWireState: String, Equatable {
+enum SessionInputWireState: String, Equatable, Sendable {
     /// No session grant, no pending request.
     case off
     /// A control-request prompt is up on the Mac, awaiting the owner.

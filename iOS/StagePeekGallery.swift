@@ -279,6 +279,7 @@ struct StagePeekGallery: View {
     var edge: StagePeekEdge = .left
     var onCompact: () -> Void = {}
     @State private var visible: [UInt32] = []
+    @Environment(\.controlRequest) private var controlRequest
     /// The card showing its Close Window button (swiped left), and a swipe in progress.
     @State private var revealed: UInt32?
     @State private var swipe: (id: UInt32, dx: CGFloat)?
@@ -451,11 +452,11 @@ struct StagePeekGallery: View {
     private func closeAction(_ w: CatalogWindowItem, width: CGFloat) -> some View {
         Button {
             revealed = nil
-            model.closeWindow(w)
+            if inputAllowed { model.closeWindow(w) } else { controlRequest?.request() }   // never closes after a grant by itself
         } label: {
             VStack(spacing: 4) {
                 Image(systemName: inputAllowed ? "xmark.square" : "lock").font(.system(size: 18, weight: .semibold))
-                Text(inputAllowed ? String(localized: "Close Window") : String(localized: "Needs Control"))
+                Text(inputAllowed ? String(localized: "Close Window") : (controlRequest?.gatedLabel ?? String(localized: "Needs Control")))
                     .font(.caption2.weight(.semibold)).multilineTextAlignment(.center).lineLimit(2)
             }
             .foregroundStyle(.white)
@@ -465,7 +466,7 @@ struct StagePeekGallery: View {
         }
         .buttonStyle(.plain)
         .opacity(min(1, width / 60))
-        .accessibilityLabel(inputAllowed ? String(localized: "Close Window") : String(localized: "Close Window needs control"))
+        .accessibilityLabel(inputAllowed ? String(localized: "Close Window") : String(localized: "Close Window needs control. Request Control"))
     }
 
     /// The UIKit gestures for one card (they share each touch with the scroll view).
@@ -590,8 +591,9 @@ struct StagePeekGallery: View {
                 .opacity(inputAllowed ? 1 : 0.5)
                 .accessibilityIdentifier("stagePeekOpenOnMac")
                 if !inputAllowed {
-                    Text("Opening apps needs control of the Mac. Use Request Control first.")
+                    Text("Opening apps needs control of the Mac.")
                         .font(.caption).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+                    RequestControlInline(compact: true)
                 }
                 if model.launchFailed == app.bundleID {
                     Text("The Mac couldn't open \(app.name).").font(.caption).foregroundStyle(.orange)

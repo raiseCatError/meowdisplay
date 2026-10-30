@@ -453,6 +453,7 @@ struct ReceiverScreen: View {
                                 // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts
                                 // the desktop in a pane; "View Full Screen" is in a desktop pane's menu.)
                             })
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
                        !showSettings, !model.workspace.overviewOpen {

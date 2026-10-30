@@ -755,6 +755,7 @@ private struct RemoteFinderApps: View {
             }
             .padding(14)
             if !inputAllowed {
+                RequestControlInline()
                 Text("Ask for control of the Mac to open apps there.")
                     .font(.footnote).foregroundStyle(.secondary).padding()
             }
@@ -967,8 +968,11 @@ private struct RemoteFilePreviewCard: View {
                 .accessibilityHint("Hold to choose the app")
             }
             if !inputAllowed {
-                Text("Opening on the Mac needs control of the Mac.").font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                HStack(spacing: 8) {
+                    Spacer()
+                    Text("Opening on the Mac needs control.").font(.caption).foregroundStyle(.secondary)
+                    RequestControlInline(compact: true)
+                }
             }
         }
     }
