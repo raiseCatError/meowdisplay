@@ -17,22 +17,19 @@ stay exactly as they are.
 | `reference/opendisplay` | Read-only copy of the external project's `main`, moved only by `reference-sync.yml` (fast-forward, no tags). Never a base for features or releases. | Only the sync workflow may update it |
 | `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | Only the release workflows may update it |
 
-Required checks: `mac`, `release-tooling` (Tests) and `conventional` (PR
-title); `android` once the Android app is in the branch.
+Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
+title).
 
-## The repository today (audited 2026-10-27)
+## The repository today (2026-10-30)
 
-- `raiseCatError/meowdisplay` is public and a GitHub **network fork** of `peetzweg/opendisplay`. Default branch: `dev/opendisplay-next`.
-- **`main` = `a186369`**: the external project's tree at the fork point, with no MeowDisplay commits. It still carries that project's `release.yml` (release-please on push to `main`) and `pages.yml` (GitHub Pages deploy on push to `main`). **It is not a MeowDisplay release.**
-- **`release/app-store-rc` = `65d46e8`**: the source of everything shipped (v1.20.0 = `cbbad7f`) plus the type-check fix (#29). **Unprotected** (no ruleset).
-- **`dev/opendisplay-next` = `3f24b51`**: v1.20.0's merge-base plus five docs-only commits; 30 commits behind the release line. Protected (PR, no force-push), required-checks list empty.
-- **`integration/meowdisplay-next-preview` = `c57f422`**: draft PR #30, the combined v2 preview of PRs #24–#28 (do not merge).
-- Open draft PRs: #24 → `dev/opendisplay-next`; #25 → #24's branch; #26 → #25's branch (stacked); #27, #28, #30 → `release/app-store-rc`; #19 → `dev/opendisplay-next` (already contained in the release line).
-- Tags: MeowDisplay's own start at `v1.20.0` (→ `cbbad7f`). The external project's older tags (`v0.1.0`–`v1.16.0` and others) were inherited at the fork point and stay as history; local clones keep newer external tags under `refs/upstream-tags/*`. The reference sync never imports tags.
-- One GitHub Release: **MeowDisplay 1.20.0 for Mac** (Latest) with both DMGs, both signed feeds and `SHA256SUMS.txt`. Installed Macs update from it through `meowdisplay.app/appcast*.xml` → `releases/latest/download/…`.
-- Rulesets: "Protect Main Branch" (`main`, with an always-bypass for a repository role) and "Protect development branch" (`dev/opendisplay-next`); both have empty required-checks lists. No environments. Actions token read-only; Actions can't create PRs.
-- Secrets at repository level: `DEVELOPMENT_TEAM`, `MATCH_DEPLOY_KEY`, `MATCH_GIT_URL`, `SPARKLE_PRIVATE_KEY`.
-- ~75 remote branches, most of them copies of the external project's branches from the fork; they do nothing and can be cleaned up later (never needed for the migration).
+- `raiseCatError/meowdisplay` is public and a GitHub **network fork** of `peetzweg/opendisplay`.
+- **Default branch: `legacy/dev-opendisplay-next`** (`3f24b51`), the former `dev/opendisplay-next`, renamed so `dev` could exist (Git can't hold `dev` beside `dev/…`). It becomes `dev` once the release workflows' resume and store-safety fixes are on `dev` and the scheduled workflows are confirmed inert.
+- **`dev`** (created at `3f24b51`) takes the 2.0 integration (`feature/v2-hotspot-parity` at `52727ce`) by PR; every later change reaches it by PR.
+- **`main` = `a186369`**: the external project's tree at the fork point. **It shares no history with MeowDisplay's line**, whose first commit is `94aaa88` (2026-09-24); `main`, the inherited tags and the two pre-restart tags `pairing-encryption-v1` and `pre-testflight-ultrareview-2026-09-17` hold that earlier history and are never deleted. Its inherited `release.yml` and `pages.yml` (and the old default branch's `app-store-candidate.yml`) are **disabled** in Actions settings.
+- **`release/app-store-rc` = `65d46e8`**: the source of v1.20.0 (`cbbad7f`) and its follow-up fix; contained in `52727ce`.
+- Open PRs #19, #24–#28 and #30 are all contained in `52727ce` and are closed as included once the integration PR merges.
+- One GitHub Release: **MeowDisplay 1.20.0 for Mac** (Latest), whose assets are the live Sparkle feeds.
+- Rulesets: "Protect Main Branch", "Protect development branch" (now covering both the old and the renamed branch name) and those in `.github/rulesets/` once applied. Required checks: `mac`, `release-tooling`, `conventional`, `android`.
 
 ## Fork relationship: operational independence vs. GitHub metadata
 
@@ -62,27 +59,20 @@ migration.
 
 ## Migration sequence
 
-Each step is reversible, rewrites no history and force-pushes nothing.
-**Every step marked ⚑ needs your explicit approval** and is done by you or
-on your instruction; nothing here is applied by a workflow.
+Each step is reversible, rewrites no history and force-pushes nothing. ⚑ = the owner's approval or account.
 
-1. ⚑ **Protect `release/app-store-rc`** (ruleset: no deletion, no force-push, PR required). *Rollback:* disable the ruleset.
-2. ⚑ **Merge the reviewed v2 stack into `release/app-store-rc`** in the order the integration review set: #28, #27, then retarget #24 to `release/app-store-rc` and merge #24 → #25 → #26 (retargeting each only after its parent merged), merge commits only. Close #30 (preview) and #19 (superseded). Check `git diff 07935b2 release/app-store-rc` is empty. *Rollback:* revert the merge commits.
-3. ⚑ **Create `dev`** at `release/app-store-rc` (a new branch; `dev/opendisplay-next` is not renamed or deleted). Check `dev/opendisplay-next` is an ancestor of `dev` (its docs commits arrived through #24). *Rollback:* delete `dev` (it holds no unique commits).
-4. **Land the work branches into `dev` by draft PR**, reviewed one by one: `infra/repository-independence` (this; after its own review), `feature/v2-apple-finalization`, `feature/same-mac-sessions`, then the Android branches. *Rollback:* revert the PRs.
-5. ⚑ **Create the environments and credentials** (RELEASE.md § Credentials), move the signing secrets into them, delete the repository-level copies, create the release and website GitHub Apps. Run **Release dry run** from a release branch to confirm. *Rollback:* re-add repository secrets; delete environments.
-6. ⚑ **Default branch → `dev`.** Set `EXPECTED_DEFAULT_BRANCH=dev`. *Rollback:* switch back to `dev/opendisplay-next`.
-7. ⚑ **Apply the rulesets** (`scripts/release/apply-rulesets.sh`, then `--apply`): `main`, `dev`, `release/*` (protection, and admin-only creation), `reference/opendisplay`, `release-state`. The old two rulesets stay until step 14. Once a second maintainer exists, raise the required approvals on `main` and `release/*` to 1 (a sole maintainer can't approve their own PRs). *Rollback:* disable the new rulesets.
-8. ⚑ **Start the reference branch**: dispatch **Reference sync** once; enable `REFERENCE_SYNC` after reviewing its first run. Optionally `REPOSITORY_GUARD=enabled`.
-9. ⚑ **Cut `release/2.0.0` from `dev`** after the integration review and the coordinated physical QA. Run **Release PR** on it and merge the PR: the candidate builds for every platform.
-10. ⚑ **Store setup**: App Store version 2.0.0 metadata; Play Console app, managed publishing on, internal/closed testing tracks; then `RELEASE_AUTOMATION=enabled` (the monitor submits and follows review).
-11. ⚑ **Approve publication** (`release-publish`) when the readiness report says *Ready to publish*.
-12. ⚑ **Merge the promotion PR** `release/2.0.0` → `main` (merge commit; `git diff v2.0.0 main` empty afterwards). `main`'s inherited workflows are replaced in that same commit by MeowDisplay's, so nothing else runs on it.
-13. ⚑ **Default branch → `main`**, `EXPECTED_DEFAULT_BRANCH=main`; forward-port release fixes from `release/2.0.0` to `dev` by PR.
-14. ⚑ **Retire old names** once nothing depends on them: remove the old two rulesets; leave `dev/opendisplay-next` and `release/app-store-rc` as protected, read-only history (or delete them after confirming every open PR and worktree moved; the tags keep the shipped source regardless).
-
-Release fixes after 2.0.0: on `release/2.0.x` (or `release/2.0.1`) from the
-release tag, forward-ported to `dev`.
+1. ✅ ⚑ Disable the inherited `release.yml`, `pages.yml` and `app-store-candidate.yml` (Actions settings). Re-enabling any of them needs its own safety review.
+2. ✅ ⚑ Rename `dev/opendisplay-next` → `legacy/dev-opendisplay-next` after adding the new name to its ruleset (same commit, same protection; PRs #19 and #24 retarget automatically).
+3. ✅ Create `dev` at `3f24b51`.
+4. ⚑ Apply `.github/rulesets/*.json` (`scripts/release/apply-rulesets.sh`, then `--apply`) from a checkout that has them, including `tags.json` (no tag is ever deleted or moved). The old two rulesets stay.
+5. ⚑ Create the protected environments and move the signing secrets into them (RELEASE.md § Credentials); each replacement is proven to work before its repository copy is deleted.
+6. Merge the 2.0 integration PR (`feature/v2-hotspot-parity` → `dev`) once every required check, Android included, passes on the exact `52727ce` tree. Close #19, #24–#28 and #30 as included.
+7. ⚑ Default branch → `dev` once the release-tooling fixes are on `dev` and the scheduled workflows are confirmed inert without their variables. Set `EXPECTED_DEFAULT_BRANCH=dev`.
+8. ⚑ Start the reference branch (dispatch **Reference sync** once; `REFERENCE_SYNC=enabled` after reviewing it).
+9. ⚑ Cut `release/2.0.0` from `dev` after the coordinated QA; the release PR and candidate pipeline follow (RELEASE.md).
+10. ⚑ At the approved public launch only, **reconcile `main` without rewriting it**: a promotion branch whose one commit has the `v2.0.0` tree and two parents, `v2.0.0` and `main` (`git commit-tree 'v2.0.0^{tree}' -p v2.0.0 -p main`), merged into `main` by PR. `main`'s tree then equals the tag's, the upstream history stays in `main`'s ancestry with its authors, and none of the inherited workflows exists in the new tree. A plain `--allow-unrelated-histories` merge would conflict and keep `main`-only files; resetting `main` would be a force-push: neither is used. Later releases promote `release/<version>` → `main` normally.
+11. ⚑ Default branch → `main` after the launch; development PRs keep targeting `dev`. Release fixes are made on `release/<version>` and merged back into `dev`.
+12. ⚑ Branch cleanup only from a re-validated manifest and an explicit list: branches whose commits exist nowhere else are archived as tags first; `main`, every tag and `legacy/dev-opendisplay-next` stay.
 
 ## Not changed by this
 

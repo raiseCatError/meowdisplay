@@ -56,14 +56,33 @@ jobs:
         if: hashFiles('AndroidReceiver/settings.gradle.kts') != ''
         working-directory: AndroidReceiver
         run: ./gradlew --no-daemon :core:test :app:testDebugUnitTest :app:lintRelease :app:bundleRelease
+      # The counts, so a review can see the suites really ran (Gradle prints none by itself).
+      - name: Test counts
+        if: always() && hashFiles('AndroidReceiver/settings.gradle.kts') != ''
+        working-directory: AndroidReceiver
+        run: |
+          ruby -rrexml/document -e '
+            totals = Hash.new { |h, k| h[k] = [0, 0, 0, 0] }
+            Dir["*/build/test-results/**/TEST-*.xml"].each do |f|
+              s = REXML::Document.new(File.read(f)).root
+              t = totals[f.split("/").first]
+              %w[tests failures errors skipped].each_with_index { |a, i| t[i] += s.attributes[a].to_i }
+            end
+            abort "no test results found" if totals.empty?
+            totals.each { |m, (n, f, e, s)| puts "#{m}: #{n} tests, #{f} failures, #{e} errors, #{s} skipped" }'
 
   mac:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+          xcodebuild -version
 
       # Deliberately without DEVELOPMENT_TEAM: nothing built here is
       # distributed, so an unsigned build is enough, and needing no secrets
@@ -73,7 +92,12 @@ jobs:
 
       # Builds the Mac app as well as the test bundle, since the scheme covers
       # both — so this is a compile check for the app on top of the tests.
+      # TLS, pinning and QUIC tests fail here instead of skipping when their setup (a
+      # temporary keychain, a loopback QUIC listener) can't run, so they can't pass by not
+      # running. xcodebuild hands TEST_RUNNER_* variables to the tests without the prefix.
       - name: Run macOS tests
+        env:
+          TEST_RUNNER_MEOW_REQUIRE_SECURITY_TESTS: "1"
         run: |
           xcodebuild test \
             -project MeowDisplay.xcodeproj \

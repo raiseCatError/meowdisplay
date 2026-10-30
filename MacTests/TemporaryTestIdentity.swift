@@ -26,7 +26,7 @@ final class TemporaryTestKeychain {
         var created: SecKeychain?
         let status = SecKeychainCreate(path, UInt32(password.utf8.count), password, false, nil, &created)
         guard status == errSecSuccess, let created else {
-            throw XCTSkip("temporary keychain unavailable on this runner (status \(status))")
+            throw securityTestUnavailable("temporary keychain unavailable on this runner (status \(status))")
         }
         keychain = created
     }
@@ -44,7 +44,7 @@ final class TemporaryTestKeychain {
     /// MeowDisplay pins the leaf SPKI and never evaluates the chain, while
     /// the TLS handshake itself proves possession of the keychain key.
     func makeIdentity() throws -> Identity {
-        guard let keychain else { throw XCTSkip("no temporary keychain") }
+        guard let keychain else { throw securityTestUnavailable("no temporary keychain") }
         var cfError: Unmanaged<CFError>?
         guard let privateKey = SecKeyCreateRandomKey([
             kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
@@ -55,7 +55,7 @@ final class TemporaryTestKeychain {
               let publicKey = SecKeyCopyPublicKey(privateKey),
               let x963 = SecKeyCopyExternalRepresentation(publicKey, &cfError) as Data?,
               let p256 = try? P256.Signing.PublicKey(x963Representation: x963) else {
-            throw XCTSkip("temporary keychain key unavailable: \(String(describing: cfError?.takeRetainedValue()))")
+            throw securityTestUnavailable("temporary keychain key unavailable: \(String(describing: cfError?.takeRetainedValue()))")
         }
         let signer = Certificate.PrivateKey(P256.Signing.PrivateKey())
         let name = try DistinguishedName { CommonName("meowdisplay-test-\(UUID().uuidString)") }
@@ -69,16 +69,32 @@ final class TemporaryTestKeychain {
         var serializer = DER.Serializer()
         try serializer.serialize(certificate)
         guard let secCert = SecCertificateCreateWithData(nil, Data(serializer.serializedBytes) as CFData) else {
-            throw XCTSkip("could not build test certificate")
+            throw securityTestUnavailable("could not build test certificate")
         }
         var status = SecItemAdd([kSecClass: kSecClassCertificate, kSecValueRef: secCert,
                                  kSecUseKeychain: keychain] as CFDictionary, nil)
-        guard status == errSecSuccess else { throw XCTSkip("temporary certificate import failed (status \(status))") }
+        guard status == errSecSuccess else { throw securityTestUnavailable("temporary certificate import failed (status \(status))") }
         var identity: SecIdentity?
         status = SecIdentityCreateWithCertificate(keychain, secCert, &identity)
         guard status == errSecSuccess, let identity else {
-            throw XCTSkip("temporary identity unavailable (status \(status))")
+            throw securityTestUnavailable("temporary identity unavailable (status \(status))")
         }
         return Identity(identity: identity, spki: p256.derRepresentation)
     }
+}
+
+/// A TLS, pinning or QUIC test whose setup can't run here (no temporary keychain, no loopback
+/// QUIC listener). On a developer's Mac it skips; in CI, which sets MEOW_REQUIRE_SECURITY_TESTS=1
+/// (tests.yml passes it as TEST_RUNNER_MEOW_REQUIRE_SECURITY_TESTS), it fails instead, so a
+/// security check can never pass by not running.
+func securityTestUnavailable(_ reason: String) -> Error {
+    if ProcessInfo.processInfo.environment["MEOW_REQUIRE_SECURITY_TESTS"] == "1" {
+        return SecurityTestSetupFailed(reason: reason)
+    }
+    return XCTSkip(reason)
+}
+
+struct SecurityTestSetupFailed: Error, CustomStringConvertible {
+    let reason: String
+    var description: String { "security test could not run in CI: \(reason)" }
 }
