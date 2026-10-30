@@ -19,7 +19,12 @@ enum PairedMacUserName {
     /// Printable, single line, at most `maxLength` characters; nil when nothing is left.
     static func clean(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        let printable = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && !CharacterSet.newlines.contains($0) }
+        // Controls and format characters (Cc, Cf: bidi overrides too), separators and private use:
+        // a name can't disguise itself as another Mac's ID. Same rule on Android.
+        let printable = raw.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) && !CharacterSet.newlines.contains($0)
+                && !CharacterSet.illegalCharacters.contains($0) && !(0xE000...0xF8FF).contains($0.value)
+        }
         let text = String(String.UnicodeScalarView(printable)).trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? nil : String(text.prefix(maxLength))
     }

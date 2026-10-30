@@ -135,8 +135,15 @@ object ReceiverMessages {
 /** The paired Mac's user name as shown: printable, one line, at most [MAX] characters. */
 object PairedMacUser {
     const val MAX = 64
+    /** Invisible or layout-changing characters (controls, bidi overrides, separators) are dropped,
+     *  so a name can't disguise itself as another Mac's ID; same rule as the Mac and iOS. */
+    private val dropped = setOf(
+        Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
+        Character.SURROGATE, Character.UNASSIGNED, Character.PRIVATE_USE,
+    ).map { it.toInt() }.toSet()
+
     fun clean(raw: String?): String? {
-        val text = raw?.filter { !it.isISOControl() }?.trim() ?: return null
+        val text = raw?.filter { Character.getType(it) !in dropped }?.trim() ?: return null
         return text.take(MAX).ifEmpty { null }
     }
 }

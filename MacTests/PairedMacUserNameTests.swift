@@ -15,6 +15,7 @@ final class PairedMacUserNameTests: XCTestCase {
     func testNamesAreCleanedAndCapped() {
         XCTAssertEqual(PairedMacUserName.clean("  Jai\nSukka\u{0007} "), "JaiSukka")
         XCTAssertNil(PairedMacUserName.clean("   "))
+        XCTAssertEqual(PairedMacUserName.clean("Eve\u{202E}4671 DI\u{202C}\u{2028}"), "Eve4671 DI", "no bidi overrides or separators")
         XCTAssertEqual(PairedMacUserName.clean(String(repeating: "x", count: 200))?.count, PairedMacUserName.maxLength)
     }
 

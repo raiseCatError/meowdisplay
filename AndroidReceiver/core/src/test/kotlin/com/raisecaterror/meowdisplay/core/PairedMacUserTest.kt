@@ -23,6 +23,8 @@ class PairedMacUserTest {
     @Test fun namesAreCleanedAndCapped() {
         assertEquals("JaiSukka", PairedMacUser.clean("  Jai\nSukka\u0007 "))
         assertNull(PairedMacUser.clean("   "))
+        // A right-to-left override could make "4671 DI" read as another Mac's "ID 1764".
+        assertEquals("Eve4671 DI", PairedMacUser.clean("Eve\u202E4671 DI\u202C\u2028"))
         assertEquals(PairedMacUser.MAX, PairedMacUser.clean("x".repeat(200))?.length)
     }
 }
