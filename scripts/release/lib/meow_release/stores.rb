@@ -32,18 +32,28 @@ module MeowRelease
   # App Store Connect's version states, as the API reports them
   # (`appStoreState`, or the newer `appVersionState`). A build finishing
   # processing (`VALID`) is NOT approval: only these version states are.
+  #
+  # PENDING_APPLE_RELEASE is not "approved and waiting for us": Apple holds
+  # the version until the OS release it requires ships. It is reported as a
+  # hold and never opens the publication gate. Approval alone also isn't
+  # enough to count: the version must be set to manual release
+  # (IosObservation#manual_release?), or Apple could release it on its own.
   module AppleReview
     IN_REVIEW = %w[WAITING_FOR_REVIEW IN_REVIEW READY_FOR_REVIEW WAITING_FOR_EXPORT_COMPLIANCE].freeze
-    APPROVED = %w[PENDING_DEVELOPER_RELEASE PENDING_APPLE_RELEASE ACCEPTED].freeze
+    APPROVED = %w[PENDING_DEVELOPER_RELEASE ACCEPTED].freeze
+    HELD = %w[PENDING_APPLE_RELEASE].freeze
     PUBLISHED = %w[READY_FOR_SALE READY_FOR_DISTRIBUTION PROCESSING_FOR_APP_STORE PROCESSING_FOR_DISTRIBUTION].freeze
     REJECTED = %w[REJECTED METADATA_REJECTED INVALID_BINARY].freeze
     NEEDS_DEVELOPER = %w[DEVELOPER_REJECTED PREPARE_FOR_SUBMISSION PENDING_CONTRACT].freeze
+    MANUAL = "MANUAL"
 
     module_function
 
     def classify(state)
+      return :missing if state.nil?
       return :in_review if IN_REVIEW.include?(state)
       return :approved if APPROVED.include?(state)
+      return :held if HELD.include?(state)
       return :published if PUBLISHED.include?(state)
       return :rejected if REJECTED.include?(state)
       return :preparing if NEEDS_DEVELOPER.include?(state)
@@ -53,8 +63,22 @@ module MeowRelease
   end
 
   # What one look at App Store Connect showed for this release's version.
+  # `release_type` / `earliest_release_date` are the App Store version's own
+  # release settings (nil when the version doesn't exist yet).
   IosObservation = Struct.new(:build, :build_state, :version_state, :attached_build, :submission_id,
-                              :blockers, :listing_version, keyword_init: true)
+                              :blockers, :listing_version, :release_type, :earliest_release_date,
+                              keyword_init: true) do
+    # Only a manually released version waits for our explicit release
+    # request; AFTER_APPROVAL or SCHEDULED (or any earliest release date)
+    # would let Apple make it public without the publication gate.
+    def manual_release?
+      release_type == AppleReview::MANUAL && earliest_release_date.nil?
+    end
+
+    def release_settings
+      [release_type || "unset", earliest_release_date && "earliest #{earliest_release_date}"].compact.join(", ")
+    end
+  end
 
   # Google Play's release lifecycle, from
   # `GET applications/{package}/tracks/{track}/releases` (ReleaseSummary.
@@ -124,6 +148,10 @@ module MeowRelease
 
     def latest_build_number(version)
       respond(:latest_build_number, version)
+    end
+
+    def ensure_manual_release(version)
+      respond(:ensure_manual_release, version)
     end
 
     def submit_for_review(version, build)

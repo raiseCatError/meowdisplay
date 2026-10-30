@@ -4,9 +4,10 @@
 # The release workflows' only way to read or change release state.
 #
 #   meow-release init      STATE --config CFG --version V
-#   meow-release candidate STATE --sha SHA --run-id N
+#   meow-release candidate STATE --sha SHA --run-id N [--config CFG]
 #   meow-release record    STATE --platform P --stage S --sha SHA [--set k=v]... [--artifact FILE]...
 #   meow-release monitor   STATE --config CFG [--stores live|fixture:FILE]
+#   meow-release verify-live STATE --config CFG [--stores live|fixture:FILE]
 #   meow-release gate      STATE --branch-head SHA
 #   meow-release publish   STEP STATE --config CFG [--branch-head SHA] [--stores ...] [step options]
 #            STEP: start | mac-published --url U | mac-failed --reason R [--reverted]
@@ -109,9 +110,10 @@ begin
     end
   when "candidate"
     path = ARGV.shift
-    o = parse(ARGV, :sha, :run_id)
+    o = parse(ARGV, :sha, :run_id, :config)
     state = load_state(path)
-    changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i)
+    platforms = o[:config] && Config.load(o[:config]).required_platforms
+    changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i, required_platforms: platforms)
     save(state, path)
     puts changed ? "candidate #{o[:sha][0, 12]}" : "candidate unchanged (re-run of #{o[:sha][0, 12]})"
   when "record"
@@ -132,6 +134,15 @@ begin
     actions = coordinator_for(state, Config.load(o.fetch(:config)), o[:stores]).tick
     save(state, path)
     puts(actions.empty? ? "nothing to do" : actions)
+  when "verify-live"
+    # Read-only: the stores' live answer on whether every required platform
+    # is approved for the recorded build (never the recorded state alone).
+    path = ARGV.shift
+    o = parse(ARGV, :config, :stores)
+    blockers = coordinator_for(load_state(path), Config.load(o.fetch(:config)), o[:stores]).live_approval_blockers
+    blockers.each { |b| warn "::error::#{b}" }
+    puts(blockers.empty? ? "stores confirm approval" : "stores do not confirm approval")
+    exit(blockers.empty? ? 0 : 1)
   when "gate"
     o = parse(ARGV.drop(1), :branch_head)
     blockers = load_state(ARGV.first).publication_blockers(branch_head: o.fetch(:branch_head))

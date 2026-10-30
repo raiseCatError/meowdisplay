@@ -623,4 +623,19 @@ final class RemotePairingTests: XCTestCase {
                                ephemeralPublicKey: Data(count: 65), nonce: Data(count: 32))
         XCTAssertThrowsError(try old.validate()) { XCTAssertEqual($0 as? PairingError, .unsupportedVersion) }
     }
+
+    // A peer that shows a code and then aborts (or whose code is declined) can't raise prompt
+    // after prompt: each one counts toward the cooldown, and only a completed pairing forgives.
+    func testCodesShownWithoutPairingCountTowardCooldown() {
+        var throttle = PairingCommitThrottle()
+        let now = Date()
+        for _ in 0..<PairingCommitThrottle.failuresBeforeCooldown {
+            _ = admittedToken(throttle.admitCommitment(now: now))
+            throttle.revealSucceeded()
+            throttle.codeShownWithoutPairing(now: now)
+        }
+        XCTAssertEqual(throttle.admitCommitment(now: now), .coolingDown)
+        XCTAssertNotEqual(throttle.admitCommitment(now: now.addingTimeInterval(PairingCommitThrottle.cooldownDuration + 1)), .coolingDown)
+    }
+
 }

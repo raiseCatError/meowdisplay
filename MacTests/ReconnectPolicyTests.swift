@@ -22,4 +22,20 @@ final class ReconnectPolicyTests: XCTestCase {
         XCTAssertTrue(ReconnectPolicy.automaticRetryAllowed(
             autoReconnectEnabled: true, everConnected: false))
     }
+
+    /// Inside its disconnect grace a session that was connected redials every second.
+    func testAConnectedSessionRedialsEverySecond() {
+        for attempt in 1...20 {
+            XCTAssertEqual(ReconnectPolicy.retryDelay(attempt: attempt, everConnected: true), 1)
+        }
+    }
+
+    /// A session that never connected backs off to every 10 seconds instead of
+    /// dialing every second forever.
+    func testANeverConnectedSessionBacksOff() {
+        let delays = (1...8).map { ReconnectPolicy.retryDelay(attempt: $0, everConnected: false) }
+        XCTAssertEqual(delays, [1, 2, 4, 8, 10, 10, 10, 10])
+        XCTAssertEqual(ReconnectPolicy.retryDelay(attempt: 10_000, everConnected: false), ReconnectPolicy.maxRetryDelay)
+        XCTAssertEqual(ReconnectPolicy.retryDelay(attempt: 0, everConnected: false), 1)
+    }
 }

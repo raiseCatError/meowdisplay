@@ -103,6 +103,11 @@ final class MissionControlMonitor: @unchecked Sendable {
     /// blind toggle, and never an Escape that would land in another app's dialog).
     @discardableResult
     static func exit() -> Bool {
+        // Never while the Mac asks for its password: Escape would cancel that prompt.
+        guard !PrivacyShieldWindows.isUnlocking else {
+            Log.info("missionControl: exit asked while the Mac asks for its password — nothing sent")
+            return false
+        }
         guard isOpenNow() else {
             Log.info("missionControl: exit asked but it isn't open — nothing sent")
             return false

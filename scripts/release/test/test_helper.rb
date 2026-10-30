@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+
+# Tool output and the files under test are UTF-8 whatever the locale says.
+Encoding.default_external = Encoding::UTF_8
 require "time"
 require_relative "../lib/meow_release"
 
@@ -9,7 +12,10 @@ module ReleaseTestHelpers
   SHA_B = "b" * 40
   NOW = Time.utc(2026, 11, 2, 9, 0, 0)
 
-  def config(overrides = {})
+  # The full publication flow, with Android production explicitly
+  # authorized for 2.0.0 by both switches (release config and operator).
+  # Tests of the refusals build their own configs.
+  def config(overrides = {}, production_authorization = "2.0.0")
     MeowRelease::Config.new({
       "publishMode" => "manual-final-approval",
       "crossPlatformReady" => true,
@@ -17,9 +23,9 @@ module ReleaseTestHelpers
       "ios" => { "appId" => "6817552864", "submitForReview" => true,
                  "storeUrl" => "https://apps.apple.com/app/id6817552864" },
       "android" => { "package" => "com.raisecaterror.meowdisplay.android", "uploadTrack" => "internal",
-                     "reviewTrack" => "production", "managedPublishing" => true,
+                     "reviewTrack" => "production", "productionRelease" => "2.0.0",
                      "storeUrl" => "https://play.google.com/store/apps/details?id=com.raisecaterror.meowdisplay.android" },
-    }.merge(overrides))
+    }.merge(overrides), production_authorization: production_authorization)
   end
 
   def state_for(cfg = config, sha: SHA_A)
@@ -41,9 +47,11 @@ module ReleaseTestHelpers
     state
   end
 
-  def ios(build_state: "VALID", version_state: "PREPARE_FOR_SUBMISSION", attached: nil, blockers: [], build: 7)
+  def ios(build_state: "VALID", version_state: "PREPARE_FOR_SUBMISSION", attached: nil, blockers: [], build: 7,
+          release_type: "MANUAL", earliest: nil)
     MeowRelease::IosObservation.new(build: build, build_state: build_state, version_state: version_state,
-                                    attached_build: attached, blockers: blockers)
+                                    attached_build: attached, blockers: blockers,
+                                    release_type: release_type, earliest_release_date: earliest)
   end
 
   def play_release(state, code: 2_000_001, track: "production")
@@ -57,7 +65,8 @@ module ReleaseTestHelpers
   # The store a test doesn't script stays neutral: an iOS build still
   # processing, an Android upload Play doesn't show yet.
   def coordinator(state, cfg, apple: {}, google: {})
-    @apple = MeowRelease::FakeAppStore.new({ observe: [ios(build_state: "PROCESSING")] }.merge(apple))
+    @apple = MeowRelease::FakeAppStore.new({ observe: [ios(build_state: "PROCESSING")],
+                                             ensure_manual_release: [true] }.merge(apple))
     @play = MeowRelease::FakePlay.new({ observe: [play(codes: [])] }.merge(google))
     MeowRelease::Coordinator.new(state: state, config: cfg, apple: @apple, play: @play, now: NOW)
   end

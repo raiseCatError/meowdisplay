@@ -91,16 +91,24 @@ the order that keeps every failure recoverable
 4. **main.** A PR of `release/<version>` into `main` (merge commit, so main's tree equals the tag's).
 
 A run that stops part way is resumed (`resume`, by the monitor) without
-repeating finished steps; resuming never starts a publication.
+repeating finished steps; resuming never starts a publication. **A resume
+needs the same final approval as the first run** (the `release-publish`
+environment, always with its required reviewer: `authorize-resume`) and
+then re-derives everything live before any store version is released
+(`verify-resume`): the publication in progress is for this commit, the
+GitHub Release `v<version>` is published, Latest, tagged at this commit and
+carries exactly the recorded artifact hashes, a `publish-mac` job of this
+workflow succeeded for this commit, and the stores confirm approval of the
+recorded builds (`meow-release verify-live`).
 
 **The release state is not evidence.** Without a dedicated writer, any
 workflow holding `contents: write` could write the `release-state` branch
 (its ruleset therefore stays closed until the owner's release App is its
 only bypass; BRANCHING.md), so publication re-derives every fact
 that matters from its source before anything becomes public:
-`verify-stores` observes App Store Connect and Google Play live (a recorded
-approval a store doesn't confirm fails, since a platform can't move
-backwards); the Mac artifacts must come from the `release-candidate.yml`
+`verify-stores` observes App Store Connect and Google Play live and
+requires each store to confirm approval of exactly the recorded build
+(`verify-live`; a recorded approval a store doesn't confirm fails); the Mac artifacts must come from the `release-candidate.yml`
 run for exactly this commit on this branch, whose Mac verification
 succeeded, and are verified again (signatures, notarization, identity,
 feeds against the published key) before the draft is created.
@@ -108,19 +116,27 @@ feeds against the published key) before the draft is created.
 ## Stores
 
 **App Store Connect.** The build uploads with `fastlane ios upload_candidate`
-(no submission). The monitor attaches it to the App Store version (created
-with manual release control if missing) and submits it through
+(no submission). The monitor attaches it to the App Store version and submits it through
 `reviewSubmissions` once processing is `VALID`; processing finished is
-never treated as approval. Approval = `PENDING_DEVELOPER_RELEASE`
-(`appStoreState`/`appVersionState`); release = an
-`appStoreVersionReleaseRequests` call from the publish workflow. A newer
+never treated as approval. **Before every submission the version is set to
+manual release** (`releaseType: MANUAL`, no earliest release date; created
+that way if missing) and read back; if App Store Connect doesn't end up
+manual, nothing is submitted and the platform is blocked. Approval =
+`PENDING_DEVELOPER_RELEASE` (or `ACCEPTED` in `appVersionState`) **under
+manual release with the candidate's build attached**; anything else
+(automatic or scheduled release, another build) blocks the gate.
+`PENDING_APPLE_RELEASE` is Apple's hold until the OS version a build needs
+is released: reported as a hold, never as approval. Release = an
+`appStoreVersionReleaseRequests` call from the publish workflow, which
+checks the same conditions again. A newer
 candidate's build replaces an older one still in review (the older
 submission is cancelled first). Metadata and screenshots stay maintained in
 App Store Connect ([`fastlane/APP_STORE_LISTING.md`](fastlane/APP_STORE_LISTING.md)).
 
 **Google Play.** The bundle uploads to the internal track as its own
-committed edit. The monitor puts the build on the review track (production)
-and commits with `changesInReviewBehavior=ERROR_IF_IN_REVIEW`, so nothing in
+committed edit. The monitor puts the build on the review track
+(`android.reviewTrack`: `internal` or a closed testing track such as
+`alpha`; there is no default) and commits with `changesInReviewBehavior=ERROR_IF_IN_REVIEW`, so nothing in
 review is ever cancelled by accident; replacing a superseded candidate's
 release uses `CANCEL_IN_REVIEW_AND_SUBMIT` deliberately. Review is followed
 through `GET applications/{package}/tracks/{track}/releases`
@@ -135,10 +151,17 @@ through `GET applications/{package}/tracks/{track}/releases`
 | `PUBLISHED` | Published |
 
 The list omits obsolete releases and returns at most 20 per track.
-**Turn on managed publishing in Play Console**: without it, Play publishes
-the moment review approves, which can't be coordinated with the Mac and App
-Store releases. Publishing a held release has no API: it is Play Console's
-**Publish changes** button, which the monitor then records.
+
+**Production is separately authorized.** The `production` track is refused
+unless BOTH the release config names this exact version
+(`android.productionRelease`) AND the operator's separate authorization
+(`ANDROID_PRODUCTION_AUTHORIZED`, the same version) is present; no workflow
+sets the latter today. A release on a testing track reaches testers only,
+so it never counts as public: publication refuses Android on a testing
+track. **Managed publishing is not a control here**: Google doesn't offer it
+for an app's first publication, and the code never relies on it. For a
+later production release it can still hold an approved release until
+**Publish changes** in Play Console, which the monitor then records.
 
 ## Website
 
@@ -162,6 +185,11 @@ Every secret lives in one protected environment; jobs check the
 environment's protection (`check-environment.sh`) before using a secret,
 because a job naming a missing environment silently gets an unprotected one.
 `Release dry run` reports what is missing, by name only.
+
+`scripts/release/apply-environments.sh` creates and protects the seven
+environments below (branch patterns, owner approval where marked, no admin
+bypass) and then checks each one; it never touches secrets. It prints the plan
+unless given `--apply`, and is safe to re-run.
 
 | Environment (branches) | Secrets | Variables | Who creates them |
 | --- | --- | --- | --- |

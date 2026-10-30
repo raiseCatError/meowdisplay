@@ -64,9 +64,12 @@ final class CoalescingFetchTests: XCTestCase {
     }
 
     func testStartedAfterNowGetsANewRequestSharedByLateCallers() async throws {
-        let (fetcher, service) = make(.milliseconds(150))
+        let (fetcher, service) = make(.milliseconds(600))
         async let a = fetcher.value(.cachedWithin(.seconds(5)))
-        try await Task.sleep(for: .milliseconds(100))   // well past `sameMoment`
+        // Wait for a's request to be out (a busy runner can start it late), then let more
+        // than `sameMoment` pass, well before it answers.
+        while service.calls.withLock({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try await Task.sleep(for: CoalescingFetch<Int>.sameMoment + .milliseconds(50))
         async let b = fetcher.value(.startedAfterNow)
         async let c = fetcher.value(.startedAfterNow)
         let (ra, rb, rc) = try await (a, b, c)

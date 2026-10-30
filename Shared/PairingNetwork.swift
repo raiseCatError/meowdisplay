@@ -126,7 +126,18 @@ enum PairingNetwork {
                              isCurrent: @escaping @Sendable () -> Bool = { true },
                              attemptToken: UUID = UUID(),
                              throttle: PairingCommitThrottleGate = .shared,
+                             preAuth: PreAuthSlots = .pairing,
                              store: TrustStore = .shared) async throws -> PendingPairing {
+        // Until its commitment arrives the peer is anyone on the network: it
+        // holds one of a few slots, and only for `PreAuthSlots.deadline`.
+        guard preAuth.tryAcquire() else {
+            Log.info("pairDebug: too many unauthenticated pairing connections — closing this one")
+            connection.cancel()
+            throw PairingError.tooManyAttempts
+        }
+        var preAuthHeld = true
+        func releasePreAuth() { if preAuthHeld { preAuthHeld = false; preAuth.release() } }
+        defer { releasePreAuth() }
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
         defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
         let timeout = pairingTimeout(for: connection)
@@ -138,7 +149,8 @@ enum PairingNetwork {
         // hello — until a valid `helloCommit` is admitted by the throttle:
         // the responder must never send its hello, let alone show a SAS,
         // before receiving and accepting a commitment.
-        let request = try await PairingFraming.receive(on: connection)
+        let request = try await receiveWithDeadline(PreAuthSlots.deadline, on: connection)
+        releasePreAuth()
         guard request.kind == .helloCommit, let commitment = request.helloCommitment, commitment.count == 32 else {
             throw PairingError.malformedMessage
         }
@@ -174,18 +186,24 @@ enum PairingNetwork {
         throttleResolved = true
         await throttle.revealSucceeded()
         logReady(pending)
-        try await PairingSessionCore.run(
-            role: .responder, result: result, pending: pending, transport: transport,
-            gate: gate, abortSlot: slot,
-            decide: { pending in
-                let accepted = await prompt.request(pending, token: attemptToken)
-                // Owner-auth failure/cancel surfaces its own error, not "rejected".
-                if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
-                return accepted
-            },
-            onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
-            onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
-            store: store, isCurrent: isCurrent)
+        do {
+            try await PairingSessionCore.run(
+                role: .responder, result: result, pending: pending, transport: transport,
+                gate: gate, abortSlot: slot,
+                decide: { pending in
+                    let accepted = await prompt.request(pending, token: attemptToken)
+                    // Owner-auth failure/cancel surfaces its own error, not "rejected".
+                    if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
+                    return accepted
+                },
+                onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
+                onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
+                store: store, isCurrent: isCurrent)
+        } catch {
+            // A code was shown and nothing was paired (declined, timed out, aborted).
+            await throttle.codeShownWithoutPairing()
+            throw error
+        }
         // The ceremony reached authenticated trust completion (commit
         // verified and `PairingFinalizer` ran inside `PairingSessionCore.run`)
         // for THIS admitted attempt: only now is prior failure history
@@ -224,13 +242,19 @@ enum PairingNetwork {
     /// Receives one frame, failing with `.malformedMessage` if it doesn't
     /// arrive within `seconds` — the responder's ~5-second reveal deadline
     /// after sending its own hello, distinct from the overall attempt
-    /// deadline `pairingTimeout` enforces.
-    private static func receiveWithDeadline(_ seconds: TimeInterval,
-                                            on connection: NWConnection) async throws -> PairingEnvelope {
+    /// deadline `pairingTimeout` enforces. A missed deadline ends the
+    /// attempt and closes the connection: a pending receive can't be
+    /// cancelled any other way, and the task group waits for it, so without
+    /// the close a silent peer held the throttle's slot until the 65-second
+    /// backstop.
+    static func receiveWithDeadline(_ seconds: TimeInterval,
+                                    on connection: NWConnection) async throws -> PairingEnvelope {
         try await withThrowingTaskGroup(of: PairingEnvelope.self) { group in
             group.addTask { try await PairingFraming.receive(on: connection) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                Log.info("pairDebug: reveal deadline missed")
+                connection.cancel()
                 throw PairingError.malformedMessage
             }
             defer { group.cancelAll() }

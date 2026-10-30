@@ -27,6 +27,16 @@ struct WakeMetadata: Codable, Equatable {
 /// incompatible schema rather than guessing at its shape.
 /// Per role (`RolePreferences`), like `RemoteEndpointStore`.
 enum WakeMetadataStore {
+    /// The peer a `wakeInfo` message may be stored under: the Mac that completed mutual TLS on
+    /// this connection, never the ID the message names for itself. A message naming another
+    /// peer is dropped, so one paired Mac can't replace another Mac's wake target (and steer
+    /// where this device later sends its wake packets).
+    static func storageKey(claimedPeerID: String?, authenticatedPeerID: String?) -> String? {
+        guard let authenticatedPeerID, !authenticatedPeerID.isEmpty else { return nil }
+        if let claimedPeerID, claimedPeerID != authenticatedPeerID { return nil }
+        return authenticatedPeerID
+    }
+
     private static func defaultsKey(_ role: RolePreferences) -> String { role.key("wakeMetadataHints.v1") }
 
     private static func load(_ role: RolePreferences) -> [String: WakeMetadata] {

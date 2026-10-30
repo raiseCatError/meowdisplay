@@ -83,4 +83,32 @@ final class RemoteEndpointStoreTests: XCTestCase {
         UserDefaults.standard.set(raw, forKey: "remoteEndpointHints.v1")
         XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: peer, role: .sender))
     }
+
+    // The two ports stay distinct: media connections go to the media listener (9001), knocks to
+    // the remote request listener (9003). A hint saved with 9003 by the Mac's editor (which filled
+    // that in for a while) still dials media on 9001; any other port is kept as the person typed it.
+    func testMediaDialsNeverUseTheRemoteRequestPort() {
+        let peer = peerID()
+        RemoteEndpointStore.setEndpoint("100.64.1.2", port: WireCrypto.remoteRequestPort, forPeerID: peer, role: .sender)
+        XCTAssertEqual(RemoteEndpointStore.mediaEndpoint(forPeerID: peer, role: .sender)?.port, WireCrypto.tlsPort)
+        XCTAssertEqual(RemoteEndpointStore.endpoint(forPeerID: peer, role: .sender)?.port, WireCrypto.remoteRequestPort, "the stored value isn't rewritten")
+        XCTAssertEqual(RemoteEndpointStore.connectRequestEndpoint(forPeerID: peer, role: .sender)?.port, WireCrypto.remoteRequestPort)
+        RemoteEndpointStore.setEndpoint("100.64.1.2", port: 12_345, forPeerID: peer, role: .sender)
+        XCTAssertEqual(RemoteEndpointStore.mediaEndpoint(forPeerID: peer, role: .sender)?.port, 12_345)
+        XCTAssertEqual(WireCrypto.tlsPort, 9001)
+        XCTAssertEqual(WireCrypto.remoteRequestPort, 9003)
+    }
+
+    // Forget on a receiver removes the Mac's saved Remote address and wake target with its pin.
+    func testForgetOnAReceiverRemovesItsHints() {
+        let peer = peerID()
+        RemoteEndpointStore.setEndpoint("100.64.1.3", port: 9003, forPeerID: peer, role: .receiverRole)
+        WakeMetadataStore.setMetadata(WakeMetadata(macAddress: "aa:bb:cc:dd:ee:ff", interfaceName: "en0", ipv4: nil,
+                                                   subnetMask: nil, broadcastAddress: nil, updatedAt: Date()),
+                                      forPeerID: peer, role: .receiverRole)
+        StreamReceiver.removeStoredTrust(peerID: peer)
+        XCTAssertNil(RemoteEndpointStore.endpoint(forPeerID: peer, role: .receiverRole))
+        XCTAssertNil(WakeMetadataStore.metadata(forPeerID: peer, role: .receiverRole))
+    }
+
 }
