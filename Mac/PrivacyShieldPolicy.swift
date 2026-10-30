@@ -49,6 +49,8 @@ enum PrivacyShieldPolicy {
     static let coverDarkAfter: TimeInterval = 5 * 60
     /// The message (icon and two lines) with the Unlock button under it, as one block.
     static let coverBlock = CGSize(width: 640, height: 200)
+    /// The message's own box (icon and two lines), inside the block.
+    static let coverMessageSize = CGSize(width: 640, height: 110)
     /// From the block's centre: up to the message's centre, down to the Unlock button's centre.
     static let coverMessageLift: CGFloat = 50
     static let coverButtonDrop: CGFloat = 48

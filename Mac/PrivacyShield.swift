@@ -53,8 +53,9 @@ final class PrivacyShield {
     private var tap: CFMachPort?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
-    /// Where the message sits and how bright it is, shared by every cover.
-    private let appearance = PrivacyShieldAppearance()
+    /// Where the message sits (`coverStep`) and how bright it is, on every cover.
+    private var coverStep = 0
+    private var coverLook: PrivacyShieldPolicy.CoverLook = .bright
     /// When the cover last appeared (the message moves on from there).
     private var coverSince = ProcessInfo.processInfo.systemUptime
     /// Where the Unlock button is going (it may still be gliding there).
@@ -73,9 +74,11 @@ final class PrivacyShield {
         // Made (not shown) now, so their ids are left out of every capture before they ever appear.
         revealPanel = Self.panel(size: NSSize(width: 240, height: 44), level: Self.topLevel + 1, clicks: true)
         noticePanel = Self.panel(size: NSSize(width: 320, height: 40), level: Self.topLevel + 2, clicks: false)
-        revealPanel.contentView = NSHostingView(rootView: RevealButton { [weak self] in self?.revealTapped() })
+        let reveal = NSHostingView(rootView: RevealButton { [weak self] in self?.revealTapped() })
+        reveal.sizingOptions = []   // the panel's size is fixed; SwiftUI never resizes it
+        revealPanel.contentView = reveal
         // Covers for every display now plus spares for displays plugged in later.
-        pool = (0..<max(NSScreen.screens.count + 2, 3)).map { [appearance] _ in Self.makeShield(appearance) }
+        pool = (0..<max(NSScreen.screens.count + 2, 3)).map { _ in Self.makeShield() }
         publishIDs()
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -166,8 +169,8 @@ final class PrivacyShield {
         if !showing {
             Log.info("privacy shield: covering this Mac's screens")
             coverSince = ProcessInfo.processInfo.systemUptime
-            appearance.step = 0
-            appearance.look = .bright
+            coverStep = 0
+            coverLook = .bright
         }
         showing = true
         refreshAppearance()
@@ -180,13 +183,18 @@ final class PrivacyShield {
                 shields[id] = spare
             } else {
                 // More displays than spares: a new window, shown once the captures leave it out.
-                let w = Self.makeShield(appearance); pool.append(w); shields[id] = w; fresh = true
+                let w = Self.makeShield(); pool.append(w); shields[id] = w; fresh = true
             }
         }
         let present = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.showing else { return }
-                for (id, w) in self.shields { if let s = screens[id] { w.setFrame(s.frame, display: true); w.orderFrontRegardless() } }
+                for (id, w) in self.shields {
+                    guard let s = screens[id] else { continue }
+                    w.setFrame(s.frame, display: true)
+                    (w.contentView as? PrivacyShieldCoverView)?.show(step: self.coverStep, look: self.coverLook, animate: false)
+                    w.orderFrontRegardless()
+                }
                 self.placeRevealButton(animate: false)
             }
         }
@@ -205,15 +213,15 @@ final class PrivacyShield {
     /// The Unlock button under the message on the main covered display; gone while the cover is dark.
     private func placeRevealButton(animate: Bool) {
         guard showing, !unlocking else { return }
-        guard appearance.look != .dark else { revealPanel.orderOut(nil); return }
+        guard coverLook != .dark else { revealPanel.orderOut(nil); return }
         let screens = NSScreen.screens.filter { s in s.displayID.map { shields[$0] != nil } ?? false }
         guard let s = screens.first(where: { $0 == NSScreen.main }) ?? screens.first else { return }
-        let c = PrivacyShieldPolicy.coverCenter(step: appearance.step, screen: s.frame.size)
+        let c = PrivacyShieldPolicy.coverCenter(step: coverStep, screen: s.frame.size)
         let size = revealPanel.frame.size
         let frame = NSRect(x: s.frame.minX + c.x - size.width / 2,
                            y: s.frame.maxY - c.y - PrivacyShieldPolicy.coverButtonDrop - size.height / 2,
                            width: size.width, height: size.height)
-        revealPanel.alphaValue = appearance.look == .dim ? 0.4 : 1
+        revealPanel.alphaValue = coverLook == .dim ? 0.4 : 1
         if frame != revealTarget || !revealPanel.isVisible {
             if animate && revealPanel.isVisible {
                 // Glides with the message (not blocking the main thread).
@@ -235,21 +243,22 @@ final class PrivacyShield {
         let now = ProcessInfo.processInfo.systemUptime
         let step = max(0, Int((now - coverSince) / PrivacyShieldPolicy.coverMoveEvery))
         let look = PrivacyShieldPolicy.coverLook(idle: now - max(coverSince, lastPhysicalInput))
-        guard step != appearance.step || look != appearance.look else { return }
-        if look != appearance.look { Log.info("privacy shield: message \(look)") }
-        if step != appearance.step { Log.info("privacy shield: message moved (spot \(step))") }
-        appearance.step = step
-        appearance.look = look
+        guard step != coverStep || look != coverLook else { return }
+        if look != coverLook { Log.info("privacy shield: message \(look)") }
+        if step != coverStep { Log.info("privacy shield: message moved (spot \(step))") }
+        coverStep = step
+        coverLook = look
+        for w in shields.values { (w.contentView as? PrivacyShieldCoverView)?.show(step: step, look: look, animate: true) }
         placeRevealButton(animate: true)
     }
 
     /// Someone touched this Mac's own input: a dimmed or dark message comes back at once.
     fileprivate func physicalInputArrived() {
-        guard showing, appearance.look != .bright else { return }
+        guard showing, coverLook != .bright else { return }
         refreshAppearance()
     }
 
-    private static func makeShield(_ appearance: PrivacyShieldAppearance) -> NSWindow {
+    private static func makeShield() -> NSWindow {
         let w = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
         w.level = topLevel
         w.backgroundColor = .black
@@ -261,7 +270,10 @@ final class PrivacyShield {
         w.isReleasedWhenClosed = false
         w.sharingType = .none
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        w.contentView = NSHostingView(rootView: PrivacyShieldCover(appearance: appearance))
+        // Plain AppKit, not a SwiftUI root: a hosting view as the content of a full-screen window
+        // over the camera notch looped on safe-area and window-size updates until AppKit threw
+        // (crash 2026-10-30 18:38, ad9be49). The message is a fixed-size subview AppKit places.
+        w.contentView = PrivacyShieldCoverView()
         return w
     }
 
@@ -274,10 +286,17 @@ final class PrivacyShield {
 
     /// A small notice on the Mac when a device connects: whether the cover is on. Devices don't see it.
     private func showNotice(on: Bool) {
-        noticePanel.contentView = NSHostingView(rootView: Label(on ? "Privacy Shield is on" : "Privacy Shield is off",
-                                                                systemImage: on ? "eye.slash.fill" : "eye")
+        // Fixed size, centred label: letting SwiftUI size this panel made its height flip between
+        // 33 and 34 pt and loop until AppKit threw (crash 2026-10-30 18:38:42, "more Update
+        // Constraints in Window passes than there are views", <NSPanel> 155x33).
+        let host = NSHostingView(rootView: Label(on ? "Privacy Shield is on" : "Privacy Shield is off",
+                                                 systemImage: on ? "eye.slash.fill" : "eye")
             .font(.callout.weight(.semibold)).padding(.horizontal, 14).padding(.vertical, 9)
-            .background(.regularMaterial, in: Capsule()))
+            .background(.regularMaterial, in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity))
+        host.sizingOptions = []
+        noticePanel.contentView = host
+        noticePanel.setContentSize(NSSize(width: 320, height: 40))
         if let screen = NSScreen.main { noticePanel.setFrameOrigin(NSPoint(x: screen.frame.midX - 160, y: screen.visibleFrame.maxY - 56)) }
         noticePanel.orderFrontRegardless()
         noticeHide?.cancel()
@@ -389,32 +408,64 @@ private extension NSScreen {
     var displayID: CGDirectDisplayID? { (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value }
 }
 
-/// Where the cover's message sits (`step`) and how bright it is.
-@MainActor
-final class PrivacyShieldAppearance: ObservableObject {
-    @Published var step = 0
-    @Published var look: PrivacyShieldPolicy.CoverLook = .bright
+/// A cover's content: black (an OLED panel's pixels are off) with the message in a fixed-size
+/// subview that AppKit moves and dims. SwiftUI only draws the message's text: it can't size the
+/// window or react to the camera notch's safe area.
+final class PrivacyShieldCoverView: NSView {
+    private let message: NSHostingView<PrivacyShieldMessage>
+    private var step = 0
+    private var look: PrivacyShieldPolicy.CoverLook = .bright
+
+    override var isFlipped: Bool { true }   // top-left origin, like PrivacyShieldPolicy.coverCenter
+
+    init() {
+        message = NSHostingView(rootView: PrivacyShieldMessage())
+        message.sizingOptions = []
+        message.safeAreaRegions = []
+        message.frame = NSRect(origin: .zero, size: PrivacyShieldPolicy.coverMessageSize)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        addSubview(message)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Places and dims the message for this cover's size.
+    func show(step: Int, look: PrivacyShieldPolicy.CoverLook, animate: Bool) {
+        self.step = step
+        self.look = look
+        let c = PrivacyShieldPolicy.coverCenter(step: step, screen: bounds.size)
+        let size = message.frame.size
+        let origin = NSPoint(x: c.x - size.width / 2, y: c.y - PrivacyShieldPolicy.coverMessageLift - size.height / 2)
+        let alpha: CGFloat = look == .bright ? 1 : look == .dim ? 0.4 : 0
+        if animate {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 1.5
+                message.animator().setFrameOrigin(origin)
+                message.animator().alphaValue = alpha
+            }
+        } else {
+            message.setFrameOrigin(origin)
+            message.alphaValue = alpha
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        show(step: step, look: look, animate: false)
+    }
 }
 
-private struct PrivacyShieldCover: View {
-    @ObservedObject var appearance: PrivacyShieldAppearance
-
+/// The cover's message (drawn only; its size is fixed by `PrivacyShieldCoverView`).
+struct PrivacyShieldMessage: View {
     var body: some View {
-        GeometryReader { g in
-            let c = PrivacyShieldPolicy.coverCenter(step: appearance.step, screen: g.size)
-            VStack(spacing: 10) {
-                Image(systemName: "eye.slash").font(.system(size: 34, weight: .regular)).foregroundStyle(.white.opacity(0.55))
-                Text("This Mac is in use from another device").font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.75))
-                Text("Privacy Shield · Click Unlock, then type this Mac's login password").font(.callout).foregroundStyle(.white.opacity(0.45))
-            }
-            .fixedSize()
-            .position(x: c.x, y: c.y - PrivacyShieldPolicy.coverMessageLift)
-            .opacity(appearance.look == .bright ? 1 : appearance.look == .dim ? 0.4 : 0)
+        VStack(spacing: 10) {
+            Image(systemName: "eye.slash").font(.system(size: 34, weight: .regular)).foregroundStyle(.white.opacity(0.55))
+            Text("This Mac is in use from another device").font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.75))
+            Text("Privacy Shield · Click Unlock, then type this Mac's login password").font(.callout).foregroundStyle(.white.opacity(0.45))
         }
-        .background(Color.black)
-        .ignoresSafeArea()
-        .animation(.easeInOut(duration: 1.5), value: appearance.step)
-        .animation(.easeInOut(duration: 0.6), value: appearance.look)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
