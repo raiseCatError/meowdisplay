@@ -126,10 +126,21 @@ struct PairingCommitThrottle: Equatable {
         unrevealedInProgress = false
     }
 
+    /// An attempt that showed a code and then didn't pair: declined, timed out,
+    /// aborted by the peer or failed later. Counts toward the cooldown like a
+    /// failed reveal, so a peer can't raise prompt after prompt (each one costs
+    /// the person at this device an interruption) by aborting and starting over.
+    /// The single-flight slot was already released by `revealSucceeded`.
+    mutating func codeShownWithoutPairing(now: Date) {
+        consecutiveFailures += 1
+        if consecutiveFailures >= Self.failuresBeforeCooldown {
+            consecutiveFailures = 0
+            cooldownUntil = now.addingTimeInterval(Self.cooldownDuration)
+        }
+    }
+
     /// Disconnect before a valid reveal, a reveal timeout, or an
-    /// invalid/mismatched reveal — never a normal user cancellation *after*
-    /// the SAS is shown, which is a separate, later phase this throttle never
-    /// observes (callers only invoke this up to a successful reveal).
+    /// invalid/mismatched reveal.
     mutating func revealFailed(now: Date) {
         unrevealedInProgress = false
         consecutiveFailures += 1
@@ -167,6 +178,7 @@ actor PairingCommitThrottleGate {
     }
     func revealSucceeded() { state.revealSucceeded() }
     func revealFailed(now: Date = Date()) { state.revealFailed(now: now) }
+    func codeShownWithoutPairing(now: Date = Date()) { state.codeShownWithoutPairing(now: now) }
     func pairingSucceeded(token: UInt64) { state.pairingSucceeded(token: token) }
 
     /// Test-only reset so throttle state never leaks between test cases.
@@ -493,6 +505,13 @@ enum OwnerAuthPolicy {
         }
         var view = String.UnicodeScalarView(); view.append(contentsOf: kept)
         return String(String(view).trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+    }
+
+    /// A peer's self-chosen name as this device shows and stores it: `sanitizedName`, or a
+    /// neutral word when nothing printable is left (the name comes from an unauthenticated hello).
+    static func displayName(_ name: String) -> String {
+        let clean = sanitizedName(name)
+        return clean.isEmpty ? String(localized: "Device") : clean
     }
 
     static func reason(peerName: String, updatingEndpointOnly: Bool = false) -> String {

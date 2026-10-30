@@ -92,10 +92,16 @@ class PairingAttempt(
             if (!isCurrent() || gate.isCancelled) fail(PairingError.Rejected)
             throttleResolved = true
             throttle.revealSucceeded()
-            PairingSessionCore.run(
-                PairingRole.Responder, result, pending, transport, gate, abortSlot,
-                decide, onPeerAbort, onCommitting, store, isCurrent,
-            )
+            try {
+                PairingSessionCore.run(
+                    PairingRole.Responder, result, pending, transport, gate, abortSlot,
+                    decide, onPeerAbort, onCommitting, store, isCurrent,
+                )
+            } catch (e: Throwable) {
+                // A code was shown and nothing was paired (declined, timed out, aborted).
+                throttle.codeShownWithoutPairing()
+                throw e
+            }
             // Authenticated trust completion for THIS admission: only now is
             // earlier failure history forgiven.
             throttle.pairingSucceeded(admission.token)

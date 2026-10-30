@@ -1092,11 +1092,15 @@ final class SenderController: ObservableObject {
         // must be seen regardless of Menu Bar/Background presentation or
         // whether the control window happens to be open — it cannot depend
         // on the user already having the Devices list in view.
+        pairingPrompt.onAccepted = { [weak self] pending in
+            self?.beginExplicitPairing(peerID: pending.peerID)
+        }
         pairingPrompt.onPending = { [weak self] pending in
             guard let self else { return }
             Log.info("pairDebug: onPending peerID=\(pending.peerID)")
             Log.info("pairDebug: presenting classification=\(String(describing: pending.classification))")
-            self.beginExplicitPairing(peerID: pending.peerID)
+            // No session is ended for a prompt alone (it can come from any host on the network
+            // naming any device): only an accepted code does (onAccepted above).
             // The confirmation panel is a stable AppKit object owned by the
             // coordinator, not a SwiftUI sheet on a settings page that may
             // not currently exist (Menu Bar presentation with the window

@@ -99,4 +99,35 @@ final class PairingPromptModelTests: XCTestCase {
         let accepted = await task.value
         XCTAssertFalse(accepted)
     }
+
+    // A prompt can come from any host on the network: only an accepted code may interrupt this
+    // device's sessions (onAccepted), never a prompt that is shown, declined or left to time out.
+    func testOnlyAnAcceptedCodeReachesOnAccepted() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        var accepted: [PendingPairing] = []
+        model.onAccepted = { accepted.append($0) }
+
+        let declined = Task { @MainActor in await model.request(self.pending("peer-a")) }
+        await Task.yield()
+        XCTAssertTrue(accepted.isEmpty, "showing the prompt interrupts nothing")
+        model.decide(accept: false)
+        _ = await declined.value
+        XCTAssertTrue(accepted.isEmpty, "a declined code interrupts nothing")
+
+        let approved = Task { @MainActor in await model.request(self.pending("peer-b")) }
+        await Task.yield()
+        model.decide(accept: true)
+        _ = await approved.value
+        XCTAssertEqual(accepted.map(\.peerID), ["peer-b"])
+    }
+
+    func testATimedOutPromptNeverReachesOnAccepted() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 20_000_000)
+        var accepted = 0
+        model.onAccepted = { _ in accepted += 1 }
+        let result = await model.request(pending())
+        XCTAssertFalse(result)
+        XCTAssertEqual(accepted, 0)
+    }
+
 }
