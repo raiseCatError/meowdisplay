@@ -93,8 +93,10 @@ the order that keeps every failure recoverable
 A run that stops part way is resumed (`resume`, by the monitor) without
 repeating finished steps; resuming never starts a publication.
 
-**The release state is not evidence.** Any GitHub Actions workflow can
-write the `release-state` branch, so publication re-derives every fact
+**The release state is not evidence.** Without a dedicated writer, any
+workflow holding `contents: write` could write the `release-state` branch
+(its ruleset therefore stays closed until the owner's release App is its
+only bypass; BRANCHING.md), so publication re-derives every fact
 that matters from its source before anything becomes public:
 `verify-stores` observes App Store Connect and Google Play live (a recorded
 approval a store doesn't confirm fails, since a platform can't move

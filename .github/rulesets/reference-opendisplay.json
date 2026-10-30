@@ -1,5 +1,5 @@
 {
-  "name": "External reference: only its sync workflow updates it",
+  "name": "External reference: fast-forward only, never deleted (temporary)",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -10,25 +10,13 @@
       "exclude": []
     }
   },
-  "bypass_actors": [
-    {
-      "actor_id": 15368,
-      "actor_type": "Integration",
-      "bypass_mode": "always"
-    }
-  ],
+  "bypass_actors": [],
   "rules": [
     {
       "type": "deletion"
     },
     {
       "type": "non_fast_forward"
-    },
-    {
-      "type": "update"
-    },
-    {
-      "type": "creation"
     }
   ]
 }
