@@ -534,7 +534,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 }
                 sendState(force: true)
             case WireMessage.windowAction:
-                guard inputGranted else { return }   // changing the Mac needs control
+                guard inputGranted else {   // changing the Mac needs control
+                    Log.info("workspace: window action \(obj["action"] as? String ?? "?") ignored: this session has no control")
+                    return
+                }
                 performWindowAction(obj)
             case WireMessage.menuRequest:
                 // A pane's app menus: a control feature (reading them alone is of no use, and
