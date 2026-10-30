@@ -25,8 +25,8 @@ final class ReceiverPanelGeometryTests: XCTestCase {
     func testUnusableSizesAreIgnored() {
         XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: .zero, scale: 3))
         XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: CGSize(width: 100, height: 100), scale: 0))
-        XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: CGSize(width: .nan, height: 100), scale: 2))
-        XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: CGSize(width: 100, height: .infinity), scale: 2))
+        XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: CGSize(width: CGFloat.nan, height: 100), scale: 2))
+        XCTAssertNil(ReceiverPanelGeometry.pixels(windowPoints: CGSize(width: 100, height: CGFloat.infinity), scale: 2))
     }
 }
 

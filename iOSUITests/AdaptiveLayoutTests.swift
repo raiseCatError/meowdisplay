@@ -29,10 +29,15 @@ final class AdaptiveLayoutTests: XCTestCase {
             sleep(1)   // let the layout and the announced panel settle
             let window = app.windows.firstMatch.frame
             XCTAssertFalse(window.isEmpty)
+            print("AdaptiveLayout: orientation \(orientation.rawValue) window \(window)")
             for name in ["Exit Demo", "Settings"] {
                 let control = app.descendants(matching: .any)[name].firstMatch
                 XCTAssertTrue(control.waitForExistence(timeout: 5), "\(name) in \(orientation.rawValue)")
                 XCTAssertTrue(window.contains(control.frame), "\(name) lies inside the window in \(orientation.rawValue)")
+                let reachable = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: control)
+                if XCTWaiter.wait(for: [reachable], timeout: 3) != .completed {
+                    print("AdaptiveLayout: \(name) not hittable at \(control.frame)\n\(app.debugDescription)")
+                }
                 XCTAssertTrue(control.isHittable, "\(name) is reachable in \(orientation.rawValue)")
             }
             keep(app, "demo-\(orientation.rawValue)")

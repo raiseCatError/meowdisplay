@@ -48,8 +48,11 @@ final class DemoModeSmokeTests: XCTestCase {
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
         for category in categories {
             let cell = app.buttons[category].firstMatch
-            if UIDevice.current.userInterfaceIdiom == .phone, !cell.isHittable { app.swipeUp() }
-            XCTAssertTrue(cell.waitForExistence(timeout: 3), category)
+            // Decided by what is on screen, not the device: a compact window pushes each page
+            // over the list, a regular one (iPad, unfolded iPhone Duo) keeps the list beside it.
+            if !cell.isHittable { app.swipeUp() }
+            if !cell.waitForExistence(timeout: 3) { print(app.debugDescription) }
+            XCTAssertTrue(cell.exists, category)
             cell.tap()
             XCTAssertTrue(app.navigationBars[category].waitForExistence(timeout: 3), category)
             snapshot(app, "settings-\(category)")
@@ -57,8 +60,8 @@ final class DemoModeSmokeTests: XCTestCase {
                 XCTAssertTrue(app.descendants(matching: .any)["Privacy Policy"].firstMatch.exists,
                               "About links the privacy policy in Demo Mode")
             }
-            if app.navigationBars[category].buttons.firstMatch.exists,
-               UIDevice.current.userInterfaceIdiom == .phone {
+            let pushed = !(cell.exists && cell.isHittable)
+            if pushed, app.navigationBars[category].buttons.firstMatch.exists {
                 app.navigationBars[category].buttons.firstMatch.tap()
                 XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3), category)
             }
