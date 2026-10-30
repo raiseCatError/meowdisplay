@@ -854,7 +854,8 @@ class PadDefaultLayoutTests {
 
     @Test
     fun testFreshPhoneKeepsTheStandardDefaults() {
-        assertEquals(ReceiverControlPreferences(), ReceiverControlPreferences.initial(isPad = false))
+        // Standard defaults, except that phones start in Trackpad (schema 21).
+        assertEquals(ReceiverControlPreferences().also { it.inputMode = PointerInputMode.Trackpad }, ReceiverControlPreferences.initial(isPad = false))
     }
 
     @Test

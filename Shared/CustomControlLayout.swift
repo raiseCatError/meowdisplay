@@ -551,6 +551,8 @@ extension ReceiverControlPreferences {
     /// defaults. Saved preferences are never replaced by this.
     static func initial(isPad: Bool) -> ReceiverControlPreferences {
         var preferences = ReceiverControlPreferences()
+        // Phones start in Trackpad, iPads in Direct Touch (schema 21).
+        preferences.inputMode = isPad ? .direct : .trackpad
         guard isPad else { return preferences }
         preferences.createCustomLayout(corner: .bottomTrailing)
         preferences.padControlLayout = .custom

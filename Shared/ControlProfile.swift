@@ -826,7 +826,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 20
+    static let schemaVersion = 21
 
     var version = schemaVersion
     var trayEnabled = true
@@ -865,11 +865,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// `defaultTrackpadSensitivity`. Never affects Direct Touch or any
     /// multi-finger gesture.
     var trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity
-    /// Direct Touch style (schema 19). Natural Touch for everyone, new and
-    /// upgraded: a blob without this key decodes to `.natural`, and only an
-    /// explicit Classic choice is stored as `.classic`. Never affects
-    /// Trackpad mode.
-    var touchStyle = DirectTouchStyle.natural
+    /// Direct Touch style. Classic for everyone, new and upgraded (schema 21,
+    /// owner decision 2026-10-30; schema 19 had made it Natural). Never
+    /// affects Trackpad mode.
+    var touchStyle = DirectTouchStyle.classic
     /// Whether the one-time "Natural Touch is on" hint has been shown.
     var naturalTouchHintShown = false
     /// Window mode's switcher (schema 20). Stage Peek for everyone unless a
@@ -1296,6 +1295,14 @@ struct ReceiverControlPreferencesRepository {
         // defaulted it to Stage Peek on the left — nothing to transform.
         if value.version < 20 {
             value.version = 20
+        }
+        // Schema 21 (owner decision 2026-10-30): Classic Direct Touch for
+        // everyone, and phones start in Trackpad (iPads stay in Direct
+        // Touch). Applied once to upgraded installs too, like schema 19.
+        if value.version < 21 {
+            value.touchStyle = .classic
+            if initial.inputMode == .trackpad { value.inputMode = .trackpad }
+            value.version = 21
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

@@ -43,10 +43,10 @@ class SharedPreferenceBlobStore(context: Context, name: String = "receiverContro
  * never reads, so a window that grows past compact opens on the iPad's
  * default and a user's own layout choice is kept across every transition.
  */
-class ReceiverControlStore(private val blobs: PreferenceBlobStore) {
+class ReceiverControlStore(private val blobs: PreferenceBlobStore, phone: Boolean = false) {
     private val repository = ReceiverControlPreferencesRepository(blobs)
     private val handler = Handler(Looper.getMainLooper())
-    private val prefsState = MutableStateFlow(repository.load(ReceiverControlPreferences.initial(isPad = true)).atProcessStart())
+    private val prefsState = MutableStateFlow(repository.load(ReceiverControlPreferences.initial(isPad = true, phone = phone)).atProcessStart())
     private val transientState = MutableStateFlow(Transient())
 
     val preferences: StateFlow<ReceiverControlPreferences> = prefsState.asStateFlow()

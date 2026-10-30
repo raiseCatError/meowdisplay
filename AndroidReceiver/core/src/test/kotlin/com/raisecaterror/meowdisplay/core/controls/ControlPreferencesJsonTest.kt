@@ -110,14 +110,40 @@ class TouchStylePreferenceTest {
     }
 
     @Test
-    fun newInstallIsNatural() {
-        assertEquals(DirectTouchStyle.Natural, ReceiverControlPreferences().touchStyle)
+    fun newInstallIsClassic() {
+        assertEquals(DirectTouchStyle.Classic, ReceiverControlPreferences().touchStyle)
         assertFalse(ReceiverControlPreferences().naturalTouchHintShown)
-        assertEquals(20, ReceiverControlPreferences.SCHEMA_VERSION)
+        assertEquals(21, ReceiverControlPreferences.SCHEMA_VERSION)
+    }
+
+    /** Schema 21 (owner decision 2026-10-30): Classic for everyone; phones move to Trackpad, tablets keep their mode. */
+    @Test
+    fun schema21MakesEveryoneClassicAndPhonesTrackpad() {
+        val saved = ReceiverControlPreferences()
+        saved.version = 20
+        saved.touchStyle = DirectTouchStyle.Natural
+        saved.inputMode = PointerInputMode.Direct
+        saved.smartTouchEnabled = false
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = saved.toJson().toString()
+        val phone = ReceiverControlPreferencesRepository(store).load(ReceiverControlPreferences.initial(isPad = true, phone = true))
+        assertEquals(DirectTouchStyle.Classic, phone.touchStyle)
+        assertEquals(PointerInputMode.Trackpad, phone.inputMode)
+        assertFalse("other choices are kept", phone.smartTouchEnabled)
+        val tablet = ReceiverControlPreferencesRepository(store).load(ReceiverControlPreferences.initial(isPad = true, phone = false))
+        assertEquals(DirectTouchStyle.Classic, tablet.touchStyle)
+        assertEquals(PointerInputMode.Direct, tablet.inputMode)
+        // Fresh installs: phones Trackpad, tablets Direct Touch.
+        assertEquals(PointerInputMode.Trackpad, ReceiverControlPreferences.initial(isPad = true, phone = true).inputMode)
+        assertEquals(PointerInputMode.Direct, ReceiverControlPreferences.initial(isPad = true, phone = false).inputMode)
+        // Once migrated, a later choice of Natural sticks.
+        phone.touchStyle = DirectTouchStyle.Natural
+        ReceiverControlPreferencesRepository(store).save(phone)
+        assertEquals(DirectTouchStyle.Natural, ReceiverControlPreferencesRepository(store).load(ReceiverControlPreferences.initial(isPad = true, phone = true)).touchStyle)
     }
 
     @Test
-    fun blobWithoutTheFieldDecodesToNaturalAndKeepsEverythingElse() {
+    fun blobWithoutTheFieldBecomesClassicAndKeepsEverythingElse() {
         val old = ReceiverControlPreferences()
         old.inputMode = PointerInputMode.Trackpad
         old.smartTouchEnabled = false
@@ -130,7 +156,7 @@ class TouchStylePreferenceTest {
         val store = MapStore()
         store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = json.toString()
         val loaded = ReceiverControlPreferencesRepository(store).load()
-        assertEquals(DirectTouchStyle.Natural, loaded.touchStyle)
+        assertEquals(DirectTouchStyle.Classic, loaded.touchStyle)
         assertFalse(loaded.naturalTouchHintShown)
         assertEquals(ReceiverControlPreferences.SCHEMA_VERSION, loaded.version)
         val expected = old.deepCopy()

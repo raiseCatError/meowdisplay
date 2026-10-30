@@ -58,11 +58,8 @@ data class ReceiverControlPreferences(
     var smartTouchEnabled: Boolean = true,
     /** Smart Touch hold haptics; also silenced while [hapticsEnabled] is off. Original persisted name kept. */
     var smartTouchLongPressHapticEnabled: Boolean = true,
-    /**
-     * Direct Touch style (schema 19). Natural for everyone, new and upgraded: a blob without this key
-     * decodes to Natural; only an explicit Classic choice is stored. Never affects Trackpad mode.
-     */
-    var touchStyle: DirectTouchStyle = DirectTouchStyle.Natural,
+    /** Direct Touch style: Classic for everyone, new and upgraded (schema 21; 19 had made it Natural). Never affects Trackpad mode. */
+    var touchStyle: DirectTouchStyle = DirectTouchStyle.Classic,
     /** Whether the one-time "Natural Touch is on" hint has been shown. */
     var naturalTouchHintShown: Boolean = false,
     /** Window mode's switcher (schema 20): Stage Peek unless one was chosen; Rail keeps its own settings. */
@@ -203,7 +200,7 @@ data class ReceiverControlPreferences(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 20
+        const val SCHEMA_VERSION = 21
 
         /**
          * The hand-written Swift `init(from:)`: a key added by a later schema
@@ -349,6 +346,13 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
         if (value.version < 19) value.version = 19
         // Schema 19 predates the window switcher choice; the decoder already defaulted it.
         if (value.version < 20) value.version = 20
+        // Schema 21 (owner decision 2026-10-30): Classic Direct Touch for everyone; phones start in
+        // Trackpad, tablets stay in Direct Touch. Applied once to upgraded installs too, like 19.
+        if (value.version < 21) {
+            value.touchStyle = DirectTouchStyle.Classic
+            if (initial.inputMode == PointerInputMode.Trackpad) value.inputMode = PointerInputMode.Trackpad
+            value.version = 21
+        }
         // Resolve current canonical Function Tray metadata by ID without rewriting the user's choices.
         value.functionTrayProfiles = value.functionTrayProfiles.map { it.resolvingCanonicalMetadata() }
         return value

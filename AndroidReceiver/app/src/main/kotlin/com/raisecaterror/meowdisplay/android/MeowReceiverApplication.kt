@@ -46,7 +46,8 @@ class MeowReceiverApplication : Application() {
     }
 
     /** The receiver controls' preferences (iOS JSON format) and their transient state. */
-    val controls: ReceiverControlStore by lazy { ReceiverControlStore(SharedPreferenceBlobStore(this)) }
+    // Phones (narrowest side under 600 dp) start in Trackpad, tablets in Direct Touch.
+    val controls: ReceiverControlStore by lazy { ReceiverControlStore(SharedPreferenceBlobStore(this), phone = resources.configuration.smallestScreenWidthDp < 600) }
 
     /** Input, viewport and control wiring for the live receiver surface. */
     val receiver: ReceiverController by lazy {

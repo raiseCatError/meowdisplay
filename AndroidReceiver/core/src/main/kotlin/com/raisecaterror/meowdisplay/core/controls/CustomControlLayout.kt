@@ -654,8 +654,10 @@ val ReceiverControlPreferences.canCreateCustomLayout: Boolean get() = customLayo
  * Overlay one setting away; iPhone keeps the standard defaults. Saved
  * preferences are never replaced by this.
  */
-fun ReceiverControlPreferences.Companion.initial(isPad: Boolean): ReceiverControlPreferences {
+fun ReceiverControlPreferences.Companion.initial(isPad: Boolean, phone: Boolean = !isPad): ReceiverControlPreferences {
     val preferences = ReceiverControlPreferences()
+    // Phones start in Trackpad, tablets in Direct Touch (schema 21).
+    preferences.inputMode = if (phone) PointerInputMode.Trackpad else PointerInputMode.Direct
     if (!isPad) return preferences
     preferences.createCustomLayout(corner = ControlCorner.BottomTrailing)
     preferences.padControlLayout = PadControlLayoutMode.Custom

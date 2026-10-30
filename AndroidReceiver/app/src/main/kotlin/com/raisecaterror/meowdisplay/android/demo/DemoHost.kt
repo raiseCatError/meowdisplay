@@ -115,7 +115,9 @@ class DemoRuntime(context: Context, panel: () -> HelloFields) {
         store = ReceiverControlStore(MemoryBlobStore()).also {
             it.update { prefs ->
                 prefs.audioPreferred = false
-                // The demo's guide explains Natural Touch; its one-time hint would cover the DEMO badge.
+                // The demo's guide teaches Natural Touch, so the demo uses it (Classic is the app default);
+                // its one-time hint would cover the DEMO badge.
+                prefs.touchStyle = com.raisecaterror.meowdisplay.core.controls.DirectTouchStyle.Natural
                 prefs.naturalTouchHintShown = true
             }
         }
