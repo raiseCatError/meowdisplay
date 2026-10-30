@@ -891,6 +891,19 @@ actor ReceiverPipelineActor {
     }
 
     var currentPhase: ReceiverSessionPhase { sessionState.phase }
+    var currentGeneration: Int { sessionState.generation }
+
+    /// The connection of `generation` failed or was closed by the Mac. A report that arrives
+    /// after a newer connection was adopted (the old socket's error or EOF still in flight while
+    /// the Mac redialed, e.g. after Wi-Fi gave way to Tailscale) belongs to the replaced
+    /// connection and is ignored: it must not mark the new session lost or clear its send target.
+    func connectionEnded(generation: Int) {
+        guard generation == sessionState.generation else {
+            Log.info("reconnectDebug: ignored the end of a replaced connection generation=\(generation) current=\(sessionState.generation)")
+            return
+        }
+        setConnected(false)
+    }
 
     // MARK: - Connect / disconnect funnel
 

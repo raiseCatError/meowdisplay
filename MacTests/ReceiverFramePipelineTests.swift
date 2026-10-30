@@ -54,8 +54,8 @@ final class ReceiverFramePipelineTests: XCTestCase {
             audioPayload: { data in recorder.recordAudioPayload(data) },
             codecConfigurationChanged: { box, size in recorder.recordCodecConfiguration(box.value, size) },
             presentationFrame: { _, _, _ in recorder.recordPresentationFrame() },
-            connectionFailed: { _ in recorder.recordConnectionFailed() },
-            connectionClosedByPeer: { recorder.recordConnectionClosed() })
+            connectionFailed: { _, _ in recorder.recordConnectionFailed() },
+            connectionClosedByPeer: { _ in recorder.recordConnectionClosed() })
         return (ReceiverFramePipeline(outputEffects: effects), recorder)
     }
 

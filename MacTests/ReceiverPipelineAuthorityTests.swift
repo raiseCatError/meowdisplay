@@ -180,6 +180,24 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
         XCTAssertEqual(host.knocks, [])
     }
 
+    // A late error or EOF from a connection a newer one replaced must not mark the new session
+    // lost (it cleared the send target: no pings, no input until the Mac's watchdog redialed).
+    func testTheEndOfAReplacedConnectionLeavesTheCurrentSessionAlone() async {
+        let host = PipelineTestHost()
+        let pipeline = host.makePipeline()
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        let current = await pipeline.currentGeneration
+
+        await pipeline.connectionEnded(generation: current - 1)
+        var phase = await pipeline.currentPhase
+        XCTAssertEqual(phase, .connected, "a replaced connection's end is ignored")
+
+        await pipeline.connectionEnded(generation: current)
+        phase = await pipeline.currentPhase
+        XCTAssertEqual(phase, .reconnecting, "the current connection's end is a loss")
+        await stopRecovery(pipeline)
+    }
+
     // MARK: - Parked candidates (F5)
 
     func testForgetCancelsAParkedCandidate() async throws {

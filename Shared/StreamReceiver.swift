@@ -5688,7 +5688,7 @@ final class StreamReceiver: ObservableObject {
             presentationFrame: { box, captureMs, sendMs in
                 queue.async { selfBox.currentOnQueue()?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
             },
-            connectionFailed: { error in
+            connectionFailed: { error, generation in
                 queue.async {
                     // FORENSIC FIX (media-death-with-input-still-working):
                     // see the original `processReceivedData`'s doc comment
@@ -5697,14 +5697,14 @@ final class StreamReceiver: ObservableObject {
                     // must mark the session down exactly like EOF.
                     Log.info("receive error: \(error)")
                     guard let pipeline = pipelineBox.current() else { return }
-                    Task { await pipeline.setConnected(false) }
+                    Task { await pipeline.connectionEnded(generation: generation) }
                 }
             },
-            connectionClosedByPeer: {
+            connectionClosedByPeer: { generation in
                 queue.async {
                     Log.info("peer closed connection")
                     guard let pipeline = pipelineBox.current() else { return }
-                    Task { await pipeline.setConnected(false) }
+                    Task { await pipeline.connectionEnded(generation: generation) }
                 }
             },
             mediaAdmitted: { [mediaAdmissionGate] generation in
