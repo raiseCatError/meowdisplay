@@ -224,13 +224,19 @@ enum PairingNetwork {
     /// Receives one frame, failing with `.malformedMessage` if it doesn't
     /// arrive within `seconds` — the responder's ~5-second reveal deadline
     /// after sending its own hello, distinct from the overall attempt
-    /// deadline `pairingTimeout` enforces.
-    private static func receiveWithDeadline(_ seconds: TimeInterval,
-                                            on connection: NWConnection) async throws -> PairingEnvelope {
+    /// deadline `pairingTimeout` enforces. A missed deadline ends the
+    /// attempt and closes the connection: a pending receive can't be
+    /// cancelled any other way, and the task group waits for it, so without
+    /// the close a silent peer held the throttle's slot until the 65-second
+    /// backstop.
+    static func receiveWithDeadline(_ seconds: TimeInterval,
+                                    on connection: NWConnection) async throws -> PairingEnvelope {
         try await withThrowingTaskGroup(of: PairingEnvelope.self) { group in
             group.addTask { try await PairingFraming.receive(on: connection) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                Log.info("pairDebug: reveal deadline missed")
+                connection.cancel()
                 throw PairingError.malformedMessage
             }
             defer { group.cancelAll() }
