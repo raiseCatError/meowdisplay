@@ -316,6 +316,11 @@ private fun SettingsPageContent(
                     set { it.stagePeekDock = dock }
                 }
             }
+            controller.workspace?.let { ws ->
+                var bring by remember { mutableStateOf(ws.bringStripWindowsForward) }
+                Toggle("Bring Stage Manager Windows Forward", bring) { on -> bring = on; ws.bringStripWindowsForward = on }
+                Caption("macOS pauses windows in Stage Manager's side strip. With this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")
+            }
             Caption(
                 (if (prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) "Touch and hold the screen edge to see your windows. Tap one to switch."
                 else "A compact strip of windows along one edge.") + " Used in Window view." +

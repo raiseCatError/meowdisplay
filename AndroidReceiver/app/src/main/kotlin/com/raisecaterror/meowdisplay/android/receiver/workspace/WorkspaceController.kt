@@ -154,6 +154,8 @@ data class WorkspaceUi(
  * without ever dropping tiles, and sends only this Mac's tiles to it.
  * Mirrors iOS WorkspaceModel. Main thread only.
  */
+private const val BRING_STRIP_FORWARD = "workspace.bringStripWindowsForward"
+
 class WorkspaceController(
     context: Context,
     private val media: SessionHost,
@@ -659,9 +661,18 @@ class WorkspaceController(
     }
 
     /** A window chosen in the overview, rail or Stage Peek. */
+    /** Settings ▸ Controls, off by default: choosing a window in Stage Manager's side strip also brings it
+     *  forward on the Mac (its stage changes) so it streams live. Needs control; the Mac refuses it otherwise. */
+    var bringStripWindowsForward: Boolean
+        get() = prefs.getBoolean(BRING_STRIP_FORWARD, false)
+        set(on) { prefs.edit().putBoolean(BRING_STRIP_FORWARD, on).apply() }
+
     fun choose(window: CatalogWindow, asNewTile: Boolean) {
         val host = host ?: return
         val source = source(window) ?: return
+        if (window.inStageStrip && bringStripWindowsForward && inputAllowed) {
+            media.session.sendWorkspace(WorkspaceWire.activate(window.id, window.generation))   // chosen, and opted in
+        }
         val replacing = state.value.replacingTile
         closeOverview()
         state.update { it.copy(railExpanded = false, stagePeekOpen = false) }

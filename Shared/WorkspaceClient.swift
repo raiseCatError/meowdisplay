@@ -1116,8 +1116,20 @@ final class WorkspaceModel: ObservableObject {
         persist(); publish(); scheduleSend()
     }
 
+    /// Settings ▸ Controls, off by default: choosing a window that sits in Stage Manager's side
+    /// strip also brings it forward on the Mac (it changes the Mac's stage), so it streams live.
+    /// Needs control; the Mac refuses it otherwise.
+    static let bringStripWindowsForwardKey = "workspace.bringStripWindowsForward"
+    var bringStripWindowsForward: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.bringStripWindowsForwardKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.bringStripWindowsForwardKey); objectWillChange.send() }
+    }
+
     func choose(_ w: CatalogWindowItem, asNewTile: Bool) {
         guard let host, let source = source(for: w) else { return }
+        if w.inStageStrip, bringStripWindowsForward, inputAllowed() {
+            _ = send(WorkspaceRequests.activateWindow(w.id, generation: w.generation))   // the person chose it, and opted in
+        }
         let replacing = replacingTile
         closeOverview()
         if !windowMode { requestWindowMode() }

@@ -830,6 +830,7 @@ private struct GestureSettingsPage: View {
 // MARK: - Controls
 
 private struct ControlSettingsPage: View {
+    @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -900,6 +901,8 @@ private struct ControlSettingsPage: View {
                     }
                     .accessibilityIdentifier("stagePeekDockPicker")
                 }
+                Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
+                    .accessibilityIdentifier("bringStripWindowsForward")
             } header: {
                 Text("Window Switcher")
             } footer: {
@@ -908,7 +911,8 @@ private struct ControlSettingsPage: View {
                      + (controlStore.preferences.windowSwitcher == .stagePeek
                         ? " " + (controlStore.preferences.stagePeekDock == .compact
                                  ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
-                                 : String(localized: "Normal uses the whole edge.")) : ""))
+                                 : String(localized: "Normal uses the whole edge.")) : "")
+                     + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane."))
             }
             Section {
                 Picker("Control Profile", selection: Binding(
