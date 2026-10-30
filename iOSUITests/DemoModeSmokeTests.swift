@@ -295,4 +295,33 @@ extension DemoModeSmokeTests {
         snapshot(app, "live-connect-session")
         XCTAssertFalse(app.staticTexts["Connection lost"].exists, "the session doesn't drop")
     }
+
+    /// Live Mac (skips without one): Rotate from a pane's menu turns that pane's picture.
+    @MainActor
+    func testRotatesAPaneOnTheLiveMac() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let reconnect = app.buttons["Reconnect"]
+        let connect = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connect to' OR label BEGINSWITH 'Wake and connect to'")).firstMatch
+        if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
+        else if connect.waitForExistence(timeout: 10) { connect.tap() }
+        sleep(10)
+        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        guard pane.waitForExistence(timeout: 20) else { snapshot(app, "rotate-no-pane"); throw XCTSkip("no Window-mode pane") }
+        snapshot(app, "rotate-before")
+        pane.press(forDuration: 0.7)
+        let rotate = app.buttons["Rotate"]
+        XCTAssertTrue(rotate.waitForExistence(timeout: 5), "the pane menu offers Rotate")
+        snapshot(app, "rotate-menu")
+        rotate.tap()
+        sleep(4)
+        snapshot(app, "rotate-after")
+        // Leave the owner's layout as it was.
+        pane.press(forDuration: 0.7)
+        let reset = app.buttons["Reset View"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 5), "a rotated pane offers Reset View")
+        reset.tap()
+        sleep(3)
+        snapshot(app, "rotate-reset")
+    }
 }

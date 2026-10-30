@@ -164,8 +164,9 @@ struct WorkspaceChromeView: View {
 
     private func syncMenus() {
         let source = model.active.flatMap { model.layout.tiles[$0]?.source }
+        let appName = source.flatMap { s in model.catalog?.windows.first { $0.id == s.windowID }?.app }
         model.menus.sync(tile: model.active, bundle: source?.isDisplay == false ? source?.bundleID : nil,
-                         enabled: inputAllowed && model.windowMode)
+                         appName: appName, enabled: inputAllowed && model.windowMode)
     }
 
     private var closeTitle: String {
@@ -444,14 +445,13 @@ struct WorkspaceChromeView: View {
     // MARK: The label menu
 
     private func paneMenu(_ m: PaneMenuTarget, tile: WorkspaceTile, maxHeight: CGFloat) -> some View {
-        let rows = paneMenuRows(m, tile: tile)
-        return ViewThatFits(in: .vertical) {
-            rows
-            ScrollView(.vertical) { rows }.scrollIndicators(.visible)
+        // The rows' natural height is measured inside the scroll view; the menu is exactly that tall,
+        // or the room's height (scrolling) when taller.
+        ScrollView(.vertical, showsIndicators: menuHeight > maxHeight) {
+            paneMenuRows(m, tile: tile)
+                .background(GeometryReader { g in Color.clear.preference(key: PaneMenuHeightKey.self, value: g.size.height) })
         }
-        .frame(width: 252)
-        .frame(maxHeight: maxHeight)
-        .background(GeometryReader { g in Color.clear.preference(key: PaneMenuHeightKey.self, value: g.size.height) })
+        .frame(width: 252, height: min(menuHeight, maxHeight))
         .onPreferenceChange(PaneMenuHeightKey.self) { menuHeight = $0 }
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.ultraThinMaterial))
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35)))

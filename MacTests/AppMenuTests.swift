@@ -89,4 +89,11 @@ final class WindowAudioSourcesTests: XCTestCase {
         XCTAssertEqual(WindowAudioSources.of([tile("a", pid: 11), tile("b", pid: 12), tile("c", pid: 11)]), .apps([11, 12]))
         XCTAssertEqual(WindowAudioSources.of([tile("a", pid: 11), tile("d", pid: 0, display: 1)]), .everything, "a desktop pane: all sound")
     }
+
+    func testAReplyForThePanesPreviousAppIsAskedAgainNotShown() {
+        XCTAssertTrue(AppMenuModel.isStale(replyApp: "Terminal", expected: "Zed"), "the Mac still had the previous tab's window")
+        XCTAssertFalse(AppMenuModel.isStale(replyApp: "zed", expected: "Zed"))
+        XCTAssertFalse(AppMenuModel.isStale(replyApp: "Zed", expected: nil), "unknown app: shown")
+        XCTAssertFalse(AppMenuModel.isStale(replyApp: "", expected: "Zed"))
+    }
 }

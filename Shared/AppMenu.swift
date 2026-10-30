@@ -104,7 +104,13 @@ final class AppMenuModel: ObservableObject {
     }
 
     /// The focused pane (and its app) changed, or control came or went.
-    func sync(tile newTile: String?, bundle newBundle: String?, enabled: Bool) {
+    /// The app the focused pane shows now (its name as the Mac lists it): a reply for another app is
+    /// from before a tab switch reached the Mac, so it is asked again instead of shown.
+    private var expectedApp: String?
+    private var staleRetries = 0
+
+    func sync(tile newTile: String?, bundle newBundle: String?, appName: String? = nil, enabled: Bool) {
+        expectedApp = appName.flatMap { $0.isEmpty ? nil : $0 }
         guard available, enabled, let newTile, let newBundle, !newBundle.isEmpty else {
             if tile != nil { reset() }
             return
@@ -112,6 +118,7 @@ final class AppMenuModel: ObservableObject {
         guard newTile != tile || newBundle != bundle else { return }
         tile = newTile
         bundle = newBundle
+        staleRetries = 0
         top = []
         topError = nil
         open = []
@@ -162,6 +169,12 @@ final class AppMenuModel: ObservableObject {
         guard r.tile == nil || r.tile == tile else { return }
         if r.path.isEmpty {
             guard r.req == nil || r.req == topReq else { return }
+            if r.ok, AppMenuModel.isStale(replyApp: r.app, expected: expectedApp), staleRetries < 3 {
+                // The Mac answered for the pane's previous tab: ask again once it has the new window.
+                staleRetries += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
+                return
+            }
             if r.ok { app = r.app; top = r.items; topError = nil } else { top = []; topError = r.error ?? "unavailable" }
             return
         }
@@ -180,6 +193,12 @@ final class AppMenuModel: ObservableObject {
             self?.failed = nil
         }
         refresh()
+    }
+
+    /// A top-level reply names another app than the pane shows.
+    static func isStale(replyApp: String, expected: String?) -> Bool {
+        guard let expected, !replyApp.isEmpty else { return false }
+        return replyApp.compare(expected, options: [.caseInsensitive, .diacriticInsensitive]) != .orderedSame
     }
 
     private func nextReq() -> Int { req &+= 1; if req > 1_000_000_000 { req = 1 }; return req }
