@@ -36,8 +36,8 @@ jobs:
       - name: Shell scripts
         run: |
           set -euo pipefail
-          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' | xargs -0 -n1 bash -n
-          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' | xargs -0 shellcheck -S warning
+          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 -n1 bash -n
+          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 shellcheck -S warning
 
   # Runs on every branch; does real work only where the Android app exists.
   android:
@@ -78,6 +78,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
       - name: Install XcodeGen
         run: |
           brew install xcodegen

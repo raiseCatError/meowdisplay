@@ -117,6 +117,8 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
       - name: Environment requires an approval
         env:
           GH_TOKEN: ${{ github.token }}
