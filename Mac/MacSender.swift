@@ -6720,6 +6720,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                       "min": WireProtocol.minSupportedPeer]
         // The device shows whether this Mac's screens are covered while it's connected.
         welcome["privacyShield"] = PrivacyShieldPolicy.isOn(remote: isRemoteSession)
+        // Paired devices show who uses this Mac (welcome only goes over the authenticated session).
+        if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]

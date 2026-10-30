@@ -276,6 +276,7 @@ class MediaController(
         controlEvents?.invoke(event)
         when (event) {
             is SessionEvent.Phase -> state.update { it.copy(phase = event.phase) }
+            is SessionEvent.MacUser -> pins.setUser(event.peerID, event.name)
             is SessionEvent.Connected -> {
                 val route = event.remoteAddress?.let { routeOf?.invoke(it, event.localAddress, event.peerID) }
                 state.update {

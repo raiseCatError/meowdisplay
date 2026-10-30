@@ -326,6 +326,7 @@ targets:
       - Shared/ReceiverPipelineActor.swift
       - Shared/ReceiverAudioDecoder.swift
       - Shared/TrustStore.swift
+      - Shared/PairedMacUserName.swift
       - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/PairingNetwork.swift

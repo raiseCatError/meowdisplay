@@ -132,9 +132,20 @@ object ReceiverMessages {
 }
 
 /** Sender-to-receiver control messages this core acts on (PROTOCOL.md 6.2). */
+/** The paired Mac's user name as shown: printable, one line, at most [MAX] characters. */
+object PairedMacUser {
+    const val MAX = 64
+    fun clean(raw: String?): String? {
+        val text = raw?.filter { !it.isISOControl() }?.trim() ?: return null
+        return text.take(MAX).ifEmpty { null }
+    }
+}
+
 sealed interface SenderMessage {
     /** [privacyShield]: the Mac covers its own screens while this device is connected (null: an older Mac). */
-    data class Welcome(val pv: Int, val min: Int, val features: Set<String> = emptySet(), val privacyShield: Boolean? = null) : SenderMessage
+    /** [user]: the full name of who uses the Mac (paired sessions only; null: hidden or an older Mac). */
+    data class Welcome(val pv: Int, val min: Int, val features: Set<String> = emptySet(), val privacyShield: Boolean? = null,
+                       val user: String? = null) : SenderMessage
     data class UpdateRequired(val message: String?, val store: String?) : SenderMessage
     data class Pong(val t: Double, val mt: Double) : SenderMessage
     data object Ping : SenderMessage
@@ -195,6 +206,7 @@ sealed interface SenderMessage {
                     features = (obj["features"] as? kotlinx.serialization.json.JsonArray)?.take(16)
                         ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.take(32) }?.toSet() ?: emptySet(),
                     privacyShield = (obj["privacyShield"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull(),
+                    user = PairedMacUser.clean((obj["user"] as? JsonPrimitive)?.takeIf { it.isString }?.content),
                 )
                 "updateRequired" -> UpdateRequired(obj.string("message"), obj.string("store"))
                 "pong" -> {

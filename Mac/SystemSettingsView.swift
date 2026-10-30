@@ -12,6 +12,7 @@ struct SystemSettingsView: View {
     // wire. `catModeTapCount` intentionally isn't persisted — a relaunch
     // mid-tapping just resets the count.
     @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
+    @AppStorage(PairedMacUserName.showKey) private var showUserName = true
     @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
     @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
     @State private var showCatModeUnlockedAlert = false
@@ -160,6 +161,10 @@ struct SystemSettingsView: View {
                     LabeledContent("This Mac's ID", value: TrustStore.shortID(spki: spki))
                         .help("Shown next to this Mac's name on paired iPhones, iPads and Android devices.")
                 }
+                Toggle("Show My Name to Paired Devices", isOn: $showUserName)
+                    .help(showUserName
+                          ? "Paired devices show \(NSFullUserName()) next to this Mac, from their next connection. It's sent only to paired devices over their secure connection, never on the network for discovery."
+                          : "Paired devices show only this Mac's name and ID. Each forgets your name the next time it connects.")
                 LabeledContent("Version", value: appVersion)
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance

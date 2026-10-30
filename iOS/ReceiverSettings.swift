@@ -1255,6 +1255,9 @@ private struct PairedMacsSettingsPage: View {
                             // (the Mac shows its own in Settings ▸ General).
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(peer.displayName)
+                                if let user = PairedMacUserName.name(peerID: peer.peerID) {
+                                    Text(verbatim: user).font(.caption).foregroundStyle(.secondary)
+                                }
                                 if let id = TrustStore.shared.shortID(peerID: peer.peerID) {
                                     Text("ID \(id)").font(.caption.monospaced()).foregroundStyle(.secondary)
                                         .accessibilityLabel(Text("ID \(id.map(String.init).joined(separator: " "))"))

@@ -1473,7 +1473,8 @@ struct IdleView: View {
     private func macRow(_ mac: HomeMac) -> some View {
         // A paired Mac's short ID ("Nearby · ID 4F2A") tells same-named Macs apart.
         let shortID = mac.peerID.flatMap { TrustStore.shared.shortID(peerID: $0) }
-        let subtitle = [macSubtitle(mac), shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
+        let user = PairedMacUserName.name(peerID: mac.peerID)
+        let subtitle = [macSubtitle(mac), user, shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
             .joined(separator: " · ").nilIfEmpty
         func label(lines: Int?) -> some View {
             VStack(alignment: .leading, spacing: 2) {

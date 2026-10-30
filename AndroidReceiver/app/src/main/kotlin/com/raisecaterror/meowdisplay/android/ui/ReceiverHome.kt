@@ -199,7 +199,8 @@ fun ReceiverHome(
                         MacRow(
                             title = mac.name,
                             // A paired Mac's short ID ("Nearby · ID 4F2A") tells same-named Macs apart.
-                            subtitle = listOfNotNull(status.text, paired.firstOrNull { it.peerID == mac.peerID }?.spki
+                            subtitle = listOfNotNull(status.text, paired.firstOrNull { it.peerID == mac.peerID }?.user,
+                                paired.firstOrNull { it.peerID == mac.peerID }?.spki
                                 ?.let { "ID " + com.raisecaterror.meowdisplay.core.tls.PinnedTls.shortId(it) })
                                 .joinToString(" · ").ifEmpty { null },
                             detail = status.hint,

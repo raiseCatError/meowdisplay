@@ -223,6 +223,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
 
     /// Remove one peer's pin and refresh the snapshot.
     func forget(peerID: String) {
+        PairedMacUserName.forget(peerID: peerID)
         pinWriteLock.lock()
         defer { pinWriteLock.unlock() }
         let query: [CFString: Any] = [

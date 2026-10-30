@@ -62,6 +62,8 @@ sealed interface SessionEvent {
     data class MacFeatures(val features: Set<String>) : SessionEvent
     /** The Mac's Privacy Shield is on or off for this connection (shown briefly after each connection). */
     data class PrivacyShield(val on: Boolean) : SessionEvent
+    /** Who uses the authenticated Mac [peerID] (null: hidden on that Mac). */
+    data class MacUser(val peerID: String, val name: String?) : SessionEvent
     data class Cursor(val x: Double, val y: Double, val visible: Boolean, val pane: CursorPane? = null) : SessionEvent
     /** The Mac's focused text caret, normalized to the streamed display (`visible` false: none). */
     data class TextCaret(val x: Double, val y: Double, val width: Double, val height: Double, val visible: Boolean) : SessionEvent
@@ -569,6 +571,7 @@ class ReceiverSession(
                 publishStreamSettings()
                 deliver("features", SessionEvent.MacFeatures(message.features))
                 message.privacyShield?.let { deliver("privacyShield", SessionEvent.PrivacyShield(it)) }
+                deliver("macUser", SessionEvent.MacUser(from.peerID, message.user))
                 if (message.pv < WireProtocol.SESSION_INVITATION) admitLegacySenderOrClose(from)
                 if (link !== from) return
                 if (message.pv < WireProtocol.MIN_SUPPORTED_PEER) {

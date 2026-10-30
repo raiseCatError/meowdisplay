@@ -2800,6 +2800,8 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
             workspaceEvents.emit(.features(Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })))
             if let shield = obj["privacyShield"] as? Bool { workspaceEvents.emit(.privacyShield(shield)) }
+            // Who uses this Mac, for the peer that completed mutual TLS only (absent: hidden on the Mac).
+            PairedMacUserName.record(obj["user"] as? String, peerID: reconnectContext.current().authenticatedPeerIDHint)
             if macPV < WireProtocol.sessionInvitationWireVersion {
                 admitLegacySenderOrClose()
             }

@@ -1018,7 +1018,11 @@ to a pre-pv-2 sender and MUST assume sender `pv` 1. An optional boolean
 `privacyShield` says whether the Mac covers its own screens while this
 receiver is connected (on by default for remote connections, off for local
 ones); receivers show it briefly after each connection and ignore it when
-absent.
+absent. An optional string `user` (at most 64 characters) is the
+full name of the person signed in on the Mac, so receivers can tell
+same-named Macs apart; the Mac's owner can turn it off. It is only ever
+sent here, inside the authenticated session, never in discovery. Receivers
+keep it for that paired Mac and drop it when a `welcome` arrives without it.
 
 **`updateRequired`**: the sender declares the pairing unsupported until the
 receiver updates. `target` names the end that must act (`"ios"` for the
