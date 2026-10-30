@@ -1753,6 +1753,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Async wait half of startup — see `beginStart()`. Only ever invoked
     /// from the Task `beginStart()` creates, on a `self` resolved fresh in
     /// that Task's own isolation domain.
+    /// One startup step's duration (privacy-safe: names and milliseconds only), so a slow
+    /// connection says where its time went.
+    nonisolated static func logStartupStep(_ step: String, since start: ContinuousClock.Instant) {
+        let d = ContinuousClock.now - start
+        let ms = Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+        Log.info("startupStep: \(step) ms=\(ms)")
+    }
+
     private func awaitStartup() async throws {
         // Screen Recording permission: poll until granted. No auto-prompt at
         // launch — the permission panel's Grant button triggers the system
@@ -1768,6 +1776,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let (admitted, admittedGeneration) = try await awaitAdmittedConnection()
+        Log.info("startupStep: admitted generation=\(admittedGeneration) mode=\(mode.rawValue)")
 
         switch mode {
         case .mirror:
@@ -2632,9 +2641,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Off-screen ones too: the cover and its notice are registered before they appear.
             let shieldIDs = Set(PrivacyShieldWindows.current)
             var shield: [SCWindow] = []
+            let shieldClock = ContinuousClock.now
             if !shieldIDs.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) {
                 shield = Self.privacyHidden(content, ids: shieldIDs)
             }
+            if !shieldIDs.isEmpty { Self.logStartupStep("shieldContent", since: shieldClock) }
             let filter = SCContentFilter(display: display, excludingWindows: shield)
             let config = SCStreamConfiguration()
             config.width = plan.pixelsWide
@@ -2676,7 +2687,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             config.channelCount = 2
             config.excludesCurrentProcessAudio = true
 
+            let audioClock = ContinuousClock.now
             await audioCaptureEncoder.reset()
+            Self.logStartupStep("audioReset", since: audioClock)
             stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
@@ -2689,7 +2702,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CancellationError()
         }
         do {
+            let startClock = ContinuousClock.now
             try await stream.startCapture()
+            Self.logStartupStep("streamStart", since: startClock)
         } catch {
             _ = try? await onQueue { sender in sender.abandonCaptureStart(ticket, startAttempted: true) }
             throw error
@@ -7087,7 +7102,9 @@ extension MacSender {
     /// Mac too, as long as macOS has some display (even a virtual one)
     /// holding the windows; it never creates one.
     func startWindowWorkspace(info: PhoneInfo, sessionGeneration: UInt64) async throws {
+        let contentClock = ContinuousClock.now
         let content = try await SCShareableContent.current
+        Self.logStartupStep("windowModeContent", since: contentClock)
         let main = CGMainDisplayID()
         guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
             await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")

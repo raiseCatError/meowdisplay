@@ -267,3 +267,32 @@ extension DemoModeSmokeTests {
         XCTAssertTrue(app.buttons["Natural Touch"].firstMatch.isSelected)
     }
 }
+
+// MARK: - Live Mac connection (physical iPhone)
+
+extension DemoModeSmokeTests {
+    /// Physical iPhone + the paired Mac on the same network (skipped otherwise): connects from the
+    /// home screen (or the Reconnect button) and waits for the session to leave the home screen.
+    /// The Mac's log is the oracle for what the device then shows; this only drives the button.
+    @MainActor
+    func testConnectsToThePairedMac() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let reconnect = app.buttons["Reconnect"]
+        let connect = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connect to' OR label BEGINSWITH 'Wake and connect to' OR label BEGINSWITH 'Try again with'")).firstMatch
+        if reconnect.waitForExistence(timeout: 5) {
+            reconnect.tap()
+        } else if connect.waitForExistence(timeout: 10) {
+            snapshot(app, "live-connect-home")
+            connect.tap()
+        } else {
+            throw XCTSkip("no paired Mac on the home screen")
+        }
+        let left = NSPredicate(format: "exists == false")
+        expectation(for: left, evaluatedWith: connect)
+        waitForExpectations(timeout: 30)
+        sleep(8)
+        snapshot(app, "live-connect-session")
+        XCTAssertFalse(app.staticTexts["Connection lost"].exists, "the session doesn't drop")
+    }
+}

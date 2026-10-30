@@ -134,6 +134,11 @@ targets:
           PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac.debug
           PRODUCT_NAME: MeowDisplay Dev
           BUNDLE_DISPLAY_NAME: MeowDisplay Dev
+          # No debug-dylib stub: with it every Debug build's main executable is the same tiny
+          # stub with one fixed UUID, and macOS Local Network privacy keys its grants by the
+          # main executable's UUID (TN3179). A shared, unchanging UUID left the grant unmatched,
+          # so outgoing connections to devices failed silently ("Local network prohibited").
+          ENABLE_DEBUG_DYLIB: NO
           # Grayscale icon (same composition as Release) so the dev build is
           # obvious in the Dock, cmd-tab and permission lists.
           ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Dev
