@@ -125,6 +125,8 @@ enum WorkspaceEvent: Sendable {
     case closeResult(windowID: UInt32, result: WindowCloseResult)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
+    /// Unified Clipboard (PROTOCOL.md 6.15).
+    case clip(ClipboardMessage)
     /// Pane menus (PROTOCOL.md 6.13).
     case menu(AppMenuReply)
     case menuResult(ok: Bool, error: String?)
@@ -210,6 +212,8 @@ enum WorkspaceEvent: Sendable {
             return .closeResult(windowID: id, result: r)
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
+        case ClipboardWire.type:
+            return .clip(ClipboardMessage(obj: obj))
         case WireMessage.menu:
             return AppMenuReply.parse(obj).map { .menu($0) }
         case WireMessage.menuResult:
@@ -477,6 +481,8 @@ final class WorkspaceModel: ObservableObject {
         railEdge = defaults.string(forKey: Self.railKey).flatMap(WorkspaceRailEdge.init(rawValue:)) ?? .top
         files = RemoteFilesModel(defaults: defaults)
         menus = AppMenuModel(defaults: defaults)
+        clipboard = ClipboardModel(defaults: defaults)
+        clipboard.send = { [weak self] m in self?.send(m) ?? false }
         files.send = { [weak self] m in self?.send(m) ?? false }
         files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
         files.macKey = { [weak self] in self?.host }
@@ -488,6 +494,9 @@ final class WorkspaceModel: ObservableObject {
 
     /// Remote Finder: the Mac's approved folders, browsed here (Finder in the carousel opens it).
     let files: RemoteFilesModel
+
+    /// Unified Clipboard with the connected Mac (off until turned on here and allowed there).
+    let clipboard: ClipboardModel
 
     var active: String? { remote?.active }
     /// The connected Mac's name as paired (never a name the network claims).
@@ -508,8 +517,11 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
+        case .clip(let m):
+            clipboard.handle(m)
         case .menu(let reply):
             menus.apply(reply)
         case .menuResult(let ok, let error):
@@ -581,6 +593,7 @@ final class WorkspaceModel: ObservableObject {
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             files.setAvailable(false)
             menus.setAvailable(false)
+            clipboard.setAvailable(false)
             // A new session's frames carry no echo of this one's views; stills are re-asked.
             composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
             zoomGesture = nil; zoomPreview = nil

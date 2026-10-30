@@ -70,6 +70,12 @@ struct DemoSettingsPage: View {
             case .connections: connections
             case .pairedMacs: pairedMacs
             case .remoteAccess: remoteAccess
+            case .clipboard:
+                Section {
+                    Toggle("Unified Clipboard", isOn: .constant(false)).disabled(true)
+                } footer: {
+                    Text("Copy on your Mac and paste here, and the other way round. It needs a real Mac that allows it, so it is off in Demo Mode.")
+                }
             case .permissions: permissions
             case .diagnostics: diagnostics
             default: EmptyView()

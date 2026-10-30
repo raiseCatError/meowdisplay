@@ -13,6 +13,7 @@ enum MobileSettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case connections
     case pairedMacs
     case remoteAccess
+    case clipboard
     case permissions
     case diagnostics
     case about
@@ -31,6 +32,7 @@ enum MobileSettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .connections: return String(localized: "Connections")
         case .pairedMacs: return String(localized: "Paired Macs")
         case .remoteAccess: return String(localized: "Remote Access")
+        case .clipboard: return String(localized: "Clipboard")
         case .permissions: return String(localized: "Permissions")
         case .diagnostics: return String(localized: "Diagnostics")
         case .about: return String(localized: "About")
@@ -49,6 +51,7 @@ enum MobileSettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .connections: return "cable.connector"
         case .pairedMacs: return "laptopcomputer"
         case .remoteAccess: return "network"
+        case .clipboard: return "doc.on.clipboard"
         case .permissions: return "lock.shield"
         case .diagnostics: return "stethoscope"
         case .about: return "info.circle"
@@ -66,7 +69,7 @@ enum MobileSettingsCategory: String, CaseIterable, Identifiable, Hashable {
     var group: Group {
         switch self {
         case .general, .display, .input, .gestures, .controls, .audio: return .receiver
-        case .connections, .pairedMacs, .remoteAccess, .permissions: return .connection
+        case .connections, .pairedMacs, .remoteAccess, .clipboard, .permissions: return .connection
         case .diagnostics, .about, .developer: return .support
         }
     }

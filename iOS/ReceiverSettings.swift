@@ -19,6 +19,8 @@ struct SettingsView: View {
     /// Demo Mode: sample session state. Pages that need a real Mac show
     /// demo pages instead (see `DemoSettingsPresentation`).
     var demo: DemoSession?
+    /// Unified Clipboard with the connected Mac.
+    var clipboard: ClipboardModel?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: MobileSettingsCategory?
@@ -156,6 +158,13 @@ struct SettingsView: View {
             PairedMacsSettingsPage(receiver: receiver)
         case .remoteAccess:
             RemoteAccessSettingsPage(receiver: receiver)
+        case .clipboard:
+            if let clipboard {
+                ClipboardSettingsPage(clipboard: clipboard)
+            } else {
+                SettingsForm { Text("Unified Clipboard works with a connected Mac, not in Demo Mode.").foregroundStyle(.secondary) }
+                    .navigationTitle("Clipboard")
+            }
         case .permissions:
             PermissionsSettingsPage()
         case .diagnostics:

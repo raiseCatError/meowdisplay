@@ -231,7 +231,7 @@ struct ReceiverScreen: View {
                          haptics: ReceiverHaptics { demoControlStore.preferences.hapticsEnabled }, demo: demo)
         } else {
             SettingsView(receiver: model.receiver, controlStore: controlStore,
-                         pictureInPicture: model.pictureInPicture, haptics: haptics)
+                         pictureInPicture: model.pictureInPicture, haptics: haptics, clipboard: model.workspace.clipboard)
         }
     }
 
@@ -539,6 +539,11 @@ struct ReceiverScreen: View {
             }
         }
         .overlay(alignment: .top) {
+            ClipboardBanner(clipboard: model.workspace.clipboard)
+                .padding(.top, 8)
+                .padding(.horizontal, 16)
+        }
+        .overlay(alignment: .top) {
             if showPairedToast {
                 PairedToast()
                     .padding(.top, 12)
@@ -603,7 +608,10 @@ struct ReceiverScreen: View {
         .onChange(of: scenePhase) { phase in
             Log.info("scenePhase -> \(String(describing: phase))")
             switch phase {
-            case .active: model.sceneDidActivate()
+            case .active:
+                model.sceneDidActivate()
+                // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
+                model.workspace.clipboard.checkLocal(automatic: true)
             case .background: model.sceneDidBackground()
             default: break
             }
@@ -1836,6 +1844,7 @@ final class ReceiverModel: ObservableObject {
             receiver?.noteWorkspaceEvent(event)
         }
         workspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
+        workspace.clipboard.platform = IOSClipboardPlatform.shared
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
         receiver.$connected

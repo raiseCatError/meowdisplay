@@ -71,7 +71,7 @@ enum DemoSettingsPresentation: Equatable {
         switch category {
         case .input, .gestures, .controls, .about: return .shared
         case .general, .display, .audio, .connections, .pairedMacs,
-             .remoteAccess, .permissions, .diagnostics: return .demo
+             .remoteAccess, .clipboard, .permissions, .diagnostics: return .demo
         case .developer: return nil
         }
     }
