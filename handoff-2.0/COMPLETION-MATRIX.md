@@ -37,10 +37,10 @@ Evidence paths are relative to this folder. Commits on `feature/android-secure-c
 | Custom layout editor, Function Tray chord editor (Android) | MISSING | large UI features; iOS has them |
 | iOS hardware keyboard/pointer | NOT VERIFIED | code in f6b9904; devices off-limits |
 | iOS simulator UI tests | COMPLETE | 9/9 on iPhone 18 Pro sim (3 needed a rerun: timing under load) |
-| iPhone/iPad physical QA | PARTIAL | iPhone allowed since 2026-10-29: Stage Peek device test passes (logs/SP16); iPad not cleared |
+| iPhone/iPad physical QA | COMPLETE (2026-10-31) | iPhone since 2026-10-29; iPad (9th gen, iPadOS 27.0.1) hands-on by the owner on 2000053–2000058, see "iPad QA 2026-10-31" below |
 | Two-Mac and physical foldable QA | BLOCKED (hardware) | not run |
 | Natural Touch (Direct Touch default) | COMPLETE | Swift+Kotlin engine, fixtures, Window-mode tests, iOS UI 10/10, Moto ADB QA (REPORT: Natural Touch); human-finger feel not verified |
-| Stage Peek window switcher (iOS + Android) | COMPLETE | both platforms built and tested; Moto ADB QA and an on-device iPhone XCUITest against a live Mac, View Only (evidence/SP). Not verified: iPad, right edge on a device, TalkBack/VoiceOver walkthroughs, human-finger feel |
+| Stage Peek window switcher (iOS + Android) | COMPLETE | both platforms built and tested; Moto ADB QA and an on-device iPhone XCUITest against a live Mac, View Only (evidence/SP). iPad verified by hand 2026-10-31 (drag from the peek, one Cancel zone, fixed toolbar, Spatial Overview). Not verified: right edge on a device, TalkBack/VoiceOver walkthroughs |
 | Switching whole screen ↔ Window view | COMPLETE | Full Desktop card, "Switch to Window view?" prompt (auto-hides 8 s), Settings → Display Mirror/Extend/Windows; Moto sp14–sp18 |
 | Terminology pass (34 reviewed fixes) | COMPLETE | ff854da, 3145db9, eb3caac; Request Control family; iPhone demo tests on the device; Moto 360 dp Settings pages, no clipping (evidence/TERM) |
 | Minimal home (iPhone + Android) | COMPLETE | 307dfb1, 42f90cc, 89030f3, 36d8c1b, baf0f73; iPhone device shots + Moto incl. 360 dp |
@@ -68,7 +68,7 @@ Same status words as above. "Unit" = Swift and/or Kotlin tests pass; installed =
 | Spatial Overview + Settings ▸ Expanded Layout | PARTIAL (unit) | 5f8bf47 (shared packing, SpatialOverviewTests 5 + Kotlin vectors), d379a5a (iOS + Android views, setting). No physical check |
 | Two windows per row in the phone gallery | NOT VERIFIED (device) | 5a5c562 (shared rule + vectors). The live-Mac iPhone UI test now opens Stage Peek by hold-then-pull (lifting after a hold closes it); its 15:25 run skipped because the iPhone didn't reach Window mode on the Mac within 30 s |
 | Remote Finder Save / Share on iOS | NOT VERIFIED | 60dd727 |
-| iPad smoke test | NOT RUN | iPad still not cleared for QA (builds installed only) |
+| iPad smoke test | DONE (2026-10-31) | see "iPad QA 2026-10-31" below |
 
 ## 2026-10-30 evening — P0 connect, Privacy Shield flicker, Stage Manager setup, Window UI polish, cleanup, Lock Mac
 
@@ -200,3 +200,32 @@ SIGTERM at the owner's request (launchd restarts it on demand); all alert window
 | Spatial Overview (owner asked) | already built: Shared/SpatialOverview.swift, iOS StagePeekGallery (iPhone + iPad), Android StagePeekOverlay; setting Expanded Layout ▸ Spatial Overview | existing tests | — | yes |
 
 Installed 00:12: Mac Dev 0941f86; iPhone 2000052; Moto 752f3c3. iPad still 2000048 (unavailable).
+
+
+## iPad QA 2026-10-31 (owner hands-on; commits cdeda71, b94abf6 and the names commit; pushed)
+
+Device: iPad (9th generation, iPad12,1), iPadOS 27.0.1, Developer Mode on. Builds installed in place
+(no uninstall; pairing kept: same device ID admitted after each update): 2000053 → 2000058.
+Mac Dev = cdeda71 (Smart Touch depth fix). iPhone = 2000058. Moto = b94abf6 debug.
+
+| Check | Result |
+|---|---|
+| Connect, Window mode, two panes (Finder, Chrome), pane selection | pass |
+| Pinch zoom, pan, per-tab rotation, Reset View | pass |
+| Spatial Overview / adaptive iPad layout, rotation portrait ↔ landscape | pass |
+| View Only Request Control pill in the pane; approval on the Mac; typing and taps reach the Mac | pass |
+| Mission Control: notice, panes paused without restarts, recovery; Exit Mission Control with control | pass (Mac log: 6 open/close cycles, 0 restarts) |
+| iPad + Moto at the same time | pass (00:45) |
+| Mirror and Extend from the home screen | pass |
+| Scrolling | FAILED first (two-finger drag moved a zoomed pane; Smart Touch gave up at 12 AX levels in Chrome) → fixed cdeda71 → pass |
+| Dragging an app from the peek | FAILED first (offset from the finger; two Drop Here to Cancel zones) → fixed cdeda71 → pass |
+| Peek toolbar while the compact peek scrolls | FAILED first (jitter) → fixed b94abf6 (iOS + Android) → reported fixed |
+| Share from the long-press menu, toolbar and preview | FAILED first (copies rejected by a /private path check, silent) → fixed b94abf6 → share sheet opens |
+| Save to Device | FAILED first (same; then a crash: Photos block isolated to the main actor) → fixed b94abf6 → pass (photos to Photos, other files to Files ▸ MeowDisplay ▸ Downloads, message says where) |
+| Expanded view: tap empty space closes it | built b94abf6 (owner asked) |
+| Apps bar: widens on scroll, pull down for rows up to all apps with names, handle, swipe up to compact; All Apps closes with a swipe up | built b94abf6 + names commit (iPhone/iPad only; Android not built) |
+| Android crash on session end (InterruptedException while closing) | found in the Moto's crash log, fixed b94abf6 with a test |
+
+Not checked on the iPad: VoiceOver walkthrough, Larger Text, the Privacy Shield covering (the
+owner's privacyShield.local is off). Automated live XCUITests on the iPad skip without a saved
+Window layout (its layout was empty at first).

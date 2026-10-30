@@ -49,8 +49,12 @@ cd AndroidReceiver && ./gradlew :core:test :app:testDebugUnitTest :app:assembleD
 CI: `.github/workflows/tests.yml`; release workflows `release-*.yml`; reference sync
 `reference-*.yml`; `repository-guard.yml`, `pr-title.yml`.
 
-Results at handoff (2026-10-31, at 752f3c3): Mac unit tests 2458 run, 0 failures, 2 skipped;
-Android 994/994; iOS device build succeeds. Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
+Results at handoff (2026-10-31, code at 63c3c46): Mac unit tests 2461 run, 0 failures, 2
+skipped; Android 998/998; iOS device build and Mac sender/receiver builds succeed.
+
+Installed for the final physical checks (in place, data and pairing kept): Mac Dev cdeda71 (Mac
+code unchanged since), iPhone and iPad iOS 2000058 (63c3c46), Moto debug b94abf6 (Android code
+unchanged since). Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
 device and don't run in CI.
 
 ## Features in 2.0 and their state
@@ -71,18 +75,31 @@ cloud review:
 - Capture broker (`Mac/CoalescingFetch.swift`, `Mac/ShareableContentBroker.swift`): one shared,
   bounded, cancellable ScreenCaptureKit content request per moment, with start traces.
 - Paired-only Mac user name and short Mac ID to tell same-named Macs apart.
+- Remote files: Save to Device puts photos and videos in Photos (iOS add-only permission) or the
+  gallery (Android, Pictures/Movies ▸ MeowDisplay), everything else in Files ▸ On My iPhone/iPad ▸
+  MeowDisplay ▸ Downloads (Android: Download ▸ MeowDisplay), and says where. Share opens the
+  system share sheet.
+- Stage Peek apps bar (iPhone/iPad): widens on scroll, pull down for rows up to every app with
+  names, swipe up to compact; tap empty space in the expanded view to close it.
 - Not built: Camera Mode / Microphone Mode (owner deferred). Clipboard is out of this release's
-  checklist.
+  checklist. The growing apps bar is not on Android yet.
 
 ## Physical QA done (by the owner's devices, 2026-10-29 … 31)
 
 Mac (macOS 27) with iPhone 14 Pro Max, iPad (9th gen) and a Moto G5S Plus (LineageOS, no Google
 Play services): connect and video; Mirror, Extend and Window starts; two receivers at once in
 mixed modes; Privacy Shield cover/remove and Touch ID removal; pane selection and inline Request
-Control; Mission Control open/close (keyboard) with one and two receivers. Not done by hand:
-TalkBack (the Moto has none), VoiceOver/Voice Control declarations, trackpad-gesture Mission
-Control entry, Exit Mission Control with control granted, the iPad on the last two builds (it
-was unavailable).
+Control; Mission Control open/close (keyboard) with one and two receivers.
+
+iPad (9th gen, iPadOS 27.0.1), owner hands-on 2026-10-31 on the final builds: Window mode, pane
+selection, zoom, pan, per-tab rotation, Spatial Overview and rotation, View Only pill → approval →
+typing, Mission Control pause/recovery and Exit Mission Control with control, iPad + Moto at
+once, Mirror and Extend, scrolling, peek drags, Share and Save to Device. Seven failures found
+during that run were fixed and re-checked (handoff-2.0/COMPLETION-MATRIX.md, "iPad QA
+2026-10-31"), including a Save crash on iOS and a session-end crash on Android.
+
+Not done by hand: TalkBack (the Moto has none), VoiceOver walkthroughs and the VoiceOver/Voice
+Control declarations, Larger Text, the Privacy Shield covering during Mission Control.
 
 ## Known limitations
 
@@ -105,6 +122,16 @@ Crash-safe design (an out-of-process guardian so a crash never leaves the Mac un
 **prototype only** (`Prototypes/CrashSafeShield`, 9 tests; no persistent helper installed):
 `handoff-2.0/PRIVACY-SHIELD-CRASH-SAFE-DESIGN.md`. Installing a helper needs the owner's
 approval.
+
+## Branding
+
+The apps show MeowDisplay everywhere a person sees a name (MeowDisplay, MeowDisplay Dev,
+MeowDisplay Receiver). Legacy OpenSidecar/OpenDisplay names remain only where they are internal
+or a compatibility contract: Xcode targets and schemes (`OpenSidecarMac`, `OpenSidecariOS`,
+`OpenSidecarMacReceiver`), Swift type and file names, Bonjour types (`_opensidecar._tcp`,
+`_opendisplay-pair._tcp`, `_opendisplay-mac-pair._tcp`), keychain labels, HKDF salts, log file
+names, and the GPL attribution to OpenDisplay. Details and the reasons:
+`handoff-2.0/BRANDING-AUDIT.md`.
 
 ## Signing, notarization and stores
 
@@ -173,8 +200,7 @@ something through; stop and report instead.
 
 ## Owner actions before or during the cloud run
 
-- Unlock and connect the iPad, then install the current build (it missed the last builds).
-- Glance at the iPhone/iPad for the Mission Control notice and the pane Request Control pill.
-- Grant control once and try Exit Mission Control; open Mission Control with the trackpad.
 - Approve or decline the crash-safe Privacy Shield helper (prototype only today).
+- Say go on the 47 re-verified branch deletions (list with SHAs in the local integration report;
+  the session's safety check blocked running them).
 - Provide or confirm the release secrets/environments the audit lists as missing.
