@@ -126,7 +126,18 @@ enum PairingNetwork {
                              isCurrent: @escaping @Sendable () -> Bool = { true },
                              attemptToken: UUID = UUID(),
                              throttle: PairingCommitThrottleGate = .shared,
+                             preAuth: PreAuthSlots = .pairing,
                              store: TrustStore = .shared) async throws -> PendingPairing {
+        // Until its commitment arrives the peer is anyone on the network: it
+        // holds one of a few slots, and only for `PreAuthSlots.deadline`.
+        guard preAuth.tryAcquire() else {
+            Log.info("pairDebug: too many unauthenticated pairing connections — closing this one")
+            connection.cancel()
+            throw PairingError.tooManyAttempts
+        }
+        var preAuthHeld = true
+        func releasePreAuth() { if preAuthHeld { preAuthHeld = false; preAuth.release() } }
+        defer { releasePreAuth() }
         let (transport, gate, slot) = await beginAttempt(connection: connection, prompt: prompt, token: attemptToken)
         defer { Task { @MainActor in prompt.attemptEnded(token: attemptToken) } }
         let timeout = pairingTimeout(for: connection)
@@ -138,7 +149,8 @@ enum PairingNetwork {
         // hello — until a valid `helloCommit` is admitted by the throttle:
         // the responder must never send its hello, let alone show a SAS,
         // before receiving and accepting a commitment.
-        let request = try await PairingFraming.receive(on: connection)
+        let request = try await receiveWithDeadline(PreAuthSlots.deadline, on: connection)
+        releasePreAuth()
         guard request.kind == .helloCommit, let commitment = request.helloCommitment, commitment.count == 32 else {
             throw PairingError.malformedMessage
         }

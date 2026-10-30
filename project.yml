@@ -332,6 +332,7 @@ targets:
       - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/PairingNetwork.swift
+      - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift
       - Shared/AppStore.swift
       - Shared/ProjectLinks.swift
