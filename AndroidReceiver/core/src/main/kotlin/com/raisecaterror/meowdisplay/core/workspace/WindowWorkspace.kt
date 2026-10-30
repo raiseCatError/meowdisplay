@@ -14,9 +14,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
+import kotlin.math.sin
 
 // Port of Shared/WindowWorkspace.swift (window workspaces' layout engine and
 // tile transform). Same rules, same numbers: fixtures/workspace/vectors.json,
@@ -50,15 +52,52 @@ enum class WAxis(val wire: String) { Horizontal("horizontal"), Vertical("vertica
     companion object { fun of(s: String?) = entries.firstOrNull { it.wire == s } }
 }
 
-/** Clockwise presentation rotation of a tile; the Mac window never rotates. */
-enum class WRotation(val degrees: Int) {
-    None(0), Quarter(90), Half(180), ThreeQuarter(270);
+/**
+ * Clockwise presentation rotation of a tile in whole degrees (0..359): any angle, turned freely with
+ * two fingers; the pane menu's Rotate steps to the next right angle. The Mac window never rotates.
+ * Whole degrees keep the wire and saved layouts integers. Same as Swift's WorkspaceRotation.
+ */
+class WRotation private constructor(val degrees: Int) {
+    val isRightAngle get() = degrees % 90 == 0
+    val isQuarterTurn get() = degrees == 90 || degrees == 270
+    /** The pane menu's Rotate: the next right angle clockwise. */
+    val clockwise get() = of((degrees / 90 + 1) * 90)
 
-    val isQuarterTurn get() = this == Quarter || this == ThreeQuarter
-    val clockwise get() = of(degrees + 90)
+    /** Cosine and sine, exact at the right angles. */
+    val cosSin: Pair<Double, Double> get() = when (degrees) {
+        0 -> 1.0 to 0.0
+        90 -> 0.0 to 1.0
+        180 -> -1.0 to 0.0
+        270 -> 0.0 to -1.0
+        else -> Math.toRadians(degrees.toDouble()).let { cos(it) to sin(it) }
+    }
+
+    /** Turned by [by] degrees (clockwise); with [snap], within [snapRange] of a right angle lands on it. */
+    fun turned(by: Double, snap: Boolean, snapRange: Double = 5.0): WRotation {
+        if (!by.isFinite()) return this
+        val raw = degrees + by
+        if (snap) {
+            val nearest = swiftRound(raw / 90) * 90
+            if (abs(raw - nearest) <= snapRange) return of(nearest)
+        }
+        return of(raw)
+    }
+
+    override fun equals(other: Any?) = other is WRotation && other.degrees == degrees
+    override fun hashCode() = degrees
+    override fun toString() = "$degrees°"
 
     companion object {
-        fun of(degrees: Int): WRotation = entries.firstOrNull { it.degrees == ((degrees % 360) + 360) % 360 } ?: None
+        val None = WRotation(0)
+        val Quarter = WRotation(90)
+        val Half = WRotation(180)
+        val ThreeQuarter = WRotation(270)
+        /** The right angles. */
+        val entries = listOf(None, Quarter, Half, ThreeQuarter)
+        fun of(degrees: Int): WRotation = WRotation(((degrees % 360) + 360) % 360)
+        /** Rounded to a whole degree (half away from zero, as Swift); not finite = no rotation. */
+        fun of(degrees: Double): WRotation = if (degrees.isFinite()) of(swiftRound(degrees % 360).toInt()) else None
+        private fun swiftRound(v: Double) = Math.signum(v) * Math.floor(abs(v) + 0.5)
     }
 }
 
@@ -104,7 +143,12 @@ data class WPaneZoom(val scale: Double, val centerX: Double, val centerY: Double
 
 /** Window pixels <-> canvas for one tile. Both directions exact inverses (TileContentTransform). */
 data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRotation, val fit: WFit, val zoom: WPaneZoom = WPaneZoom.IDENTITY) {
-    val rotatedSource get() = if (rotation.isQuarterTurn) WSize(source.height, source.width) else source
+    /** The turned picture's bounding box (unscaled), any angle. */
+    val rotatedSource: WSize get() {
+        if (rotation.isRightAngle) return if (rotation.isQuarterTurn) WSize(source.height, source.width) else source
+        val (c, s) = rotation.cosSin
+        return WSize(abs(source.width * c) + abs(source.height * s), abs(source.width * s) + abs(source.height * c))
+    }
 
     /** [WFit.Auto] resolved for this tile and source. */
     val effectiveFit: WFit get() = WFit.resolved(fit, WSize(tile.width, tile.height), rotatedSource)
@@ -146,29 +190,52 @@ data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRota
     fun sourcePoint(fromCanvas: WPoint): WPoint? {
         val visible = visibleRect ?: return null
         if (!visible.contains(fromCanvas)) return null
-        val c = contentRect; val s = scale
-        if (s <= 0) return null
-        val p = unrotated(WPoint((fromCanvas.x - c.x) / s, (fromCanvas.y - c.y) / s))
+        val p = unclampedSourcePoint(fromCanvas) ?: return null
+        // At an angle the corners of the turned picture's box show no window.
+        if (!rotation.isRightAngle) {
+            val slack = 1e-6 * max(max(source.width, source.height), 1.0)
+            if (p.x < -slack || p.y < -slack || p.x > source.width + slack || p.y > source.height + slack) return null
+        }
         return WPoint(min(max(p.x, 0.0), source.width), min(max(p.y, 0.0), source.height))
     }
 
-    private fun rotated(p: WPoint): WPoint {
+    /** Canvas -> source for any canvas point, even one off the window (gestures need the window
+     *  point under the fingers wherever they are). */
+    fun unclampedSourcePoint(fromCanvas: WPoint): WPoint? {
+        val c = contentRect; val s = scale
+        if (s <= 0) return null
+        return unrotated(WPoint((fromCanvas.x - c.x) / s, (fromCanvas.y - c.y) / s))
+    }
+
+    /** Window point -> the turned picture's box (unscaled). */
+    fun rotated(p: WPoint): WPoint {
         val w = source.width; val h = source.height
-        return when (rotation) {
-            WRotation.None -> p
-            WRotation.Quarter -> WPoint(h - p.y, p.x)
-            WRotation.Half -> WPoint(w - p.x, h - p.y)
-            WRotation.ThreeQuarter -> WPoint(p.y, w - p.x)
+        return when (rotation.degrees) {
+            0 -> p
+            90 -> WPoint(h - p.y, p.x)
+            180 -> WPoint(w - p.x, h - p.y)
+            270 -> WPoint(p.y, w - p.x)
+            else -> {
+                val (c, s) = rotation.cosSin; val box = rotatedSource
+                val x = p.x - w / 2; val y = p.y - h / 2
+                WPoint(x * c - y * s + box.width / 2, x * s + y * c + box.height / 2)
+            }
         }
     }
 
-    private fun unrotated(r: WPoint): WPoint {
+    /** The turned picture's box (unscaled) -> window point. */
+    fun unrotated(r: WPoint): WPoint {
         val w = source.width; val h = source.height
-        return when (rotation) {
-            WRotation.None -> r
-            WRotation.Quarter -> WPoint(r.y, h - r.x)
-            WRotation.Half -> WPoint(w - r.x, h - r.y)
-            WRotation.ThreeQuarter -> WPoint(w - r.y, r.x)
+        return when (rotation.degrees) {
+            0 -> r
+            90 -> WPoint(r.y, h - r.x)
+            180 -> WPoint(w - r.x, h - r.y)
+            270 -> WPoint(w - r.y, r.x)
+            else -> {
+                val (c, s) = rotation.cosSin; val box = rotatedSource
+                val x = r.x - box.width / 2; val y = r.y - box.height / 2
+                WPoint(x * c + y * s + w / 2, -x * s + y * c + h / 2)
+            }
         }
     }
 }
@@ -267,6 +334,36 @@ object WZoom {
         val drawn = TileTransform(rect, source, rotation, fit, wanted).effectiveZoom
         return if (drawn.isIdentity) null else drawn
     }
+
+    /**
+     * A two-finger gesture that turns as well (WorkspaceZoom.turned): the window point under the
+     * fingers when they came down stays under them while the picture scales by [ratio] and turns by
+     * [degrees] (clockwise, from [rotation]). The size follows the fingers only. With [snap], an angle
+     * within a few degrees of a right angle lands on it.
+     */
+    fun turned(start: WPaneZoom?, rotation: WRotation, degrees: Double, snap: Boolean, tile: WSize, source: WSize, fit: WFit,
+               ratio: Double, from: WPoint, to: WPoint): Pair<WRotation, WPaneZoom?> {
+        val z0 = start ?: WPaneZoom.IDENTITY
+        if (!ratio.isFinite() || ratio <= 0 || !degrees.isFinite() || !listOf(from.x, from.y, to.x, to.y).all { it.isFinite() } ||
+            tile.width <= 0 || tile.height <= 0 || source.width <= 0 || source.height <= 0) return rotation to start
+        val rect = WRect(0.0, 0.0, tile.width, tile.height)
+        val t0 = TileTransform(rect, source, rotation, fit, z0)
+        val anchor = t0.unclampedSourcePoint(WPoint(from.x * tile.width, from.y * tile.height)) ?: return rotation to start
+        val r1 = rotation.turned(degrees, snap)
+        val base1 = TileTransform(rect, source, r1, fit).baseScale
+        if (base1 <= 0) return rotation to start
+        val scale = min(max(t0.scale * ratio / base1, MINIMUM), MAXIMUM)
+        val s1 = base1 * scale
+        val probe = TileTransform(rect, source, r1, fit, WPaneZoom.of(scale, 0.5, 0.5))
+        val box = probe.rotatedSource
+        val w = box.width * s1; val h = box.height * s1
+        if (w <= 0 || h <= 0) return rotation to start
+        val u = probe.rotated(anchor)
+        val ox = to.x * tile.width - u.x * s1; val oy = to.y * tile.height - u.y * s1
+        val wanted = WPaneZoom.of(scale, (tile.width / 2 - ox) / w, (tile.height / 2 - oy) / h)
+        val drawn = TileTransform(rect, source, r1, fit, wanted).effectiveZoom
+        return r1 to (if (drawn.isIdentity) null else drawn)
+    }
 }
 
 /**
@@ -279,8 +376,12 @@ data class WZoomPreview(
     val tile: String, val pane: WRect, val scaleX: Double, val scaleY: Double, val offsetX: Double, val offsetY: Double,
     /** Where the whole (rotated) source is drawn now, and where it was when the gesture began. */
     val source: WRect, val from: WRect, val rotation: WRotation = WRotation.None, val sourceKey: Long = 0,
+    /** The shear terms of a turn (0 without one): `v' = (scaleX·x + shearC·y + offsetX, shearB·x + scaleY·y + offsetY)`. */
+    val shearB: Double = 0.0, val shearC: Double = 0.0,
+    /** The whole source's own (unturned) size as drawn now, picture-normalized per axis; null: from [source]. */
+    val drawnSource: WSize? = null,
 ) {
-    fun apply(p: WPoint) = WPoint(scaleX * p.x + offsetX, scaleY * p.y + offsetY)
+    fun apply(p: WPoint) = WPoint(scaleX * p.x + shearC * p.y + offsetX, shearB * p.x + scaleY * p.y + offsetY)
 
     companion object {
         fun between(tile: String, pane: WRect, old: WRect, new: WRect, rotation: WRotation = WRotation.None, sourceKey: Long = 0): WZoomPreview? {
@@ -288,6 +389,26 @@ data class WZoomPreview(
                 !listOf(old.x, old.y, new.x, new.y, new.width, new.height).all { it.isFinite() }) return null
             val sx = new.width / old.width; val sy = new.height / old.height
             return WZoomPreview(tile, pane, sx, sy, new.x - sx * old.x, new.y - sy * old.y, new, old, rotation, sourceKey)
+        }
+
+        /** From the pane's view when the gesture began ([t0]) to now ([t1]), both in canvas pixels on a
+         *  canvas of [canvas] pixels: any zoom, pan and turn. */
+        fun between(tile: String, pane: WRect, t0: TileTransform, t1: TileTransform, canvas: WSize, sourceKey: Long = 0): WZoomPreview? {
+            val cw = canvas.width; val ch = canvas.height
+            if (cw <= 0 || ch <= 0 || t0.scale <= 0 || t1.scale <= 0) return null
+            fun map(x: Double, y: Double): WPoint? {
+                val s = t0.unclampedSourcePoint(WPoint(x * cw, y * ch)) ?: return null
+                val q = t1.canvasPoint(s)
+                return WPoint(q.x / cw, q.y / ch)
+            }
+            val p0 = map(0.0, 0.0) ?: return null; val p1 = map(1.0, 0.0) ?: return null; val p2 = map(0.0, 1.0) ?: return null
+            fun norm(r: WRect) = WRect(r.x / cw, r.y / ch, r.width / cw, r.height / ch)
+            val old = norm(t0.contentRect); val new = norm(t1.contentRect)
+            if (old.width <= 0 || old.height <= 0 || new.width <= 0 || new.height <= 0 ||
+                !listOf(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y).all { it.isFinite() }) return null
+            return WZoomPreview(tile, pane, p1.x - p0.x, p2.y - p0.y, p0.x, p0.y, new, old, t1.rotation, sourceKey,
+                shearB = p1.y - p0.y, shearC = p2.x - p0.x,
+                drawnSource = WSize(t1.source.width * t1.scale / cw, t1.source.height * t1.scale / ch))
         }
     }
 }
@@ -500,6 +621,14 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
     fun filling(index: Int, tile: WTile): WLayout {
         if (tile.id in tiles || !slotExists(root, index) || slotAt(root, index) != null) return this
         return of(setSlot(root, index, tile.id), tiles + (tile.id to tile), maximized)
+    }
+
+    /** A pane's turn and zoom together (a two-finger turn changes both). */
+    fun viewing(id: String, rotation: WRotation, zoom: WPaneZoom?): WLayout {
+        val z = zoom?.takeIf { !it.isIdentity }
+        val t = tiles[id] ?: return this
+        if (t.zoom == z && t.rotation == rotation) return this
+        return with(tiles = tiles + (id to t.copy(zoom = z, rotation = rotation)))
     }
 
     fun rotating(id: String): WLayout {

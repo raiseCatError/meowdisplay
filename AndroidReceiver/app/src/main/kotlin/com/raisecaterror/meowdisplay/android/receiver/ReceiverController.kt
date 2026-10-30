@@ -156,10 +156,11 @@ class ReceiverController(
             store.beginAutoHideActivity()
             workspace?.noteSurfaceTouch()   // reveals the local-fullscreen strip; never takes the touch
         }
-        override fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double): Boolean {
+        override fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double,
+                                    turn: Double, snap: Boolean): Boolean {
             val ws = workspace ?: return false
             if (ws.ui.value.windowMode != true) return false
-            return ws.pinch(began, ended, isPinch, WPoint(initial.x, initial.y), WPoint(current.x, current.y), scale)
+            return ws.pinch(began, ended, isPinch, WPoint(initial.x, initial.y), WPoint(current.x, current.y), scale, turn, snap)
         }
         override fun workspaceViewReset(at: CGPoint) {
             val ws = workspace ?: return

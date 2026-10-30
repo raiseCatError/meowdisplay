@@ -42,9 +42,11 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.raisecaterror.meowdisplay.core.controls.CGRect
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * Instant zoom: the pane follows the fingers at once. A copy of the picture the pane showed when
@@ -104,9 +106,16 @@ fun WorkspaceZoomPreviewLayer(controller: WorkspaceController, frame: CGRect, su
     val paneY = frame.minY + p.pane.y * frame.height
     val paneW = p.pane.width * frame.width
     val paneH = p.pane.height * frame.height
-    // In pane dp the copy moves by L' = scale * L + ((scale - 1) * pane + offset) * picture.
-    val tx = ((p.scaleX - 1) * p.pane.x + p.offsetX) * frame.width
-    val ty = ((p.scaleY - 1) * p.pane.y + p.offsetY) * frame.height
+    // In pane dp the copy moves by u' = L·u + T. Without a turn L is the scale; with one it is a
+    // uniform scale and a turn (the picture's own axes differ in length, so the shear is rescaled).
+    val turnedPreview = p.shearB != 0.0 || p.shearC != 0.0
+    val la = p.scaleX; val ld = p.scaleY
+    val lb = p.shearB * frame.height / frame.width; val lc = p.shearC * frame.width / frame.height
+    val px0 = p.pane.x * frame.width; val py0 = p.pane.y * frame.height
+    val tx = la * px0 + lc * py0 + p.offsetX * frame.width - px0
+    val ty = lb * px0 + ld * py0 + p.offsetY * frame.height - py0
+    val turnScale = sqrt(la * la + lb * lb)
+    val turnDegrees = Math.toDegrees(atan2(lb, la))
     Box(
         Modifier
             .offset(paneX.dp, paneY.dp)
@@ -122,7 +131,9 @@ fun WorkspaceZoomPreviewLayer(controller: WorkspaceController, frame: CGRect, su
                 val left = ((p.source.x - p.pane.x) * sx).toFloat(); val top = ((p.source.y - p.pane.y) * sy).toFloat()
                 val w = (p.source.width * sx).toFloat(); val h = (p.source.height * sy).toFloat()
                 val turned = p.rotation.isQuarterTurn
-                val dw = if (turned) h else w; val dh = if (turned) w else h
+                val d = p.drawnSource
+                val dw = d?.let { (it.width * sx).toFloat() } ?: if (turned) h else w
+                val dh = d?.let { (it.height * sy).toFloat() } ?: if (turned) w else h
                 val cx = left + w / 2; val cy = top + h / 2
                 if (dw >= 1 && dh >= 1) rotate(p.rotation.degrees.toFloat(), Offset(cx, cy)) {
                     drawImage(b, dstOffset = IntOffset((cx - dw / 2).roundToInt(), (cy - dh / 2).roundToInt()),
@@ -134,8 +145,9 @@ fun WorkspaceZoomPreviewLayer(controller: WorkspaceController, frame: CGRect, su
             Canvas(
                 Modifier.size(paneW.dp, paneH.dp).graphicsLayer {
                     transformOrigin = TransformOrigin(0f, 0f)
-                    scaleX = p.scaleX.toFloat()
-                    scaleY = p.scaleY.toFloat()
+                    scaleX = (if (turnedPreview) turnScale else p.scaleX).toFloat()
+                    scaleY = (if (turnedPreview) turnScale else p.scaleY).toFloat()
+                    rotationZ = if (turnedPreview) turnDegrees.toFloat() else 0f
                     translationX = (tx * density).toFloat()
                     translationY = (ty * density).toFloat()
                 },

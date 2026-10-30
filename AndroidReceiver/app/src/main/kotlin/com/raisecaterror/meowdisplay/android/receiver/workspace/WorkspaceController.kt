@@ -74,6 +74,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -835,7 +836,8 @@ class WorkspaceController(
 
     // MARK: Per-pane zoom
 
-    private data class ZoomGesture(val tile: String, val start: WPaneZoom?, val rect: WRect, val drawn: WRect?)
+    private data class ZoomGesture(val tile: String, val start: WPaneZoom?, val rect: WRect, val drawn: WRect?,
+                                   val rotation: WRotation, var turnFrom: Double? = null)
     private var zoomGesture: ZoomGesture? = null
     private var zoomEndedAt = 0L
 
@@ -873,7 +875,8 @@ class WorkspaceController(
      * size around the fingers; a two-finger pan moves a pane that is zoomed or filled (otherwise it
      * stays a scroll on the Mac).
      */
-    fun pinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: WPoint, current: WPoint, scale: Double): Boolean {
+    fun pinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: WPoint, current: WPoint, scale: Double,
+              turn: Double = 0.0, snapTurn: Boolean = true): Boolean {
         if (began || zoomGesture == null) {
             main.removeCallbacks(clearZoomPreview)
             main.removeCallbacks(zoomPreviewDeadline)
@@ -883,7 +886,7 @@ class WorkspaceController(
             if (tile?.source == null || !(isPinch || tile.zoom != null || effectiveFit(id) == WFit.Fill) || windowSize(tile) == null) {
                 zoomGesture = null; return false
             }
-            zoomGesture = ZoomGesture(id, tile.zoom, rect, drawnSourceRect(tile, rect))
+            zoomGesture = ZoomGesture(id, tile.zoom, rect, drawnSourceRect(tile, rect), tile.rotation)
             zoomGestures += 1
             if (state.value.active != id) focus(id)
             requestBackdrop(id)
@@ -893,16 +896,21 @@ class WorkspaceController(
         val source = windowSize(tile) ?: return false
         val pane = WSize(g.rect.width * size.width, g.rect.height * size.height)
         fun inPane(p: WPoint) = WPoint((p.x - g.rect.x) / max(g.rect.width, 1e-6), (p.y - g.rect.y) / max(g.rect.height, 1e-6))
-        val zoom = WZoom.pinched(g.start, pane, source, tile.rotation, effectiveFit(g.tile), scale, inPane(initial), inPane(current))
-        val next = saved.zooming(g.tile, zoom)
+        // A twist past the dead zone starts turning the pane, from there on without a jump.
+        if (isPinch && g.turnFrom == null && turn.isFinite() && abs(turn) >= TURN_DEAD_ZONE) g.turnFrom = turn
+        val degrees = g.turnFrom?.let { turn - it } ?: 0.0
+        val fit = effectiveFit(g.tile)
+        val (rotation, zoom) = WZoom.turned(g.start, g.rotation, degrees, snapTurn, pane, source, fit, scale, inPane(initial), inPane(current))
+        val next = saved.viewing(g.tile, rotation, zoom)
         if (next != saved) {
             saved = next
             publish(); scheduleThrottledSend()
         }
-        val start = g.drawn
-        val now = next.tiles[g.tile]?.let { drawnSourceRect(it, g.rect) }
-        val preview = if (start != null && now != null) {
-            WZoomPreview.between(g.tile, g.rect, start, now, tile.rotation, tile.source?.windowID ?: 0)
+        val now = next.tiles[g.tile]
+        val preview = if (now != null && size.width > 0 && size.height > 0) {
+            val px = WRect(g.rect.x * size.width, g.rect.y * size.height, pane.width, pane.height)
+            WZoomPreview.between(g.tile, g.rect, TileTransform(px, source, g.rotation, fit, g.start ?: WPaneZoom.IDENTITY),
+                TileTransform(px, source, now.rotation, fit, now.zoom ?: WPaneZoom.IDENTITY), size, tile.source?.windowID ?: 0)
         } else null
         zoomPreviewState.value = preview?.let { ZoomPreviewState(zoomGestures, it, backdrop(g.tile), composed = false) }
         if (ended) {
@@ -911,7 +919,7 @@ class WorkspaceController(
             // The final view goes now (its epoch is what the preview waits for), not on the next tick.
             main.removeCallbacks(throttledSend); throttledSendPending = false
             sendNow()
-            if (zoom != null) requestBackdrop(g.tile, refresh = true)   // fresh for the next gesture
+            if (zoom != null || rotation != WRotation.None) requestBackdrop(g.tile, refresh = true)   // fresh for the next gesture
             zoomEndedAt = SystemClock.elapsedRealtime()
             main.postDelayed(zoomPreviewDeadline, 1_500)
             refreshZoomPreview()
@@ -1364,6 +1372,8 @@ class WorkspaceController(
     }
 
     private companion object {
+        /** A twist this large (degrees) starts turning the pane, so a pinch's wobble never turns it. */
+        const val TURN_DEAD_ZONE = 8.0
         const val TAG = "MeowWorkspace"
         /** The drop target when no display can join the window (it then shows alone). */
         const val NO_DESKTOP = "\u0000desktop"

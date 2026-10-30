@@ -48,9 +48,11 @@ interface ReceiverSurfaceEffects {
     /**
      * Window mode: a two-finger gesture in one pane zooms (pinch) or pans (a zoomed or filled pane)
      * just that pane. Points are normalized to the picture. Return true to own the gesture; false
-     * lets it scroll on the Mac as usual (WorkspaceModel.pinch on iOS).
+     * lets it scroll on the Mac as usual (WorkspaceModel.pinch on iOS). [turn]: how far the fingers
+     * have twisted (degrees, clockwise) — a pinch also turns the pane freely; [snap]: Snap Rotation.
      */
-    fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double): Boolean = false
+    fun workspacePinch(began: Boolean, ended: Boolean, isPinch: Boolean, initial: CGPoint, current: CGPoint, scale: Double,
+                       turn: Double, snap: Boolean): Boolean = false
 
     /** Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture). Never a click. */
     fun workspaceViewReset(at: CGPoint) {}
@@ -498,7 +500,10 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         val t = currentTransform
         val a = t.remotePoint(state.initialMidpoint) ?: return false
         val b = t.remotePoint(state.midpoint) ?: return state.workspace
-        return effects.workspacePinch(began, ended, state.session.intent == TwoFingerGestureIntent.ViewportZoomPan, a, b, state.scaleRatio)
+        val pinch = state.session.intent == TwoFingerGestureIntent.ViewportZoomPan
+        // A twist turns the pane freely (degrees, clockwise), unless rotating is turned off.
+        val turn = if (pinch && config.rotateTarget != ReceiverGestureTarget.Disabled) Math.toDegrees(state.rotationDelta) else 0.0
+        return effects.workspacePinch(began, ended, pinch, a, b, state.scaleRatio, turn, config.snapRotation)
     }
 
     private fun routes(state: TwoFingerState) = TwoFingerRoutingPolicy.routes(
