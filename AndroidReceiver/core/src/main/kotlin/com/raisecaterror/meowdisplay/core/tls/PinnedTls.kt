@@ -80,6 +80,14 @@ object PinnedTls {
      * Human-comparable grouped digits (TrustStore.fingerprint): HKDF-SHA256 of
      * the SPKI, five big-endian u16 values mod 10000, zero-padded, space-joined.
      */
+    /**
+     * Four hex characters that tell same-named Macs apart (TrustStore.shortID): HKDF-SHA256 of the
+     * SPKI under its own label, so none of the fingerprint's digits show.
+     */
+    fun shortId(spki: ByteArray): String =
+        Hkdf.derive(spki, salt = "OpenDisplay-TLS-Pairing-v1".utf8, info = "MeowDisplay short ID v1".utf8, length = 2)
+            .joinToString("") { "%02X".format(java.util.Locale.ROOT, it.toInt() and 0xFF) }
+
     fun fingerprint(spki: ByteArray): String {
         val bytes = Hkdf.derive(spki, salt = "OpenDisplay-TLS-Pairing-v1".utf8, info = "fingerprint".utf8, length = 10)
         return (0 until 10 step 2).joinToString(" ") { i ->

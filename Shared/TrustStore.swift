@@ -398,6 +398,21 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         return fresh
     }
 
+    // MARK: - Short ID
+
+    /// Four hex characters that tell same-named Macs apart in lists ("Macbook · 4F2A"). Derived from
+    /// the identity key under its own HKDF label, so it shows none of the fingerprint's digits (those
+    /// stay hidden until asked for). The same on every device and in the Mac's own Settings.
+    static func shortID(spki: Data) -> String {
+        let output = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: spki),
+                                            salt: WireCrypto.fingerprintHKDFSalt,
+                                            info: Data("MeowDisplay short ID v1".utf8), outputByteCount: 2)
+        return output.withUnsafeBytes { $0.map { String(format: "%02X", $0) }.joined() }
+    }
+
+    /// The paired Mac's short ID, from its pinned key.
+    func shortID(peerID: String) -> String? { pin(peerID: peerID).map(Self.shortID(spki:)) }
+
     // MARK: - Fingerprint
 
     /// Human-comparable grouped digits: HKDF-SHA256(ikm: spki,

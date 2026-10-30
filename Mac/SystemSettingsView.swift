@@ -155,6 +155,11 @@ struct SystemSettingsView: View {
             }
 
             Section {
+                // Devices list this Mac with the same ID, so two Macs with one name can be told apart.
+                if let spki = TrustStore.shared.ownSPKI() {
+                    LabeledContent("This Mac's ID", value: TrustStore.shortID(spki: spki))
+                        .help("Shown next to this Mac's name on paired iPhones, iPads and Android devices.")
+                }
                 LabeledContent("Version", value: appVersion)
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance

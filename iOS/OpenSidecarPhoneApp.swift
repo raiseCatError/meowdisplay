@@ -1466,7 +1466,10 @@ struct IdleView: View {
     /// one line next to them (long names, large text), the buttons go
     /// under it instead of squeezing it.
     private func macRow(_ mac: HomeMac) -> some View {
-        let subtitle = macSubtitle(mac)
+        // A paired Mac's short ID ("Nearby · ID 4F2A") tells same-named Macs apart.
+        let shortID = mac.peerID.flatMap { TrustStore.shared.shortID(peerID: $0) }
+        let subtitle = [macSubtitle(mac), shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
+            .joined(separator: " · ").nilIfEmpty
         func label(lines: Int?) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: mac.name)
@@ -5174,4 +5177,8 @@ struct NaturalTouchHint: View {
             onDone()
         }
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

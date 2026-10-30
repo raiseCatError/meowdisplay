@@ -198,7 +198,10 @@ fun ReceiverHome(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
                         MacRow(
                             title = mac.name,
-                            subtitle = status.text,
+                            // A paired Mac's short ID ("Nearby · ID 4F2A") tells same-named Macs apart.
+                            subtitle = listOfNotNull(status.text, paired.firstOrNull { it.peerID == mac.peerID }?.spki
+                                ?.let { "ID " + com.raisecaterror.meowdisplay.core.tls.PinnedTls.shortId(it) })
+                                .joinToString(" · ").ifEmpty { null },
                             detail = status.hint,
                             primary = when (status.action) {
                                 RowAction.Show -> onReturnToDisplay?.let { "Show" to it }

@@ -1246,7 +1246,16 @@ private struct PairedMacsSettingsPage: View {
                         .settingsAnchor("pairedMacs")
                     ForEach(peers, id: \.peerID) { peer in
                         HStack {
-                            Text(peer.displayName)
+                            // Same-named Macs: the short ID from each Mac's key tells them apart
+                            // (the Mac shows its own in Settings ▸ General).
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(peer.displayName)
+                                if let id = TrustStore.shared.shortID(peerID: peer.peerID) {
+                                    Text("ID \(id)").font(.caption.monospaced()).foregroundStyle(.secondary)
+                                        .accessibilityLabel(Text("ID \(id.map(String.init).joined(separator: " "))"))
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
                             Spacer()
                             Button("Forget…", role: .destructive) {
                                 forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
