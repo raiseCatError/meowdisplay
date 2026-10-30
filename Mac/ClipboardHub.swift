@@ -956,8 +956,8 @@ enum ClipboardConsentPresenter {
         host.sizingOptions = [.preferredContentSize]
         p.contentViewController = host
         p.center()
+        // Never made key: it must not take the keyboard from what the person is typing.
         p.orderFrontRegardless()
-        p.makeKey()
         panel = p
     }
 
@@ -986,14 +986,14 @@ private struct ClipboardConsentView: View {
             }
             HStack(spacing: 8) {
                 Button("Not Now") { decide(.deny) }.keyboardShortcut(.cancelAction)
-                Button("Allow This Session") { decide(.session) }.disabled(!armed)
-                if alwaysAllowed { Button("Always Allow") { decide(.always) }.disabled(!armed) }
+                Button("Allow This Session") { if ConsentGrant.allowed() { decide(.session) } }.disabled(!armed)
+                if alwaysAllowed { Button("Always Allow") { if ConsentGrant.allowed() { decide(.always) } }.disabled(!armed) }
             }
         }
         .padding(20)
         .frame(width: 380)
         .task {
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(ConsentInputPolicy.armDelay * 1_000_000_000))
             armed = true
         }
     }

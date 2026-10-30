@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Who may answer a prompt that grants something (control of this Mac, a session, pairing,
@@ -17,5 +18,21 @@ enum ConsentInputPolicy {
     static func acceptsGrant(sourcePID: Int64?) -> Bool {
         guard let sourcePID else { return true }
         return PrivacyShieldPolicy.isPhysical(sourcePID: sourcePID)
+    }
+}
+
+
+/// Grant buttons answer only to the person at this Mac (ConsentInputPolicy): a press made by
+/// input a device injected is ignored and logged.
+@MainActor
+enum ConsentGrant {
+    static func allowed() -> Bool {
+        let pid = NSApp.currentEvent?.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID)
+        guard ConsentInputPolicy.acceptsGrant(sourcePID: pid) else {
+            Log.info("SECURITY: a grant button was pressed by injected input; ignored")
+            NSSound.beep()
+            return false
+        }
+        return true
     }
 }

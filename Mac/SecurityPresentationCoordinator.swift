@@ -621,22 +621,6 @@ private struct FilesConsentPanelView: View {
     }
 }
 
-
-/// Grant buttons answer only to the person at this Mac (ConsentInputPolicy): a press made by
-/// input a device injected is ignored and logged.
-@MainActor
-enum ConsentGrant {
-    static func allowed() -> Bool {
-        let pid = NSApp.currentEvent?.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID)
-        guard ConsentInputPolicy.acceptsGrant(sourcePID: pid) else {
-            Log.info("SECURITY: a grant button was pressed by injected input; ignored")
-            NSSound.beep()
-            return false
-        }
-        return true
-    }
-}
-
 /// Grant buttons wake up `ConsentInputPolicy.armDelay` after a prompt appears, and again after
 /// it changes to another request, so a click or key meant for something else can't answer it.
 struct ArmsAfterDelay<Key: Equatable>: ViewModifier {
