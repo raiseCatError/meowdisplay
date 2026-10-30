@@ -47,6 +47,9 @@ final class PrivacyShield {
     /// A device finished connecting (its welcome was sent).
     func connected(_ sessionID: String, remote: Bool) {
         connected[sessionID] = remote
+        // A reveal covers the sessions that existed then: a new device brings the cover back, so
+        // what it's told ("on") is true.
+        if revealed { revealed = false; Log.info("privacy shield: a new device connected; covering again") }
         update()
         PrivacyShieldNotice.show(on: PrivacyShieldPolicy.isOn(remote: remote))
     }
@@ -163,9 +166,17 @@ final class PrivacyShield {
             return
         }
         authorizing = true
-        // macOS's own administrator prompt must be visible to the person at the Mac.
-        shields.values.forEach { $0.level = .normal; $0.orderBack(nil) }
+        // macOS's administrator prompt must be visible to the person at the Mac, but nothing else:
+        // the cover stays above every app window (screen saver level) while it's open, and goes
+        // back to the top after 60 s whatever happens. Nothing is shown until macOS says yes.
+        shields.values.forEach { $0.level = .screenSaver }
         revealPanel?.orderOut(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.authorizing else { return }
+                self.shields.values.forEach { $0.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel())) }
+            }
+        }
         Task.detached(priority: .userInitiated) {
             let ok = Self.authenticateAdministrator()
             await MainActor.run {

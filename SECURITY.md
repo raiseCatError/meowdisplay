@@ -235,10 +235,14 @@ Settings ▸ System. Each connected device is told whether it's on.
   click without seeing. It's a viewing shield, not an input lock.
 - Revealing the Mac needs a click from the Mac's own mouse or trackpad
   (clicks injected for a device are ignored) and an administrator's
-  password, asked by macOS; MeowDisplay never sees the password. It covers
+  password, asked by macOS; MeowDisplay never sees the password. While
+  macOS asks, the cover stays above every app window; if the prompt can't be
+  seen above it, the Mac stays covered (it fails closed). It covers
   again after the chosen time (5 minutes by default) without physical input
   at the Mac; remote and synthetic input don't count. Only timestamps are
   kept, never what was typed.
+- A device that connects after a reveal brings the cover back, so what each
+  device is told on connecting is true.
 - Turning either setting off asks for confirmation, and for an
   administrator's password while the cover is up.
 
