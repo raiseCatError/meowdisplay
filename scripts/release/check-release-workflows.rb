@@ -49,6 +49,9 @@ DIR = ARGV[0] || File.expand_path("../../.github/workflows", __dir__)
 SYNC_SCRIPT = ARGV[1] || File.expand_path("../reference/sync-reference.sh", __dir__)
 @errors = []
 
+# The workflows are UTF-8 whatever the runner's locale says.
+Encoding.default_external = Encoding::UTF_8
+
 def err(file, msg)
   @errors << "#{file}: #{msg}"
 end
@@ -144,6 +147,26 @@ def secrets_behind_environments(name, doc, allowed)
     end
     check = steps(job).index { |s| run_text(s).include?("check-environment.sh #{env}") }
     err(name, "job #{id} must run check-environment.sh #{env} before using secrets") unless check && check < first
+    next unless check
+
+    # A step that still runs after a failed check (always(), !cancelled(), failure()) would
+    # hand the secrets to an environment the check just found unprotected: it must also
+    # require the check's success.
+    check_id = steps(job)[check]["id"]
+    steps(job).each_with_index do |s, i|
+      next if i <= check
+      next unless uses_secrets?(s) || s["uses"].to_s.start_with?("actions/create-github-app-token@")
+      cond = s["if"].to_s
+      next unless cond.match?(/always\(\)|cancelled\(\)|failure\(\)/)
+      next if check_id && cond.match?(/steps\.#{Regexp.escape(check_id)}\.outcome\s*==\s*'success'/)
+
+      err(name, "job #{id} step '#{s['name'] || s['uses']}' uses secrets even when check-environment.sh failed " \
+                "(give the check an id and require steps.<id>.outcome == 'success')")
+    end
+  end
+  # Job-level env is visible to every step, the environment check included.
+  doc.fetch("jobs", {}).each do |id, job|
+    err(name, "job #{id} exposes secrets in job-level env; pass them to the steps that need them") if uses_secrets?(job["env"])
   end
 end
 

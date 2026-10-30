@@ -110,6 +110,15 @@ class WorkflowChecksTest < Minitest::Test
                   "release-publish.yml" => ["run: scripts/release/check-environment.sh release-pr", "run: true"])
   end
 
+  def test_secrets_used_after_a_failed_environment_check_are_caught
+    assert_caught("uses secrets even when check-environment.sh failed",
+                  "release-dry-run.yml" => ["if: ${{ !cancelled() && steps.protected.outcome == 'success' }}\n        env:\n          DEVELOPMENT_TEAM",
+                                            "if: ${{ !cancelled() }}\n        env:\n          DEVELOPMENT_TEAM"])
+    assert_caught("exposes secrets in job-level env",
+                  "release-dry-run.yml" => ["    environment: release-build\n",
+                                            "    environment: release-build\n    env:\n      KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}\n"])
+  end
+
   def test_the_external_reference_never_merges_or_imports_tags
     assert_caught("merges or proposes the external reference into MeowDisplay",
                   "tests.yml" => ["      - name: Workflows stay fail-closed",

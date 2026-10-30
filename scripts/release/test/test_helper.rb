@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+
+# Tool output and the files under test are UTF-8 whatever the locale says.
+Encoding.default_external = Encoding::UTF_8
 require "time"
 require_relative "../lib/meow_release"
 
