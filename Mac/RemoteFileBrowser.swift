@@ -84,6 +84,109 @@ enum RemoteFilesPolicy {
         return url
     }
 
+    // MARK: Writes and safe reads
+    //
+    // Show Hidden Files is read-only: no write (upload, new folder, rename, copy, move,
+    // duplicate, compress, expand, Trash) creates, renames to, changes or writes into an item
+    // with a hidden component. Shell startup files (~/.zshenv, ~/.zprofile, ~/.bashrc…), git
+    // hooks and app configuration live there, and changing them runs code the next time a
+    // shell, git or that app starts, which would turn file access into control of the Mac.
+
+    /// A name a write may create.
+    static func isWritableName(_ name: String) -> Bool { isValidComponent(name, allowHidden: false) }
+
+    /// An existing item a write may change or read from: `resolve` without hidden components.
+    static func resolveWritable(root: URL, components: [String], home: URL) -> URL? {
+        resolve(root: root, components: components, home: home, allowHidden: false)
+    }
+
+    /// A folder a write may put something in: `resolveFolder` without hidden components.
+    static func resolveWritableFolder(root: URL, components: [String], home: URL) -> URL? {
+        resolveFolder(root: root, components: components, home: home, allowHidden: false)
+    }
+
+    /// `/private/var/…` as `/var/…`: `resolvingSymlinksInPath` drops the `/private` that the
+    /// file system reports (F_GETPATH), so the two are compared in this one spelling.
+    static func withoutPrivatePrefix(_ path: String) -> String {
+        guard path.hasPrefix("/private/") else { return path }
+        let rest = String(path.dropFirst("/private".count))
+        return ["/var", "/tmp", "/etc"].contains(where: { rest == $0 || rest.hasPrefix($0 + "/") }) ? rest : path
+    }
+
+    /// Whether the file system's own path of an opened item is inside `root`, not protected and
+    /// (unless allowed) not hidden below the root.
+    static func isInside(realPath: String, root: URL, home: URL, allowHidden: Bool) -> Bool {
+        let real = withoutPrivatePrefix(realPath)
+        let base = withoutPrivatePrefix(canonical(root).path)
+        let r = fold(real), b = fold(base)
+        guard r == b || r.hasPrefix(b == "/" ? "/" : b + "/") else { return false }
+        guard !isProtected(URL(fileURLWithPath: real), home: URL(fileURLWithPath: withoutPrivatePrefix(canonical(home).path))) else { return false }
+        let rest = real.dropFirst(base.count).split(separator: "/")
+        return allowHidden || !rest.contains { $0.hasPrefix(".") }
+    }
+
+    /// Opens `url` without following a symlink at its end, then checks where the opened item
+    /// really is (F_GETPATH) against `root`. A folder replaced by a symlink between the path
+    /// check and the open can't redirect what is read. With `regularFile`, only a plain file.
+    /// The caller owns the descriptor.
+    static func openChecked(_ url: URL, root: URL, home: URL, allowHidden: Bool,
+                            regularFile: Bool) -> (fd: Int32, realPath: String)? {
+        // O_NONBLOCK: a FIFO or device named like a file must not hang the queue on open.
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        var st = stat()
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fstat(fd, &st) == 0, !regularFile || (st.st_mode & S_IFMT) == S_IFREG,
+              fcntl(fd, F_GETPATH, &buffer) != -1 else {
+            Darwin.close(fd)
+            return nil
+        }
+        let real = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        guard isInside(realPath: real, root: root, home: home, allowHidden: allowHidden) else {
+            Darwin.close(fd)
+            return nil
+        }
+        return (fd, real)
+    }
+
+    /// A regular file opened for reading through `openChecked`.
+    static func openForReading(_ url: URL, root: URL, home: URL, allowHidden: Bool) -> (handle: FileHandle, realPath: String)? {
+        guard let (fd, real) = openChecked(url, root: root, home: home, allowHidden: allowHidden, regularFile: true) else { return nil }
+        return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), real)
+    }
+
+    /// The file system's own path of `url` once checked like `openForReading` (files, folders
+    /// and packages), for APIs that only take a path (Quick Look).
+    static func checkedRealPath(_ url: URL, root: URL, home: URL, allowHidden: Bool) -> String? {
+        guard let (fd, real) = openChecked(url, root: root, home: home, allowHidden: allowHidden, regularFile: false) else { return nil }
+        Darwin.close(fd)
+        return real
+    }
+
+    /// After an archive is expanded on the Mac: no symlinks (they could point anywhere and be
+    /// followed later), no setuid/setgid/sticky bits, and every file quarantined like a
+    /// download, as Archive Utility does. Returns the number of symlinks removed.
+    @discardableResult
+    static func sanitizeExpanded(_ folder: URL, quarantine: (URL) -> Void) -> Int {
+        let fm = FileManager.default
+        var removed = 0
+        var links: [URL] = []
+        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey]
+        if let walker = fm.enumerator(at: folder, includingPropertiesForKeys: keys, options: [], errorHandler: { _, _ in true }) {
+            for case let url as URL in walker {
+                let v = try? url.resourceValues(forKeys: Set(keys))
+                if v?.isSymbolicLink == true { links.append(url); continue }
+                var st = stat()
+                if lstat(url.path, &st) == 0, st.st_mode & (S_ISUID | S_ISGID | S_ISVTX) != 0 {
+                    chmod(url.path, st.st_mode & 0o777 & ~(S_ISUID | S_ISGID | S_ISVTX))
+                }
+                if v?.isRegularFile == true || v?.isDirectory == true { quarantine(url) }
+            }
+        }
+        for link in links where (try? fm.removeItem(at: link)) != nil { removed += 1 }
+        return removed
+    }
+
     /// Dot-folders and files in the home folder that hold credentials: never reachable, even
     /// with hidden files shown.
     static let secretHomeItems: Set<String> = [".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config",
@@ -203,6 +306,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
     private var downloadNeeds: [Int: FilesCapability] = [:]
     /// Items this session moved to the Trash, for Put Back: token → (in the Trash, where it was).
     private var trashed: [String: (trash: URL, original: URL)] = [:]
+    /// Where each running upload goes, re-resolved when it finishes.
+    private var uploadTargets: [Int: (root: RemoteFileRoot, path: [String])] = [:]
 
     static let maxEntries = 2000
     static let maxSearchResults = 200
@@ -356,7 +461,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
             }
         case "uploadData": if need(.upload) { uploadData(obj) }
         case "uploadEnd": if need(.upload) { uploadEnd(obj, req: req) }
-        case "uploadCancel": if let x = obj["x"] as? Int { transfers.cancelUpload(x) }
+        case "uploadCancel": if let x = obj["x"] as? Int { transfers.cancelUpload(x); uploadTargets[x] = nil }
         case "mkdir": if need(.upload) { mkdir(obj, req: req, grant: grant) }
         case "rename": if need(.modify) { rename(obj, req: req, grant: grant) }
         case "copy", "move", "duplicate":
@@ -429,6 +534,15 @@ final class RemoteFileBrowser: @unchecked Sendable {
         guard let root = root(obj, key: rootKey, grant: grant) else { return nil }
         let path = components(obj, key: pathKey)
         guard let url = RemoteFilesPolicy.resolve(root: root.url, components: path, home: home, allowHidden: grant.showHidden) else { return nil }
+        return (root, url, path)
+    }
+
+    /// An existing item a write changes or reads from (`item` without hidden components: Show
+    /// Hidden Files is read-only).
+    private func writableItem(_ obj: [String: Any], grant: FilesGrant) -> (root: RemoteFileRoot, url: URL, path: [String])? {
+        guard let root = root(obj, grant: grant) else { return nil }
+        let path = components(obj)
+        guard let url = RemoteFilesPolicy.resolveWritable(root: root.url, components: path, home: home) else { return nil }
         return (root, url, path)
     }
 
@@ -557,6 +671,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
         let generation = previewGeneration
         let side = min(max(obj["max"] as? Int ?? 640, 64), Self.maxPreviewSide)
         let path = components(obj)
+        let home = self.home
+        let hidden = grant.showHidden
         previewQueue.async { [weak self] in
             guard let self else { return }
             self.previewSlots.wait()
@@ -567,11 +683,15 @@ final class RemoteFileBrowser: @unchecked Sendable {
             if let req { m["req"] = req }
             let type = UTType(filenameExtension: url.pathExtension)
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            if let type, RemoteFilesPolicy.isText(type), size <= 8 * 1024 * 1024, let text = Self.textExcerpt(url) {
+            // Read through a checked open (no symlink swap between the check and the read).
+            if let type, RemoteFilesPolicy.isText(type), size <= 8 * 1024 * 1024,
+               let opened = RemoteFilesPolicy.openForReading(url, root: root.url, home: home, allowHidden: hidden),
+               let text = Self.textExcerpt(opened.handle) {
                 m["ok"] = true
                 m["text"] = text.text
                 if text.truncated { m["truncated"] = true }
-            } else if let jpeg = Self.thumbnail(url, side: side) {
+            } else if let real = RemoteFilesPolicy.checkedRealPath(url, root: root.url, home: home, allowHidden: hidden),
+                      let jpeg = Self.thumbnail(URL(fileURLWithPath: real), side: side) {
                 m["ok"] = true
                 m["jpeg"] = jpeg.data.base64EncodedString()
                 m["w"] = jpeg.width
@@ -587,8 +707,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
         }
     }
 
-    static func textExcerpt(_ url: URL) -> (text: String, truncated: Bool)? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    static func textExcerpt(_ handle: FileHandle) -> (text: String, truncated: Bool)? {
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: textPreviewBytes + 1) else { return nil }
         let truncated = data.count > textPreviewBytes
@@ -642,7 +761,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
                 guard let self, self.queue.sync(execute: { self.thumbGeneration == generation && !self.stopped }) else { return }
                 var m: [String: Any] = ["type": WireMessage.files, "op": "thumb", "root": root.id, "path": path, "name": name]
                 if let url = RemoteFilesPolicy.resolve(root: root.url, components: path + [name], home: home, allowHidden: hidden),
-                   let jpeg = Self.thumbnail(url, side: side) {
+                   let real = RemoteFilesPolicy.checkedRealPath(url, root: root.url, home: home, allowHidden: hidden),
+                   let jpeg = Self.thumbnail(URL(fileURLWithPath: real), side: side) {
                     m["ok"] = true
                     m["jpeg"] = jpeg.data.base64EncodedString()
                     m["w"] = jpeg.width
@@ -683,9 +803,13 @@ final class RemoteFileBrowser: @unchecked Sendable {
     // MARK: Downloads (bounded ranges the receiver asks for)
 
     private func download(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
-        guard let (_, url, path) = item(obj, grant: grant), !path.isEmpty else { return reply("download", req: req, error: "notFound") }
+        guard let (root, url, path) = item(obj, grant: grant), !path.isEmpty else { return reply("download", req: req, error: "notFound") }
+        // The file actually opened must be the one that was checked.
+        guard let opened = RemoteFilesPolicy.openForReading(url, root: root.url, home: home, allowHidden: grant.showHidden) else {
+            return reply("download", req: req, error: "notFound")
+        }
         do {
-            let (x, size) = try transfers.openDownload(url)
+            let (x, size) = try transfers.openDownload(URL(fileURLWithPath: opened.realPath), handle: opened.handle)
             downloadNeeds[x] = (obj["purpose"] as? String) == "view" ? .browse : .download
             var fields: [String: Any] = ["x": x, "size": size, "name": url.lastPathComponent]
             if let m = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
@@ -724,8 +848,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
 
     private func uploadBegin(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
         guard let root = root(obj, grant: grant),
-              let folder = RemoteFilesPolicy.resolveFolder(root: root.url, components: components(obj), home: home, allowHidden: grant.showHidden),
-              let name = obj["name"] as? String, RemoteFilesPolicy.isValidComponent(name, allowHidden: grant.showHidden),
+              let folder = RemoteFilesPolicy.resolveWritableFolder(root: root.url, components: components(obj), home: home),
+              let name = obj["name"] as? String, RemoteFilesPolicy.isWritableName(name),
               let size = (obj["size"] as? NSNumber)?.int64Value else {
             return reply("uploadBegin", req: req, error: "notFound")
         }
@@ -737,6 +861,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
                                                                  digest: digest, modified: modified) else {
                 return replyOK("uploadBegin", req: req, ["skipped": true, "name": name])
             }
+            uploadTargets[x] = (root, components(obj))
             replyOK("uploadBegin", req: req, ["x": x, "name": finalName])
         } catch let e as RemoteFileTransfers.TransferError {
             var extra: [String: Any] = [:]
@@ -765,6 +890,14 @@ final class RemoteFileBrowser: @unchecked Sendable {
 
     private func uploadEnd(_ obj: [String: Any], req: Int?) {
         guard let x = obj["x"] as? Int else { return reply("uploadEnd", req: req, error: "badRequest") }
+        // The folder must still be the one the upload began in (not swapped for a symlink or
+        // moved meanwhile), and still allowed for writes.
+        let target = uploadTargets.removeValue(forKey: x)
+        guard let target, let folder = RemoteFilesPolicy.resolveWritableFolder(root: target.root.url, components: target.path, home: home),
+              folder.path == transfers.uploadFolder(x)?.path else {
+            transfers.cancelUpload(x)
+            return reply("uploadEnd", req: req, error: "notFound", extra: ["x": x])
+        }
         do {
             let digest = (obj["sha"] as? String).flatMap { $0.count >= 16 && $0.count <= 64 && $0.allSatisfy(\.isHexDigit) ? $0 : nil }
             let name = try transfers.finishUpload(x, digest: digest)
@@ -800,8 +933,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
 
     private func mkdir(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
         guard let root = root(obj, grant: grant),
-              let folder = RemoteFilesPolicy.resolveFolder(root: root.url, components: components(obj), home: home, allowHidden: grant.showHidden),
-              let name = obj["name"] as? String, RemoteFilesPolicy.isValidComponent(name, allowHidden: grant.showHidden) else {
+              let folder = RemoteFilesPolicy.resolveWritableFolder(root: root.url, components: components(obj), home: home),
+              let name = obj["name"] as? String, RemoteFilesPolicy.isWritableName(name) else {
             return reply("mkdir", req: req, error: "notFound")
         }
         let conflict = (obj["conflict"] as? String).flatMap(RemoteFileConflict.init(rawValue:)) ?? .ask
@@ -823,8 +956,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
     }
 
     private func rename(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
-        guard let (_, url, path) = item(obj, grant: grant), !path.isEmpty,
-              let name = obj["name"] as? String, RemoteFilesPolicy.isValidComponent(name, allowHidden: grant.showHidden) else {
+        guard let (_, url, path) = writableItem(obj, grant: grant), !path.isEmpty,
+              let name = obj["name"] as? String, RemoteFilesPolicy.isWritableName(name) else {
             return reply("rename", req: req, error: "notFound")
         }
         let dest = url.deletingLastPathComponent().appendingPathComponent(name)
@@ -842,17 +975,24 @@ final class RemoteFileBrowser: @unchecked Sendable {
 
     /// Copy or move an item into a folder (possibly under another root), or duplicate it beside itself.
     private func copyOrMove(_ op: String, _ obj: [String: Any], req: Int?, grant: FilesGrant) {
-        guard let (_, src, path) = item(obj, grant: grant), !path.isEmpty else { return reply(op, req: req, error: "notFound") }
+        guard let (srcRoot, src, path) = writableItem(obj, grant: grant), !path.isEmpty else { return reply(op, req: req, error: "notFound") }
         let folder: URL
+        let destRoot: RemoteFileRoot
+        let destPath: [String]
         if op == "duplicate" {
             folder = src.deletingLastPathComponent()
+            destRoot = srcRoot
+            destPath = Array(path.dropLast())
         } else {
             guard let toRoot = root(obj, key: "toRoot", grant: grant),
-                  let f = RemoteFilesPolicy.resolveFolder(root: toRoot.url, components: components(obj, key: "toPath"), home: home, allowHidden: grant.showHidden) else {
+                  let f = RemoteFilesPolicy.resolveWritableFolder(root: toRoot.url, components: components(obj, key: "toPath"), home: home) else {
                 return reply(op, req: req, error: "notFound")
             }
             folder = f
+            destRoot = toRoot
+            destPath = components(obj, key: "toPath")
         }
+        let home = self.home
         // Never into itself.
         if folder.path == src.path || folder.path.hasPrefix(src.path + "/") { return reply(op, req: req, error: "intoItself") }
         let conflict: RemoteFileConflict = op == "duplicate" ? .rename : (obj["conflict"] as? String).flatMap(RemoteFileConflict.init(rawValue:)) ?? .ask
@@ -860,6 +1000,14 @@ final class RemoteFileBrowser: @unchecked Sendable {
             guard let self else { return }
             var result: [String: Any] = ["type": WireMessage.files, "op": op]
             if let req { result["req"] = req }
+            // Resolve both ends again right before acting: a folder swapped for a symlink (or
+            // moved) since the request was checked is refused, not followed.
+            guard RemoteFilesPolicy.resolveWritable(root: srcRoot.url, components: path, home: home)?.path == src.path,
+                  RemoteFilesPolicy.resolveWritableFolder(root: destRoot.url, components: destPath, home: home)?.path == folder.path else {
+                result["ok"] = false; result["error"] = "notFound"
+                self.queue.async { self.send(result) }
+                return
+            }
             do {
                 if op == "move", folder.path == src.deletingLastPathComponent().path {
                     result["ok"] = true; result["name"] = src.lastPathComponent
@@ -883,7 +1031,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
     }
 
     private func trash(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
-        guard let (root, url, path) = item(obj, grant: grant), !path.isEmpty, url.path != RemoteFilesPolicy.canonical(root.url).path else {
+        guard let (root, url, path) = writableItem(obj, grant: grant), !path.isEmpty, url.path != RemoteFilesPolicy.canonical(root.url).path else {
             return reply("trash", req: req, error: "notFound")
         }
         do {
@@ -915,12 +1063,12 @@ final class RemoteFileBrowser: @unchecked Sendable {
     /// Compress items of one folder into a ZIP beside them (bsdtar keeps links as links).
     private func compress(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
         guard let root = root(obj, grant: grant),
-              let folder = RemoteFilesPolicy.resolveFolder(root: root.url, components: components(obj), home: home, allowHidden: grant.showHidden) else {
+              let folder = RemoteFilesPolicy.resolveWritableFolder(root: root.url, components: components(obj), home: home) else {
             return reply("zip", req: req, error: "notFound")
         }
         let names = ((obj["names"] as? [String]) ?? []).prefix(500)
         let path = components(obj)
-        guard !names.isEmpty, names.allSatisfy({ RemoteFilesPolicy.resolve(root: root.url, components: path + [$0], home: home, allowHidden: grant.showHidden) != nil }) else {
+        guard !names.isEmpty, names.allSatisfy({ RemoteFilesPolicy.resolveWritable(root: root.url, components: path + [$0], home: home) != nil }) else {
             return reply("zip", req: req, error: "notFound")
         }
         let base = names.count == 1 ? names[0] : "Archive"
@@ -931,10 +1079,13 @@ final class RemoteFileBrowser: @unchecked Sendable {
         }
     }
 
-    /// Expand an archive into a new folder beside it. bsdtar refuses `..` and writing through
-    /// symlinks unless told otherwise, so nothing lands outside that folder.
+    /// Expand an archive into a new folder beside it. bsdtar refuses `..`, absolute paths and
+    /// writing through symlinks unless told otherwise, so nothing lands outside that folder;
+    /// ownership, permissions beyond the umask, ACLs and file flags from the archive are not applied.
+    /// Afterwards symlinks are removed, setuid/setgid bits cleared and everything quarantined
+    /// (`sanitizeExpanded`), as Archive Utility treats a download.
     private func expand(_ obj: [String: Any], req: Int?, grant: FilesGrant) {
-        guard let (_, url, path) = item(obj, grant: grant), !path.isEmpty else { return reply("unzip", req: req, error: "notFound") }
+        guard let (_, url, path) = writableItem(obj, grant: grant), !path.isEmpty else { return reply("unzip", req: req, error: "notFound") }
         let folder = url.deletingLastPathComponent()
         let stem = (url.lastPathComponent as NSString).deletingPathExtension
         let name = (try? RemoteFileTransfers.targetName(in: folder, name: stem, conflict: .rename)).flatMap { $0 } ?? stem
@@ -942,10 +1093,18 @@ final class RemoteFileBrowser: @unchecked Sendable {
         do { try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false) } catch {
             return reply("unzip", req: req, error: errorCode(error))
         }
-        run("/usr/bin/bsdtar", ["-xf", url.path, "--no-same-owner", "-C", target.path], in: folder) { [weak self] ok in
-            if ok { self?.replyOK("unzip", req: req, ["name": name]) } else {
+        let args = ["-xf", url.path, "--no-same-owner", "--no-same-permissions", "--no-acls", "--no-fflags",
+                    "-C", target.path]
+        run("/usr/bin/bsdtar", args, in: folder) { [weak self] ok in
+            guard let self else { return }
+            guard ok else {
                 try? FileManager.default.removeItem(at: target)
-                self?.reply("unzip", req: req, error: "failed")
+                return self.reply("unzip", req: req, error: "failed")
+            }
+            self.workQueue.async {
+                let links = RemoteFilesPolicy.sanitizeExpanded(target, quarantine: RemoteFileTransfers.quarantine)
+                if links > 0 { Log.info("files: unzip removed \(links) symlink(s)") }
+                self.queue.async { self.replyOK("unzip", req: req, ["name": name]) }
             }
         }
     }

@@ -287,4 +287,110 @@ private struct Sha256Box {
     var h = SHA256()
     mutating func update(_ d: Data) { h.update(data: d) }
     var hex: String { h.finalize().map { String(format: "%02x", $0) }.joined() }
+
+    // MARK: Write policy (Show Hidden Files is read-only; writes re-check where they land)
+
+    private func alwaysAllBrowser(_ box: Box, showHidden: Bool = true) -> RemoteFileBrowser {
+        let b = browser(box.add)
+        var policy = FilesDevicePolicy(access: .always, scope: .selectedFolders, capabilities: [.browse, .download, .upload, .modify, .delete])
+        policy.showHidden = showHidden
+        b.livePolicy = { policy }
+        b.askConsent = { _ in }
+        b.handle(["op": "state", "req": 1], inputGranted: false)
+        b.consentDecided(FilesGrant.always(policy))
+        _ = waitReply(box, "state", req: 1)
+        return b
+    }
+
+    func testHiddenItemsAreNeverWrittenEvenWithHiddenFilesShown() throws {
+        let box = Box()
+        let b = alwaysAllBrowser(box)
+        let fm = FileManager.default
+        try fm.createDirectory(at: home.appendingPathComponent("Shared/.hooks"), withIntermediateDirectories: true)
+        try "x".write(to: home.appendingPathComponent("Shared/doc.txt"), atomically: true, encoding: .utf8)
+        let refused: [[String: Any]] = [
+            ["op": "uploadBegin", "root": "r1", "path": [], "name": ".zshenv", "size": 1],
+            ["op": "uploadBegin", "root": "r1", "path": [".hooks"], "name": "pre-commit", "size": 1],
+            ["op": "mkdir", "root": "r1", "path": [], "name": ".git"],
+            ["op": "rename", "root": "r1", "path": ["doc.txt"], "name": ".zshrc"],
+            ["op": "rename", "root": "r1", "path": [".hidden-note"], "name": "visible.txt"],
+            ["op": "move", "root": "r1", "path": ["doc.txt"], "toRoot": "r1", "toPath": [".hooks"]],
+            ["op": "copy", "root": "r1", "path": [".hidden-note"], "toRoot": "r1", "toPath": ["Inbox"]],
+            ["op": "duplicate", "root": "r1", "path": [".hidden-note"]],
+            ["op": "trash", "root": "r1", "path": [".hidden-note"]],
+            ["op": "zip", "root": "r1", "path": [], "names": [".hidden-note"]],
+        ]
+        for (n, var request) in refused.enumerated() {
+            request["req"] = 100 + n
+            b.handle(request, inputGranted: false)
+            let op = request["op"] as! String
+            XCTAssertEqual(waitReply(box, op, req: 100 + n)["error"] as? String, "notFound", "\(request)")
+        }
+        XCTAssertFalse(fm.fileExists(atPath: home.appendingPathComponent("Shared/.zshenv").path))
+        XCTAssertFalse(fm.fileExists(atPath: home.appendingPathComponent("Shared/.git").path))
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent("Shared/.hidden-note").path), "left alone")
+        // Hidden files can still be read when shown.
+        try "shown".write(to: home.appendingPathComponent("Shared/.notes.txt"), atomically: true, encoding: .utf8)
+        b.handle(["op": "preview", "root": "r1", "path": [".notes.txt"], "req": 200], inputGranted: false)
+        XCTAssertEqual(waitReply(box, "preview", req: 200)["text"] as? String, "shown")
+    }
+
+    func testAFinishedUploadIsQuarantinedAndLandsOnlyWhereItBegan() throws {
+        let box = Box()
+        let b = alwaysAllBrowser(box, showHidden: false)
+        let payload = Data("hello".utf8)
+        func upload(_ name: String, req: Int, between: () throws -> Void = {}) throws -> [String: Any] {
+            b.handle(["op": "uploadBegin", "root": "r1", "path": ["Inbox"], "name": name, "size": payload.count, "req": req], inputGranted: false)
+            let x = try XCTUnwrap(waitReply(box, "uploadBegin", req: req)["x"] as? Int)
+            try between()
+            b.handle(["op": "uploadData", "x": x, "o": 0, "d": payload.base64EncodedString()], inputGranted: false)
+            let deadline = Date().addingTimeInterval(5)
+            while !box.all.contains(where: { $0["op"] as? String == "uploadAck" && $0["x"] as? Int == x }), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            b.handle(["op": "uploadEnd", "x": x, "req": req + 1], inputGranted: false)
+            return waitReply(box, "uploadEnd", req: req + 1)
+        }
+        XCTAssertEqual(try upload("a.txt", req: 10)["name"] as? String, "a.txt")
+        let landed = home.appendingPathComponent("Shared/Inbox/a.txt")
+        let quarantine = try landed.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
+        XCTAssertEqual(quarantine?["LSQuarantineAgentName"] as? String, "MeowDisplay", "uploads carry the quarantine mark")
+
+        // The folder is replaced by a symlink to a folder outside while the upload runs.
+        let fm = FileManager.default
+        let reply = try upload("b.txt", req: 20) {
+            try fm.moveItem(at: home.appendingPathComponent("Shared/Inbox"), to: home.appendingPathComponent("Shared/Moved"))
+            try fm.createSymbolicLink(at: home.appendingPathComponent("Shared/Inbox"), withDestinationURL: dir.appendingPathComponent("outside"))
+        }
+        XCTAssertEqual(reply["error"] as? String, "notFound")
+        XCTAssertFalse(fm.fileExists(atPath: dir.appendingPathComponent("outside/b.txt").path), "nothing written outside")
+        XCTAssertFalse(fm.fileExists(atPath: home.appendingPathComponent("Shared/Moved/b.txt").path))
+    }
+
+    func testExpandedArchivesLoseSymlinksAndAreQuarantined() throws {
+        let box = Box()
+        let b = alwaysAllBrowser(box, showHidden: false)
+        let fm = FileManager.default
+        // An archive holding a symlink to a secret outside the folder, made with the same tool.
+        let staging = dir.appendingPathComponent("staging")
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        try "data".write(to: staging.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+        try fm.createSymbolicLink(at: staging.appendingPathComponent("key"), withDestinationURL: home.appendingPathComponent(".ssh/id_ed25519"))
+        let zip = home.appendingPathComponent("Shared/Inbox/bundle.zip")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/bsdtar")
+        p.arguments = ["-a", "-cf", zip.path, "--", "file.txt", "key"]
+        p.currentDirectoryURL = staging
+        try p.run(); p.waitUntilExit()
+        XCTAssertEqual(p.terminationStatus, 0)
+
+        b.handle(["op": "unzip", "root": "r1", "path": ["Inbox", "bundle.zip"], "req": 30], inputGranted: false)
+        let folder = try XCTUnwrap(waitReply(box, "unzip", req: 30)["name"] as? String)
+        let out = home.appendingPathComponent("Shared/Inbox/\(folder)")
+        XCTAssertEqual(try String(contentsOf: out.appendingPathComponent("file.txt"), encoding: .utf8), "data")
+        XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: out.appendingPathComponent("key").path), "no symlink survives")
+        let q = try out.appendingPathComponent("file.txt").resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
+        XCTAssertEqual(q?["LSQuarantineAgentName"] as? String, "MeowDisplay")
+    }
+
 }
