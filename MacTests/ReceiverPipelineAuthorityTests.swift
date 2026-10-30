@@ -537,8 +537,8 @@ private final class PipelineTestHost: Sendable {
             audioPayload: { _ in },
             codecConfigurationChanged: { _, _ in },
             presentationFrame: { _, _, _ in },
-            connectionFailed: { _ in },
-            connectionClosedByPeer: {}))
+            connectionFailed: { _, _ in },
+            connectionClosedByPeer: { _ in }))
         return ReceiverPipelineActor(
             queue: queue, sendTargetBox: StreamReceiver.SendTargetBox(), reconnectContext: context,
             uiEffects: uiEffects, hostEffects: hostEffects, framePipeline: framePipeline)
