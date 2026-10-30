@@ -14,8 +14,8 @@ stay exactly as they are.
 | `dev` | Active development: features, fixes, Android, Mac and iOS work integrate here by PR. | PR, required checks, no deletion or force-push |
 | `release/<version>` | One release's candidate for every platform (RELEASE.md). Created from an approved `dev` baseline; takes release fixes, QA findings and distribution preparation; fixes are forward-ported to `dev`. Every push builds a candidate; nothing publishes without approval. | Only admins create one (its own ruleset, so the admin bypass covers creation only); PR, required checks, no deletion or force-push. The signing environments allow `release/*` only, so this decides who can reach the signing keys |
 | `feature/*`, `fix/*`, `infra/*` | Short-lived work, by draft PR into `dev` (or a release branch for a release fix). | — |
-| `reference/opendisplay` | Read-only copy of the external project's `main`, moved only by `reference-sync.yml` (fast-forward, no tags). Never a base for features or releases. | Only the sync workflow may update it |
-| `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | Only the release workflows may update it |
+| `reference/opendisplay` | Read-only copy of the external project's `main`, moved only by `reference-sync.yml` (fast-forward, no tags). Never a base for features or releases. | Fast-forward only, never deleted, no bypass (only its sync workflow writes it) |
+| `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | Fast-forward only, never deleted, no bypass (only the release workflows write it) |
 
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).
@@ -55,7 +55,7 @@ migration.
 | The workflow files must exist on the default branch to be dispatchable, and scheduled ones run only there | Monitor, sync and guard can't run otherwise | `dev` becomes the default branch early (step 6), `main` after 2.0.0 (step 13) |
 | Stacked PRs #24 → #25 → #26 | Retargeting or squashing out of order replays or loses reviewed changes | Merge in the reviewed order with merge commits; retarget each only after its parent merged |
 | Secrets readable by any workflow on any branch | A workflow from another branch (or the reference branch's files) could read signing keys | Move them into environments limited to `release/*`; delete the repository-level copies |
-| The release-state and reference branches | A manual push could corrupt state or import external code | Rulesets allow only GitHub Actions to update them |
+| The release-state and reference branches | A manual push could corrupt state or import external code | Rulesets: fast-forward only, never deleted, no bypass. Publication never trusts `release-state` (every fact is re-derived live), and the sync only fast-forwards to the verified external head. **Restricting updates to the workflows alone** needs a bypass actor GitHub accepts on a user-owned repository: GitHub's own Actions app (integration 15368) is refused ("must be part of the ruleset source or owner organization"), the owner's own GitHub App is accepted. When the release App exists (RELEASE.md § Credentials), both writers move to its token and the `update`/`creation` rules return with that App as the only bypass |
 
 ## Migration sequence
 

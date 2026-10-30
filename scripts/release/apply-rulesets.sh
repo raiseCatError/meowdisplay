@@ -13,6 +13,17 @@ set -euo pipefail
 repo=${REPOSITORY:-raiseCatError/meowdisplay}
 dir="$(cd "$(dirname "$0")/../../.github/rulesets" && pwd)"
 apply=false; [ "${1:-}" = "--apply" ] && apply=true
+# Every file is checked before anything changes, so a bad file can't leave the rulesets half
+# applied. GitHub accepts as bypass actors on this user-owned repository only repository
+# roles, deploy keys and the owner's own GitHub Apps: its own Actions app (integration
+# 15368) is refused with HTTP 422, so no file may name it.
+for file in "$dir"/*.json; do
+  jq -e 'type == "object" and (.name | type == "string") and (.rules | type == "array")' "$file" >/dev/null ||
+    { echo "::error::$file is not a ruleset definition"; exit 1; }
+  if jq -e '[.bypass_actors[]? | select(.actor_type == "Integration" and .actor_id == 15368)] | length > 0' "$file" >/dev/null; then
+    echo "::error::$file names GitHub Actions (integration 15368) as a bypass actor, which GitHub refuses here"; exit 1
+  fi
+done
 existing=$(gh api "repos/$repo/rulesets" --jq '.[] | "\(.id)\t\(.name)"')
 normalize='{name, target, enforcement, include: .conditions.ref_name.include, bypass: [.bypass_actors[]? | {actor_id, actor_type, bypass_mode}],
             rules: [.rules[] | {type, parameters}] | sort_by(.type)}'
