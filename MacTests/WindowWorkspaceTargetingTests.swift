@@ -554,9 +554,14 @@ final class WorkspaceZoomTests: XCTestCase {
         XCTAssertNil(t.sourcePoint(fromCanvas: WorkspacePoint(x: 50, y: 400)), "empty pane space never clicks the Mac")
         let p = t.sourcePoint(fromCanvas: WorkspacePoint(x: 400, y: 400))
         XCTAssertEqual(p?.x ?? 0, 800, accuracy: 1e-9); XCTAssertEqual(p?.y ?? 0, 500, accuracy: 1e-9)
-        // Moved by hand: the smaller source can go anywhere inside the pane, never out of it.
-        let moved = transform(WorkspacePaneZoom(scale: 0.7, centerX: -3, centerY: 0.5)).contentRect
-        XCTAssertEqual(moved.maxX, 800, accuracy: 1e-9)
+        // Moved by hand (free canvas): the source's left edge can come to the pane's centre and
+        // no further, so the source still covers the centre and can't be lost.
+        let movedT = transform(WorkspacePaneZoom(scale: 0.7, centerX: -3, centerY: 0.5))
+        let moved = movedT.contentRect
+        XCTAssertEqual(moved.x, 400, accuracy: 1e-9, "left edge at the pane's centre")
+        XCTAssertEqual(moved.maxX, 960, accuracy: 1e-9, "the rest runs past the pane: intended empty canvas on the left")
+        XCTAssertNil(movedT.sourcePoint(fromCanvas: WorkspacePoint(x: 100, y: 400)), "empty canvas never clicks the Mac")
+        XCTAssertEqual(movedT.sourcePoint(fromCanvas: WorkspacePoint(x: 400.5, y: 400))?.x ?? -1, 0, accuracy: 2, "just right of centre is the source's left edge")
     }
 
     func testPinchKeepsTheSourcePointUnderTheFingersAndClampsCleanlyAt8xAnd07x() throws {
@@ -580,13 +585,31 @@ final class WorkspaceZoomTests: XCTestCase {
         XCTAssertNil(z, "back at 1x, centred")
     }
 
-    func testPanningAZoomedPaneStopsAtTheSourceEdges() throws {
-        let z = try XCTUnwrap(WorkspaceZoom.pinched(WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5), tile: pane, source: window,
-                                                    rotation: .none, fit: .fit, ratio: 1,
+    /// Free canvas (a88a3b5): a zoomed pane pans until the source's edge or corner reaches the
+    /// pane's centre, leaves empty canvas beyond it on purpose, stays recoverable and maps input.
+    func testPanningAZoomedPaneBringsAnEdgeOrCornerToTheCentreAndStaysRecoverable() throws {
+        let start = WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5)
+        let z = try XCTUnwrap(WorkspaceZoom.pinched(start, tile: pane, source: window, rotation: .none, fit: .fit, ratio: 1,
                                                     from: WorkspacePoint(x: 0.5, y: 0.5), to: WorkspacePoint(x: 30, y: 0.5)))
-        let c = transform(z).contentRect
-        XCTAssertEqual(c.x, 0, accuracy: 1e-6, "no gap at the left edge")
-        XCTAssertNotNil(transform(z).sourcePoint(fromCanvas: WorkspacePoint(x: 1, y: 400)), "every pane pixel shows the window")
+        let t = transform(z)
+        XCTAssertEqual(t.contentRect.x, 400, accuracy: 1e-6, "dragged far right: the left edge stops at the pane's centre")
+        XCTAssertNil(t.sourcePoint(fromCanvas: WorkspacePoint(x: 1, y: 400)), "empty canvas left of it, which sends nothing")
+        let edge = try XCTUnwrap(t.sourcePoint(fromCanvas: WorkspacePoint(x: 401, y: 400)), "the source still covers the centre")
+        XCTAssertEqual(edge.x, 0, accuracy: 1, "and it's the source's left edge")
+        // Input maps both ways on the visible part.
+        let src = WorkspacePoint(x: 40, y: 500)
+        let back = try XCTUnwrap(t.sourcePoint(fromCanvas: t.canvasPoint(fromSource: src)))
+        XCTAssertEqual(back.x, src.x, accuracy: 1e-6); XCTAssertEqual(back.y, src.y, accuracy: 1e-6)
+
+        // A corner: top-left at the centre, empty canvas up and left.
+        let corner = transform(WorkspacePaneZoom(scale: 3, centerX: -1, centerY: -1)).contentRect
+        XCTAssertEqual(corner.x, 400, accuracy: 1e-6); XCTAssertEqual(corner.y, 400, accuracy: 1e-6)
+
+        // Recoverable: dragging back the other way brings the source across the pane again.
+        let back2 = try XCTUnwrap(WorkspaceZoom.pinched(z, tile: pane, source: window, rotation: .none, fit: .fit, ratio: 1,
+                                                        from: WorkspacePoint(x: 0.5, y: 0.5), to: WorkspacePoint(x: -0.5, y: 0.5)))
+        XCTAssertLessThan(transform(back2).contentRect.x, 0, "the source covers the pane again")
+        XCTAssertNotNil(transform(back2).sourcePoint(fromCanvas: WorkspacePoint(x: 1, y: 400)))
     }
 
     func testZoomedAndRotatedPanesMapInputBothWays() {
