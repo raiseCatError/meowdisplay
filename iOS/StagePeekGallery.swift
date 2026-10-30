@@ -116,7 +116,9 @@ struct StagePeekDock: View {
 
     static let cell: CGFloat = 42
     static let spacing: CGFloat = 10
-    static let rowHeight: CGFloat = 59
+    /// Rows of the grown bar (Launchpad-like): wider cells with the app's name under its icon.
+    static let gridCell: CGFloat = 68
+    static let rowHeight: CGFloat = 78
 
     var body: some View {
         let layout = StagePeekDockLayout(apps: apps.count, width: width, maxHeight: maxHeight)
@@ -144,9 +146,9 @@ struct StagePeekDock: View {
                 .frame(height: 64)
                 .simultaneousGesture(pull(layout: layout, shown: shown))
             } else {
-                let grid = LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.cell), spacing: Self.spacing), count: layout.perRow),
+                let grid = LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.gridCell), spacing: Self.spacing), count: layout.perRow),
                                      spacing: Self.spacing - 3) {
-                    ForEach(apps) { appButton($0) }
+                    ForEach(apps) { appButton($0, named: true) }
                     allAppsButton
                 }
                 .padding(.horizontal, 12)
@@ -220,7 +222,7 @@ struct StagePeekDock: View {
         .accessibilityIdentifier("stagePeekLaunchpad")
     }
 
-    private func appButton(_ app: MacAppItem) -> some View {
+    private func appButton(_ app: MacAppItem, named: Bool = false) -> some View {
         let isSelected = selected == app.bundleID
         return Button { onApp(app) } label: {
             VStack(spacing: 3) {
@@ -229,6 +231,12 @@ struct StagePeekDock: View {
                         .stroke(meowAccent, lineWidth: isSelected ? 2.5 : 0).padding(-3))
                     .scaleEffect(isSelected && !reduceMotion ? 1.1 : 1)
                 Circle().fill(Color.white.opacity(app.running ? 0.85 : 0)).frame(width: 4, height: 4)
+                if named {
+                    // Grown bar: the name under the icon, as in Launchpad (owner, 2026-10-31).
+                    Text(app.name).font(.caption2).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
+                        .frame(width: Self.gridCell)
+                        .accessibilityHidden(true)   // the button is already labelled with it
+                }
             }
         }
         .buttonStyle(.plain)
@@ -259,7 +267,7 @@ struct StagePeekDockLayout: Equatable {
 
     init(apps: Int, width: CGFloat, maxHeight: CGFloat) {
         total = apps + 1   // and All Apps
-        perRow = max(1, Int((width - 24 + StagePeekDock.spacing) / (StagePeekDock.cell + StagePeekDock.spacing)))
+        perRow = max(1, Int((width - 24 + StagePeekDock.spacing) / (StagePeekDock.gridCell + StagePeekDock.spacing)))
         let needed = max(1, (total + perRow - 1) / perRow)
         let room = max(1, Int((maxHeight - 30) / StagePeekDock.rowHeight))
         maxRows = min(needed, room)
