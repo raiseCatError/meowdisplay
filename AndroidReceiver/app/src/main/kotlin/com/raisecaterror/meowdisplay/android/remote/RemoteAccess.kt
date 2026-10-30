@@ -78,6 +78,9 @@ class RemoteAccess(
     /** The Mac's login session is on Bonjour but switched out (Fast User Switching): it can't share now. */
     fun switchedOut(peerID: String): Boolean = nearbyEntry(peerID)?.advert?.switchedOut == true
 
+    /** The Mac advertises that macOS blocks its connections to devices (Local Network privacy). */
+    fun macLocalNetworkBlocked(peerID: String): Boolean = nearbyEntry(peerID)?.advert?.localNetworkBlocked == true
+
     private fun nearbyEntry(peerID: String): HomeRows.Nearby? {
         val name = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: return null
         return HomeRows.nearbyEntry(peerID, name, bonjour.nearbyMacs.value.map { HomeRows.Nearby(it.serviceName, it.advert) })

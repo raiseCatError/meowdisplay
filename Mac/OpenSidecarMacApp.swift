@@ -1185,6 +1185,9 @@ final class SenderController: ObservableObject {
         // v13 helloCommit/hello/helloReveal ceremony is the only thing
         // that actually validates pairing compatibility.
         txt["pp"] = String(WireProtocol.pairingVersion)
+        // `lnd`: macOS is blocking this Mac's outgoing connections to devices (Local Network
+        // privacy), so a device's Connect can't complete. Display-only, like the session hints.
+        if LocalNetworkAccess.state == .denied { txt["lnd"] = "1" }
         // Same-Mac session hints (opt-in): grouping and labels only.
         let advertisement = sessionAdvertisement()
         for (key, value) in advertisement?.txtFields ?? [:] { txt[key] = value }
@@ -1249,6 +1252,7 @@ final class SenderController: ObservableObject {
             let listener = try NWListener(using: parameters)
             listener.service = senderPairingService(localID: localID)
             pairingListener = listener
+            LocalNetworkAccess.onChange = { [weak self] _ in MainActor.assumeIsolated { self?.refreshSenderAdvertisement() } }
             #if DEBUG
             Log.info("pairing listener starting: type=_opendisplay-mac-pair._tcp id=\(localID) peerToPeer=true")
             #endif

@@ -178,6 +178,7 @@ fun ReceiverHome(
                                 route = mediaUi.route.takeIf { live }, awaitingMacApproval = awaiting,
                                 localConnectPending = mediaUi.connectingTo == mac.peerID, attempt = attempts[mac.peerID],
                                 switchedOut = isNearby && remote.switchedOut(mac.peerID),
+                                macLocalNetworkBlocked = isNearby && remote.macLocalNetworkBlocked(mac.peerID),
                             ),
                         ) { id -> paired.firstOrNull { it.peerID == id }?.name }
                         val busy = status is MacStatus.Connecting || status is MacStatus.NeedsMacApproval

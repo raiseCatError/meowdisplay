@@ -115,4 +115,16 @@ class RemoteStatusTest {
         assertEquals(listOf("A", "B"), rows.paired.map { it.peerID })
         assertEquals("a nearby paired Mac is not listed again to pair", listOf("Guest Mac"), rows.toPair)
     }
+
+    @Test
+    fun `a Mac that macOS blocks from dialing back says where to fix it`() {
+        val advert = MacAdvertisement.parse(mapOf("id" to "A6DEFD3A-EFF6-4BAC-8FE9-7987E8293BD1", "lnd" to "1"))
+        assertTrue(advert.localNetworkBlocked)
+        val status = MacStatusReducer.reduce(MacFacts(peerID = "p", name = "Mac", nearby = true, macLocalNetworkBlocked = true, localConnectPending = true))
+        assertEquals(MacStatus.MacLocalNetworkBlocked, status)
+        assertTrue(status.hint!!.contains("Local Network"))
+        assertEquals("a live session wins", MacStatus.Connected(null),
+            MacStatusReducer.reduce(MacFacts(peerID = "p", name = "Mac", nearby = true, macLocalNetworkBlocked = true, connected = true)))
+        assertTrue(!MacAdvertisement.parse(mapOf("id" to "x")).localNetworkBlocked)
+    }
 }

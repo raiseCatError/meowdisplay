@@ -4355,6 +4355,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue(), generation == self.transportController.currentDialGeneration, !self.stopped,
                   self.transportController.currentConnection === conn, conn.state != .ready else { return }
             Log.info("dial timed out in \(conn.state) — redialing")
+            // A dial that never leaves "preparing" while the device is advertising is most often
+            // macOS Local Network privacy blocking this Mac's outgoing connections: say so.
+            let sink = self.statusSink
+            LocalNetworkAccess.check { state in
+                guard state == .denied else { return }
+                Task { @MainActor in
+                    sink.publishStatus("macOS is blocking MeowDisplay from connecting to devices. Turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network.")
+                }
+            }
             self.scheduleReconnect()
         }
         conn.stateUpdateHandler = { state in

@@ -13,6 +13,9 @@ data class MacAdvertisement(
     val sessionLabel: String? = null,
     /** Logged in but not on the console: it can't capture or take input, so it can't share now. */
     val switchedOut: Boolean = false,
+    /** `lnd`: macOS blocks this Mac's outgoing connections to devices (Local Network privacy), so
+     *  Connect can't complete until that's allowed on the Mac. Explains a wait; never trust. */
+    val localNetworkBlocked: Boolean = false,
 ) {
     /** "Family MacBook · Jai" for one of several sessions; null when the Mac didn't label it. */
     val sessionTitle: String? get() = sessionLabel?.let { label -> hostName?.let { "$it · $label" } ?: label }
@@ -32,6 +35,7 @@ data class MacAdvertisement(
                 hostName = if (group != null) field("hn", MAX_HOST_NAME) else null,
                 sessionLabel = if (group != null) field("sl", MAX_LABEL) else null,
                 switchedOut = txt["ss"]?.trim() == "i",
+                localNetworkBlocked = txt["lnd"]?.trim() == "1",
             )
         }
     }

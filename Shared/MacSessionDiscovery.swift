@@ -114,6 +114,10 @@ struct NearbyMacSession: Equatable, Sendable, Identifiable {
     /// The label to show in a group; disambiguated when two sessions on one
     /// Mac chose the same label.
     var rowTitle: String
+    /// The Mac says macOS blocks its outgoing connections to devices (`lnd`, Local Network
+    /// privacy), so Connect can't complete until that's allowed on the Mac. Unauthenticated: it
+    /// only explains a wait, never hides or trusts a Mac.
+    var localNetworkBlocked = false
 
     var id: String { installID ?? "service:\(serviceName)" }
 }
@@ -152,7 +156,8 @@ enum NearbyMacDirectory {
             let session = NearbyMacSession(
                 installID: installID, serviceName: entry.serviceName, sessionLabel: hint?.label,
                 availability: hint?.availability ?? .available,
-                rowTitle: hint?.label ?? entry.serviceName)
+                rowTitle: hint?.label ?? entry.serviceName,
+                localNetworkBlocked: entry.txt["lnd"]?.trimmingCharacters(in: .whitespaces) == "1")
             // The group is the digest AND the name together: an
             // advertisement (it is unauthenticated) that copies a Mac's
             // digest under another name forms its own row instead of

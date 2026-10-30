@@ -57,6 +57,8 @@ data class MacFacts(
     val attempt: RemoteAttempt? = null,
     /** Bonjour shows this Mac's login session as switched out (Fast User Switching). */
     val switchedOut: Boolean = false,
+    /** The Mac says macOS blocks it from connecting to devices (Local Network privacy, `lnd`). */
+    val macLocalNetworkBlocked: Boolean = false,
 )
 
 enum class ConnectingStep(val text: String) {
@@ -113,6 +115,12 @@ sealed interface MacStatus {
         override val action get() = RowAction.None
     }
 
+    /** The Mac sees this device but macOS won't let it connect back (Local Network privacy). */
+    data object MacLocalNetworkBlocked : MacStatus {
+        override val text get() = "The Mac can't connect to this device"
+        override val action get() = RowAction.Retry
+    }
+
     /** Bonjour sees the Mac (the local path). */
     data object AvailableLocally : MacStatus {
         override val text get() = "Nearby"
@@ -138,10 +146,12 @@ sealed interface MacStatus {
             NotAccepted -> "Forget it here and pair again, or pair it again from the Mac."
             DialBackMissed -> "Is your Mac awake, with Auto-Reconnect on? A firewall on the Mac can also block the connection."
             SwitchedOut -> "Another user is using this Mac. It can share again once its user switches back to this account."
+            MacLocalNetworkBlocked -> "macOS is blocking MeowDisplay on the Mac from connecting to devices. On the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network, then try again."
             else -> null
         }
 
-    val isFailure: Boolean get() = this is Offline || this is DifferentMac || this == NotAccepted || this == DialBackMissed
+    val isFailure: Boolean get() = this is Offline || this is DifferentMac || this == NotAccepted || this == DialBackMissed ||
+        this == MacLocalNetworkBlocked
 }
 
 enum class RowAction(val label: String) {
@@ -159,6 +169,8 @@ object MacStatusReducer {
     fun reduce(facts: MacFacts, nameOf: (String) -> String? = { null }): MacStatus {
         if (facts.connected) return MacStatus.Connected(facts.route)
         if (facts.awaitingMacApproval) return MacStatus.NeedsMacApproval
+        // Nothing local can finish while macOS blocks the Mac's side: say where to fix it.
+        if (facts.nearby && facts.macLocalNetworkBlocked) return MacStatus.MacLocalNetworkBlocked
         when (val attempt = facts.attempt) {
             is RemoteAttempt.Knocking -> return MacStatus.Connecting(if (attempt.automatic) ConnectingStep.Reconnecting else ConnectingStep.ContactingMac)
             RemoteAttempt.WaitingForDialBack -> return MacStatus.Connecting(ConnectingStep.WaitingForMac)

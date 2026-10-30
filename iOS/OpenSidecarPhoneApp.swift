@@ -1301,6 +1301,8 @@ struct IdleView: View {
         /// Logged in on the Mac but not in front: it can't share.
         let switchedOut: Bool
         let hasRemote: Bool
+        /// The Mac says macOS blocks it from connecting to devices (Local Network privacy).
+        var localNetworkBlocked = false
         var isPaired: Bool { peerID != nil }
     }
 
@@ -1309,7 +1311,7 @@ struct IdleView: View {
     private func homeMacs() -> [HomeMac] {
         _ = remoteRefresh
         let remoteIDs = Set(RemoteEndpointStore.allPeerIDs(role: .receiverRole))
-        var nearbyPaired: [String: (result: NWBrowser.Result, switchedOut: Bool, title: String)] = [:]
+        var nearbyPaired: [String: (result: NWBrowser.Result, switchedOut: Bool, title: String, blocked: Bool)] = [:]
         var toPair: [HomeMac] = []
         for group in receiver.nearbyMacGroups {
             for session in group.sessions {
@@ -1320,7 +1322,7 @@ struct IdleView: View {
                     : group.title
                 let switchedOut = session.availability == .switchedOut
                 if receiver.pairingMacIsPaired(result), let id = receiver.pairingMacPeerID(result) {
-                    if nearbyPaired[id] == nil { nearbyPaired[id] = (result, switchedOut, title) }
+                    if nearbyPaired[id] == nil { nearbyPaired[id] = (result, switchedOut, title, session.localNetworkBlocked) }
                 } else {
                     toPair.append(HomeMac(id: "nearby-" + session.id, name: title, peerID: nil, nearby: result,
                                           switchedOut: switchedOut, hasRemote: false))
@@ -1331,14 +1333,15 @@ struct IdleView: View {
             let near = nearbyPaired[peer.peerID]
             return HomeMac(id: "paired-" + peer.peerID, name: peer.displayName, peerID: peer.peerID,
                            nearby: near?.result, switchedOut: near?.switchedOut ?? false,
-                           hasRemote: remoteIDs.contains(peer.peerID))
+                           hasRemote: remoteIDs.contains(peer.peerID), localNetworkBlocked: near?.blocked ?? false)
         }
         // A paired Mac that is visible always gets a row, even if the pin
         // list and the discovery record briefly disagree.
         let listed = Set(paired.compactMap(\.peerID))
         for (id, near) in nearbyPaired where !listed.contains(id) {
             paired.append(HomeMac(id: "paired-" + id, name: near.title, peerID: id, nearby: near.result,
-                                  switchedOut: near.switchedOut, hasRemote: remoteIDs.contains(id)))
+                                  switchedOut: near.switchedOut, hasRemote: remoteIDs.contains(id),
+                                  localNetworkBlocked: near.blocked))
         }
         paired.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return paired + toPair
@@ -1476,6 +1479,10 @@ struct IdleView: View {
             return mac.switchedOut ? String(localized: "Switched Out") : String(localized: "Not paired")
         }
         if receiver.connected { return String(localized: "Connected") }
+        // The Mac can see this iPhone but macOS won't let it connect back: say where to fix it.
+        if mac.localNetworkBlocked {
+            return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
+        }
         if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
         if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
         if mac.switchedOut { return String(localized: "Switched Out") }
