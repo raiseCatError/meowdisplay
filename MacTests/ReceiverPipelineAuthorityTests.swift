@@ -182,6 +182,61 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
 
     // MARK: - Parked candidates (F5)
 
+    // MARK: - Unauthenticated newcomers (L1)
+
+    /// A TLS client against a listener that accepts the socket and never answers: its
+    /// handshake never completes, like a stranger without a pinned identity.
+    private func strangerRig() async throws -> (NWListener, () -> NWConnection) {
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { $0.start(queue: .global()) }   // silent
+        let listening = OSAllocatedUnfairLock(initialState: false)
+        listener.stateUpdateHandler = { if case .ready = $0 { listening.withLock { $0 = true } } }
+        listener.start(queue: .global())
+        let ready = await eventually { listening.withLock { $0 } }
+        XCTAssertTrue(ready, "the loopback listener never became ready")
+        let port = try XCTUnwrap(listener.port)
+        return (listener, { NWConnection(host: "127.0.0.1", port: port, using: NWParameters(tls: NWProtocolTLS.Options())) })
+    }
+
+    func testAStrangerArrivingWhileIdleNeitherBecomesTheSessionNorEndsRecovery() async throws {
+        let host = PipelineTestHost()
+        let pipeline = host.makePipeline()
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        await pipeline.setConnected(false)
+        let before = await pipeline.currentPhase
+        XCTAssertEqual(before, .reconnecting)
+        let (listener, stranger) = try await strangerRig()
+        let newcomer = stranger()
+
+        await pipeline.handleIncomingConnection(newcomer)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let current = await pipeline.connection
+        XCTAssertFalse(current === newcomer, "only a completed pinned handshake makes a session")
+        let phase = await pipeline.currentPhase
+        XCTAssertEqual(phase, .reconnecting, "recovery carries on")
+        newcomer.cancel()
+        listener.cancel()
+        await stopRecovery(pipeline)
+    }
+
+    func testWaitingNewcomersAreBounded() async throws {
+        let host = PipelineTestHost()
+        let pipeline = host.makePipeline()
+        let (listener, stranger) = try await strangerRig()
+        let newcomers = (0..<(ReceiverPipelineActor.maxPendingConnections + 2)).map { _ in stranger() }
+        for newcomer in newcomers { await pipeline.handleIncomingConnection(newcomer) }
+
+        let oldestDropped = await eventually {
+            newcomers[0].state == .cancelled && newcomers[1].state == .cancelled
+        }
+        XCTAssertTrue(oldestDropped, "the oldest waiting connections are closed")
+        XCTAssertNotEqual(newcomers.last?.state, .cancelled, "the newest still waits")
+        newcomers.forEach { $0.cancel() }
+        listener.cancel()
+        await stopRecovery(pipeline)
+    }
+
     func testForgetCancelsAParkedCandidate() async throws {
         let rig = try await makeParkedCandidateRig()
         rig.host.unpin(peerID: "mac-A")   // Forget removes the pin first

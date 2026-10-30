@@ -108,7 +108,12 @@ actor ReceiverPipelineActor {
     // MARK: - Authoritative state
 
     private(set) var connection: NWConnection?
+    /// Newcomers that haven't proved themselves yet (see `park`): bounded,
+    /// and each one has a deadline, so connections that never finish their
+    /// pinned TLS handshake can't pile up.
     private var pendingConnections: [NWConnection] = []
+    static let maxPendingConnections = 8
+    static let pendingDeadline: Duration = .seconds(15)
     private(set) var sessionState = ReceiverSessionState()
     private var reconnectTimer: DispatchSourceTimer?
     private var pingTimer: DispatchSourceTimer?
@@ -545,9 +550,9 @@ actor ReceiverPipelineActor {
     /// reads/writes `connection`/`pendingConnections` and is inseparable from
     /// `adopt` itself.
     func handleIncomingConnection(_ newConnection: NWConnection) {
-        if let current = connection, current.state != .cancelled, !Self.isFailed(current.state) {
+        if hasLiveConnection {
             Log.info("reconnectDebug: incomingReplacement peer via TLS listener — parked pending proof")
-            pendingConnections.append(newConnection)
+            park(newConnection)
             if newConnection.state == .ready {
                 // A QUIC Control stream arrives already started and ready
                 // (its preface was read first): no `.ready` callback will
@@ -555,15 +560,79 @@ actor ReceiverPipelineActor {
                 handlePendingConnectionReady(newConnection)
             } else {
                 newConnection.stateUpdateHandler = { [weak self] state in
-                    guard let self, case .ready = state else { return }
-                    Task { await self.handlePendingConnectionReady(newConnection) }
+                    guard let self else { return }
+                    switch state {
+                    case .ready: Task { await self.handlePendingConnectionReady(newConnection) }
+                    case .failed, .cancelled: Task { await self.dropPending(newConnection) }
+                    default: break
+                    }
                 }
                 newConnection.start(queue: queue)
             }
-        } else {
+        } else if newConnection.state == .ready || quicGroups.owner(ofControlStream: newConnection) != nil {
+            // Already authenticated: a ready connection, or the Control
+            // stream of a QUIC connection whose pinned handshake is done.
             Log.info("reconnectDebug: incomingReplacement peer via TLS listener")
             adopt(newConnection)
+        } else {
+            // Idle: adopted once its pinned TLS handshake completes, not
+            // before. Adopting ends any reconnect in progress, and a stranger
+            // that never authenticates must not be able to do that.
+            Log.info("reconnectDebug: incoming peer via TLS listener — adopting once its handshake completes")
+            park(newConnection)
+            newConnection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready: Task { await self.adoptAuthenticatedNewcomer(newConnection) }
+                case .failed, .cancelled: Task { await self.dropPending(newConnection) }
+                default: break
+                }
+            }
+            newConnection.start(queue: queue)
         }
+    }
+
+    private var hasLiveConnection: Bool {
+        guard let current = connection else { return false }
+        return current.state != .cancelled && !Self.isFailed(current.state)
+    }
+
+    /// Tracks a newcomer until it proves itself: the oldest is dropped when
+    /// too many are waiting, and each is dropped at `pendingDeadline`.
+    private func park(_ newcomer: NWConnection) {
+        if pendingConnections.count >= Self.maxPendingConnections {
+            Log.info("reconnectDebug: too many connections waiting — dropping the oldest")
+            retire(pendingConnections.removeFirst())
+        }
+        pendingConnections.append(newcomer)
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.pendingDeadline)
+            await self?.expirePending(newcomer)
+        }
+    }
+
+    private func expirePending(_ newcomer: NWConnection) {
+        guard pendingConnections.contains(where: { $0 === newcomer }) else { return }
+        Log.info("reconnectDebug: a waiting connection never proved itself — dropping it")
+        pendingConnections.removeAll { $0 === newcomer }
+        retire(newcomer)
+    }
+
+    private func dropPending(_ newcomer: NWConnection) {
+        pendingConnections.removeAll { $0 === newcomer }
+    }
+
+    /// An idle-time newcomer finished its pinned handshake. If another
+    /// connection became the session meanwhile, it proves itself like any
+    /// replacement; otherwise it is the session.
+    private func adoptAuthenticatedNewcomer(_ newcomer: NWConnection) {
+        guard pendingConnections.contains(where: { $0 === newcomer }) else { return }
+        if hasLiveConnection {
+            handlePendingConnectionReady(newcomer)
+            return
+        }
+        pendingConnections.removeAll { $0 === newcomer }
+        adopt(newcomer)
     }
 
     private func handlePendingConnectionReady(_ pending: NWConnection) {
