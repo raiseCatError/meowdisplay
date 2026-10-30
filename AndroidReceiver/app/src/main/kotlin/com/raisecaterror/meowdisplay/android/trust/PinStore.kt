@@ -42,6 +42,9 @@ class PinStore(context: Context) : PeerTrustStore {
     @SuppressLint("ApplySharedPref", "UseKtx")
     @Synchronized
     override fun setPin(peerID: String, spki: ByteArray, displayName: String, allowIdentityChange: Boolean): Boolean {
+        // Keys with this prefix hold pairing dates in the same file (so pin and date are one write):
+        // a Mac id using it could hide its pin or erase another Mac's date.
+        if (peerID.isEmpty() || peerID.startsWith(DATE_PREFIX)) return false
         if (PeerDirectory.isHeldByAnotherPeer(pinnedPeers(), peerID, spki)) return false
         val decision = TrustPinPolicy.decision(pin(peerID), spki)
         if (decision == TrustPinPolicy.Decision.IdentityChanged && !allowIdentityChange) return false
