@@ -785,6 +785,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // (the user may start the Mac side first); once connected, a device that
     // stays gone past the grace ends the session via onDisconnected.
     private var everConnected = false
+    /// Redials since the transport was last up (`ReconnectPolicy.retryDelay`).
+    private var redialAttempts = 0
     private var disconnectedSince: Date?
     private let disconnectGraceSeconds: TimeInterval = 10
     /// Auto-Reconnect preference (Mac Sender's own local Settings toggle).
@@ -4708,10 +4710,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = transportController.resetForRedial()
         pipelineState.resetPendingSendsForNewTransport()
         pipelineState.resetPendingEncodes()
+        // An explicit Connect/Reconnect starts the backoff over.
+        redialAttempts = automatic ? redialAttempts + 1 : 1
+        let delay = ReconnectPolicy.retryDelay(attempt: redialAttempts, everConnected: everConnected)
+        if delay > 1 { Log.info("connectDebug: redial \(redialAttempts) in \(Int(delay))s peer=\(endpointName)") }
         let selfBox = self.selfBox
-        queue.asyncAfter(deadline: .now() + 1.0) {
+        queue.asyncAfter(deadline: .now() + delay) {
             // Generation-guarded so a switchTransport (or another reconnect)
-            // that landed in this 1s window supersedes this dial instead of
+            // that landed in this window supersedes this dial instead of
             // racing it — otherwise the queued connect() re-dials the new
             // transport, briefly running two live connections. (No bare
             // self-rescheduling asyncAfter — the pattern banned in #76.)
@@ -7069,6 +7075,7 @@ extension MacSender: MacSenderTransportDelegate {
         Task { @MainActor in protocolSink.publishNetworkProtocol(networkProtocol) }
         cursorSeq = 0   // per-session; the receiver rewound its floor with the connection
         consecutiveRefusals = 0
+        redialAttempts = 0
         disconnectedSince = nil
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
         // Keep cached pixels: ScreenCaptureKit stays quiet on a static
