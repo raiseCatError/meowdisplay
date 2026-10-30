@@ -17,3 +17,13 @@ class LockMacWireTest {
         assertNull(LockMacResult.parse(buildJsonObject { put("result", 1) }))
     }
 }
+
+class StageAddWireTest {
+    @Test fun addToStageMatchesTheMacAndTheStateCarriesTheAnswer() {
+        val req = WorkspaceWire.addToStage(17007, 3)
+        assertEquals("addToStage", (req["action"] as kotlinx.serialization.json.JsonPrimitive).content)
+        val state = WorkspaceState.parse(kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"type":"workspaceState","tiles":[],"stageAdd":{"window":17007,"result":"failed"}}""") as kotlinx.serialization.json.JsonObject)
+        assertEquals(17007L to "failed", state.stageAdd)
+    }
+}

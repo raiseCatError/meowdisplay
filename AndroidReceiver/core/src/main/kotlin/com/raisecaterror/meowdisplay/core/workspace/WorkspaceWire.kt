@@ -113,6 +113,8 @@ object WorkspaceWire {
     fun activate(windowID: Long, generation: Long?) = action("activate") { put("window", windowID); generation?.let { put("gen", it) } }
     /** Owner-confirmed on the device, control only: Stage Manager off for Window mode (turned back on after). */
     fun stageManager(on: Boolean) = action("stageManager") { put("on", on) }
+    /** Control only: Stage Manager's own Add to Stage on the strip item holding exactly this window. */
+    fun addToStage(windowID: Long, generation: Long) = action("addToStage") { put("window", windowID); put("gen", generation) }
     fun launch(bundleID: String) = action("launch") { put("bundle", bundleID) }
     /** Minimizes the real Mac window. Only ever from its own explicit action. */
     fun minimizeRemoteWindow(windowID: Long, generation: Long) = action("minimize") { put("window", windowID); put("gen", generation) }
@@ -229,6 +231,8 @@ data class WorkspaceState(
      * Mac yet) or "failed" (macOS didn't apply the last change). null: an older Mac, never offered.
      */
     val stageManagerControl: String? = null,
+    /** The last Add to Current Stage (for 8 s): window id and "added", "notInStrip", "ambiguous", "accessibility" or "failed". */
+    val stageAdd: Pair<Long, String>? = null,
 ) {
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
@@ -241,7 +245,8 @@ data class WorkspaceState(
             }
             val rejected = (obj["rejected"] as? JsonObject)?.entries?.take(32)?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { k to it } }?.toMap() ?: emptyMap()
             return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES,
-                obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16))
+                obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16),
+                (obj["stageAdd"] as? JsonObject)?.let { a -> a.long("window")?.let { w -> a.str("result")?.take(16)?.let { w to it } } })
         }
     }
 }

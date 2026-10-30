@@ -113,7 +113,12 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     /// Whether the Mac can switch it: "ready", "setup" (the owner hasn't made the two shortcuts on
     /// the Mac yet) or "failed" (macOS didn't apply the last change). nil: an older Mac, never offered.
     var stageManagerControl: String?
+    /// The last Add to Current Stage (for 8 s): the window and "added", "notInStrip", "ambiguous",
+    /// "accessibility" or "failed".
+    var stageAdd: StageAddReply?
 }
+
+struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
 
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
@@ -195,7 +200,10 @@ enum WorkspaceEvent: Sendable {
             return .state(WorkspaceStateMessage(host: str(obj, "host"), tiles: Array(tiles), active: str(obj, "active", 32),
                                                 hostFocus: (obj["hostFocus"] as? String).flatMap(RemoteHostFocus.init(rawValue:)) ?? .noActiveTile,
                                                 rejected: rejected, stageManager: obj["stageManager"] as? Bool ?? false,
-                                                stageManagerControl: str(obj, "stageManagerControl", 16)))
+                                                stageManagerControl: str(obj, "stageManagerControl", 16),
+                                                stageAdd: (obj["stageAdd"] as? [String: Any]).flatMap { a in
+                                                    u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
+                                                }))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
@@ -885,6 +893,25 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
+    /// Add to Current Stage: Stage Manager's own action on the strip item holding this pane's
+    /// window (needs control; the Mac answers in its state).
+    func addToStage(_ id: String) {
+        guard let source = layout.tiles[id]?.source, !source.isDisplay, let gen = generation(source) else { return }
+        _ = send(["type": WireMessage.windowAction, "action": "addToStage", "window": Int(source.windowID), "gen": Int(gen)])
+    }
+
+    /// What the Mac said about the last Add to Current Stage for this pane's window, if it failed.
+    func stageAddProblem(_ id: String) -> String? {
+        guard let source = layout.tiles[id]?.source, let add = remote?.stageAdd, add.window == source.windowID else { return nil }
+        switch add.result {
+        case "added": return nil
+        case "accessibility": return String(localized: "The Mac can't do that: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac.")
+        case "notInStrip": return String(localized: "That window isn't in Stage Manager's side strip any more.")
+        case "ambiguous": return String(localized: "Stage Manager lists that window twice; add it on the Mac.")
+        default: return String(localized: "macOS didn't add it to the stage. Try again, or add it on the Mac.")
+        }
+    }
+
     func showOnMac(_ id: String) {
         guard let source = layout.tiles[id]?.source, !source.isDisplay, let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.activateWindow(source.windowID, generation: gen))

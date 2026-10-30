@@ -1041,6 +1041,26 @@ class WorkspaceController(
     }
 
     /** A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (needs control). */
+    /** Add to Current Stage (needs control): the Mac answers in its state. */
+    fun addToStage(id: String) {
+        val source = state.value.layout.tiles[id]?.source ?: return
+        if (source.isDisplay || !inputAllowed) return
+        media.session.sendWorkspace(WorkspaceWire.addToStage(source.windowID, source.generation ?: return))
+    }
+
+    /** What the Mac said about the last Add to Current Stage for this pane's window, if it failed. */
+    fun stageAddProblem(id: String): String? {
+        val source = state.value.layout.tiles[id]?.source ?: return null
+        val add = state.value.remote?.stageAdd?.takeIf { it.first == source.windowID } ?: return null
+        return when (add.second) {
+            "added" -> null
+            "accessibility" -> "The Mac can't do that: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac."
+            "notInStrip" -> "That window isn't in Stage Manager's side strip any more."
+            "ambiguous" -> "Stage Manager lists that window twice; add it on the Mac."
+            else -> "macOS didn't add it to the stage. Try again, or add it on the Mac."
+        }
+    }
+
     fun showOnMac(id: String) {
         val source = state.value.layout.tiles[id]?.source ?: return
         if (source.isDisplay || !inputAllowed) return

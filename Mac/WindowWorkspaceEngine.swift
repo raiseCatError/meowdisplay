@@ -301,6 +301,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private let queue = DispatchQueue(label: "meow.workspace.engine", qos: .userInteractive)
     /// When the last Stage Manager change a device asked for didn't take effect (sent as "failed" for a few seconds).
     private var stageManagerFailedAt: TimeInterval?
+    /// The last Add to Current Stage: window, result, when (sent in the state for 8 s).
+    private var stageAdd: (window: CGWindowID, result: StageStripAccess.Result, at: TimeInterval)?
     private let inputLock = NSRecursiveLock()
     private var targeting = WorkspaceInputTargeting()
     private var canvas: CGSize
@@ -1007,6 +1009,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
             if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         }
+        if let add = stageAdd, ProcessInfo.processInfo.systemUptime - add.at < 8 {
+            msg["stageAdd"] = ["window": Int(add.window), "result": add.result.rawValue]
+        }
         if let active = t.keyboardTarget?.tileID { msg["active"] = active }
         if !rejected.isEmpty { msg["rejected"] = rejected }
         let key = (try? JSONSerialization.data(withJSONObject: msg, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -1034,6 +1039,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     self.sendState(force: true)
                 }
             })
+        case "addToStage":
+            // Confirmed on the device by a person with control (the caller checks the grant):
+            // Stage Manager's own Add to Stage on the strip item holding exactly this window.
+            guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
+                  (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let result = StageStripAccess.addToStage(windowID: id)
+                self?.queue.async {
+                    guard let self else { return }
+                    self.stageAdd = (id, result, ProcessInfo.processInfo.systemUptime)
+                    self.refreshSoon()
+                    self.sendState(force: true)
+                }
+            }
         case "activate":
             guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }

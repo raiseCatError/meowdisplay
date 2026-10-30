@@ -2063,3 +2063,13 @@ answer; it never reports `locked` without seeing it. Unlocking needs the Mac's l
 Receivers ask before sending and show the answer; with no answer in 8 s they show it as failed.
 The Mac also locks its screen before quitting while the Privacy Shield covers it (not when
 macOS is logging out, restarting or shutting down).
+
+#### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
+
+`{"type":"windowAction","action":"addToStage","window":ID,"gen":G}` (needs control, Window mode):
+the Mac finds the one item in Stage Manager's side strip whose `AXWindowsIDs` holds that window
+and performs that item's own `AXAddToStage` accessibility action (never a click by position),
+then checks the window left the strip within 2 s. The whole strip item joins the stage. The
+answer rides in `workspaceState` for 8 s: `"stageAdd":{"window":ID,"result":R}`, R one of
+`added`, `notInStrip`, `ambiguous`, `accessibility`, `failed`. A pane whose window was added
+gets a fresh stream through the usual back-from-the-strip recovery (no reconnect).
