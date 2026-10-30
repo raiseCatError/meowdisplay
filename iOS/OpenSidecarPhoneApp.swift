@@ -677,7 +677,12 @@ struct ReceiverScreen: View {
             #endif
             if !allowed { keyboardActive = false }
         }
-        .onAppear { inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput) }
+        .onAppear {
+            inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput)
+            // Actions the Mac carries out (Stage Manager, Lock Mac) follow its confirmed decision.
+            model.workspace.controlState = { [weak controlStore] in controlStore?.sessionInputState ?? .off }
+            model.workspace.requestControl = { requestInputFromPrompt() }
+        }
         .onChange(of: model.receiver.session.allowsLiveInput) { live in
             withAnimation { inputPrompt.setSessionLive(live) }
         }

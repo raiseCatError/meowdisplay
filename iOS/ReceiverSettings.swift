@@ -661,7 +661,12 @@ private struct InputSettingsPage: View {
                 }
             }
             if let lockMacClient { LockMacSection(workspace: lockMacClient) }
-            if let lockMacClient { StageManagerSection(workspace: lockMacClient) }
+            if let lockMacClient {
+                StageManagerSection(workspace: lockMacClient, control: InlineControlRequest(state: controlStore.sessionInputState, request: {
+                    controlStore.noteInputTurnedOffByUser(false)
+                    requestInput(true)
+                }))
+            }
             Section {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {
                     ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
@@ -1612,7 +1617,11 @@ extension EnvironmentValues {
 /// Needs control; shows what the Mac reports.
 private struct StageManagerSection: View {
     @ObservedObject var workspace: WorkspaceModel
+    /// The Mac's confirmed control state. Without control the buttons ask for it in place, and this
+    /// screen stays put while the Mac's owner decides; the switch itself is tapped again after.
+    let control: InlineControlRequest
     @State private var confirmingOff = false
+    private var granted: Bool { control.state == .allowed }
 
     var body: some View {
         if let on = workspace.stageManagerIsOn {
@@ -1624,20 +1633,26 @@ private struct StageManagerSection: View {
                 case "setup"?:
                     SettingNote("To switch it from here, open MeowDisplay's Settings on the Mac ▸ System ▸ Stage Manager and choose Set Up Automatically.")
                 default:
-                    if on {
-                        Button("Turn Off Stage Manager") { confirmingOff = true }
-                            .disabled(!workspace.canControlMac)
-                            .accessibilityIdentifier("stageManagerOff")
+                    if granted {
+                        if on {
+                            Button("Turn Off Stage Manager") { confirmingOff = true }
+                                .accessibilityIdentifier("stageManagerOff")
+                        } else {
+                            Button("Turn On Stage Manager") { workspace.turnOnStageManager() }
+                                .accessibilityIdentifier("stageManagerOn")
+                        }
                     } else {
-                        Button("Turn On Stage Manager") { workspace.turnOnStageManager() }
-                            .disabled(!workspace.canControlMac)
-                            .accessibilityIdentifier("stageManagerOn")
+                        Button(control.gatedLabel) { control.request() }
+                            .disabled(control.state == .requesting || control.state == .requestsDisabled)
+                            .accessibilityIdentifier(on ? "stageManagerOff" : "stageManagerOn")
+                            .accessibilityHint(on ? "Turning Stage Manager off needs control of the Mac. Asks the Mac for control."
+                                                  : "Turning Stage Manager on needs control of the Mac. Asks the Mac for control.")
                     }
                     if workspace.remote?.stageManagerControl == "failed" {
                         Text("The Mac didn't change it. Try again, or switch it in Control Center on the Mac.")
                             .font(.footnote).foregroundStyle(.secondary)
-                    } else if !workspace.canControlMac {
-                        Text("Needs control of the Mac. Request Control first.").font(.footnote).foregroundStyle(.secondary)
+                    } else if !granted {
+                        Text(Self.controlNote(control.state, on: on)).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
             } footer: {
@@ -1649,6 +1664,19 @@ private struct StageManagerSection: View {
             } message: {
                 Text("Windows in its side strip then show live here. MeowDisplay turns Stage Manager back on when Window mode ends.")
             }
+        }
+    }
+}
+
+extension StageManagerSection {
+    /// Why the switch isn't offered yet, in words for each control state.
+    static func controlNote(_ state: SessionInputWireState, on: Bool) -> String {
+        let action = on ? String(localized: "Turning Stage Manager off") : String(localized: "Turning Stage Manager on")
+        switch state {
+        case .requesting: return String(localized: "Awaiting approval on the Mac… Then tap Turn \(on ? "Off" : "On") Stage Manager.")
+        case .notAllowed: return String(localized: "The Mac didn't allow control. \(action) needs it; Request Control to ask again.")
+        case .requestsDisabled: return String(localized: "This Mac doesn't take control requests from this device, so it can't be switched from here.")
+        default: return String(localized: "\(action) needs control of the Mac.")
         }
     }
 }

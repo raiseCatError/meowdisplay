@@ -292,12 +292,19 @@ struct WorkspaceChromeView: View {
                             // Every strip window live: Stage Manager off while Window mode is used (confirmed).
                             // Offered only when the Mac can actually do it (the owner's shortcuts exist).
                             if ["ready", "failed"].contains(model.remote?.stageManagerControl ?? "") {
-                                Button { confirmStageManagerOff = true } label: {
-                                    Label("Turn Off Stage Manager", systemImage: "rectangle.stack.badge.minus").font(.callout.weight(.semibold))
+                                // Without control: ask for it here (this pane stays), then Turn Off again.
+                                let granted = model.controlState() == .allowed
+                                Button { if granted { confirmStageManagerOff = true } else { model.requestControl() } } label: {
+                                    Label(granted ? String(localized: "Turn Off Stage Manager")
+                                          : model.controlState() == .requesting ? String(localized: "Awaiting Approval on the Mac…")
+                                          : String(localized: "Request Control to Turn Off Stage Manager"),
+                                          systemImage: granted ? "rectangle.stack.badge.minus" : "hand.raised").font(.callout.weight(.semibold))
                                         .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
                                         .background(workspaceChip, in: Capsule())
                                 }
                                 .buttonStyle(.plain)
+                                .disabled([.requesting, .requestsDisabled].contains(model.controlState()))
+                                .accessibilityIdentifier("paneStageManagerOff")
                             }
                         }
                         if model.remote?.stageManagerControl == "setup" {

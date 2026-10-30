@@ -529,4 +529,19 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertLessThanOrEqual(max(image.width, image.height), 128)
         XCTAssertNil(WorkspaceImageDecoder.image(Data("not an image".utf8), maxSide: 128))
     }
+
+    /// Regression (2026-10-30 21:3x): in View Only the session is live but the Mac hasn't granted
+    /// control; Stage Manager on/off looked available and the Mac silently dropped it.
+    func testActionsTheMacCarriesOutNeedItsConfirmedControlNotJustALiveSession() {
+        let m = model(sent: { _ in })
+        m.inputAllowed = { true }
+        for state: SessionInputWireState in [.off, .requesting, .notAllowed, .requestsDisabled] {
+            m.controlState = { state }
+            XCTAssertFalse(m.canControlMac, "\(state)")
+        }
+        m.controlState = { .allowed }
+        XCTAssertTrue(m.canControlMac)
+        m.inputAllowed = { false }
+        XCTAssertFalse(m.canControlMac, "a session that isn't live controls nothing")
+    }
 }

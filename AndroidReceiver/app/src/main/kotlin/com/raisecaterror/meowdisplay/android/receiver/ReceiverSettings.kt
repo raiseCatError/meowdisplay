@@ -189,7 +189,7 @@ private fun SettingsPageContent(
             }
             Caption("Your Mac decides. Every session starts View Only; control stops the moment the Mac revokes it.")
             controller.workspace?.let { ws -> LockMacSection(ws) }
-            controller.workspace?.let { ws -> StageManagerSection(ws) }
+            controller.workspace?.let { ws -> StageManagerSection(ws, view.inputState) { controller.requestInput(true) } }
             Section("Keyboard")
             val zoomWhileTyping by controller.store.zoomWhileTyping.collectAsState()
             Toggle("Zoom While Typing", zoomWhileTyping) { on -> controller.store.setZoomWhileTyping(on) }
@@ -673,7 +673,11 @@ internal fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPoi
  * Turn it off (confirmed; MeowDisplay turns it back on when Window mode ends) or on. Needs control.
  */
 @Composable
-private fun StageManagerSection(ws: com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController) {
+private fun StageManagerSection(
+    ws: com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController,
+    inputState: InputWireState,
+    onRequestControl: () -> Unit,
+) {
     val s by ws.ui.collectAsState()
     val on = s.remote?.stageManagerIsOn ?: return
     var confirmingOff by remember { mutableStateOf(false) }
@@ -683,13 +687,28 @@ private fun StageManagerSection(ws: com.raisecaterror.meowdisplay.android.receiv
     if (control == "setup") {
         Caption("To switch it from here, open MeowDisplay's Settings on the Mac ▸ System ▸ Stage Manager and choose Set Up Automatically.")
     } else {
+        // Without control the button asks for it here (this screen stays while the Mac decides);
+        // the switch is tapped again once control is allowed.
         val canControl = ws.canControlMac
-        OutlinedButton(onClick = { if (on) confirmingOff = true else ws.turnOnStageManager() }, enabled = canControl) {
-            Text(if (on) "Turn Off Stage Manager" else "Turn On Stage Manager")
+        if (canControl) {
+            OutlinedButton(onClick = { if (on) confirmingOff = true else ws.turnOnStageManager() }) {
+                Text(if (on) "Turn Off Stage Manager" else "Turn On Stage Manager")
+            }
+        } else {
+            OutlinedButton(
+                onClick = onRequestControl,
+                enabled = inputState != InputWireState.Requesting && inputState != InputWireState.RequestsDisabled,
+                modifier = Modifier.semantics { contentDescription = "Request Control. Turning Stage Manager ${if (on) "off" else "on"} needs control of the Mac." },
+            ) { Text(if (inputState == InputWireState.Requesting) "Awaiting Approval" else "Request Control") }
         }
+        val action = if (on) "Turning Stage Manager off" else "Turning Stage Manager on"
         when {
             control == "failed" -> Caption("The Mac didn't change it. Try again, or switch it in Control Center on the Mac.")
-            !canControl -> Caption("Needs control of the Mac. Request Control first.")
+            canControl -> {}
+            inputState == InputWireState.Requesting -> Caption("Awaiting approval on the Mac… Then tap Turn ${if (on) "Off" else "On"} Stage Manager.")
+            inputState == InputWireState.NotAllowed -> Caption("The Mac didn't allow control. $action needs it; Request Control to ask again.")
+            inputState == InputWireState.RequestsDisabled -> Caption("This Mac doesn't take control requests from this device, so it can't be switched from here.")
+            else -> Caption("$action needs control of the Mac.")
         }
     }
     Caption("Stage Manager's side strip pauses the windows in it, so their panes stand still. With it off they show live. If MeowDisplay turned it off, it turns it back on when Window mode ends.")

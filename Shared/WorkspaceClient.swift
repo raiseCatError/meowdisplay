@@ -930,7 +930,14 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// Whether this device may switch Stage Manager now (it has control).
-    var canControlMac: Bool { inputAllowed() }
+    /// The Mac's confirmed decision on control for this session (Request Control). `inputAllowed`
+    /// only says the session is live: in View Only it's true too, and the Mac drops actions such
+    /// as Stage Manager on/off (found 2026-10-30 21:3x: the button looked enabled and did nothing).
+    /// Receivers without Request Control keep `.allowed`.
+    var controlState: () -> SessionInputWireState = { .allowed }
+    /// Asks the Mac for control: the same request as Settings ▸ Input.
+    var requestControl: () -> Void = {}
+    var canControlMac: Bool { inputAllowed() && controlState() == .allowed }
 
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
     /// Add to Current Stage: Stage Manager's own action on the strip item holding this pane's
