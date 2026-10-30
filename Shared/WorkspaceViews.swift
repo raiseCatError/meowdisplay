@@ -174,6 +174,9 @@ struct WorkspaceChromeView: View {
     }
 
     private func status(for id: String, tile: WorkspaceTile) -> String? {
+        // The Mac is drawing this pane's window: never a stale "choose a window" over a live picture
+        // (the window list can lag behind a window that just appeared).
+        if let remote = model.tileState(id), remote.status == .live, let source = tile.source, remote.windowID == source.windowID { return nil }
         if tile.source?.isDisplay == true, model.missing.contains(id) { return "This display isn't connected to the Mac now" }
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
         // Refused by the Mac (e.g. that window already shows in another tile).
@@ -238,9 +241,16 @@ struct WorkspaceChromeView: View {
             if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
                     Button { model.openOverview(replacing: id) } label: {
-                        Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+                        HStack(spacing: 8) {
+                            // Still working: a live spinner (a still hourglass with Reduce Motion).
+                            if let s = model.tileState(id)?.status, s == .waiting || s == .retrying {
+                                if reduceMotion { Image(systemName: "hourglass").foregroundStyle(.white.opacity(0.8)) }
+                                else { ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small) }
+                            }
+                            Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
                     if let s = model.tileState(id)?.status, s == .failed || s == .retrying {

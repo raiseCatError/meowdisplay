@@ -210,6 +210,8 @@ fun WorkspaceChrome(
             ) {
                 val desktop = tile.source?.isDisplay == true
                 val status = when {
+                    // The Mac is drawing this pane's window: never a stale "choose a window" over a live picture.
+                    remote?.state == TileStatus.Live && tile.source?.windowID?.let { it == remote.windowID } == true -> null
                     desktop && id in ui.missing -> "This display isn't connected to the Mac now"
                     id in ui.missing || tile.source == null -> "Choose a window for this pane"
                     // Refused by the Mac (e.g. that window already shows in another pane).
@@ -221,18 +223,24 @@ fun WorkspaceChrome(
                     remote.state == TileStatus.Failed -> "The Mac stopped sending ${remote.app.ifEmpty { "this window" }}. Tap Retry."
                     remote.state == TileStatus.Limit -> "Paused: too many windows at once"
                     remote.state == TileStatus.Paused -> if (remote.inStageStrip)
-                        "${remote.app.ifEmpty { "This window" }} is in Stage Manager's side strip, so macOS pauses its picture. Show it on the Mac, or put it in the same stage."
+                        "${remote.app.ifEmpty { "This window" }} is in Stage Manager's side strip, so macOS pauses its picture. Add it to the current stage to see it live."
                     else "macOS paused ${remote.app.ifEmpty { "this window" }}'s picture. It comes back when the window is shown on the Mac."
                     remote.state == TileStatus.Retrying -> "Reconnecting to ${remote.app.ifEmpty { "the window" }}… (try ${remote.attempt})"
                     else -> null
                 }
                 if (status != null) {
                     Column(Modifier.align(Alignment.Center).padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            status, color = Color.White, style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.background(Chip, RoundedCornerShape(10.dp)).clickable { controller.openOverview(replacing = id) }
+                        Row(
+                            Modifier.background(Chip, RoundedCornerShape(10.dp)).clickable { controller.openOverview(replacing = id) }
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
-                        )
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            // Still working: a live spinner (still with the system's animations off).
+                            if (remote?.state == TileStatus.Waiting || remote?.state == TileStatus.Retrying) {
+                                androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            }
+                            Text(status, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                        }
                         // A stalled or failed capture can be started again now (no control needed: nothing on the Mac changes).
                         if (remote?.state == TileStatus.Failed || remote?.state == TileStatus.Retrying) {
                             PaneButton("Retry", enabled = true) { controller.retryTile(id) }
