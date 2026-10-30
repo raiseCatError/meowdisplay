@@ -2080,3 +2080,21 @@ gets a fresh stream through the usual back-from-the-strip recovery (no reconnect
 The Mac offers it only with `"stageAddAvailable":true` in `workspaceState`; receivers hide it
 otherwise. macOS 27 acknowledges AXAddToStage without the window joining the stage, so the Mac
 currently never sends it (research: RESEARCH-2026-10-30-add-to-stage.md in the integration folder).
+
+#### 6.10 addendum: Mission Control (`workspaceState` `missionControl`, `windowAction` `missionControl`)
+
+While Mission Control is open on the Mac, macOS pauses every window capture. In Window mode the
+Mac then adds `"missionControl":"open"` to `workspaceState` and holds paused panes as `paused`
+without restarting them (no reconnect loop); without the field it is closed. Receivers say
+"Mission Control is open on your Mac. Video is paused." on every paused, waiting or retrying
+pane, and one pane (the selected one if paused, else the first paused one) offers Exit Mission
+Control, or inline Request Control without control. When it closes, macOS resumes the captures;
+a pane still paused after the usual 2 s gets one fresh stream.
+
+`{"type":"windowAction","action":"missionControl","exit":true}` (needs control): the Mac checks
+that Mission Control is open right now and only then posts Escape; otherwise nothing is sent.
+
+Detection (macOS 27, no public API says so): a window owned by WindowManager or the Dock covering
+a whole display (CGWindowList) gates an Accessibility check for WindowManager's `mc.display`
+group or the Dock's `mc` group. Polled twice a second only while a Window-mode session is live.
+Older Macs never send the field; older receivers ignore it and see paused panes as before.

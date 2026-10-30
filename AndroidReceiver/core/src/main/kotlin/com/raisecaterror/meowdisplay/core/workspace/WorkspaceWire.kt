@@ -113,6 +113,8 @@ object WorkspaceWire {
     fun activate(windowID: Long, generation: Long?) = action("activate") { put("window", windowID); generation?.let { put("gen", it) } }
     /** Owner-confirmed on the device, control only: Stage Manager off for Window mode (turned back on after). */
     fun stageManager(on: Boolean) = action("stageManager") { put("on", on) }
+    /** Control only: the Mac checks Mission Control is open right now, then presses Escape. */
+    fun exitMissionControl() = action("missionControl") { put("exit", true) }
     /** Control only: Stage Manager's own Add to Stage on the strip item holding exactly this window. */
     fun addToStage(windowID: Long, generation: Long) = action("addToStage") { put("window", windowID); put("gen", generation) }
     fun launch(bundleID: String) = action("launch") { put("bundle", bundleID) }
@@ -237,9 +239,22 @@ data class WorkspaceState(
     val stageAddAvailable: Boolean = false,
     /** Stage Manager on (true) or off (false); null: an older Mac that only says when it is on. */
     val stageManagerOn: Boolean? = null,
+    /** Mission Control is open on the Mac: macOS pauses window pictures until it closes. */
+    val missionControlOpen: Boolean = false,
 ) {
     /** As Settings shows it: on, off, or null when the Mac doesn't say. */
     val stageManagerIsOn: Boolean? get() = stageManagerOn ?: if (stageManager) true else null
+
+    /**
+     * The one pane that offers Exit Mission Control: the selected pane when macOS paused it,
+     * otherwise the first paused pane (one button, not one per pane). Same rule as Apple devices.
+     */
+    val missionControlActionPane: String? get() {
+        if (!missionControlOpen) return null
+        fun paused(id: String) = tiles.firstOrNull { it.id == id }?.state in setOf(TileStatus.Paused, TileStatus.Waiting, TileStatus.Retrying)
+        active?.let { if (paused(it)) return it }
+        return tiles.firstOrNull { paused(it.id) }?.id
+    }
 
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
@@ -255,7 +270,8 @@ data class WorkspaceState(
                 obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16),
                 (obj["stageAdd"] as? JsonObject)?.let { a -> a.long("window")?.let { w -> a.str("result")?.take(16)?.let { w to it } } },
                 obj.bool("stageAddAvailable") == true,
-                when (obj.str("stageManagerState")) { "on" -> true; "off" -> false; else -> null })
+                when (obj.str("stageManagerState")) { "on" -> true; "off" -> false; else -> null },
+                obj.str("missionControl") == "open")
         }
     }
 }

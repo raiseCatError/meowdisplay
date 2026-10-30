@@ -1054,6 +1054,12 @@ class WorkspaceController(
         media.session.sendWorkspace(WorkspaceWire.stageManager(true))
     }
 
+    /** Exit Mission Control on the Mac (needs control; the Mac re-checks it is open before Escape). */
+    fun exitMissionControl() {
+        if (!inputAllowed || state.value.remote?.missionControlOpen != true) return
+        media.session.sendWorkspace(WorkspaceWire.exitMissionControl())
+    }
+
     /** Whether this device may switch Stage Manager now (it has control). */
     val canControlMac: Boolean get() = inputAllowed
 

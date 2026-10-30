@@ -233,6 +233,8 @@ fun WorkspaceChrome(
                     // Refused by the Mac (e.g. that window already shows in another pane).
                     ui.remote?.rejected?.containsKey(id) == true -> "Tap to choose a window for this pane"
                     remote == null -> null
+                    ui.remote?.missionControlOpen == true && remote.state in setOf(TileStatus.Paused, TileStatus.Waiting, TileStatus.Retrying) ->
+                        "Mission Control is open on your Mac. Video is paused."
                     remote.state == TileStatus.Waiting -> "Waiting for ${remote.app.ifEmpty { "the window" }}…"
                     remote.state == TileStatus.Offscreen -> "${remote.app.ifEmpty { "This window" }} is minimized or hidden on the Mac"
                     remote.state == TileStatus.Closed -> "Closed on Mac. Tap to choose another window."
@@ -262,8 +264,13 @@ fun WorkspaceChrome(
                         if (remote?.state == TileStatus.Failed || remote?.state == TileStatus.Retrying) {
                             PaneButton("Retry", enabled = true) { controller.retryTile(id) }
                         }
+                        // Mission Control: one pane offers Exit (needs control; without it, ask here).
+                        if (ui.remote?.missionControlActionPane == id) {
+                            if (inputAllowed) PaneButton("Exit Mission Control", enabled = true) { controller.exitMissionControl() }
+                            else RequestControlInline()
+                        }
                         // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
-                        if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop) {
+                        if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop && ui.remote?.missionControlOpen != true) {
                             if (inputAllowed) {
                                 if (ui.remote?.stageAddAvailable == true) PaneButton("Add to Current Stage", enabled = true) { controller.addToStage(id) }
                                 // Explicit only: switches the Mac to that window's stage (brings its app forward).

@@ -304,6 +304,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private let queue = DispatchQueue(label: "meow.workspace.engine", qos: .userInteractive)
     /// When the last Stage Manager change a device asked for didn't take effect (sent as "failed" for a few seconds).
     private var stageManagerFailedAt: TimeInterval?
+    /// Mission Control is open on the Mac: macOS pauses every window capture until it closes, so
+    /// panes say so and nothing restarts (no reconnect loop); they resume when it closes.
+    private var missionControlOpen = false
+    private var missionControlWatch: UUID?
     /// The last Add to Current Stage: window, result, when (sent in the state for 8 s).
     private var stageAdd: (window: CGWindowID, result: StageStripAccess.Result, at: TimeInterval)?
     private let inputLock = NSRecursiveLock()
@@ -382,6 +386,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         queue.async { [self] in
             guard !running else { return }
             running = true
+            if missionControlWatch == nil {
+                missionControlWatch = MissionControlMonitor.shared.addListener { [weak self] open in
+                    self?.queue.async { self?.missionControlChanged(open) }
+                }
+            }
             if StageManagerSwitch.offDuringWindowMode {
                 StageManagerSwitch.inBackground({ StageManagerSwitch.turnOffForWindowMode() }) { [weak self] in self?.queue.async { self?.refreshSoon() } }
             } else {
@@ -412,6 +421,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             if running { StageManagerSwitch.inBackground { StageManagerSwitch.restoreIfTurnedOffByUs() } }
             running = false
             stopped = true
+            if let watch = missionControlWatch { MissionControlMonitor.shared.removeListener(watch); missionControlWatch = nil }
             deliverFrame = nil
             sendMessage = nil
             releaseHeldInput = nil
@@ -914,7 +924,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let r = recovery[a.tileID] ?? Recovery()
             let onStage = a.displayID != nil || (catalog[a.windowID].map { $0.availability == .visible && !$0.inStageStrip } ?? false)
             let verdict = TileCaptureWatch.verdict(now: now, startedAt: h.startedAt, firstCompleteAt: h.firstCompleteAt,
-                                                   suspendedSince: r.suspendedSince, sourceLooksAvailable: onStage)
+                                                   suspendedSince: r.suspendedSince, sourceLooksAvailable: onStage,
+                                                   missionControlOpen: missionControlOpen)
             let state = tileState[a.tileID]
             switch verdict {
             case .waiting:
@@ -954,6 +965,22 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
         }
         if changed { dirty = true; sendState() }
+    }
+
+    /// Mission Control opened or closed. Closed: macOS resumes the captures it paused; each paused
+    /// pane gets the usual short wait, then at most one fresh stream (a pause before it doesn't count).
+    private func missionControlChanged(_ open: Bool) {
+        guard !stopped, open != missionControlOpen else { return }
+        missionControlOpen = open
+        if !open {
+            let now = ProcessInfo.processInfo.systemUptime
+            for id in recovery.keys where recovery[id]?.suspendedSince != nil {
+                recovery[id]?.suspendedSince = now
+                recovery[id]?.pauseRestartSignature = nil
+            }
+        }
+        dirty = true
+        sendState(force: true)
     }
 
     /// Restart a pane's capture later (backoff), or give up and say so (the receiver offers Retry).
@@ -1048,6 +1075,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
         if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         if StageStripAccess.isAvailable { msg["stageAddAvailable"] = true }
+        // Receivers say video is paused and offer Exit Mission Control (control only).
+        if missionControlOpen { msg["missionControl"] = "open" }
         if let add = stageAdd, ProcessInfo.processInfo.systemUptime - add.at < 8 {
             msg["stageAdd"] = ["window": Int(add.window), "result": add.result.rawValue]
         }
@@ -1079,6 +1108,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     self.sendState(force: true)
                 }
             })
+        case "missionControl":
+            // Exit Mission Control, asked by a person with control (the caller checks the grant).
+            // The Mac checks it is open right now and only then sends Escape: never a blind toggle.
+            guard obj["exit"] as? Bool == true else { return }
+            DispatchQueue.global(qos: .userInitiated).async { MissionControlMonitor.exit() }
         case "addToStage":
             // Confirmed on the device by a person with control (the caller checks the grant):
             // Stage Manager's own Add to Stage on the strip item holding exactly this window.

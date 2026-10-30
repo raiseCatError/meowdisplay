@@ -120,6 +120,8 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var stageAdd: StageAddReply?
     /// The Mac can add a strip window to the current stage (off until it is shown to work).
     var stageAddAvailable = false
+    /// Mission Control is open on the Mac: macOS pauses window pictures until it closes.
+    var missionControlOpen = false
 }
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
@@ -209,7 +211,8 @@ enum WorkspaceEvent: Sendable {
                                                 stageAdd: (obj["stageAdd"] as? [String: Any]).flatMap { a in
                                                     u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
                                                 },
-                                                stageAddAvailable: obj["stageAddAvailable"] as? Bool ?? false))
+                                                stageAddAvailable: obj["stageAddAvailable"] as? Bool ?? false,
+                                                missionControlOpen: obj["missionControl"] as? String == "open"))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
@@ -356,6 +359,11 @@ enum WorkspaceRequests {
     /// Stage Manager keeps in its side strip.
     /// Owner-confirmed on the device, control only: turn Stage Manager off for Window mode
     /// (the Mac turns it back on when Window mode ends), or undo that.
+    /// Exit Mission Control: the Mac checks it is open, then presses Escape (control only).
+    static var exitMissionControl: [String: Any] {
+        ["type": WireMessage.windowAction, "action": "missionControl", "exit": true]
+    }
+
     static func stageManager(on: Bool) -> [String: Any] {
         ["type": WireMessage.windowAction, "action": "stageManager", "on": on]
     }
@@ -914,6 +922,24 @@ final class WorkspaceModel: ObservableObject {
     func turnOffStageManager() {
         guard inputAllowed() else { return }
         _ = send(WorkspaceRequests.stageManager(on: false))
+    }
+
+    /// Mission Control is open on the Mac (Window mode): every paused pane says so.
+    var missionControlOpen: Bool { remote?.missionControlOpen == true }
+
+    /// Exit Mission Control on the Mac (needs the Mac's grant; the Mac re-checks before Escape).
+    func exitMissionControl() {
+        guard canControlMac, missionControlOpen else { return }
+        _ = send(WorkspaceRequests.exitMissionControl)
+    }
+
+    /// The one pane that offers Exit Mission Control: the selected pane when macOS paused it,
+    /// otherwise the first paused pane (one button, not one per pane).
+    var missionControlActionPane: String? {
+        guard missionControlOpen else { return nil }
+        let paused = { (id: String) in [.paused, .waiting, .retrying].contains(self.tileState(id)?.status) }
+        if let active = remote?.active, paused(active) { return active }
+        return remote?.tiles.first { paused($0.id) }?.id
     }
 
     /// Turn Stage Manager on on the Mac (Settings; control).

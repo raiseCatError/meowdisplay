@@ -205,4 +205,22 @@ class WorkspaceWireTest {
         assertEquals("ready", parse(""","stageManager":true,"stageManagerControl":"ready"""").stageManagerControl)
         assertNull("an older Mac: never offered", parse(""","stageManager":true""").stageManagerControl)
     }
+
+    /** Mission Control open on the Mac (2026-10-31): panes say why video paused; one pane offers Exit (control only). */
+    @Test
+    fun missionControlStateAndItsOneExitButton() {
+        fun state(mc: Boolean, active: String?, vararg tiles: Pair<String, String>) = WorkspaceState.parse(Json.parseToJsonElement(
+            """{"type":"workspaceState","host":"mac-a","hostFocus":"noActiveTile",${if (mc) "\"missionControl\":\"open\"," else ""}""" +
+                (active?.let { "\"active\":\"$it\"," } ?: "") +
+                "\"tiles\":[" + tiles.mapIndexed { i, t -> """{"id":"${t.first}","window":${10 + i},"gen":1,"state":"${t.second}","app":"Zed"}""" }.joinToString(",") + "]}",
+        ).jsonObject)
+        assertTrue(state(true, null).missionControlOpen)
+        assertFalse("an older Mac never says it", state(false, null).missionControlOpen)
+        assertEquals("b", state(true, "b", "a" to "paused", "b" to "paused").missionControlActionPane)
+        assertEquals("the selected pane still shows a picture", "a", state(true, "b", "a" to "paused", "b" to "live").missionControlActionPane)
+        assertNull("closed: nothing offered", state(false, "b", "a" to "paused", "b" to "paused").missionControlActionPane)
+        val exit = WorkspaceWire.exitMissionControl()
+        assertEquals("missionControl", exit["action"]!!.jsonPrimitive.content)
+        assertEquals("true", exit["exit"]!!.jsonPrimitive.content)
+    }
 }

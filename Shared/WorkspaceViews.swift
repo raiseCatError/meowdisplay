@@ -184,6 +184,9 @@ struct WorkspaceChromeView: View {
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
         guard let remote = model.tileState(id) else { return nil }
         let app = remote.app.isEmpty ? "This window" : remote.app
+        if model.missionControlOpen, [.paused, .waiting, .retrying].contains(remote.status) {
+            return String(localized: "Mission Control is open on your Mac. Video is paused.")
+        }
         switch remote.status {
         case .live: return nil
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
@@ -269,7 +272,22 @@ struct WorkspaceChromeView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed {
+                    if model.missionControlActionPane == id {
+                        // One pane offers it. Without control: ask for it here, then Exit.
+                        let granted = model.canControlMac
+                        Button { if granted { model.exitMissionControl() } else { model.requestControl() } } label: {
+                            Label(granted ? String(localized: "Exit Mission Control")
+                                  : model.controlState() == .requesting ? String(localized: "Awaiting Approval on the Mac…")
+                                  : String(localized: "Request Control to Exit Mission Control"),
+                                  systemImage: granted ? "xmark.rectangle" : "hand.raised").font(.callout.weight(.semibold))
+                                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(.white, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled([.requesting, .requestsDisabled].contains(model.controlState()))
+                        .accessibilityIdentifier("exitMissionControl")
+                    }
+                    if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed, !model.missionControlOpen {
                         HStack(spacing: 8) {
                             if model.remote?.stageAddAvailable == true {
                                 // Explicit only: Stage Manager's own Add to Stage on this exact window's strip item.

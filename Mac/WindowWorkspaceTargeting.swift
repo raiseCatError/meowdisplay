@@ -528,7 +528,13 @@ enum TileCaptureWatch {
     static let backoff: [TimeInterval] = [1, 2, 4, 8, 16]
 
     static func verdict(now: TimeInterval, startedAt: TimeInterval, firstCompleteAt: TimeInterval?,
-                        suspendedSince: TimeInterval?, sourceLooksAvailable: Bool) -> Verdict {
+                        suspendedSince: TimeInterval?, sourceLooksAvailable: Bool, missionControlOpen: Bool = false) -> Verdict {
+        // Mission Control pauses every window capture (2026-10-31 log: panes "paused by macOS",
+        // then restarted as if stuck). While it is open nothing is stuck: wait for it to close.
+        if missionControlOpen {
+            if firstCompleteAt != nil, suspendedSince == nil { return .live }
+            return .paused
+        }
         if let since = suspendedSince {
             // macOS paused it (Stage Manager's strip, a hidden Space). A pause the catalog can't
             // explain (the window is on the stage again) gets a fresh stream.
