@@ -249,7 +249,10 @@ struct RemoteFileRoot: Codable, Equatable, Identifiable, Sendable {
 /// One session's Remote Finder. Requests are answered on a private queue; the owner's
 /// grant comes from the Mac's prompt or the device's stored policy (`askConsent`).
 final class RemoteFileBrowser: @unchecked Sendable {
-    enum Consent: Equatable { case none, asking, granted(FilesGrant), denied }
+    /// `revoked`: the owner ended this session's access. Every request still in flight is
+    /// answered "revoked" (never "asking", which would read on the receiver as a fresh prompt)
+    /// until the receiver explicitly asks again with `state`.
+    enum Consent: Equatable { case none, asking, granted(FilesGrant), denied, revoked }
 
     /// A message for the receiver (the sender gates it on admission).
     var sendMessage: (([String: Any]) -> Void)?
@@ -359,8 +362,8 @@ final class RemoteFileBrowser: @unchecked Sendable {
     /// The owner revoked this session's access in Settings: transfers end, the next request asks again.
     func revoke() {
         queue.async { [self] in
-            guard consent != .none else { return }
-            consent = .none
+            guard consent != .none, consent != .revoked else { return }
+            consent = .revoked
             pendingAccess = nil
             sessionCapabilities = []
             transfers.stopAll()
@@ -391,7 +394,7 @@ final class RemoteFileBrowser: @unchecked Sendable {
         if g.duration == .always {
             guard p.access == .always else {
                 // Always Allow was turned off: this session asks again.
-                consent = .none
+                consent = .revoked
                 transfers.stopAll()
                 return nil
             }
@@ -414,9 +417,9 @@ final class RemoteFileBrowser: @unchecked Sendable {
         case .granted: break
         case .denied: return reply(op, req: req, error: "denied")
         case .asking: return reply(op, req: req, error: "asking")
-        case .none:
+        case .none, .revoked:
             // Only an explicit request to start browsing asks the owner.
-            guard op == "state" else { return reply(op, req: req, error: "asking") }
+            guard op == "state" else { return reply(op, req: req, error: consent == .revoked ? "revoked" : "asking") }
             if livePolicy()?.access == .block {
                 consent = .denied
                 return sendState(req: req)
@@ -485,10 +488,11 @@ final class RemoteFileBrowser: @unchecked Sendable {
         }
         switch consent {
         case .none, .asking: m["state"] = "asking"
+        case .revoked: m["state"] = "revoked"
         case .denied: m["state"] = "denied"
         case .granted:
             guard let g = effectiveGrant() else {
-                m["state"] = consent == .denied ? "denied" : "asking"
+                m["state"] = consent == .denied ? "denied" : consent == .revoked ? "revoked" : "asking"
                 return send(m)
             }
             let roots = roots(for: g)

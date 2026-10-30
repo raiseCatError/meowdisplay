@@ -50,6 +50,10 @@
           {
             "context": "release-tooling",
             "integration_id": 15368
+          },
+          {
+            "context": "android",
+            "integration_id": 15368
           }
         ]
       }
