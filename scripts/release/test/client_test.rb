@@ -49,7 +49,8 @@ class AppStoreConnectClientTest < Minitest::Test
 
   def test_submission_attaches_the_build_and_submits_one_review_submission
     c = client(
-      [:get, %r{appStoreVersions\?}] => [200, { data: [{ id: "v1", attributes: { appVersionState: "PREPARE_FOR_SUBMISSION" } }] }],
+      [:get, %r{appStoreVersions\?}] => [200, { data: [{ id: "v1", attributes: { appVersionState: "PREPARE_FOR_SUBMISSION",
+                                                                              releaseType: "MANUAL" } }] }],
       [:get, %r{/v1/builds\?}] => [200, { data: [{ id: "b8", attributes: { version: "8" } }] }],
       [:patch, %r{/v1/appStoreVersions/v1/relationships/build}] => [204, ""],
       [:get, %r{/v1/reviewSubmissions\?}] => [200, { data: [] }],

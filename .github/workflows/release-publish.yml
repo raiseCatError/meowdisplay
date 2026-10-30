@@ -18,7 +18,12 @@ name: Release publish
 #  4. promote: a PR of the released source into main.
 #  5. finish: published, or still pending (resumed by the monitor).
 # `resume: true` (the monitor) re-runs 2-5 for a publication already in
-# progress for this commit; it can never start one.
+# progress for this commit; it can never start one. A resume never trusts
+# the release state: it needs the same final approval (release-publish) and
+# re-derives every fact live before anything is released (verify-resume):
+# the stores' approvals for the recorded builds, the Mac release for this
+# exact commit published as Latest with the recorded artifact hashes, and a
+# successful publish-mac job of this workflow for this commit.
 on:
   workflow_dispatch:
     inputs:
@@ -99,6 +104,7 @@ jobs:
           set -euo pipefail
           state() { scripts/release/release-state.sh "$VERSION" "$@"; }
           state monitor STATE --config .github/release-config.json --stores live
+          state verify-live STATE --config .github/release-config.json --stores live
           state gate STATE --branch-head "$SHA"
 
   publish-mac:
@@ -283,9 +289,117 @@ jobs:
           [ -n "$pr" ] || { echo "::warning::No merged release PR labelled 'autorelease: pending' for $VERSION; relabel it by hand"; exit 0; }
           gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
 
+  # A resumed publication's final authorization: the same release-publish
+  # approval publish-mac needs, always with a required reviewer (a resume
+  # continues irreversible store steps, so it is never automatic).
+  authorize-resume:
+    needs: guard
+    if: ${{ inputs.resume }}
+    runs-on: ubuntu-latest
+    environment: release-publish
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment requires an approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-publish --require-reviewers
+
+  # Everything a resume relies on, observed live rather than read from the
+  # release state (which any workflow token could have written).
+  verify-resume:
+    needs: [guard, authorize-resume]
+    if: ${{ inputs.resume }}
+    runs-on: ubuntu-latest
+    environment: release-stores
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Publication in progress for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          status=$(scripts/release/release-state.sh "$VERSION" status STATE)
+          [ "$(jq -r .candidate <<< "$status")" = "$SHA" ] || { echo "::error::the candidate is not $SHA"; exit 1; }
+          [ "$(jq -r .publication <<< "$status")" = in-progress ] || { echo "::error::no publication in progress"; exit 1; }
+      - name: The Mac release for this commit is live, with the recorded artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          [ "$latest" = "$tag" ] || { echo "::error::Latest is $latest, not $tag"; exit 1; }
+          [ "$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false ] ||
+            { echo "::error::$tag is a draft"; exit 1; }
+          tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+          [ "$tagged" = "$SHA" ] || { echo "::error::$tag points at $tagged, not $SHA"; exit 1; }
+          record=$(scripts/release/release-state.sh "$VERSION" show STATE --platform mac)
+          jq -r '.artifacts[] | "\(.sha256)  live/\(.name)"' <<< "$record" > expected.sha256
+          [ -s expected.sha256 ] || { echo "::error::no recorded Mac artifacts"; exit 1; }
+          mkdir live
+          while read -r _ path; do
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$(basename "$path")" -D live
+          done < expected.sha256
+          sha256sum -c expected.sha256
+      - name: Provenance (a successful publish-mac job of this workflow for this commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-publish.yml/runs?branch=release/$VERSION&head_sha=$SHA&per_page=100" \
+                   --jq '.workflow_runs[] | select(.id != '"$GITHUB_RUN_ID"') | .id')
+          found=
+          for run in $runs; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" \
+                 --jq '.jobs[] | select(.name == "publish-mac" and .conclusion == "success") | .id' | grep -q .; then
+              found=$run; break
+            fi
+          done
+          [ -n "$found" ] || { echo "::error::no successful publish-mac job of release-publish.yml for $SHA"; exit 1; }
+          echo "publish-mac succeeded in run $found"
+      - name: Store approvals, observed live
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: scripts/release/release-state.sh "$VERSION" verify-live STATE --config .github/release-config.json --stores live
+
   stores:
-    needs: [guard, publish-mac]
-    if: always() && needs.guard.result == 'success' && (needs.publish-mac.result == 'success' || inputs.resume)
+    needs: [guard, publish-mac, verify-resume]
+    # Normal path: after publish-mac (which held the approval). Resume: only
+    # after authorize-resume's approval and verify-resume's live checks.
+    if: >-
+      always() && needs.guard.result == 'success' &&
+      ((!inputs.resume && needs.publish-mac.result == 'success') ||
+       (inputs.resume && needs.verify-resume.result == 'success'))
     runs-on: ubuntu-latest
     environment: release-stores
     permissions:
