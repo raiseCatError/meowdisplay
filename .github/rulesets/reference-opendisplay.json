@@ -1,5 +1,5 @@
 {
-  "name": "External reference: fast-forward only, never deleted",
+  "name": "External reference: fast-forward only, never deleted (temporary)",
   "target": "branch",
   "enforcement": "active",
   "conditions": {

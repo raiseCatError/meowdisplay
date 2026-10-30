@@ -1,5 +1,5 @@
 {
-  "name": "Release state: fast-forward only, never deleted",
+  "name": "Release state: closed until a dedicated release App exists",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -17,6 +17,12 @@
     },
     {
       "type": "non_fast_forward"
+    },
+    {
+      "type": "update"
+    },
+    {
+      "type": "creation"
     }
   ]
 }

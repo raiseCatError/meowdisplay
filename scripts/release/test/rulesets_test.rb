@@ -16,15 +16,27 @@ class RulesetFilesTest < Minitest::Test
                 &.map { |c| c["context"] } || []
   end
 
-  # GitHub refuses (HTTP 422) its own Actions app as a bypass actor on a user-owned repository,
-  # and admin bypasses would defeat the protections; only the release-branch creation rule
-  # names one (admins create release branches).
+  # GitHub refuses (HTTP 422) its own Actions app (integration 15368) as a bypass actor on a
+  # user-owned repository. Admin bypasses would defeat the protections, so the only role bypass
+  # is admins creating release branches. A GitHub App the owner creates is accepted by GitHub and
+  # may become the single bypass of release-state or the reference branch; nothing else may.
+  APP_BYPASS_ALLOWED = %w[release-state reference-opendisplay].freeze
+
   def test_bypass_actors_are_supported_and_minimal
     rulesets.each do |name, set|
       set.fetch("bypass_actors", []).each do |actor|
-        refute(actor["actor_type"] == "Integration" && actor["actor_id"] == 15_368, "#{name}: GitHub Actions can't be a bypass actor here")
-        assert_equal "release-branch-creation", name, "#{name}: unexpected bypass #{actor.inspect}"
-        assert_equal({ "actor_id" => 5, "actor_type" => "RepositoryRole", "bypass_mode" => "always" }, actor)
+        refute(actor["actor_type"] == "Integration" && actor["actor_id"] == 15_368,
+               "#{name}: GitHub's Actions app can't be a bypass actor on this repository")
+        case actor["actor_type"]
+        when "RepositoryRole"
+          assert_equal "release-branch-creation", name, "#{name}: no role bypass"
+          assert_equal({ "actor_id" => 5, "actor_type" => "RepositoryRole", "bypass_mode" => "always" }, actor)
+        when "Integration"
+          assert_includes APP_BYPASS_ALLOWED, name, "#{name}: no app bypass"
+          assert_equal 1, set["bypass_actors"].length, "#{name}: a dedicated App is the only bypass"
+        else
+          flunk "#{name}: unexpected bypass #{actor.inspect}"
+        end
       end
     end
     assert_equal %w[creation], rulesets["release-branch-creation"]["rules"].map { |r| r["type"] }, "the admin bypass covers creation only"
@@ -41,11 +53,20 @@ class RulesetFilesTest < Minitest::Test
     assert_equal true, params["do_not_enforce_on_create"], "a new release branch can't carry PR-only checks"
   end
 
-  def test_state_and_reference_branches_are_never_rewritten_or_deleted
-    %w[release-state reference-opendisplay].each do |name|
-      assert_equal %w[deletion non_fast_forward], rulesets[name]["rules"].map { |r| r["type"] }.sort, name
-      assert_empty rulesets[name]["bypass_actors"], name
-    end
+  # Release state is closed to every writer until a dedicated App is its only bypass: it is
+  # never downgraded to "anyone with contents: write may update it".
+  def test_release_state_fails_closed
+    set = rulesets.fetch("release-state")
+    assert_equal %w[creation deletion non_fast_forward update], set["rules"].map { |r| r["type"] }.sort
+    assert(set["bypass_actors"].empty? || set["bypass_actors"].map { |a| a["actor_type"] } == ["Integration"])
+  end
+
+  # Temporary until the reference sync has a dedicated App: never deleted or rewritten.
+  def test_reference_branch_is_never_rewritten_or_deleted
+    set = rulesets.fetch("reference-opendisplay")
+    types = set["rules"].map { |r| r["type"] }
+    assert_includes types, "deletion"
+    assert_includes types, "non_fast_forward"
   end
 
   def test_every_tag_is_protected
