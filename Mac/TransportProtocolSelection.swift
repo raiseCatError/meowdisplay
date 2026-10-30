@@ -514,11 +514,25 @@ final class QUICDiscoveryHintStore: @unchecked Sendable {
     private let lock = NSLock()
     private var hints: [String: Entry] = [:]
 
+    /// Discovery is unauthenticated: an ID that records of different service names advertise
+    /// is ambiguous (one of them may be spoofed) and gets no hint at all; the dial then derives
+    /// the QUIC endpoint from the TCP service it chose. The same service seen on several
+    /// interfaces (Wi-Fi and peer-to-peer) is one record, not a conflict.
     func replaceAll(_ entries: [Entry]) {
         lock.lock(); defer { lock.unlock() }
         var next: [String: Entry] = [:]
-        for entry in entries { next[entry.hint.peerID] = entry }
+        var names: [String: Set<String>] = [:]
+        for entry in entries {
+            next[entry.hint.peerID] = entry
+            names[entry.hint.peerID, default: []].insert(Self.instanceName(entry.endpoint))
+        }
+        for (peerID, set) in names where set.count > 1 { next[peerID] = nil }
         hints = next
+    }
+
+    private static func instanceName(_ endpoint: NWEndpoint) -> String {
+        if case .service(let name, _, _, _) = endpoint { return name }
+        return "\(endpoint)"
     }
 
     func entry(peerID: String) -> Entry? {
