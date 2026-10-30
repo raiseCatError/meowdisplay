@@ -171,6 +171,10 @@ struct PairingCommitThrottle: Equatable {
 /// connection to reset the throttle.
 actor PairingCommitThrottleGate {
     static let shared = PairingCommitThrottleGate()
+    /// The receiver role's own throttle: on a Mac that is both sender and
+    /// receiver, failed attempts at one role's pairing listener never lock
+    /// out the other's.
+    static let receiverRole = PairingCommitThrottleGate()
     private var state = PairingCommitThrottle()
 
     func admitCommitment(now: Date = Date()) -> PairingCommitThrottle.Admission {

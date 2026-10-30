@@ -2444,7 +2444,7 @@ final class StreamReceiver: ObservableObject {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: installID,
                             localName: localName, prompt: prompt, allowIdentityChange: false,
-                            store: .receiverRole)
+                            throttle: .receiverRole, store: .receiverRole)
                         await prompt.finish(String(localized: "Paired with \(paired.peerName)"))
                         await uiSink.publishPairingSucceeded()
                         Self.finishExplicitPairing(

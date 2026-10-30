@@ -1558,8 +1558,26 @@ final class SenderController: ObservableObject {
     /// The peer is resolved again after that read, so a Forget landing in
     /// between rejects the knock.
     private func acceptRemoteConnectRequest(_ connection: NWConnection) {
+        // Until its pinned handshake completes the caller is anyone who can
+        // reach the port: it holds one of a few slots, for a few seconds.
+        let slots = PreAuthSlots.remoteKnock
+        guard slots.tryAcquire() else {
+            Log.info("remote connect-request: too many unauthenticated connections — closing this one")
+            connection.cancel()
+            return
+        }
+        let slot = OneShotRelease { slots.release() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + PreAuthSlots.deadline) {
+            guard slot.isHeld else { return }
+            Log.info("remote connect-request: handshake not completed in time — closing")
+            slot.release()
+            connection.cancel()
+        }
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
+                if case .ready = state { slot.release() }
+                if case .failed = state { slot.release() }
+                if case .cancelled = state { slot.release() }
                 guard let self else { connection.cancel(); return }
                 switch state {
                 case .ready:
