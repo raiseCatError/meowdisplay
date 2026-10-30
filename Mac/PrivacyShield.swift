@@ -237,6 +237,7 @@ final class PrivacyShield {
         let look = PrivacyShieldPolicy.coverLook(idle: now - max(coverSince, lastPhysicalInput))
         guard step != appearance.step || look != appearance.look else { return }
         if look != appearance.look { Log.info("privacy shield: message \(look)") }
+        if step != appearance.step { Log.info("privacy shield: message moved (spot \(step))") }
         appearance.step = step
         appearance.look = look
         placeRevealButton(animate: true)
