@@ -129,7 +129,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             health.lastStatus = status
             health.lastAnyAt = now
             if let frame {
-                latest = frame
+                // While the Privacy Shield asks for the login password panes keep their last
+                // picture (a Full Desktop pane could show the prompt); health still counts.
+                if !PrivacyShieldWindows.isUnlocking { latest = frame }
                 health.completeFrames += 1
                 health.lastCompleteAt = now
                 if health.firstCompleteAt == nil { health.firstCompleteAt = now }
