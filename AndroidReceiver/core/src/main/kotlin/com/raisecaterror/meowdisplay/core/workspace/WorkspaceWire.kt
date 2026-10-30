@@ -224,6 +224,11 @@ data class WorkspaceState(
     val rejected: Map<String, String>, val limit: Int,
     /** Stage Manager is on on the Mac (its strip pauses windows). */
     val stageManager: Boolean = false,
+    /**
+     * Whether the Mac can switch it: "ready", "setup" (the owner hasn't made the two shortcuts on the
+     * Mac yet) or "failed" (macOS didn't apply the last change). null: an older Mac, never offered.
+     */
+    val stageManagerControl: String? = null,
 ) {
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
@@ -236,7 +241,7 @@ data class WorkspaceState(
             }
             val rejected = (obj["rejected"] as? JsonObject)?.entries?.take(32)?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { k to it } }?.toMap() ?: emptyMap()
             return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES,
-                obj.bool("stageManager") == true)
+                obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16))
         }
     }
 }

@@ -242,7 +242,15 @@ fun WorkspaceChrome(
                             if (inputAllowed) {
                                 PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
                                 var confirmOff by remember { mutableStateOf(false) }
-                                PaneButton("Turn Off Stage Manager", enabled = true) { confirmOff = true }
+                                // Offered only when the Mac can actually do it (the owner's shortcuts exist).
+                                val smControl = ui.remote?.stageManagerControl
+                                if (smControl == "ready" || smControl == "failed") PaneButton("Turn Off Stage Manager", enabled = true) { confirmOff = true }
+                                if (smControl == "failed" || smControl == "setup") Text(
+                                    if (smControl == "failed") "macOS didn't turn Stage Manager off. Try again, or turn it off on the Mac."
+                                    else "To turn Stage Manager off from here, set it up on the Mac: MeowDisplay Settings ▸ System ▸ Stage Manager.",
+                                    color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.widthIn(max = 320.dp),
+                                )
                                 if (confirmOff) androidx.compose.material3.AlertDialog(
                                     onDismissRequest = { confirmOff = false },
                                     title = { Text("Turn off Stage Manager on the Mac?") },

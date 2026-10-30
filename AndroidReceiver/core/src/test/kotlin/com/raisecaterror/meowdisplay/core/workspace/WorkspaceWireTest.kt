@@ -190,4 +190,11 @@ class WorkspaceWireTest {
         assertEquals(0.0, corner.y, 1e-9)
         assertNull(WZoomPreview.between("t", pane, WRect(0.0, 0.0, 0.0, 1.0), now))
     }
+
+    @Test fun stageManagerControlSaysWhetherTheMacCanSwitchIt() {
+        fun parse(extra: String) = WorkspaceState.parse(Json.parseToJsonElement("""{"type":"workspaceState","tiles":[],"hostFocus":"noActiveTile"$extra}""").jsonObject)
+        assertEquals("setup", parse(""","stageManager":true,"stageManagerControl":"setup"""").stageManagerControl)
+        assertEquals("ready", parse(""","stageManager":true,"stageManagerControl":"ready"""").stageManagerControl)
+        assertNull("an older Mac: never offered", parse(""","stageManager":true""").stageManagerControl)
+    }
 }

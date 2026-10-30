@@ -1048,7 +1048,7 @@ final class SenderController: ObservableObject {
 
     init() {
         // Window mode turned Stage Manager off and the app didn't get to turn it back on.
-        StageManagerSwitch.restoreIfTurnedOffByUs()
+        StageManagerSwitch.inBackground { StageManagerSwitch.restoreIfTurnedOffByUs() }
         _ = TrustStore.shared.ownIdentity()
         ClipboardHub.shared.anySessionHasEffectiveInput = { [weak self] in self?.anySessionHasEffectiveInput ?? true }
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()

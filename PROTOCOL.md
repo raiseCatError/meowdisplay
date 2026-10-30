@@ -1387,7 +1387,8 @@ naming another `host` are ignored (they belong to that Mac's connection).
 The Mac accepts a tile only for a window it listed to this session with
 the same `gen`; anything else is rejected, never retargeted.
 
-`workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit}`
+`workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit,
+stageManager?, stageManagerControl?}`
 reports what the Mac shows: per tile `{id, window, gen, state, app, bundle,
 title, follow, rotation, fit}` with `state` one of `live`, `waiting`,
 `offscreen`, `closed`, `failed`, `limit` (paused by the Mac's capture
@@ -1395,7 +1396,10 @@ budget; the tile is kept). `active` is the tile keyboard input goes to;
 `hostFocus` is `deliver`, `noActiveTile`, `hostFocusElsewhere` (another
 app is frontmost on the Mac) or `otherWindowFocused`; keys are not
 delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
-`limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`.
+`limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`. `stageManager` is true while Stage Manager is on; `stageManagerControl` is
+`ready` (the Mac can switch it: the owner made its two shortcuts), `setup`
+(not yet: the device explains where to set it up instead of offering Turn
+Off) or `failed` (macOS didn't apply the last change, for a few seconds).
 
 `workspaceFocus {tile}` makes a tile active (the Mac raises its window when
 input is granted). `windowAction {action}` needs this session's input

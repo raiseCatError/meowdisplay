@@ -443,16 +443,18 @@ enum TileCaptureWatch {
 
     /// No complete frame this long after starting (and not paused): the stream is stuck.
     static let firstFrameTimeout: TimeInterval = 4
-    /// Paused although the catalog says the window is on the stage: restart after this long.
-    static let pausedOnStageTimeout: TimeInterval = 6
+    /// Paused although the catalog says the window is on the stage: restart after this long. A
+    /// stream rebuilt after the window left the strip went live within a second (capture lab
+    /// 2026-10-30), so a short wait brings a returning window back quickly.
+    static let pausedOnStageTimeout: TimeInterval = 2
     /// Restarts back off; after the last one the pane says it failed and offers Retry.
     static let backoff: [TimeInterval] = [1, 2, 4, 8, 16]
 
     static func verdict(now: TimeInterval, startedAt: TimeInterval, firstCompleteAt: TimeInterval?,
                         suspendedSince: TimeInterval?, sourceLooksAvailable: Bool) -> Verdict {
         if let since = suspendedSince {
-            // macOS paused it (Stage Manager's strip, a hidden Space). It resumes by itself when the
-            // window is shown; only a pause the catalog can't explain is treated as stuck.
+            // macOS paused it (Stage Manager's strip, a hidden Space). A pause the catalog can't
+            // explain (the window is on the stage again) gets a fresh stream.
             return sourceLooksAvailable && now - since >= pausedOnStageTimeout ? .stalled : .paused
         }
         // Frames came: the stream works, even if the content is static now (no new frames).

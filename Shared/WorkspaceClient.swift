@@ -110,6 +110,9 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var rejected: [String: String]
     /// Stage Manager is on on the Mac (its strip pauses windows).
     var stageManager = false
+    /// Whether the Mac can switch it: "ready", "setup" (the owner hasn't made the two shortcuts on
+    /// the Mac yet) or "failed" (macOS didn't apply the last change). nil: an older Mac, never offered.
+    var stageManagerControl: String?
 }
 
 enum WorkspaceEvent: Sendable {
@@ -187,7 +190,8 @@ enum WorkspaceEvent: Sendable {
             }
             return .state(WorkspaceStateMessage(host: str(obj, "host"), tiles: Array(tiles), active: str(obj, "active", 32),
                                                 hostFocus: (obj["hostFocus"] as? String).flatMap(RemoteHostFocus.init(rawValue:)) ?? .noActiveTile,
-                                                rejected: rejected, stageManager: obj["stageManager"] as? Bool ?? false))
+                                                rejected: rejected, stageManager: obj["stageManager"] as? Bool ?? false,
+                                                stageManagerControl: str(obj, "stageManagerControl", 16)))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }

@@ -255,12 +255,22 @@ struct WorkspaceChromeView: View {
                             }
                             .buttonStyle(.plain)
                             // Every strip window live: Stage Manager off while Window mode is used (confirmed).
-                            Button { confirmStageManagerOff = true } label: {
-                                Label("Turn Off Stage Manager", systemImage: "rectangle.stack.badge.minus").font(.callout.weight(.semibold))
-                                    .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
-                                    .background(workspaceChip, in: Capsule())
+                            // Offered only when the Mac can actually do it (the owner's shortcuts exist).
+                            if ["ready", "failed"].contains(model.remote?.stageManagerControl ?? "") {
+                                Button { confirmStageManagerOff = true } label: {
+                                    Label("Turn Off Stage Manager", systemImage: "rectangle.stack.badge.minus").font(.callout.weight(.semibold))
+                                        .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                        .background(workspaceChip, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+                        }
+                        if model.remote?.stageManagerControl == "failed" {
+                            Text("macOS didn't turn Stage Manager off. Try again, or turn it off on the Mac.")
+                                .font(.caption).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
+                        } else if model.remote?.stageManagerControl == "setup" {
+                            Text("To turn Stage Manager off from here, set it up on the Mac: MeowDisplay Settings ▸ System ▸ Stage Manager.")
+                                .font(.caption).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
                         }
                     }
                     #if os(iOS)

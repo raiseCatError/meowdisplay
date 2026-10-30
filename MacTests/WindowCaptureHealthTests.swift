@@ -24,6 +24,10 @@ final class WindowCaptureHealthTests: XCTestCase {
                        "left the stage while streaming: paused, last picture kept")
         XCTAssertEqual(TileCaptureWatch.verdict(now: 7, startedAt: 0, firstCompleteAt: nil, suspendedSince: 0.5, sourceLooksAvailable: true), .stalled,
                        "paused although the window is on the stage: restarted")
+        XCTAssertEqual(TileCaptureWatch.verdict(now: 2.4, startedAt: 0, firstCompleteAt: 0.2, suspendedSince: 0.3, sourceLooksAvailable: true), .stalled,
+                       "back on the stage: a fresh stream after 2 s (lab: a rebuilt stream is live within a second)")
+        XCTAssertEqual(TileCaptureWatch.verdict(now: 1.5, startedAt: 0, firstCompleteAt: 0.2, suspendedSince: 0.3, sourceLooksAvailable: true), .paused,
+                       "not before: the catalog may see the stage a moment before the stream does")
         XCTAssertTrue(StageManagerWindows.looksLikeThumbnail(CGRect(x: -238, y: 180, width: 176, height: 166)))
         XCTAssertFalse(StageManagerWindows.looksLikeThumbnail(CGRect(x: 214, y: 30, width: 1554, height: 993)))
     }

@@ -102,9 +102,21 @@ holding the old one is refused, never pointed at the new one.
   without moving the Mac pointer, so hover reaches the Mac only over the
   active tile.
 - **Zoom.** On iPhone and iPad, tile handles follow the unzoomed picture.
-- **Full-screen Spaces and Stage Manager** were not exercised with Stage
-  Manager turned on (the test Mac had it off, and MeowDisplay never changes
-  that setting).
+- **Stage Manager.** Windows on the current stage stream live. A window in
+  the side strip doesn't: measured on macOS 27.0 (26A428) with a disposable
+  window drawing a frame counter, ScreenCaptureKit's per-window stream
+  suspends, its screenshot fails (-3811), and neither the legacy
+  CGWindowListCreateImage nor SkyLight's private CGSHWCaptureWindowList (with
+  or without the `fullSize` option) returns the real window — only the
+  tilted thumbnail, or nothing while the strip is hidden. The pane keeps its
+  last picture and says why; with control, **Show on Mac** brings that window
+  onto the stage, and **Turn Off Stage Manager** switches it off for Window
+  mode (back on afterwards). macOS applies Stage Manager only through its own
+  control, so that runs two shortcuts the owner makes once with the
+  "Set Stage Manager" action (Settings → System → Stage Manager); writing the
+  `GloballyEnabled` preference has no visible effect (measured). A window
+  that returns to the stage gets a fresh stream within about 2 s.
+  Evidence: the integration folder's RESEARCH-2026-10-30-stage-manager-capture-lab.md.
 
 ## Turning it off
 
