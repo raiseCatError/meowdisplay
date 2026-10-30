@@ -43,5 +43,14 @@ enum PrivacyShieldWindows {
     static var current: [CGWindowID] { lock.withLock { ids } }
     /// True when they changed.
     static func replace(with new: [CGWindowID]) -> Bool { lock.withLock { defer { ids = new }; return ids != new } }
+
+    nonisolated(unsafe) private static var unlocking = false
+    /// macOS is asking for the login password to remove the cover: no remote input reaches the Mac
+    /// (the password can only come from this Mac's own keyboard) and the prompt is left out of
+    /// what devices see.
+    static var isUnlocking: Bool {
+        get { lock.withLock { unlocking } }
+        set { lock.withLock { unlocking = newValue } }
+    }
 }
 

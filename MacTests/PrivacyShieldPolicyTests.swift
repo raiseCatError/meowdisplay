@@ -58,4 +58,12 @@ final class PrivacyShieldPolicyTests: XCTestCase {
         XCTAssertEqual(PrivacyShieldWindows.current, [10, 11])
         XCTAssertTrue(PrivacyShieldWindows.replace(with: []))
     }
+
+    func testUnlockingPausesRemoteInputUntilItEnds() {
+        XCTAssertFalse(PrivacyShieldWindows.isUnlocking)
+        PrivacyShieldWindows.isUnlocking = true
+        XCTAssertTrue(PrivacyShieldWindows.isUnlocking, "InputInjector's sink and system gestures drop remote input meanwhile")
+        PrivacyShieldWindows.isUnlocking = false
+        XCTAssertFalse(PrivacyShieldWindows.isUnlocking)
+    }
 }

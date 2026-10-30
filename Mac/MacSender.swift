@@ -2629,10 +2629,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream: SCStream
         do {
             // The Privacy Shield covers the Mac's own screens, never the device's picture.
+            // Off-screen ones too: the cover and its notice are registered before they appear.
             let shieldIDs = Set(PrivacyShieldWindows.current)
             var shield: [SCWindow] = []
-            if !shieldIDs.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) {
-                shield = content.windows.filter { shieldIDs.contains($0.windowID) }
+            if !shieldIDs.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) {
+                shield = Self.privacyHidden(content, ids: shieldIDs)
             }
             let filter = SCContentFilter(display: display, excludingWindows: shield)
             let config = SCStreamConfiguration()
@@ -2711,17 +2712,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         _ = try? await onQueue { sender in sender.applyWindowAudio(nil) }
     }
 
+    /// What devices never see: the Privacy Shield's own windows (listed even before they appear)
+    /// and, while it asks for the login password, macOS's prompt.
+    private static func privacyHidden(_ content: SCShareableContent, ids: Set<CGWindowID>) -> [SCWindow] {
+        let unlocking = PrivacyShieldWindows.isUnlocking
+        return content.windows.filter {
+            ids.contains($0.windowID) || (unlocking && $0.owningApplication?.bundleIdentifier == "com.apple.SecurityAgent")
+        }
+    }
+
     /// The Privacy Shield's windows changed: the Mac's screen capture leaves them out again.
-    func privacyShieldChanged() {
+    /// `done` runs once the capture no longer includes them (the cover waits for it before it shows).
+    func privacyShieldChanged(done: (@Sendable () -> Void)? = nil) {
         queue.async { [self] in
-            guard mode != .window, let stream = captureOwnership.liveStream else { return }
+            guard mode != .window, let stream = captureOwnership.liveStream else { done?(); return }
             let displayID = captureDisplayID
             let box = WindowAudioStreamBox(stream: stream)
             Task {
-                guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+                defer { done?() }
+                guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
                       let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
-                let ids = Set(PrivacyShieldWindows.current)
-                let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { ids.contains($0.windowID) })
+                let filter = SCContentFilter(display: display, excludingWindows: Self.privacyHidden(content, ids: Set(PrivacyShieldWindows.current)))
                 do { try await box.stream.updateContentFilter(filter) } catch { Log.info("privacy shield: capture filter update failed \((error as NSError).code)") }
             }
         }

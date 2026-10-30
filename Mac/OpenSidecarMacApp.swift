@@ -548,7 +548,11 @@ final class SenderController: ObservableObject {
         didSet {
             ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
-            PrivacyShield.shared.onWindowsChanged = { [weak self] in self?.sessions.forEach { $0.sender.privacyShieldChanged() } }
+            PrivacyShield.shared.onWindowsChanged = { [weak self] done in
+                let group = DispatchGroup()
+                for s in self?.sessions ?? [] { group.enter(); s.sender.privacyShieldChanged { group.leave() } }
+                group.notify(queue: .main, execute: done)
+            }
         }
     }
     private var suppressModeRestart = false

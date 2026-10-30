@@ -233,18 +233,24 @@ Settings ▸ System. Each connected device is told whether it's on.
   beyond that.
 - Clicks and keys pass through it, so someone at the Mac can still type or
   click without seeing. It's a viewing shield, not an input lock.
-- Revealing the Mac needs a click from the Mac's own mouse or trackpad
-  (clicks injected for a device are ignored) and an administrator's
-  password, asked by macOS; MeowDisplay never sees the password. While
-  macOS asks, the cover stays above every app window; if the prompt can't be
-  seen above it, the Mac stays covered (it fails closed). It covers
-  again after the chosen time (5 minutes by default) without physical input
-  at the Mac; remote and synthetic input don't count. Only timestamps are
-  kept, never what was typed.
+- Removing the cover needs a click from the Mac's own mouse or trackpad
+  (clicks injected for a device are ignored) and the Mac's login password,
+  asked by macOS; MeowDisplay never sees the password. While macOS asks, no
+  remote input reaches the Mac (MeowDisplay drops it), so the password can
+  only come from the Mac's own keyboard, and devices don't see the prompt.
+  The cover stays above every app window meanwhile; if the prompt can't be
+  seen above it, the Mac stays covered (it fails closed). It covers again
+  after the chosen time (5 minutes by default) without physical input at the
+  Mac; remote and synthetic input don't count. Only timestamps are kept,
+  never what was typed.
+- Devices never see the cover: its windows (and the Mac-side notice) exist
+  and are left out of MeowDisplay's captures before they appear. If a
+  capture doesn't confirm within 3 seconds, the Mac is covered anyway and
+  that's logged.
 - A device that connects after a reveal brings the cover back, so what each
   device is told on connecting is true.
-- Turning either setting off asks for confirmation, and for an
-  administrator's password while the cover is up.
+- Turning either setting off asks for confirmation, and for the login
+  password (typed on the Mac) while the cover is up.
 
 ## What this doesn't claim
 

@@ -27,7 +27,11 @@ protocol SyntheticEventSink: Sendable {
 }
 
 struct HIDEventTapSink: SyntheticEventSink {
-    func post(_ event: CGEvent) { event.post(tap: .cghidEventTap) }
+    func post(_ event: CGEvent) {
+        // While the Privacy Shield asks for the login password, only this Mac's own input counts.
+        guard !PrivacyShieldWindows.isUnlocking else { return }
+        event.post(tap: .cghidEventTap)
+    }
 }
 
 /// Turns normalized touch coordinates from the phone into mouse events on a
