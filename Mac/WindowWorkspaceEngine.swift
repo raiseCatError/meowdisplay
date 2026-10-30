@@ -308,6 +308,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var stageAdd: (window: CGWindowID, result: StageStripAccess.Result, at: TimeInterval)?
     private let inputLock = NSRecursiveLock()
     private var targeting = WorkspaceInputTargeting()
+    /// The receiver moves the pointer itself (Trackpad mode: relative motion), so it is shown
+    /// the workspace pointer, not wherever the Mac's own cursor is. Under `inputLock`.
+    private var pointerDriven = false
     private var canvas: CGSize
     private var streamFPS: Int
     /// Listings, stills and app launches (shared with Mirror/Extend browsing).
@@ -1174,6 +1177,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.lock()
         defer { inputLock.unlock() }
         let p = WorkspacePoint(x: x ?? 0, y: y ?? 0)
+        if phase == .hover || phase == .drag { pointerDriven = x == nil }
         let target: WorkspaceInputTargeting.Target?
         switch phase {
         case .down: target = x == nil ? targeting.resolveAtPointer(.down) : targeting.resolve(.down, at: p)
@@ -1276,8 +1280,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.canvasPoint(forGlobal: g) }
     }
 
+    /// The cursor the receiver draws: in Trackpad mode the workspace pointer (in the focused
+    /// pane, always shown there), otherwise the Mac's own cursor while it is over a pane.
     func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
-        inputLock.withLock { targeting.cursorPlacement(forGlobal: g) }
+        inputLock.withLock { pointerDriven ? targeting.pointerPlacement() : targeting.cursorPlacement(forGlobal: g) }
+    }
+
+    /// The receiver's input mode from its hello: Trackpad shows the pane cursor from the start.
+    func setPointerDriven(_ value: Bool) {
+        inputLock.withLock { pointerDriven = value }
     }
 
     /// The focused text caret (global points) in normalized canvas

@@ -351,15 +351,78 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertTrue(t2.update(assignments: Array(rotated.suffix(1))), "removing the bound tile releases")
     }
 
-    func testRelativeMotionCrossesTilesFreely() {
+    func testRelativeMotionMovesFreelyWhileNoPaneHasFocus() {
         var t = twoTiles()
-        _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5))
-        _ = t.resolve(.up, at: .init(x: 0.25, y: 0.5))
-        for _ in 0..<10 { _ = t.resolveRelative(dx: 100, dy: 0) }
+        XCTAssertNil(t.activeTile)
+        for _ in 0..<5 { _ = t.resolveRelative(dx: 100, dy: 0) }
         XCTAssertEqual(t.pointer.x, 0.75, accuracy: 1e-9)
-        XCTAssertEqual(t.hoveredTile, "b", "the workspace pointer is not trapped in the active tile")
+        XCTAssertEqual(t.hoveredTile, "b", "no pane in focus: the pointer crosses panes")
         for _ in 0..<50 { _ = t.resolveRelative(dx: 100, dy: 0) }
         XCTAssertEqual(t.pointer.x, 1, accuracy: 1e-9, "clamped to the workspace")
+    }
+
+    /// Trackpad mode: the cursor lives in the focused pane. It never slides into a neighbour;
+    /// focusing a pane puts it in that pane's middle the first time and back where it was after.
+    func testTrackpadCursorStaysInTheFocusedPaneAndEachPaneRemembersItsOwn() throws {
+        var t = twoTiles()
+        t.setActive("a")
+        // Tile a is 1000x1000 canvas px showing a 1000x1000 window: its middle.
+        XCTAssertEqual(t.pointer.x, 0.25, accuracy: 1e-9, "first focus: the pane's middle")
+        XCTAssertEqual(t.pointer.y, 0.5, accuracy: 1e-9)
+        for _ in 0..<20 { _ = t.resolveRelative(dx: 100, dy: 0) }
+        XCTAssertEqual(t.pointer.x, 0.5, accuracy: 1e-5, "stopped at the pane's right edge")
+        XCTAssertEqual(t.hoveredTile, "a", "never slides into the neighbour")
+        let edge = try XCTUnwrap(t.resolveRelative(dx: 0, dy: -200))
+        XCTAssertEqual(edge.tileID, "a")
+        XCTAssertEqual(edge.point.x, 1000, accuracy: 0.1, "the window's right edge on the Mac")
+        let leftA = t.pointer
+
+        t.setActive("b")
+        // Tile b: 1000x1000 px showing 1000x500, letterboxed: its picture is y 250...750.
+        XCTAssertEqual(t.pointer.x, 0.75, accuracy: 1e-9, "the other pane's middle")
+        XCTAssertEqual(t.pointer.y, 0.5, accuracy: 1e-9)
+        for _ in 0..<10 { _ = t.resolveRelative(dx: 0, dy: -100) }
+        XCTAssertEqual(t.pointer.y, 0.25, accuracy: 1e-5, "kept on the picture, not the letterbox bar")
+        let leftB = t.pointer
+
+        t.setActive("a")
+        XCTAssertEqual(t.pointer.x, leftA.x, accuracy: 1e-5, "back where it was in this pane")
+        XCTAssertEqual(t.pointer.y, leftA.y, accuracy: 1e-5)
+        t.setActive("b")
+        XCTAssertEqual(t.pointer.x, leftB.x, accuracy: 1e-5)
+        XCTAssertEqual(t.pointer.y, leftB.y, accuracy: 1e-5)
+        let shown = try XCTUnwrap(t.pointerPlacement(), "the cursor is drawn in the focused pane")
+        XCTAssertEqual(shown.x, leftB.x, accuracy: 1e-9)
+        XCTAssertEqual(shown.kx * 2000, 1, accuracy: 1e-9, "with that pane's scale (1 canvas px per Mac point)")
+    }
+
+    /// The cursor is kept per tab and on the window's own content: a tab switch brings that
+    /// tab's cursor back, and zooming the pane keeps it on the same spot of the window.
+    func testThePaneCursorFollowsTabsAndStaysOnTheContentWhenZoomed() throws {
+        var t = twoTiles()
+        t.windowFrames[12] = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        t.setActive("a")
+        for _ in 0..<2 { _ = t.resolveRelative(dx: -100, dy: -100) }   // window point (300, 300)
+        XCTAssertEqual(t.pointer.x, 0.15, accuracy: 1e-9)
+        XCTAssertEqual(t.pointer.y, 0.3, accuracy: 1e-9)
+        var tabbed = t.assignments
+        tabbed[0].windowID = 12
+        tabbed[0].assignmentGeneration = 7
+        _ = t.update(assignments: tabbed)
+        XCTAssertEqual(t.pointer.x, 0.25, accuracy: 1e-9, "a tab seen for the first time: its middle")
+        XCTAssertEqual(t.pointer.y, 0.5, accuracy: 1e-9)
+        _ = t.update(assignments: twoTiles().assignments.map { a in var a = a; if a.tileID == "a" { a.assignmentGeneration = 8 }; return a })
+        XCTAssertEqual(t.pointer.x, 0.15, accuracy: 1e-9, "back on the first tab: where it was")
+        XCTAssertEqual(t.pointer.y, 0.3, accuracy: 1e-9)
+        var zoomed = t.assignments
+        zoomed[0].zoom = WorkspacePaneZoom(scale: 2, centerX: 0.5, centerY: 0.5)
+        _ = t.update(assignments: zoomed)
+        // 2x around the middle: window (300, 300) is 200 px left of and above the middle at 2x.
+        XCTAssertEqual(t.pointer.x, 0.05, accuracy: 1e-9, "still on the same spot of the window")
+        XCTAssertEqual(t.pointer.y, 0.1, accuracy: 1e-9)
+        let press = try XCTUnwrap(t.resolveAtPointer(.down))
+        XCTAssertEqual(press.point.x, 300, accuracy: 1e-6)
+        XCTAssertEqual(press.point.y, 300, accuracy: 1e-6)
     }
 
     // MARK: Keyboard arbitration

@@ -7191,6 +7191,7 @@ extension MacSender {
                 sender.applyWindowAudio(sources)
             }
         }
+        engine.setPointerDriven(lastHello?.inputMode == "trackpad")   // PointerInputMode.trackpad
         workspaceEngine = engine
         // Input is mapped per tile to the window under it; the display id is
         // only the fallback for releases.

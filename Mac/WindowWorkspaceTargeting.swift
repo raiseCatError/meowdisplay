@@ -182,6 +182,13 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     private(set) var boundTile: String?
     /// The workspace pointer, normalized to the canvas (for relative motion).
     private(set) var pointer = WorkspacePoint(x: 0.5, y: 0.5)
+    /// Trackpad mode keeps one cursor per pane and tab: where it was last, on that window's
+    /// own content (normalized to the window), so it is there again when the pane gets focus,
+    /// even after a zoom, pan or turn. Keyed by `cursorKey`.
+    private(set) var paneCursors: [String: WorkspacePoint] = [:]
+    /// The pane and tab the pointer is in now.
+    private(set) var pointerKey: String?
+    static let paneCursorLimit = 64
 
     func transform(for a: WorkspaceTileAssignment) -> TileContentTransform? {
         guard let frame = windowFrames[a.windowID], frame.width > 0, frame.height > 0 else { return nil }
@@ -211,6 +218,11 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     /// or a tile without a live window.
     mutating func resolve(_ phase: Phase, at p: WorkspacePoint) -> Target? {
         pointer = WorkspacePoint(x: min(max(p.x, 0), 1), y: min(max(p.y, 0), 1))
+        if let a = assignment(boundTile) ?? tile(at: pointer) { remember(a) }
+        return resolveAtCurrentPointer(phase)
+    }
+
+    private mutating func resolveAtCurrentPointer(_ phase: Phase) -> Target? {
         switch phase {
         case .down:
             guard boundTile == nil else {
@@ -258,12 +270,70 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     }
 
     /// Relative motion (Trackpad mode, mice): moves the workspace pointer in
-    /// canvas pixels, then resolves like an absolute move. The pointer moves
-    /// freely across tiles; it is never trapped in the active one.
+    /// canvas pixels, then resolves like an absolute move. With a pane in focus the
+    /// pointer stays on that pane's picture (another pane gets it by being focused:
+    /// its label, a touch); with none it moves freely.
     mutating func resolveRelative(dx: Double, dy: Double) -> Target? {
         guard canvas.width > 0, canvas.height > 0 else { return nil }
-        let p = WorkspacePoint(x: pointer.x + dx / canvas.width, y: pointer.y + dy / canvas.height)
+        var p = WorkspacePoint(x: pointer.x + dx / canvas.width, y: pointer.y + dy / canvas.height)
+        if let a = assignment(boundTile) ?? assignment(activeTile), let box = pointerBox(a) {
+            p = Self.clamp(p, to: box)
+        }
         return resolve(.move, at: p)
+    }
+
+    // MARK: Pane cursors (Trackpad mode)
+
+    /// One cursor per pane and tab.
+    static func cursorKey(_ a: WorkspaceTileAssignment) -> String { "\(a.tileID)|\(a.windowID)" }
+
+    /// Where the pointer may go in a pane (normalized canvas): the part of the pane that shows
+    /// its window.
+    func pointerBox(_ a: WorkspaceTileAssignment) -> WorkspaceRect? {
+        guard canvas.width > 0, canvas.height > 0 else { return nil }
+        let px = transform(for: a)?.visibleRect ?? a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
+        guard px.width > 0, px.height > 0 else { return nil }
+        return WorkspaceRect(x: px.x / canvas.width, y: px.y / canvas.height, width: px.width / canvas.width, height: px.height / canvas.height)
+    }
+
+    /// `p` kept in `box`, a hair inside the far edges so it still hit-tests as inside.
+    private static func clamp(_ p: WorkspacePoint, to box: WorkspaceRect) -> WorkspacePoint {
+        let eps = 1e-6
+        return WorkspacePoint(x: min(max(p.x, box.x), max(box.maxX - eps, box.x)), y: min(max(p.y, box.y), max(box.maxY - eps, box.y)))
+    }
+
+    /// Notes where the pointer is on `a`'s window, for when the pane gets focus again.
+    private mutating func remember(_ a: WorkspaceTileAssignment) {
+        guard let t = transform(for: a), t.source.width > 0, t.source.height > 0,
+              let s = t.clampedSourcePoint(fromCanvas: WorkspacePoint(x: pointer.x * canvas.width, y: pointer.y * canvas.height))
+        else { return }
+        let key = Self.cursorKey(a)
+        if paneCursors[key] == nil, paneCursors.count >= Self.paneCursorLimit, let drop = paneCursors.keys.first(where: { $0 != pointerKey }) {
+            paneCursors[drop] = nil
+        }
+        paneCursors[key] = WorkspacePoint(x: s.x / t.source.width, y: s.y / t.source.height)
+        pointerKey = key
+    }
+
+    /// Puts the pointer in `a`: where it was last on that pane's window, or the middle of
+    /// what the pane shows the first time. Kept on the picture after a zoom, pan or turn.
+    private mutating func placePointer(in a: WorkspaceTileAssignment) {
+        guard let box = pointerBox(a) else { return }
+        var p = WorkspacePoint(x: box.x + box.width / 2, y: box.y + box.height / 2)
+        if let saved = paneCursors[Self.cursorKey(a)], let t = transform(for: a) {
+            let q = t.canvasPoint(fromSource: WorkspacePoint(x: saved.x * t.source.width, y: saved.y * t.source.height))
+            p = Self.clamp(WorkspacePoint(x: q.x / canvas.width, y: q.y / canvas.height), to: box)
+        }
+        pointer = p
+        remember(a)
+    }
+
+    /// Trackpad mode's cursor as the receiver draws it: the workspace pointer, with the scale
+    /// and turn of the pane it is in (as `cursorPlacement`). Nil outside every pane.
+    func pointerPlacement() -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
+        guard canvas.width > 0, canvas.height > 0,
+              let a = assignment(boundTile) ?? tile(at: pointer), let t = transform(for: a) else { return nil }
+        return (pointer.x, pointer.y, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
     }
 
     /// Re-resolve at the current pointer (pointer buttons press where the cursor is).
@@ -280,6 +350,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
 
     mutating func setActive(_ id: String?) {
         activeTile = id.flatMap { assignment($0)?.tileID }
+        if boundTile == nil, let a = assignment(activeTile), Self.cursorKey(a) != pointerKey { placePointer(in: a) }
     }
 
     /// New assignments (a workspace change). Returns true when held input
@@ -298,6 +369,12 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         if assignment(activeTile) == nil { activeTile = new.count == 1 ? new.first?.tileID : nil }
         if activeTile == nil, new.count == 1 { activeTile = new.first?.tileID }
         if assignment(hoveredTile) == nil { hoveredTile = nil }
+        // Forget the cursors of panes that are gone (a pane's other tabs keep theirs).
+        let tiles = Set(new.map(\.tileID))
+        paneCursors = paneCursors.filter { tiles.contains(String($0.key.prefix { $0 != "|" })) }
+        // The focused pane's cursor stays on its picture: after a zoom, pan, turn or resize it
+        // is put back on the same spot of the window; after a tab switch, where that tab had it.
+        if boundTile == nil, let a = assignment(activeTile) { placePointer(in: a) }
         return release
     }
 
