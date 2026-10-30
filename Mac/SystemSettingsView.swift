@@ -80,6 +80,8 @@ struct SystemSettingsView: View {
                 Text("Turning this off only stops automatic connecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected.")
             }
 
+            StageManagerSettingsSection()
+
             Section("App Behavior") {
                 Picker("Show app in", selection: $controller.presentation) {
                     ForEach(AppPresentation.allCases, id: \.self) { p in

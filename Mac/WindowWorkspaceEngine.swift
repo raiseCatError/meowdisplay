@@ -367,6 +367,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         queue.async { [self] in
             guard !running else { return }
             running = true
+            if StageManagerSwitch.offDuringWindowMode { StageManagerSwitch.turnOffForWindowMode() }
             compositor?.resize(to: canvas)
             browser.onSnapshot = { [weak self] snap in self?.queue.async { self?.apply(snap) } }
             browser.liveFrame = { [weak self] id in self?.liveWholeFrame(id) }
@@ -389,6 +390,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     func stop(completion: (@Sendable () -> Void)? = nil) {
         queue.async { [self] in
+            if running { StageManagerSwitch.restoreIfTurnedOffByUs() }
             running = false
             stopped = true
             deliverFrame = nil
@@ -682,6 +684,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let source = CaptureSource(window: a.displayID == nil ? snapshot?.scWindows[a.windowID] : nil,
                                        display: a.displayID.flatMap { browser.scDisplay($0) })
             guard source.window != nil || source.display != nil else { setState(a.tileID, "waiting"); continue }
+            // In Stage Manager's side strip macOS shows only a thumbnail, and capturing it can fail in a
+            // way that spoils later captures (SCStreamError -3811/-3812). Wait until it is on the stage.
+            if a.displayID == nil, catalog[a.windowID]?.inStageStrip == true { setState(a.tileID, "paused"); continue }
             guard Self.reserveBudget() else { setState(a.tileID, "limit"); continue }
             let capture = WindowTileCapture(tileID: a.tileID, windowID: a.windowID, assignmentGeneration: a.assignmentGeneration)
             capture.onFrame = { [weak self] in
@@ -989,6 +994,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             "hostFocus": decision.rawValue, "canvas": [Int(canvas.width), Int(canvas.height)],
             "limit": WorkspaceLayout.maximumTiles,
         ]
+        // Stage Manager is on: receivers can offer to turn it off (owner-confirmed, control only).
+        if StageManagerSwitch.isOnRecently { msg["stageManager"] = true }
         if let active = t.keyboardTarget?.tileID { msg["active"] = active }
         if !rejected.isEmpty { msg["rejected"] = rejected }
         let key = (try? JSONSerialization.data(withJSONObject: msg, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -1002,6 +1009,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func performWindowAction(_ obj: [String: Any]) {
         guard let action = obj["action"] as? String else { return }
         switch action {
+        case "stageManager":
+            // Confirmed on the device by a person with control (the caller checks the grant).
+            // Off: remembered and turned back on when Window mode ends. On: only undoes our change.
+            if obj["on"] as? Bool == false { StageManagerSwitch.turnOffForWindowMode() } else { StageManagerSwitch.restoreIfTurnedOffByUs() }
+            refreshSoon()
+            sendState(force: true)
         case "activate":
             guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }

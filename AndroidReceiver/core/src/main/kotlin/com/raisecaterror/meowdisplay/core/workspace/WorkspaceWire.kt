@@ -111,6 +111,8 @@ object WorkspaceWire {
     fun backdrop(tile: String, max: Int, req: Int) = buildJsonObject { put("type", WORKSPACE_BACKDROP_REQUEST); put("tile", tile); put("max", max); put("req", req) }
 
     fun activate(windowID: Long, generation: Long?) = action("activate") { put("window", windowID); generation?.let { put("gen", it) } }
+    /** Owner-confirmed on the device, control only: Stage Manager off for Window mode (turned back on after). */
+    fun stageManager(on: Boolean) = action("stageManager") { put("on", on) }
     fun launch(bundleID: String) = action("launch") { put("bundle", bundleID) }
     /** Minimizes the real Mac window. Only ever from its own explicit action. */
     fun minimizeRemoteWindow(windowID: Long, generation: Long) = action("minimize") { put("window", windowID); put("gen", generation) }
@@ -220,6 +222,8 @@ enum class HostFocus(val wire: String) {
 data class WorkspaceState(
     val host: String?, val tiles: List<RemoteTileState>, val active: String?, val hostFocus: HostFocus,
     val rejected: Map<String, String>, val limit: Int,
+    /** Stage Manager is on on the Mac (its strip pauses windows). */
+    val stageManager: Boolean = false,
 ) {
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
@@ -231,7 +235,8 @@ data class WorkspaceState(
                 )
             }
             val rejected = (obj["rejected"] as? JsonObject)?.entries?.take(32)?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { k to it } }?.toMap() ?: emptyMap()
-            return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES)
+            return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES,
+                obj.bool("stageManager") == true)
         }
     }
 }

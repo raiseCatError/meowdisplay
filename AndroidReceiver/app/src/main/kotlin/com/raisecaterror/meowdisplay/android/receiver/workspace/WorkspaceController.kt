@@ -984,6 +984,12 @@ class WorkspaceController(
         media.session.sendWorkspace(WorkspaceWire.retry(id))
     }
 
+    /** Stage Manager off on the Mac while Window mode is used (confirmed on this device; needs control). */
+    fun turnOffStageManager() {
+        if (!inputAllowed) return
+        media.session.sendWorkspace(WorkspaceWire.stageManager(false))
+    }
+
     /** A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (needs control). */
     fun showOnMac(id: String) {
         val source = state.value.layout.tiles[id]?.source ?: return

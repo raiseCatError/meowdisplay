@@ -239,8 +239,18 @@ fun WorkspaceChrome(
                         }
                         // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
                         if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop) {
-                            if (inputAllowed) PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
-                            else RequestControlInline()
+                            if (inputAllowed) {
+                                PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
+                                var confirmOff by remember { mutableStateOf(false) }
+                                PaneButton("Turn Off Stage Manager", enabled = true) { confirmOff = true }
+                                if (confirmOff) androidx.compose.material3.AlertDialog(
+                                    onDismissRequest = { confirmOff = false },
+                                    title = { Text("Turn off Stage Manager on the Mac?") },
+                                    text = { Text("Windows in its side strip then show live here. MeowDisplay turns Stage Manager back on when Window mode ends.") },
+                                    confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmOff = false; controller.turnOffStageManager() }) { Text("Turn Off") } },
+                                    dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmOff = false }) { Text("Cancel") } },
+                                )
+                            } else RequestControlInline()
                         }
                         // A closed window's app can open it again (explicit; needs control).
                         val bundle = remote?.bundleID?.ifEmpty { null } ?: tile.source?.bundleID

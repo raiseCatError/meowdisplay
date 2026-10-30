@@ -35,6 +35,7 @@ struct WorkspaceChromeView: View {
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
     var onViewFullScreen: (() -> Void)?
     @State private var confirmClose: String?
+    @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
     /// Outside Arrange: the divider held (long press) and being dragged, by index.
     @State private var heldDivider: Int?
@@ -134,6 +135,12 @@ struct WorkspaceChromeView: View {
                 Button("Cancel", role: .cancel) { confirmClose = nil }
             } message: {
                 Text("The window closes on the Mac itself, as if you clicked its close button. The app keeps running, and unsaved work asks to be saved there first.")
+            }
+            .alert("Turn off Stage Manager on the Mac?", isPresented: $confirmStageManagerOff) {
+                Button("Turn Off") { model.turnOffStageManager() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Windows in its side strip then show live here. MeowDisplay turns Stage Manager back on when Window mode ends.")
             }
             .onChange(of: model.localFullscreen) { full in if full != nil { revealStrip() } }
             .onAppear { syncMenus() }
@@ -239,13 +246,22 @@ struct WorkspaceChromeView: View {
                         .buttonStyle(.plain)
                     }
                     if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed {
-                        // Explicit only: switching Stage Manager's stage brings that app forward on the Mac.
-                        Button { model.showOnMac(id) } label: {
-                            Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
-                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
-                                .background(workspaceChip, in: Capsule())
+                        HStack(spacing: 8) {
+                            // Explicit only: switching Stage Manager's stage brings that app forward on the Mac.
+                            Button { model.showOnMac(id) } label: {
+                                Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                                    .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(workspaceChip, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            // Every strip window live: Stage Manager off while Window mode is used (confirmed).
+                            Button { confirmStageManagerOff = true } label: {
+                                Label("Turn Off Stage Manager", systemImage: "rectangle.stack.badge.minus").font(.callout.weight(.semibold))
+                                    .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(workspaceChip, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                     #if os(iOS)
                     // Showing it on the Mac (or reopening a closed window) needs control: ask in place.

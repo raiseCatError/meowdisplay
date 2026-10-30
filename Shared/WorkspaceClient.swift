@@ -108,6 +108,8 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var active: String?
     var hostFocus: RemoteHostFocus
     var rejected: [String: String]
+    /// Stage Manager is on on the Mac (its strip pauses windows).
+    var stageManager = false
 }
 
 enum WorkspaceEvent: Sendable {
@@ -185,7 +187,7 @@ enum WorkspaceEvent: Sendable {
             }
             return .state(WorkspaceStateMessage(host: str(obj, "host"), tiles: Array(tiles), active: str(obj, "active", 32),
                                                 hostFocus: (obj["hostFocus"] as? String).flatMap(RemoteHostFocus.init(rawValue:)) ?? .noActiveTile,
-                                                rejected: rejected))
+                                                rejected: rejected, stageManager: obj["stageManager"] as? Bool ?? false))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
@@ -328,6 +330,12 @@ enum WorkspaceRequests {
 
     /// Brings the real Mac window forward (needs control): the only way to show a window
     /// Stage Manager keeps in its side strip.
+    /// Owner-confirmed on the device, control only: turn Stage Manager off for Window mode
+    /// (the Mac turns it back on when Window mode ends), or undo that.
+    static func stageManager(on: Bool) -> [String: Any] {
+        ["type": WireMessage.windowAction, "action": "stageManager", "on": on]
+    }
+
     static func activateWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
         ["type": WireMessage.windowAction, "action": "activate", "window": Int(id), "gen": Int(generation)]
     }
@@ -835,6 +843,12 @@ final class WorkspaceModel: ObservableObject {
 
     /// A pane whose capture failed (or stalled): ask the Mac to start it again now.
     func retryTile(_ id: String) { _ = send(WorkspaceRequests.retry(id)) }
+
+    /// Turn Stage Manager off on the Mac while Window mode is used (confirmed here; control).
+    func turnOffStageManager() {
+        guard inputAllowed() else { return }
+        _ = send(WorkspaceRequests.stageManager(on: false))
+    }
 
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
     func showOnMac(_ id: String) {

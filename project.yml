@@ -265,6 +265,7 @@ targets:
       - Mac/WindowCatalog.swift
       - Mac/WindowWorkspaceTargeting.swift
       - Mac/WindowWorkspaceEngine.swift
+      - Mac/StageManagerSwitch.swift
       - Mac/WindowBrowserService.swift
       - Mac/RemoteFileBrowser.swift
       - Mac/RemoteFileTransfers.swift
