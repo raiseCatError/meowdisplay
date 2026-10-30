@@ -1326,11 +1326,14 @@ Mac window is moved, resized or put on another Space.
 with `windowCatalog`:
 
 * `host` — the Mac's install id;
-* `windows` — at most 120 of `{id, gen, bundle, app, title, w, h, state, active}`;
+* `windows` — at most 120 of `{id, gen, bundle, app, title, w, h, state, active, strip?}`;
   `state` is `visible` or `offscreen` (minimized, hidden or on another
   Space: such a window has no frames until it is back); `gen` is the
   window's identity generation in this session (a window id reused by
-  another process is a new `gen`);
+  another process is a new `gen`); `strip: true` — the window sits in
+  Stage Manager's side strip: macOS pauses its capture there and only
+  shows a tilted thumbnail, so it has no current picture until it is on
+  the stage again (`w`/`h` are still the real window's);
 * `apps` — running regular apps `{bundle, name, windows}`;
 * `installed` — only when asked: apps the receiver may ask to open
   `{bundle, name}`.
@@ -1341,8 +1344,11 @@ are never listed. `error` present: the Mac can't list windows now.
 
 `windowThumbnailRequest {ids, max, icons}` (at most 24 ids, `max` 64–320
 pixels wide, at most 32 bundle ids) is answered with one
-`windowThumbnail {id, gen, jpeg}` per window (`unavailable: true` for a
-minimized one) and one `appIcon {bundle, png}` per app. Receivers bound
+`windowThumbnail {id, gen, jpeg}` per window and one `appIcon {bundle, png}`
+per app. `stale: true` marks an older real picture (the window can't be
+captured now); `unavailable: true` with `reason` (`offscreen`, `stageStrip`,
+`failed`) means there is none. A window in Stage Manager's strip is never
+answered with a screenshot of its strip thumbnail. Receivers bound
 both before decoding (96 KiB base64; refuse images declaring more than 16
 megapixels). Stills are requested only while the receiver's picker is open.
 
@@ -1905,4 +1911,4 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |
 | 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
-| 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12) |
+| 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |

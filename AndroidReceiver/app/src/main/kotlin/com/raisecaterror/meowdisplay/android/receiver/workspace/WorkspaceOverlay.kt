@@ -846,15 +846,15 @@ private fun OverviewCard(w: CatalogWindow, thumb: ImageBitmap?, icon: ImageBitma
             .border(if (current) 2.dp else 0.dp, if (current) Accent else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(onClick = onPick)
             .semantics {
-                contentDescription = "${w.app}: ${w.title.ifEmpty { "untitled window" }}" + if (w.availability == WindowAvailability.Offscreen) ", minimized" else ""
+                contentDescription = "${w.app}: ${w.title.ifEmpty { "untitled window" }}" + (w.pausedSpoken?.let { ", $it" } ?: "")
                 if (current) stateDescription = "Showing"
             },
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color(0xFF2C2C2E))) {
             if (thumb != null) Image(thumb, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             else icon?.let { Image(it, null, Modifier.size(40.dp).align(Alignment.Center)) }
-            if (w.availability == WindowAvailability.Offscreen) Text("Minimized", color = Color.White, style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Chip, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
+            w.pausedBadge?.let { paused -> Text(paused, color = Color.White, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Chip, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) }
             if (onAdd != null) Text("Add", color = Color.White, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(Chip, RoundedCornerShape(8.dp)).clickable(onClick = onAdd)
                     .semantics { contentDescription = "Add ${w.app} as a new tile" }.padding(horizontal = 8.dp, vertical = 4.dp))

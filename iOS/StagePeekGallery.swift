@@ -191,7 +191,7 @@ struct StagePeekWindowCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(window.title.isEmpty ? window.app : window.title), \(window.app)")
         .accessibilityValue(closing ? String(localized: "Closing")
-                            : inTile ? String(localized: "Showing in a tile") : (window.minimized ? String(localized: "Minimized") : ""))
+                            : inTile ? String(localized: "Showing in a tile") : (window.pausedSpoken ?? ""))
         .accessibilityAddTraits(.isButton)
     }
 
@@ -212,7 +212,7 @@ struct StagePeekWindowCard: View {
 
     @ViewBuilder private var badges: some View {
         HStack(spacing: 4) {
-            if window.minimized { badge(String(localized: "Minimized"), "minus.square") }
+            if let paused = window.pausedBadge { badge(paused, window.minimized ? "minus.square" : "sidebar.left") }
             if inTile { badge(String(localized: "In Tile"), "rectangle.split.2x1") }
         }
     }

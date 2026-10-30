@@ -219,6 +219,19 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertFalse(failed.starting)
     }
 
+    func testAWindowInStageManagersStripIsBadgedNotShownAsLive() {
+        guard case .catalog(let c)? = WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
+            "windows": [
+                ["id": 1, "bundle": "dev.zed.Zed", "app": "Zed", "title": "a", "w": 800, "h": 600, "state": "visible"],
+                ["id": 2, "bundle": "com.apple.Safari", "app": "Safari", "title": "b", "state": "offscreen"],
+                ["id": 3, "bundle": "com.apple.Notes", "app": "Notes", "title": "c", "w": 560, "h": 412, "state": "visible", "strip": true],
+            ], "apps": [],
+        ]) else { return XCTFail("expected catalog") }
+        XCTAssertEqual(c.windows.map(\.inStageStrip), [false, false, true])
+        XCTAssertEqual(c.windows.map(\.pausedBadge), [nil, "Minimized", "In Strip"])
+        XCTAssertEqual(c.windows[2].width, 560, "the real window's size, not the strip thumbnail's")
+    }
+
     func testParsingIsBoundedAndDefensive() {
         let state = WorkspaceEvent.parse(type: WireMessage.workspaceState, [
             "tiles": [["id": "a", "window": 10, "gen": 2, "state": "live", "app": "Zed"], ["id": "b", "state": "bogus"], ["window": 3]],

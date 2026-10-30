@@ -299,12 +299,19 @@ final class WindowBrowserService: @unchecked Sendable {
             inFlight += 1
             let width = captureWidth[id] ?? 320
             let job = StillJob(live: liveFrame?(id), window: window)
+            // In Stage Manager's side strip a screenshot is the strip's tilted thumbnail, not the
+            // window (measured, WINDOW-WORKSPACE-DESIGN W2): use a pane's last real frame, else
+            // the last real still, else say why there is none.
+            let inStrip = entry.inStageStrip
+            let realFrame = entry.frame
             Task { [weak self] in
                 let image: CGImage?
                 let window = job.window
-                if let live = job.live { image = Self.downscale(live.0, content: live.1, width: width) } else {
+                if let live = job.live { image = Self.downscale(live.0, content: live.1, width: width) } else if inStrip {
+                    image = nil
+                } else {
                     let cfg = SCStreamConfiguration()
-                    let aspect = window.frame.height / max(window.frame.width, 1)
+                    let aspect = realFrame.height / max(realFrame.width, 1)
                     cfg.width = width
                     cfg.height = max(Int(Double(width) * aspect) & ~1, 2)
                     cfg.showsCursor = false
@@ -322,7 +329,11 @@ final class WindowBrowserService: @unchecked Sendable {
                     guard let self else { return }
                     self.inFlight -= 1
                     var msg: [String: Any] = ["type": WireMessage.windowThumbnail, "id": Int(id), "gen": Int(entry.generation)]
-                    if let jpeg {
+                    if inStrip, let jpeg {
+                        // A paused pane's last frame: real, but not current.
+                        msg["jpeg"] = jpeg.base64EncodedString()
+                        msg["stale"] = true
+                    } else if let jpeg {
                         self.stills[id] = jpeg
                         self.scheduler.stored(id, generation: entry.generation, width: width, at: ProcessInfo.processInfo.systemUptime)
                         msg["jpeg"] = jpeg.base64EncodedString()
@@ -331,7 +342,7 @@ final class WindowBrowserService: @unchecked Sendable {
                         msg["stale"] = true
                     } else {
                         msg["unavailable"] = true
-                        msg["reason"] = entry.availability == .offscreen ? "offscreen" : "failed"
+                        msg["reason"] = inStrip ? "stageStrip" : entry.availability == .offscreen ? "offscreen" : "failed"
                     }
                     if self.stills.count > 160, let drop = self.stills.keys.first(where: { self.scheduler.cache[$0] == nil }) { self.stills[drop] = nil }
                     if self.active { self.sendMessage?(msg) }

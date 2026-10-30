@@ -129,7 +129,22 @@ enum class WindowAvailability(val wire: String) { Visible("visible"), Offscreen(
 data class CatalogWindow(
     val id: Long, val generation: Long, val bundleID: String, val app: String, val title: String,
     val width: Int, val height: Int, val availability: WindowAvailability, val active: Boolean,
-)
+    /** In Stage Manager's side strip: macOS pauses its picture there (PROTOCOL.md §6.10). */
+    val inStageStrip: Boolean = false,
+) {
+    /** A short card badge for a window that can't show a current picture, or null. */
+    val pausedBadge: String? get() = when {
+        availability == WindowAvailability.Offscreen -> "Minimized"
+        inStageStrip -> "In Strip"
+        else -> null
+    }
+    /** The same for TalkBack. */
+    val pausedSpoken: String? get() = when {
+        availability == WindowAvailability.Offscreen -> "minimized"
+        inStageStrip -> "in Stage Manager's side strip, picture paused"
+        else -> null
+    }
+}
 
 data class CatalogApp(val bundleID: String, val name: String, val hasWindows: Boolean)
 data class InstalledApp(val bundleID: String, val name: String)
@@ -161,7 +176,7 @@ data class WindowCatalog(val host: String?, val windows: List<CatalogWindow>, va
                 CatalogWindow(
                     id, w.long("gen") ?: 0, w.str("bundle") ?: return@mapNotNull null, w.str("app")?.take(80) ?: "",
                     w.str("title")?.take(160) ?: "", w.int("w") ?: 0, w.int("h") ?: 0,
-                    WindowAvailability.of(w.str("state")), w.bool("active") == true,
+                    WindowAvailability.of(w.str("state")), w.bool("active") == true, w.bool("strip") == true,
                 )
             }
             val apps = obj.arrayOrEmpty("apps").objects().take(WorkspaceWire.MAX_APPS).mapNotNull { a ->

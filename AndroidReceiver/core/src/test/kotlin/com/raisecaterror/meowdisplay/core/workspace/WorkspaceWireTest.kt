@@ -89,15 +89,20 @@ class WorkspaceWireTest {
             {"type":"windowCatalog","host":"mac-a","windows":[
               {"id":10,"gen":2,"bundle":"dev.zed.Zed","app":"Zed","title":"main.rs","w":800,"h":600,"state":"visible","active":true},
               {"id":"bad","bundle":"x"},{"id":11,"app":"no bundle"},
-              {"id":12,"gen":1,"bundle":"com.apple.Safari","app":"Safari","title":"News","state":"offscreen"}],
+              {"id":12,"gen":1,"bundle":"com.apple.Safari","app":"Safari","title":"News","state":"offscreen"},
+              {"id":13,"gen":1,"bundle":"com.apple.Notes","app":"Notes","title":"List","w":560,"h":412,"state":"visible","strip":true}],
              "apps":[{"bundle":"dev.zed.Zed","name":"Zed","windows":true},{"name":"no bundle"}],
              "installed":[{"bundle":"com.apple.TextEdit","name":"TextEdit"}]}
         """).jsonObject)
-        assertEquals(listOf(10L, 12L), catalog.windows.map { it.id })
+        assertEquals(listOf(10L, 12L, 13L), catalog.windows.map { it.id })
         assertEquals(WindowAvailability.Offscreen, catalog.windows[1].availability)
+        // Stage Manager's strip: the real size, and a badge instead of a live claim.
+        assertEquals(listOf(false, false, true), catalog.windows.map { it.inStageStrip })
+        assertEquals(listOf(null, "Minimized", "In Strip"), catalog.windows.map { it.pausedBadge })
+        assertEquals(560, catalog.windows[2].width)
         assertEquals(1, catalog.apps.size)
         assertEquals("TextEdit", catalog.installed.single().name)
-        assertEquals(listOf("Zed", "Safari"), catalog.byApp.map { it.first })
+        assertEquals(listOf("Zed", "Safari", "Notes"), catalog.byApp.map { it.first })
         assertEquals(listOf(12L), catalog.search("news").map { it.id })
         assertFalse(catalog.unavailable)
 

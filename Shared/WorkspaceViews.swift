@@ -832,8 +832,8 @@ private struct OverviewCard: View {
                 }
                 .aspectRatio(16 / 10, contentMode: .fit)
                 .overlay(alignment: .bottomLeading) {
-                    if window.minimized {
-                        Text("Minimized").font(.caption2).foregroundStyle(.white).padding(.horizontal, 6).padding(.vertical, 2)
+                    if let paused = window.pausedBadge {
+                        Text(paused).font(.caption2).foregroundStyle(.white).padding(.horizontal, 6).padding(.vertical, 2)
                             .background(workspaceChip, in: RoundedRectangle(cornerRadius: 6)).padding(6)
                     }
                 }
@@ -857,7 +857,7 @@ private struct OverviewCard: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(current ? workspaceAccent : .clear, lineWidth: 2))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "untitled window" : window.title)" + (window.minimized ? ", minimized" : ""))
+        .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "untitled window" : window.title)" + (window.pausedSpoken.map { ", \($0)" } ?? ""))
         .accessibilityValue(current ? "Showing" : "")
     }
 }

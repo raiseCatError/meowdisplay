@@ -19,6 +19,17 @@ struct CatalogWindowItem: Equatable, Sendable, Identifiable {
     var height: Int
     var minimized: Bool
     var active: Bool
+    /// In Stage Manager's side strip: macOS pauses its picture there (PROTOCOL.md §6.10).
+    var inStageStrip = false
+
+    /// A short card badge for a window that can't show a current picture, or nil.
+    var pausedBadge: String? {
+        minimized ? String(localized: "Minimized") : inStageStrip ? String(localized: "In Strip") : nil
+    }
+    /// The same for VoiceOver.
+    var pausedSpoken: String? {
+        minimized ? String(localized: "Minimized") : inStageStrip ? String(localized: "In Stage Manager’s side strip, picture paused") : nil
+    }
 }
 
 /// The outcome of one Close Window, worded for the person who asked.
@@ -138,7 +149,8 @@ enum WorkspaceEvent: Sendable {
                 guard let id = u32(w, "id"), let bundle = str(w, "bundle") else { return nil }
                 return CatalogWindowItem(id: id, generation: u64(w, "gen") ?? 0, bundleID: bundle, app: str(w, "app", 80) ?? "",
                                          title: str(w, "title") ?? "", width: w["w"] as? Int ?? 0, height: w["h"] as? Int ?? 0,
-                                         minimized: (w["state"] as? String) == "offscreen", active: w["active"] as? Bool ?? false)
+                                         minimized: (w["state"] as? String) == "offscreen", active: w["active"] as? Bool ?? false,
+                                         inStageStrip: w["strip"] as? Bool ?? false)
             }
             let apps = (obj["apps"] as? [[String: Any]] ?? []).prefix(60).compactMap { a -> CatalogAppItem? in
                 guard let b = str(a, "bundle") else { return nil }

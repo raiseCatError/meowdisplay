@@ -492,7 +492,7 @@ private fun StagePeekCardView(
         displayIndex != null -> desktopName
         window == null -> ""
         else -> (if (window.title.isEmpty()) window.app else "${window.app}, ${window.title}") +
-            if (window.availability == WindowAvailability.Offscreen) ", minimized" else ""
+            (window.pausedSpoken?.let { ", $it" } ?: "")
     }
     val highlighted = card.highlighted
     Box(
@@ -557,8 +557,8 @@ private fun StagePeekCardView(
                 // The app's icon at the card's bottom-left, like Stage Manager.
                 Image(icon, null, Modifier.align(Alignment.BottomStart).padding(6.dp).size(24.dp))
             }
-            if (window?.availability == WindowAvailability.Offscreen) {
-                Text("Minimized", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            window?.pausedBadge?.let { paused ->
+                Text(paused, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.TopStart).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 2.dp))
             }
         }
@@ -1065,7 +1065,7 @@ private fun GalleryCard(
                     host.pick(w)
                 }
                 .semantics {
-                    contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (w.availability == WindowAvailability.Offscreen) ", minimized" else "") +
+                    contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (w.pausedSpoken?.let { ", $it" } ?: "") +
                         (if (inTile) ", in a pane" else "") + (if (closing) ", closing" else "")
                     customActions = listOfNotNull(
                         CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true },
@@ -1082,7 +1082,7 @@ private fun GalleryCard(
                 if (still != null) Image(still, null, Modifier.fillMaxSize().padding(6.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Fit)
                 else AppIconView(icon, w.app, 44.0)
                 Row(Modifier.align(Alignment.TopEnd).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (w.availability == WindowAvailability.Offscreen) Badge("Minimized")
+                    w.pausedBadge?.let { Badge(it) }
                     if (inTile) Badge("In Pane")
                 }
                 if (icon != null && still != null) Image(icon, null, Modifier.align(Alignment.BottomStart).padding(8.dp).size(26.dp))

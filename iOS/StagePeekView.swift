@@ -356,8 +356,8 @@ struct StagePeekOverlay: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
             }
-            if window?.minimized == true {
-                Text("Minimized").font(.caption2.weight(.semibold))
+            if let paused = window?.pausedBadge {
+                Text(paused).font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.black.opacity(0.55), in: Capsule()).foregroundStyle(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(6)
@@ -378,6 +378,7 @@ struct StagePeekOverlay: View {
         .accessibilityElement()
         .accessibilityLabel(fullDesktop ? String(localized: "Full Desktop")
                             : window.map { w in w.title.isEmpty ? w.app : "\(w.app), \(w.title)" } ?? "")
+        .accessibilityValue(window?.pausedSpoken ?? "")
         .accessibilityAddTraits(card.highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { finish(machine.select(index: card.index)) }
     }
