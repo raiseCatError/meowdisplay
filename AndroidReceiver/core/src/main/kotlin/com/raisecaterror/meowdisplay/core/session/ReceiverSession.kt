@@ -800,9 +800,15 @@ class ReceiverSession(
         emit(SessionEvent.SenderApproval(false))
     }
 
-    private fun requestKeyframeThrottled() {
+    /**
+     * A keyframe request, at most one per [KEYFRAME_REQUEST_INTERVAL_MS]: what the decoder uses
+     * (every refused P-frame while it waits for a keyframe asks again, and unthrottled that
+     * became a request per frame and a stream of keyframes from the Mac).
+     */
+    @Synchronized
+    fun requestKeyframeThrottled(): Boolean {
         val last = lastKeyframeRequestMs
-        if (last == null || now() - last >= KEYFRAME_REQUEST_INTERVAL_MS) requestKeyframe()
+        return if (last == null || now() - last >= KEYFRAME_REQUEST_INTERVAL_MS) requestKeyframe() else false
     }
 
     private fun closeCurrent(reason: SessionLossReason) {

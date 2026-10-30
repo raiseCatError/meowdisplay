@@ -5371,6 +5371,8 @@ final class StreamReceiver: ObservableObject {
         // the old `self.onDecodedFrame?(...)` read.
         let queue = self.queue
         let decodedFrameSink = self.decodedFrameSink
+        let keyframeThrottle = self.keyframeThrottle
+        let sendTargetBox = self.sendTargetBox
         return ReceiverVideoPresenter(
             displayLayer: displayLayer,
             outputEffects: .init(
@@ -5391,6 +5393,14 @@ final class StreamReceiver: ObservableObject {
                 // path.
                 decodeFlushIncurred: {
                     telemetry.incrementFlushCount()
+                    // The layer failed and was flushed: it shows nothing until the next
+                    // keyframe, and the Mac sends one on its own only every 60 s. Ask now,
+                    // through the same 1 s throttle as the decoder's requests.
+                    queue.async {
+                        guard keyframeThrottle.shouldSend(now: Date(), minimumInterval: 1.0) else { return }
+                        Log.info("requesting keyframe (display layer flushed after a failure)")
+                        Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                    }
                 },
                 debugFramePresented: {
                     #if DEBUG

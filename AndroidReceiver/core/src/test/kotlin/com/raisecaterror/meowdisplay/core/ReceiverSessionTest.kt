@@ -168,6 +168,20 @@ class ReceiverSessionTest {
         return connect(MAC_A).also { session.say(it, invite("a1")); assertTrue(session.isAdmitted) }
     }
 
+    /** The decoder asks for a keyframe on every refused P-frame: the Mac hears it once a second. */
+    @Test
+    fun decoderKeyframeRequestsAreThrottled() {
+        val link = streamingA()
+        assertFalse("admission's own request counts toward the interval", session.requestKeyframeThrottled())
+        clock += ReceiverSession.KEYFRAME_REQUEST_INTERVAL_MS
+        val before = link.types().count { it == "kf" }
+        repeat(30) { session.requestKeyframeThrottled() }
+        assertEquals(before + 1, link.types().count { it == "kf" })
+        clock += ReceiverSession.KEYFRAME_REQUEST_INTERVAL_MS
+        session.requestKeyframeThrottled()
+        assertEquals(before + 2, link.types().count { it == "kf" })
+    }
+
     @Test
     fun anotherMacWaitsGreetedUntilTheUserLetsItIn() {
         val a = streamingA()
