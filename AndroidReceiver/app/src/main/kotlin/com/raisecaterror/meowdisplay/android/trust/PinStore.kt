@@ -11,7 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-data class PairedMac(val peerID: String, val name: String, val spki: ByteArray) {
+/** [pairedAtMillis]: when this pin was saved; null for pins saved before dates were recorded. */
+data class PairedMac(val peerID: String, val name: String, val spki: ByteArray, val pairedAtMillis: Long? = null) {
     override fun equals(other: Any?) = other is PairedMac && peerID == other.peerID && spki.contentEquals(other.spki)
     override fun hashCode() = peerID.hashCode()
 }
@@ -44,8 +45,11 @@ class PinStore(context: Context) : PeerTrustStore {
         if (PeerDirectory.isHeldByAnotherPeer(pinnedPeers(), peerID, spki)) return false
         val decision = TrustPinPolicy.decision(pin(peerID), spki)
         if (decision == TrustPinPolicy.Decision.IdentityChanged && !allowIdentityChange) return false
-        val entry = PairedMac(peerID, displayName, spki)
-        val stored = prefs.edit().putString(peerID, encode(entry)).commit()
+        val now = System.currentTimeMillis()
+        val entry = PairedMac(peerID, displayName, spki, now)
+        // The date goes in the same write: a pin without one counts as older than every dated pin
+        // (Clean Up), so a new pin must never be saved undated.
+        val stored = prefs.edit().putString(peerID, encode(entry)).putLong(DATE_PREFIX + peerID, now).commit()
         if (stored) state.value = state.value.filterNot { it.peerID == peerID } + entry
         return stored
     }
@@ -54,15 +58,20 @@ class PinStore(context: Context) : PeerTrustStore {
     @SuppressLint("ApplySharedPref", "UseKtx")
     @Synchronized
     override fun forget(peerID: String) {
-        prefs.edit().remove(peerID).commit()
+        prefs.edit().remove(peerID).remove(DATE_PREFIX + peerID).commit()
         state.value = state.value.filterNot { it.peerID == peerID }
     }
 
-    private fun load(): List<PairedMac> = prefs.all.mapNotNull { (peerID, value) ->
-        (value as? String)?.let { decode(peerID, it) }
-    }.sortedBy { it.name }
+    private fun load(): List<PairedMac> {
+        val all = prefs.all
+        return all.filterKeys { !it.startsWith(DATE_PREFIX) }.mapNotNull { (peerID, value) ->
+            (value as? String)?.let { decode(peerID, it) }?.copy(pairedAtMillis = all[DATE_PREFIX + peerID] as? Long)
+        }.sortedBy { it.name }
+    }
 
     private companion object {
+        /** `paired:<peerID>` holds when that pin was saved (epoch milliseconds). */
+        const val DATE_PREFIX = "paired:"
         fun encode(entry: PairedMac) = entry.spki.base64() + "\n" + entry.name
 
         fun decode(peerID: String, text: String): PairedMac? {

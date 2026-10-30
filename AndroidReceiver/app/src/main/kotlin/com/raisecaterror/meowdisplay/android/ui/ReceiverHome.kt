@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import com.raisecaterror.meowdisplay.android.R
+import com.raisecaterror.meowdisplay.core.pairing.PairedMacCleanup
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Arrangement
@@ -111,6 +112,13 @@ fun ReceiverHome(
     var editAddressFor by rememberSaveable { mutableStateOf<String?>(null) }
     var policyFor by rememberSaveable { mutableStateOf<String?>(null) }
     var forgetFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var cleanupList by remember { mutableStateOf<List<PairedMacCleanup.Entry>>(emptyList()) }
+    // Old copies of a Mac: same name as a newer pairing, not connected or nearby (never guessed).
+    val oldCopies = {
+        PairedMacCleanup.superseded(paired.map { mac ->
+            PairedMacCleanup.Entry(mac.peerID, mac.name, mac.pairedAtMillis, inUse = mediaUi.peerID == mac.peerID || remote.nearby(mac.peerID))
+        })
+    }
     var securityFor by rememberSaveable { mutableStateOf<String?>(null) }
     var showSteps by rememberSaveable { mutableStateOf(false) }
     // Short phones (landscape) keep the links in the scrolling list so the Macs keep their room.
@@ -214,6 +222,13 @@ fun ReceiverHome(
                             },
                         )
                     }
+                    val old = oldCopies()
+                    if (old.isNotEmpty()) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        TextButton(onClick = { cleanupList = old }) {
+                            Text("Clean Up ${old.size} Old ${if (old.size == 1) "Entry" else "Entries"}…")
+                        }
+                    }
                     toPair.forEach { mac ->
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
                         // Switched out: that session can't share, so there is nothing to pair with yet (iOS).
@@ -293,6 +308,27 @@ fun ReceiverHome(
             text = { Text("This removes the pairing and its saved address. To use this Mac again, pair it again.") },
             confirmButton = { TextButton(onClick = { remote.forget(peerID); forgetFor = null }) { Text("Forget", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { forgetFor = null }) { Text("Cancel") } },
+        )
+    }
+    if (cleanupList.isNotEmpty()) {
+        val format = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+        AlertDialog(
+            onDismissRequest = { cleanupList = emptyList() },
+            title = { Text("Remove ${cleanupList.size} old ${if (cleanupList.size == 1) "entry" else "entries"}?") },
+            text = {
+                Text(cleanupList.joinToString("\n") { e ->
+                    e.name + (e.pairedAtMillis?.let { " · paired " + format.format(java.util.Date(it)) } ?: " · paired before dates were kept")
+                })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Only what is still an old copy now (a Mac may have connected meanwhile).
+                    val still = oldCopies().map { it.id }.toSet()
+                    cleanupList.filter { it.id in still }.forEach { remote.forget(it.id) }
+                    cleanupList = emptyList()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { cleanupList = emptyList() }) { Text("Cancel") } },
         )
     }
     securityFor?.let { peerID ->
