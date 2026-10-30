@@ -62,4 +62,41 @@ class AppMenuModelTest {
         m.setAvailable(false)
         assertNull(m.ui.value.tile)
     }
+
+    @Test
+    fun aReplyForThePanesPreviousAppIsAskedAgainNotShown() {
+        val timers = mutableListOf<() -> Unit>()
+        val m = AppMenuModel(send = { sent += it; true }, scheduler = { _, block -> timers += block; {} })
+        m.setAvailable(true)
+        // The pane switched tabs from Zed to Safari; the Mac still answers for Zed.
+        m.sync("w1", "com.apple.Safari", enabled = true, appName = "Safari")
+        m.apply(reply("""{"type":"menu","tile":"w1","path":[],"app":"Zed","req":${sent.last().req()},"items":[{"i":1,"t":"Zed"}]}"""))
+        assertTrue("the old app's menus are not shown", m.ui.value.top.isEmpty())
+        assertEquals("asked again later", 1, timers.size)
+        timers.removeAt(0)()
+        assertEquals(2, sent.size)
+        m.apply(reply("""{"type":"menu","tile":"w1","path":[],"app":"Safari","req":${sent.last().req()},"items":[{"i":1,"t":"Safari"},{"i":2,"t":"File"}]}"""))
+        assertEquals("Safari", m.ui.value.app)
+        assertEquals(listOf("Safari", "File"), m.ui.value.top.map { it.title })
+
+        assertTrue(AppMenuModel.isStale("Zed", "Safari"))
+        assertTrue("case and accents don't count", !AppMenuModel.isStale("CAFÉ", "cafe"))
+        assertTrue("no name known: never stale", !AppMenuModel.isStale("Zed", null))
+        assertTrue("no app in the reply: never stale", !AppMenuModel.isStale("", "Safari"))
+    }
+
+    @Test
+    fun staleRepliesStopAfterThreeTries() {
+        val timers = mutableListOf<() -> Unit>()
+        val m = AppMenuModel(send = { sent += it; true }, scheduler = { _, block -> timers += block; {} })
+        m.setAvailable(true)
+        m.sync("w1", "com.apple.Safari", enabled = true, appName = "Safari")
+        repeat(3) {
+            m.apply(reply("""{"type":"menu","tile":"w1","path":[],"app":"Zed","req":${sent.last().req()},"items":[{"i":1,"t":"Zed"}]}"""))
+            timers.removeAt(0)()
+        }
+        m.apply(reply("""{"type":"menu","tile":"w1","path":[],"app":"Zed","req":${sent.last().req()},"items":[{"i":1,"t":"Zed"}]}"""))
+        assertTrue("no endless asking", timers.isEmpty())
+        assertEquals("after three tries the Mac's answer is shown", "Zed", m.ui.value.app)
+    }
 }

@@ -311,8 +311,9 @@ fun WorkspaceChrome(
         val activeSource = ui.active?.let { ui.layout.tiles[it]?.source }
         // `available` too: after a reconnect the same pane and app need their menus asked for again.
         val menusAvailable = controller.menus.ui.collectAsState().value.available
-        LaunchedEffect(ui.active, activeSource?.bundleID, activeSource?.isDisplay, inputAllowed, ui.windowMode, menusAvailable) {
-            controller.menus.sync(ui.active, activeSource?.takeIf { !it.isDisplay }?.bundleID, inputAllowed && ui.windowMode)
+        val activeAppName = activeSource?.windowID?.let { id -> ui.catalog?.windows?.firstOrNull { it.id == id }?.app }
+        LaunchedEffect(ui.active, activeSource?.bundleID, activeSource?.isDisplay, inputAllowed, ui.windowMode, menusAvailable, activeAppName) {
+            controller.menus.sync(ui.active, activeSource?.takeIf { !it.isDisplay }?.bundleID, inputAllowed && ui.windowMode, activeAppName)
         }
         val activeRect = ui.active?.let { frames.tiles[it] }?.let { transform.viewRect(it) }
         if (activeRect != null && !ui.arranging && ui.drag == null && (multi || ui.localFullscreen == ui.active)) {

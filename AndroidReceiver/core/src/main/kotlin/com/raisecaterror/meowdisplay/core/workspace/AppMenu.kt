@@ -102,6 +102,10 @@ class AppMenuModel(
     private var topReq: Int? = null
     private var levelReq: Int? = null
     private var cancelFailed: (() -> Unit)? = null
+    /** The focused pane's app name from the window list; a top-level reply for another app is stale. */
+    private var expectedApp: String? = null
+    private var staleRetries = 0
+    private var cancelRetry: (() -> Unit)? = null
 
     fun setAvailable(value: Boolean) {
         state.update { it.copy(available = value) }
@@ -115,11 +119,13 @@ class AppMenuModel(
 
     fun reset() {
         bundle = null; topReq = null; levelReq = null
+        cancelRetry?.invoke(); cancelRetry = null
         state.update { AppMenuUi(available = it.available, barShown = it.barShown) }
     }
 
     /** The focused pane (and its app) changed, or control came or went. */
-    fun sync(tile: String?, bundle: String?, enabled: Boolean) {
+    fun sync(tile: String?, bundle: String?, enabled: Boolean, appName: String? = null) {
+        expectedApp = appName?.takeIf { it.isNotEmpty() }
         val s = state.value
         if (!s.available || !enabled || tile == null || bundle.isNullOrEmpty()) {
             if (s.tile != null) reset()
@@ -127,6 +133,7 @@ class AppMenuModel(
         }
         if (tile == s.tile && bundle == this.bundle) return
         this.bundle = bundle
+        staleRetries = 0
         state.update { it.copy(tile = tile, app = "", top = emptyList(), topError = null, open = emptyList()) }
         val r = nextReq()
         topReq = r
@@ -182,6 +189,13 @@ class AppMenuModel(
         if (r.tile != null && r.tile != s.tile) return
         if (r.path.isEmpty()) {
             if (r.req != null && r.req != topReq) return
+            if (r.ok && isStale(r.app, expectedApp) && staleRetries < 3) {
+                // The Mac answered for the pane's previous tab: ask again once it has the new window.
+                staleRetries += 1
+                cancelRetry?.invoke()
+                cancelRetry = scheduler.after(400) { refresh() }
+                return
+            }
             state.update { if (r.ok) it.copy(app = r.app, top = r.items, topError = null) else it.copy(top = emptyList(), topError = r.error ?: "unavailable") }
             return
         }
@@ -201,6 +215,17 @@ class AppMenuModel(
         cancelFailed?.invoke()
         cancelFailed = scheduler.after(2_500) { state.update { it.copy(failed = null) } }
         refresh()
+    }
+
+    companion object {
+        /** A reply names a different app than the pane shows (case and accents ignored). */
+        fun isStale(replyApp: String, expected: String?): Boolean {
+            if (expected == null || replyApp.isEmpty()) return false
+            return fold(replyApp) != fold(expected)
+        }
+
+        private fun fold(s: String) = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "").lowercase()
     }
 
     private fun nextReq(): Int { req = if (req >= 1_000_000_000) 1 else req + 1; return req }
