@@ -101,8 +101,10 @@ carries exactly the recorded artifact hashes, a `publish-mac` job of this
 workflow succeeded for this commit, and the stores confirm approval of the
 recorded builds (`meow-release verify-live`).
 
-**The release state is not evidence.** Any GitHub Actions workflow can
-write the `release-state` branch, so publication re-derives every fact
+**The release state is not evidence.** Without a dedicated writer, any
+workflow holding `contents: write` could write the `release-state` branch
+(its ruleset therefore stays closed until the owner's release App is its
+only bypass; BRANCHING.md), so publication re-derives every fact
 that matters from its source before anything becomes public:
 `verify-stores` observes App Store Connect and Google Play live and
 requires each store to confirm approval of exactly the recorded build
