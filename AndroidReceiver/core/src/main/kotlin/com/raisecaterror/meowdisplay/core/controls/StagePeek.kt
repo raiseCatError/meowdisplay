@@ -161,6 +161,12 @@ class StagePeekMachine {
     /** Open phase: the card the touch started on, when that card can be closed. */
     private var startCard: Int? = null
 
+    /**
+     * Open phase: past the tap slop but mostly sideways, so a flick (or a swipe on a card) in
+     * progress: it neither taps nor scrubs until it is long enough or turns vertical.
+     */
+    private var sideways = false
+
     /** The window whose Close Window button shows (after a swipe left on its card). */
     var closeRevealed: Long? = null
         private set
@@ -244,7 +250,7 @@ class StagePeekMachine {
                 return emptyList()
             }
             Phase.Open -> {
-                if (!tapCandidate) return emptyList()
+                if (!tapCandidate && !sideways) return emptyList()
                 // A sideways flick while open: inward expands, outward compacts (or closes when compact).
                 val dx = to.x - start.point.x; val dy = to.y - start.point.y
                 if (abs(dx) > StagePeekConfig.flickDistance && abs(dx) > abs(dy) * 1.5) {
@@ -266,6 +272,8 @@ class StagePeekMachine {
                 }
                 if (!(hypot(to.x - start.point.x, to.y - start.point.y) > StagePeekConfig.tapSlop)) return emptyList()
                 tapCandidate = false
+                if (abs(dx) > abs(dy) * 1.5) { sideways = true; return emptyList() }
+                sideways = false
                 phase = Phase.Scrubbing
                 val hid = closeRevealed != null
                 closeRevealed = null
@@ -477,6 +485,7 @@ class StagePeekMachine {
         anchor = null
         tapCandidate = false
         startCard = null
+        sideways = false
     }
 
     private fun closeAll() {

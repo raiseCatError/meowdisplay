@@ -165,6 +165,7 @@ class StagePeekVectorsTest {
                 "began" -> { machine.touchBegan(touch, point, time, onStrip = false, closableCard = card); emptyList() }
                 "moved" -> machine.touchMoved(touch, point, time, StagePeekEdge.Left)
                 "ended" -> machine.touchEnded(touch, point, time) { card }
+                "open" -> machine.openDirectly()
                 else -> error("unknown op $op")
             }
             assertEquals("$label effects", step.getValue("effects").jsonArray.map { it.jsonPrimitive.content }, render(effects))

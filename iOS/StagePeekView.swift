@@ -402,12 +402,15 @@ struct StagePeekOverlay: View {
         .zIndex(30)
     }
 
-    private static let topControlsHeight: CGFloat = 12 + 42 + 10 + 64 + 14
-
-    /// Expanded Stage Peek: every window (and display) as a vertical gallery, two columns at most.
+    /// Expanded Stage Peek: every window (and display) as a vertical gallery, as many columns as
+    /// fit. It sits between the search and app carousel and the buttons, fading at both edges, so
+    /// no card ever passes under (or intercepts touches meant for) those controls.
     private var gallery: some View {
-        StagePeekGallery(model: model, query: query, appFilter: filterApp, inputAllowed: inputAllowed,
-                         width: safe.width, topInset: Self.topControlsHeight,
+        let top = safe.minY + Self.topControlsBottom + 6
+        let bottom = toolbarY(safe.midX) - Self.toolbarHalfHeight - 6
+        let height = max(bottom - top, 140)
+        return StagePeekGallery(model: model, query: query, appFilter: filterApp, inputAllowed: inputAllowed,
+                         width: safe.width, topInset: 12,
                          onWindow: { w in pick(w) },
                          onDisplay: { d in pickDisplay(d) },
                          onApp: { a in query = ""; searchFocused = false; tapApp(a, forceFilter: true) },
@@ -424,8 +427,14 @@ struct StagePeekOverlay: View {
                          onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
                          // A flick toward the edge (off the cards) compacts the gallery again.
                          edge: edge, onCompact: { animate { machine.compact() } })
-            .frame(width: safe.width, height: safe.height)
-            .position(x: safe.midX, y: safe.midY)
+            .frame(width: safe.width, height: height)
+            .mask {
+                let f = min(18 / height, 0.3)
+                LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: f),
+                                       .init(color: .black, location: 1 - f), .init(color: .clear, location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+            }
+            .position(x: safe.midX, y: top + height / 2)
             .environment(\.colorScheme, .dark)
             .zIndex(5)
     }

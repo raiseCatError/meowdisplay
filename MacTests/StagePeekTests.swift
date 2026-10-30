@@ -547,6 +547,11 @@ final class StagePeekTests: XCTestCase {
         cBegan(3, 120, 400, 3, card: 3); cMoved(3, 60, 400, 3.1); cEnded(3, 60, 400, 3.15, card: 3)
         cBegan(4, 60, 400, 4, card: 3); cMoved(4, 120, 400, 4.1); cEnded(4, 120, 400, 4.15, card: 3)
         cBegan(5, 200, 600, 5, card: nil); cMoved(5, 120, 600, 5.1); cEnded(5, 120, 600, 5.15, card: nil)
+        // At finger speed: many small samples past the tap slop before the flick distance.
+        step(["op": "open", "id": 0, "x": 0.0, "y": 0.0, "t": 6.0], c.openDirectly())
+        cBegan(6, 120, 300, 6, card: 1); cMoved(6, 112, 301, 6.016); cMoved(6, 100, 301, 6.032); cMoved(6, 86, 302, 6.048)
+        cMoved(6, 70, 302, 6.064); cEnded(6, 70, 302, 6.08, card: 1)
+        cBegan(7, 120, 300, 7, card: 1); cMoved(7, 134, 302, 7.02); cMoved(7, 136, 380, 7.1); cEnded(7, 136, 380, 7.2, card: 1)
         // The Compact Dock's band, its layout and hit testing.
         var docks: [[String: Any]] = []
         for (name, safe, pad) in [("phoneLandscape", CGRect(x: 59, y: 0, width: 734, height: 372), false),
@@ -618,6 +623,48 @@ final class StagePeekTests: XCTestCase {
         // Off the cards, the flick works as before.
         _ = m.touchBegan(id: 4, at: CGPoint(x: 200, y: 600), time: 3, onStrip: false, closableCard: nil)
         XCTAssertEqual(m.touchMoved(id: 4, to: CGPoint(x: 120, y: 600), time: 3.1, edge: .left), [.dismissed])
+    }
+
+    func testASwipeAtFingerSpeedStillFlicksInsteadOfScrubbing() {
+        // Real fingers report many small moves: past the tap slop long before the flick distance.
+        var m = machine()
+        _ = m.openDirectly()
+        _ = m.touchBegan(id: 2, at: CGPoint(x: 120, y: 400), time: 1, onStrip: false, closableCard: 1)
+        var effects: [StagePeekEffect] = []
+        for (i, x) in [114.0, 104, 92, 80, 70].enumerated() {
+            effects += m.touchMoved(id: 2, to: CGPoint(x: x, y: 401), time: 1 + Double(i) * 0.016, edge: .left)
+            XCTAssertNotEqual(m.phase, .scrubbing)
+        }
+        XCTAssertEqual(effects, [.haptic(.tick), .revealClose(102)])
+        _ = m.touchEnded(id: 2, at: CGPoint(x: 70, y: 401), time: 1.1, cardAt: { _ in 1 })
+        // Off the cards, an inward flick at finger speed expands.
+        _ = m.touchBegan(id: 3, at: CGPoint(x: 200, y: 600), time: 2, onStrip: false, closableCard: nil)
+        effects = []
+        for (i, x) in [206.0, 216, 230, 246, 262].enumerated() {
+            effects += m.touchMoved(id: 3, to: CGPoint(x: x, y: 602), time: 2 + Double(i) * 0.016, edge: .left)
+        }
+        XCTAssertEqual(effects, [.revealClose(nil)])   // the first sideways flick only puts the card back
+        _ = m.touchEnded(id: 3, at: CGPoint(x: 262, y: 602), time: 2.2, cardAt: { _ in nil })
+        _ = m.touchBegan(id: 4, at: CGPoint(x: 200, y: 600), time: 3, onStrip: false, closableCard: nil)
+        effects = []
+        for (i, x) in [206.0, 216, 230, 246, 262].enumerated() {
+            effects += m.touchMoved(id: 4, to: CGPoint(x: x, y: 602), time: 3 + Double(i) * 0.016, edge: .left)
+        }
+        XCTAssertEqual(effects, [.haptic(.select)])
+        XCTAssertTrue(m.expanded)
+        // A sideways start that turns vertical scrubs; lifting a short sideways drag is not a tap.
+        var n = machine()
+        _ = n.openDirectly()
+        _ = n.touchBegan(id: 5, at: CGPoint(x: 120, y: 400), time: 1, onStrip: false)
+        _ = n.touchMoved(id: 5, to: CGPoint(x: 134, y: 402), time: 1.02, edge: .left)
+        XCTAssertEqual(n.phase, .open)
+        _ = n.touchMoved(id: 5, to: CGPoint(x: 136, y: 470), time: 1.1, edge: .left)
+        XCTAssertEqual(n.phase, .scrubbing)
+        _ = n.touchEnded(id: 5, at: CGPoint(x: 136, y: 470), time: 1.2, cardAt: { _ in 1 })
+        _ = n.touchBegan(id: 6, at: CGPoint(x: 120, y: 400), time: 2, onStrip: false)
+        _ = n.touchMoved(id: 6, to: CGPoint(x: 140, y: 401), time: 2.05, edge: .left)
+        XCTAssertEqual(n.touchEnded(id: 6, at: CGPoint(x: 140, y: 401), time: 2.1, cardAt: { _ in 1 }), [])
+        XCTAssertEqual(n.phase, .open)
     }
 
     func testOnTheRightEdgeASwipeLeftOnACardClosesNotExpands() {

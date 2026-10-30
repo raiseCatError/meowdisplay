@@ -194,6 +194,156 @@
       "t" : 5.1500000000000004,
       "x" : 120,
       "y" : 600
+    },
+    {
+      "effects" : [
+        "opened",
+        "haptic activate"
+      ],
+      "expanded" : false,
+      "id" : 0,
+      "op" : "open",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 6,
+      "x" : 0,
+      "y" : 0
+    },
+    {
+      "card" : 1,
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "began",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 6,
+      "x" : 120,
+      "y" : 300
+    },
+    {
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "moved",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 6.016,
+      "x" : 112,
+      "y" : 301
+    },
+    {
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "moved",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 6.032,
+      "x" : 100,
+      "y" : 301
+    },
+    {
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "moved",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 6.048,
+      "x" : 86,
+      "y" : 302
+    },
+    {
+      "effects" : [
+        "haptic tick",
+        "revealClose 102"
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "moved",
+      "phase" : "open",
+      "revealed" : 102,
+      "t" : 6.0640000000000001,
+      "x" : 70,
+      "y" : 302
+    },
+    {
+      "card" : 1,
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 6,
+      "op" : "ended",
+      "phase" : "open",
+      "revealed" : 102,
+      "t" : 6.0800000000000001,
+      "x" : 70,
+      "y" : 302
+    },
+    {
+      "card" : 1,
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 7,
+      "op" : "began",
+      "phase" : "open",
+      "revealed" : 102,
+      "t" : 7,
+      "x" : 120,
+      "y" : 300
+    },
+    {
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 7,
+      "op" : "moved",
+      "phase" : "open",
+      "revealed" : 102,
+      "t" : 7.0199999999999996,
+      "x" : 134,
+      "y" : 302
+    },
+    {
+      "effects" : [
+        "revealClose none",
+        "haptic tick"
+      ],
+      "expanded" : false,
+      "id" : 7,
+      "op" : "moved",
+      "phase" : "scrubbing",
+      "revealed" : -1,
+      "t" : 7.0999999999999996,
+      "x" : 136,
+      "y" : 380
+    },
+    {
+      "card" : 1,
+      "effects" : [
+
+      ],
+      "expanded" : false,
+      "id" : 7,
+      "op" : "ended",
+      "phase" : "open",
+      "revealed" : -1,
+      "t" : 7.2000000000000002,
+      "x" : 136,
+      "y" : 380
     }
   ],
   "config" : {

@@ -143,6 +143,9 @@ struct StagePeekMachine: Equatable {
     private var overrunSignalled = false
     /// Open phase: the card the touch started on, when that card can be closed.
     private var startCard: Int?
+    /// Open phase: past the tap slop but mostly sideways, so a flick (or a swipe on a card) in
+    /// progress: it neither taps nor scrubs until it is long enough or turns vertical.
+    private var sideways = false
     /// The window whose Close Window button shows (after a swipe left on its card).
     private(set) var closeRevealed: UInt32?
 
@@ -221,7 +224,7 @@ struct StagePeekMachine: Equatable {
             }
             return []
         case .open:
-            guard tapCandidate else { return [] }
+            guard tapCandidate || sideways else { return [] }
             // A sideways flick while open: inward expands, outward compacts (or closes when compact).
             let dx = point.x - start.point.x, dy = point.y - start.point.y
             if abs(dx) > StagePeekConfig.flickDistance, abs(dx) > abs(dy) * 1.5 {
@@ -243,6 +246,8 @@ struct StagePeekMachine: Equatable {
             }
             guard hypot(point.x - start.point.x, point.y - start.point.y) > StagePeekConfig.tapSlop else { return [] }
             tapCandidate = false
+            if abs(dx) > abs(dy) * 1.5 { sideways = true; return [] }
+            sideways = false
             phase = .scrubbing
             let hid = closeRevealed != nil
             closeRevealed = nil
@@ -436,6 +441,7 @@ struct StagePeekMachine: Equatable {
         anchor = nil
         tapCandidate = false
         startCard = nil
+        sideways = false
     }
 
     private mutating func closeAll() {

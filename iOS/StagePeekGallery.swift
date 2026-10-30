@@ -364,7 +364,7 @@ struct StagePeekGallery: View {
                         grid(allWindows, cols)
                     }
                 }
-                Color.clear.frame(height: 40)
+                Color.clear.frame(height: 16)
             }
             .padding(.horizontal, 20)
         }
