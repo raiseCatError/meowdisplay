@@ -159,6 +159,9 @@ fun WorkspaceChrome(
     onSettings: () -> Unit = {},
     /** "View Full Screen" on a desktop pane: back to the full-screen desktop (Mirror/Extend). */
     onViewFullScreen: () -> Unit = {},
+    /** View Only: a touch meant for the Mac shows Request Control inside the selected pane. */
+    promptKind: com.raisecaterror.meowdisplay.core.controls.ReceiverInputPrompt.Kind? = null,
+    onPromptTap: () -> Unit = {},
 ) {
     val ui by controller.ui.collectAsState()
     val icons by controller.icons.collectAsState()
@@ -336,6 +339,14 @@ fun WorkspaceChrome(
             val nominal = CGRect(activeRect.minX + 6, maxOf(activeRect.minY, topInset) + 6, minOf(activeRect.width - 12, 200.0), 30.0)
             val clear = (avoid + listOfNotNull(railHandle)).filter { it.intersects(nominal) }.maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
             PaneMenuBar(controller, activeRect, top = nominal.minY + clear + 30 + 4, bounds = picture)
+        }
+        // Inside the pane that was touched (its window, tabs, zoom and pan stay as they are).
+        if (activeRect != null && promptKind != null) {
+            Box(Modifier.offset { IntOffset((activeRect.minX * density).roundToInt(), (activeRect.minY * density).roundToInt()) }
+                .size(activeRect.width.dp, activeRect.height.dp)) {
+                com.raisecaterror.meowdisplay.android.receiver.InputPromptCapsule(
+                    promptKind, onPromptTap, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
+            }
         }
 
         // Landing areas and Cancel while a label (or a window from Stage Peek) is dragged.

@@ -346,6 +346,8 @@ fun ReceiverScreen(
             WorkspaceChrome(
                 workspace, transform, state.inputAllowed, avoid = occupied + workspace.hostChrome.value, onSettings = onOpenSettings,
                 onViewFullScreen = { onMode(workspace.fullDisplayMode) },
+                promptKind = state.prompt.takeIf { wsUi.windowMode && wsUi.active != null },
+                onPromptTap = controller::requestInputTapped,
             )
             if (wsUi.available && prefs.windowSwitcher == WindowSwitcherStyle.Rail) WindowRail(workspace)
         }
@@ -391,8 +393,10 @@ fun ReceiverScreen(
             }
         }
 
+        // Window mode with a selected pane: the pill is drawn inside that pane instead.
+        val promptInPane = workspace?.ui?.value?.let { it.windowMode && it.active != null } == true
         InputPromptCapsule(
-            kind = state.prompt,
+            kind = state.prompt.takeIf { !promptInPane },
             onTap = controller::requestInputTapped,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 76 - 22).dp),
         )
@@ -571,7 +575,7 @@ private fun VideoOffSurface(frame: CGRect, showGrid: Boolean) {
 
 /** The on-surface Request Control affordance (iOS InputPromptButton). */
 @Composable
-private fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Unit, modifier: Modifier = Modifier) {
+internal fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Unit, modifier: Modifier = Modifier) {
     AnimatedVisibility(visible = kind != null, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
         val title = when (kind) {
             ReceiverInputPrompt.Kind.EnableInput -> "Request Control"
