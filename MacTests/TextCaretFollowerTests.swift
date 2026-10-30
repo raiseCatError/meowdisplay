@@ -305,8 +305,12 @@ final class TextCaretFollowerTests: XCTestCase {
         h.provider.reading = .caret(CGRect(x: 250, y: 100, width: 1, height: 20))
         h.open()
         h.now += 0.5
+        // Hold the read until stop() has run: otherwise it can finish and queue its
+        // result first, which is a read finishing *before* stop, not after.
+        h.reader.suspend()
         h.owner.sync { h.follower.tick() }       // read queued
         h.owner.sync { h.follower.stop() }       // connection ended before it returned
+        h.reader.resume()
         h.reader.sync {}
         h.owner.sync {}
         XCTAssertTrue(h.sent.isEmpty)
