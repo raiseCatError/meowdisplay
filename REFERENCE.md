@@ -24,15 +24,19 @@ A read-only copy of OpenDisplay's `main`, kept current by
 - the job summary and the `reference-sync` artifact record the external commit, the previous one and the result (`created`, `fast-forwarded`, `unchanged`, `diverged`, `mismatch`).
 
 It runs when dispatched, and daily once the repository variable
-`REFERENCE_SYNC` is `enabled`. A ruleset lets only GitHub Actions update the
-branch.
+`REFERENCE_SYNC` is `enabled`. Its ruleset allows fast-forward updates only
+and never deletion, with no bypass for anyone. (Restricting updates to the
+sync workflow alone needs a bypass actor GitHub accepts on a user-owned
+repository, the owner's own GitHub App; GitHub's Actions app isn't one. It
+returns when the release App exists: see BRANCHING.md.)
 
 **Rewritten history.** If OpenDisplay rewrites `main` (the old head is no
 longer an ancestor), the sync stops with `diverged` and changes nothing. A
 person then: (1) looks at what changed upstream of us; (2) keeps the old
 copy by creating `reference/opendisplay-archive/<date>` at the current
-`reference/opendisplay`; (3) with the reference ruleset's bypass (an admin,
-deliberately), moves `reference/opendisplay` to the new external head; (4)
+`reference/opendisplay`; (3) disables the reference ruleset for that one
+deliberate step, moves `reference/opendisplay` to the new external head and
+re-enables it; (4)
 records it below. Product branches are never involved.
 
 ## Intake: deciding what to adopt
