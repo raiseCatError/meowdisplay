@@ -39,10 +39,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -105,13 +115,13 @@ fun ReceiverSettings(
     onResyncAudio: (() -> Unit)? = null,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        Surface(Modifier.fillMaxSize().semantics { paneTitle = "Settings" }, color = MaterialTheme.colorScheme.surface) {
             BoxWithConstraints(Modifier.safeDrawingPadding()) {
                 val wide = maxWidth >= 600.dp
                 var page by remember { mutableStateOf(if (wide) SettingsPage.Input else null) }
                 Column(Modifier.fillMaxSize()) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (!wide && page != null) TextButton(onClick = { page = null }) { Text("Settings") }
+                        if (!wide && page != null) TextButton(onClick = { page = null }, modifier = Modifier.semantics { contentDescription = "Back to Settings" }) { Text("Settings") }
                         Text(
                             if (!wide && page != null) page!!.title else "Settings",
                             style = MaterialTheme.typography.titleLarge,
@@ -136,7 +146,9 @@ fun ReceiverSettings(
                                         entry.title,
                                         Modifier.fillMaxWidth()
                                             .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface)
-                                            .clickable { page = entry }
+                                            .clickable(role = Role.Button) { page = entry }
+                                            .semantics { if (wide) this.selected = selected }
+                                            .heightIn(min = 48.dp)
                                             .padding(horizontal = 20.dp, vertical = 14.dp),
                                         style = MaterialTheme.typography.bodyLarge,
                                     )
@@ -168,7 +180,7 @@ private fun SettingsPageContent(
     when (page) {
         SettingsPage.Input -> {
             Section("Input")
-            Text(inputStatus(view.inputState), style = MaterialTheme.typography.bodyMedium)
+            Text(inputStatus(view.inputState), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = { controller.requestInput(true) }, enabled = view.inputState != InputWireState.Allowed && view.inputState != InputWireState.RequestsDisabled) {
                     Text("Request Control")
@@ -350,7 +362,7 @@ private fun SettingsPageContent(
                 value = offset.toFloat(), valueRange = AVSyncOffset.range.first.toFloat()..AVSyncOffset.range.last.toFloat(),
                 steps = (AVSyncOffset.range.last - AVSyncOffset.range.first) / AVSyncOffset.STEP_MS - 1,
                 onValueChange = { value -> set { it.avSyncOffsetMs = AVSyncOffset.clamped((value / AVSyncOffset.STEP_MS).roundToInt() * AVSyncOffset.STEP_MS) } },
-                modifier = Modifier.semantics { contentDescription = "A/V Sync" },
+                modifier = Modifier.semantics { contentDescription = "A/V Sync"; stateDescription = if (offset > 0) "Plus $offset milliseconds" else "$offset milliseconds" },
             )
             Caption("Adjust if sound plays slightly before or after the picture. Right delays the sound; left delays the picture.")
             if (onResyncAudio != null) {
@@ -402,8 +414,12 @@ private fun ProfileTrayEditor(controller: ReceiverController) {
     profile.trayItems.forEachIndexed { index, item ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(item.item.title, Modifier.weight(1f))
-            TextButton(onClick = { controller.store.updateActiveProfile { it.moveTrayItems(setOf(index), maxOf(0, index - 1)) } }, enabled = index > 0) { Text("Up") }
+            TextButton(
+                onClick = { controller.store.updateActiveProfile { it.moveTrayItems(setOf(index), maxOf(0, index - 1)) } }, enabled = index > 0,
+                modifier = Modifier.semantics { contentDescription = "Move ${item.item.title} up" },
+            ) { Text("Up") }
             Switch(
+                modifier = Modifier.semantics { contentDescription = "Show ${item.item.title}" },
                 checked = item.isVisible,
                 // Settings is permanent chrome on iOS: never hidden.
                 enabled = item.item != com.raisecaterror.meowdisplay.core.controls.ControlTrayItem.Settings,
@@ -428,14 +444,22 @@ private fun CustomLayoutsSection(controller: ReceiverController) {
     prefs.customLayouts.forEach { layout ->
         val active = prefs.activeCustomLayout?.id == layout.id
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text((if (active) "✓ " else "") + layout.name, Modifier.weight(1f).clickable { controller.store.update { it.activeCustomLayoutID = layout.id } })
-            TextButton(onClick = { editingLayoutID = layout.id }) { Text("Edit") }
+            Text(
+                (if (active) "✓ " else "") + layout.name,
+                Modifier.weight(1f).heightIn(min = 48.dp)
+                    .clickable(onClickLabel = "Use this layout", role = Role.Button) { controller.store.update { it.activeCustomLayoutID = layout.id } }
+                    .semantics { contentDescription = layout.name; stateDescription = if (active) "Active layout" else "Not active" },
+            )
+            TextButton(onClick = { editingLayoutID = layout.id }, modifier = Modifier.semantics { contentDescription = "Edit ${layout.name}" }) { Text("Edit") }
             TextButton(onClick = {
                 val code = CustomLayoutShareCode.encode(layout, prefs.functionTrayProfile(prefs.activeFunctionTrayProfile).allItems)
                 context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("MeowDisplay layout", code))
                 message = "Share code copied."
-            }) { Text("Share") }
-            TextButton(onClick = { controller.store.update { it.deleteCustomLayout(layout.id) } }) { Text("Delete") }
+            }, modifier = Modifier.semantics { contentDescription = "Share ${layout.name}" }) { Text("Share") }
+            TextButton(
+                onClick = { controller.store.update { it.deleteCustomLayout(layout.id) } },
+                modifier = Modifier.semantics { contentDescription = "Delete ${layout.name}" },
+            ) { Text("Delete") }
         }
     }
     if (prefs.canCreateCustomLayout) {
@@ -467,7 +491,7 @@ private fun inputStatus(state: InputWireState): String = when (state) {
 
 @Composable
 private fun LabeledRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(label, style = MaterialTheme.typography.bodyMedium)
         Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
     }
@@ -475,7 +499,7 @@ private fun LabeledRow(label: String, value: String) {
 
 @Composable
 internal fun Section(title: String) {
-    Text(title.uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp).semantics { heading() })
+    Text(title.uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp).semantics { heading(); contentDescription = title })
 }
 
 @Composable
@@ -483,9 +507,13 @@ internal fun Caption(text: String) = Text(text, style = MaterialTheme.typography
 
 @Composable
 internal fun Toggle(title: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
+    // One switch row for TalkBack and Voice Access: the whole row toggles, the Switch itself is not a second stop.
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(title, Modifier.weight(1f), color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 
@@ -533,14 +561,15 @@ private fun MirrorDisplayPicker(media: SessionHost, stream: StreamSettings) {
         state.displays.forEach { display ->
             val selected = display.uuid == state.selectedUUID
             Row(
-                Modifier.fillMaxWidth().clickable { media.session.requestMirrorDisplay(display.uuid) }.padding(vertical = 8.dp),
+                Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .selectable(selected = selected, role = Role.RadioButton) { media.session.requestMirrorDisplay(display.uuid) }.padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(if (display.isMain) "${display.name} (Main)" else display.name)
                     if (display.pixelWidth != null && display.pixelHeight != null) Caption("${display.pixelWidth}×${display.pixelHeight}")
                 }
-                if (selected) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                if (selected) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.clearAndSetSemantics {})
             }
         }
         if (state.selectionUnavailable) Text("Selected display unavailable", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -620,7 +649,8 @@ internal fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             options.forEachIndexed { index, option ->
                 SegmentedButton(selected = option == selected, onClick = { onSelect(option) }, shape = SegmentedButtonDefaults.itemShape(index, options.size)) {
-                    Text(label(option), maxLines = 1)
+                    // Two lines, so a large font size wraps the label instead of cutting it off.
+                    Text(label(option), maxLines = 2)
                 }
             }
         }
@@ -631,7 +661,10 @@ internal fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T
 internal fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
     Column {
         Row { Text(title, Modifier.weight(1f)); Text("%.2f×".format(value)) }
-        Slider(value = value, onValueChange = onChange, valueRange = range)
+        Slider(
+            value = value, onValueChange = onChange, valueRange = range,
+            modifier = Modifier.semantics { contentDescription = title; stateDescription = "%.2f times".format(value) },
+        )
     }
 }
 

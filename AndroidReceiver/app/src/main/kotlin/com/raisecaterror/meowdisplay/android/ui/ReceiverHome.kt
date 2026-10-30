@@ -53,9 +53,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -150,9 +155,9 @@ fun ReceiverHome(
             if (onReturnToDisplay != null && mediaUi.admitted && !mediaUi.awaitingMacApproval) {
                 item { ConnectedCard(macName(mediaUi.peerID), mediaUi, onReturnToDisplay, onOpenSettings) { media.session.disconnect() } }
             } else {
-                item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID)), centered = true) }   // under the name, as on iPhone
+                item { Hint(sessionStatus(mediaUi, macName(mediaUi.peerID)), centered = true, live = true) }   // under the name, as on iPhone
             }
-            mediaUi.updateMessage?.let { message -> item { Hint(message) } }
+            mediaUi.updateMessage?.let { message -> item { Hint(message, live = true) } }
             ui.message?.let { message -> item { Notice(message, onDismiss = pairing::dismissMessage) } }
             mediaUi.connectFailedFor?.let { peer ->
                 item {
@@ -166,7 +171,7 @@ fun ReceiverHome(
                     if (paired.isEmpty() && toPair.isEmpty()) {
                         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (mediaUi.listening) {
-                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(Modifier.size(16.dp).clearAndSetSemantics {}, strokeWidth = 2.dp)
                                 Spacer(Modifier.width(10.dp))
                             }
                             Text(
@@ -305,7 +310,7 @@ fun ReceiverHome(
         AlertDialog(
             onDismissRequest = { forgetFor = null },
             title = { Text("Forget \u201C${media.macName(peerID)}\u201D?") },
-            text = { Text("This removes the pairing and its saved address. To use this Mac again, pair it again.") },
+            text = { Text("This removes the pairing and its saved address. To use this Mac again, pair it again.", Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = { TextButton(onClick = { remote.forget(peerID); forgetFor = null }) { Text("Forget", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { forgetFor = null }) { Text("Cancel") } },
         )
@@ -318,7 +323,7 @@ fun ReceiverHome(
             text = {
                 Text(cleanupList.joinToString("\n") { e ->
                     e.name + (e.pairedAtMillis?.let { " · paired " + format.format(java.util.Date(it)) } ?: " · paired before dates were kept")
-                })
+                }, Modifier.verticalScroll(rememberScrollState()))
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -349,7 +354,8 @@ fun ReceiverHome(
                         DisplayMode.Mirror -> "mirror its screen"
                         DisplayMode.Window -> "show its windows"
                         else -> "extend its desktop"
-                    } + " on this device. It can't control anything here, and this device can't control it unless you ask."
+                    } + " on this device. It can't control anything here, and this device can't control it unless you ask.",
+                    Modifier.verticalScroll(rememberScrollState()),
                 )
             },
             confirmButton = { TextButton(onClick = { media.answer(approval.id, ReceiverApprovalDecision.Allow) }) { Text("Allow") } },
@@ -370,7 +376,7 @@ fun ReceiverHome(
                 )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Make sure ${prompt.peerName} shows the same code:")
                     Text(
                         prompt.sas, fontSize = 40.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace,
@@ -396,18 +402,21 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
         modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Connected to $mac", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
-            val source = when (ui.source) {
-                "mirror" -> "Mirror"
-                "extend" -> "Extend"
-                "window" -> "Windows"
-                else -> "Showing the Mac"
+            // One reading for the status, spoken again when it changes (for example when control is granted).
+            Column(Modifier.semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+                Text("Connected to $mac", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                val source = when (ui.source) {
+                    "mirror" -> "Mirror"
+                    "extend" -> "Extend"
+                    "window" -> "Windows"
+                    else -> "Showing the Mac"
+                }
+                val control = if (ui.input == InputWireState.Allowed) "Controlling" else "View Only"
+                Text(
+                    listOfNotNull(source, control, ui.route?.sessionLabel).joinToString(" · "),
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
             }
-            val control = if (ui.input == InputWireState.Allowed) "Controlling" else "View Only"
-            Text(
-                listOfNotNull(source, control, ui.route?.sessionLabel).joinToString(" · "),
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onReturn) { Text("Return to Display") }
                 onSettings?.let { OutlinedButton(onClick = it) { Text("Settings") } }
@@ -419,7 +428,7 @@ private fun ConnectedCard(mac: String, ui: MediaUiState, onReturn: () -> Unit, o
         AlertDialog(
             onDismissRequest = { confirm = false },
             title = { Text("Disconnect from $mac?") },
-            text = { Text("The picture closes on this device. Connect again from here any time.") },
+            text = { Text("The picture closes on this device. Connect again from here any time.", Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = { TextButton(onClick = { confirm = false; onDisconnect() }) { Text("Disconnect") } },
             dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
         )
@@ -431,7 +440,7 @@ private fun Steps() {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         com.raisecaterror.meowdisplay.android.receiver.connectionHelp.forEach { (title, body) ->
             Column {
-                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                 Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -448,7 +457,7 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("This Device") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 var name by remember { mutableStateOf(DeviceIdentity.customName(context) ?: "") }
                 OutlinedTextField(
                     name, { name = it.take(40) }, label = { Text("Device Name") }, singleLine = true,
@@ -460,23 +469,26 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
                 if ((DeviceIdentity.customName(context) ?: "") != name.trim()) {
                     TextButton(onClick = { DeviceIdentity.setCustomName(context, name) }) { Text("Save Name") }
                 }
-                Text("Security key", style = MaterialTheme.typography.labelLarge)
+                Text("Security key", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
                 Text(
                     if (revealed) fingerprint.chunked(4).joinToString(" ") else "Hidden",
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.semantics { contentDescription = if (revealed) "Security key fingerprint $fingerprint" else "Security key hidden" },
                 )
                 Text("Macs pin this key when you pair. You only need it to check a pairing by hand.", style = MaterialTheme.typography.bodySmall)
-                if (copied) Text("Copied.", style = MaterialTheme.typography.bodySmall)
+                if (copied) Text("Copied.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }
         },
         confirmButton = {
             Row {
-                TextButton(onClick = { revealed = !revealed }) { Text(if (revealed) "Hide" else "Reveal") }
+                TextButton(
+                    onClick = { revealed = !revealed },
+                    modifier = Modifier.semantics { contentDescription = if (revealed) "Hide security key" else "Reveal security key" },
+                ) { Text(if (revealed) "Hide" else "Reveal") }
                 if (revealed) TextButton(onClick = {
                     context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("MeowDisplay key", fingerprint))
                     copied = true
-                }) { Text("Copy") }
+                }, modifier = Modifier.semantics { contentDescription = "Copy security key" }) { Text("Copy") }
                 TextButton(onClick = onDismiss) { Text("Done") }
             }
         },
@@ -531,8 +543,10 @@ private fun FooterLinks(onSteps: () -> Unit, onDevice: () -> Unit, onDemo: (() -
 }
 
 @Composable
-private fun Hint(text: String, centered: Boolean = false) {
-    Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+private fun Hint(text: String, centered: Boolean = false, live: Boolean = false) {
+    // Connecting, connected, connection lost: these change without a touch, so a screen reader says them (once, politely).
+    Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth().then(if (live) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier),
         textAlign = if (centered) androidx.compose.ui.text.style.TextAlign.Center else null)
 }
 
@@ -540,7 +554,7 @@ private fun Hint(text: String, centered: Boolean = false) {
 private fun Notice(text: String, onDismiss: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(text, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface)
+            Text(text, Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.onSurface)
             TextButton(onClick = onDismiss) { Text("OK") }
         }
     }
@@ -605,11 +619,15 @@ private fun ConnectionPolicyDialog(
         onDismissRequest = onDismiss,
         title = { Text("Connection Requests") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("When $mac asks to start a session on this device.", style = MaterialTheme.typography.bodyMedium)
                 options.forEach { (policy, label) ->
-                    Row(Modifier.fillMaxWidth().clickable { onChoose(policy) }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.material3.RadioButton(selected = current == policy, onClick = { onChoose(policy) })
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected = current == policy, role = Role.RadioButton) { onChoose(policy) }.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.RadioButton(selected = current == policy, onClick = null)
+                        Spacer(Modifier.width(8.dp))
                         Text(label)
                     }
                 }

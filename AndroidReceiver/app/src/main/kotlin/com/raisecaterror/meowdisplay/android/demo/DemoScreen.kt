@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -153,7 +154,7 @@ private fun DemoBadgeBar(onGuide: () -> Unit, onExit: () -> Unit, modifier: Modi
     ) {
         Text(
             "DEMO", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFFEA580C))
+            modifier = Modifier.minimumInteractiveComponentSize().clip(RoundedCornerShape(6.dp)).background(Color(0xFFEA580C))
                 .clickable(onClickLabel = "Open the demo guide", role = Role.Button, onClick = onGuide)
                 .padding(horizontal = 8.dp, vertical = 4.dp)
                 .semantics { contentDescription = "Demo: a sample Mac, nothing is connected" },
@@ -187,7 +188,7 @@ private fun DemoGuide(onDismiss: () -> Unit, onExit: () -> Unit) {
 @Composable
 private fun GuideItem(title: String, body: String) {
     Column {
-        Text(title, style = MaterialTheme.typography.titleSmall)
+        Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
         Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

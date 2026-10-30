@@ -38,7 +38,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -309,7 +311,7 @@ internal fun ClipboardBanner(clipboard: ClipboardModel, modifier: Modifier = Mod
         }
         ui.progress?.let { (done, total) ->
             Pill {
-                LinearProgressIndicator(progress = { done.toFloat() / maxOf(total, 1L) }, modifier = Modifier.width(120.dp))
+                LinearProgressIndicator(progress = { done.toFloat() / maxOf(total, 1L) }, modifier = Modifier.width(120.dp).semantics { contentDescription = "Transfer progress" })
                 TextButton(onClick = { clipboard.cancelTransfer() }, colors = light) { Text("Cancel") }
             }
         }
@@ -322,7 +324,8 @@ internal fun ClipboardBanner(clipboard: ClipboardModel, modifier: Modifier = Mod
 
 @Composable
 private fun Pill(content: @Composable () -> Unit) {
-    Surface(color = Color(0xEE1F1F1F), contentColor = Color.White, shape = RoundedCornerShape(percent = 50)) {
+    // These appear on their own (a copy was made, the Mac copied files): say so once, politely.
+    Surface(color = Color(0xEE1F1F1F), contentColor = Color.White, shape = RoundedCornerShape(percent = 50), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             content()
         }

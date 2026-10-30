@@ -58,7 +58,7 @@ internal fun HelpPage() {
         Heading("How to Connect")
         connectionHelp.forEach { (title, body) ->
             Column {
-                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                 Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -79,7 +79,7 @@ internal fun HelpPage() {
         )
 
         Heading("About")
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
             Text("Version", Modifier.weight(1f))
             Text(versionName(context), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

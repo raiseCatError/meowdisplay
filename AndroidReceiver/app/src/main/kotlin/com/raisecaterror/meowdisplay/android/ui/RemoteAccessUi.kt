@@ -31,8 +31,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -102,7 +105,7 @@ internal fun AddRemoteMacDialog(
             title = { Text("Pairing…") },
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(Modifier.size(20.dp).clearAndSetSemantics {}, strokeWidth = 2.dp)
                     Spacer(Modifier.width(12.dp))
                     Text("Make sure Pair over Remote is open on your Mac. When a code appears, check that both screens show the same one and confirm it on both.")
                 }
@@ -146,7 +149,7 @@ internal fun AddRemoteMacDialog(
                         modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Remote Mac address" },
                     )
                     if (!choosing) {
-                        Text("Pair New Mac", style = MaterialTheme.typography.titleSmall)
+                        Text("Pair New Mac", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                         Text(
                             "On your Mac: Settings → Devices → Open Pair over Remote, then confirm the code on both.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -170,14 +173,14 @@ internal fun AddRemoteMacDialog(
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Use for a Paired Mac") }
                     } else {
-                        Text("Which Mac is at this address?", style = MaterialTheme.typography.titleSmall)
+                        Text("Which Mac is at this address?", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
                         if (paired.isEmpty()) {
                             Text("No Macs are paired yet. Go back and use Pair New Mac.", style = MaterialTheme.typography.bodySmall)
                         }
                         paired.forEach { mac ->
                             Row(
                                 Modifier.fillMaxWidth().selectable(selected = chosen == mac.peerID, role = Role.RadioButton, onClick = { chosen = mac.peerID })
-                                    .padding(vertical = 2.dp),
+                                    .heightIn(min = 48.dp).padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 RadioButton(selected = chosen == mac.peerID, onClick = null)

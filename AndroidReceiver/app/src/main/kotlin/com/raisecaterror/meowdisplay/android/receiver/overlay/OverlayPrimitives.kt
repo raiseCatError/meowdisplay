@@ -41,8 +41,13 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -391,21 +396,26 @@ internal fun MoveViewBanner(cx: Double, cy: Double, onReset: () -> Unit, onDone:
                 .shadow(8.dp, shape, clip = false, ambientColor = Color.Black.copy(0.25f), spotColor = Color.Black.copy(0.25f))
                 .background(Color(0xF01C1C1E), shape)
                 .border(0.5.dp, Color.White.copy(0.12f), shape)
-                .padding(horizontal = 16.dp, vertical = 9.dp)
+                // The buttons below are 48 dp tall, so the bar keeps its height with less padding of its own.
+                .padding(horizontal = 16.dp, vertical = 2.dp)
                 .semantics(mergeDescendants = false) { },
             horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
             GlyphIcon(OverlayGlyph.Move, 16.dp, Color.White)
-            Text("Move View", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Box(Modifier.width(0.5.dp).height(18.dp).background(Color.White.copy(0.3f)))
+            // It appears when Move View starts: a screen reader says so.
             Text(
-                "Reset", color = accent, fontSize = 15.sp, maxLines = 1,
-                modifier = Modifier.clickable(role = Role.Button, onClick = onReset).padding(vertical = 8.dp),
+                "Move View", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite; contentDescription = "Move View is on" },
             )
-            Text(
-                "Done", color = accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                modifier = Modifier.clickable(role = Role.Button, onClick = onDone).padding(vertical = 8.dp),
-            )
+            Box(Modifier.width(0.5.dp).height(18.dp).background(Color.White.copy(0.3f)).clearAndSetSemantics {})
+            Box(
+                Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).clickable(role = Role.Button, onClick = onReset),
+                contentAlignment = Alignment.Center,
+            ) { Text("Reset", color = accent, fontSize = 15.sp, maxLines = 1) }
+            Box(
+                Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).clickable(role = Role.Button, onClick = onDone),
+                contentAlignment = Alignment.Center,
+            ) { Text("Done", color = accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) }
         }
     }
 }

@@ -17,7 +17,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -83,13 +85,13 @@ fun UpdateRequiredNotice(media: SessionHost) {
     val link = "https://play.google.com/store/apps/details?id=${context.packageName}"
     Dialog(onDismissRequest = { dismissed = true }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         BackHandler { dismissed = true }
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        Surface(Modifier.fillMaxSize().semantics { paneTitle = "Update required" }, color = MaterialTheme.colorScheme.surface) {
             Column(
                 Modifier.safeDrawingPadding().padding(32.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("⬆", style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.primary)
+                Text("⬆", style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.clearAndSetSemantics {})
                 Text("Update required", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
                 Text(
                     ui.updateMessage ?: "Update MeowDisplay to keep using your second display.",

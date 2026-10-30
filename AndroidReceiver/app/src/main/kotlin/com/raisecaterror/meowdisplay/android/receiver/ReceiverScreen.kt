@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
@@ -71,8 +72,10 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -326,6 +329,11 @@ fun ReceiverScreen(
                 }
             },
             modifier = Modifier.fillMaxSize(),
+            // TalkBack: this view is the Mac's picture and the touch surface. Name it and say whether it controls the Mac.
+            update = { view ->
+                view.contentDescription = if (picture != null) "Sample Mac screen" else "Mac screen"
+                androidx.core.view.ViewCompat.setStateDescription(view, if (state.inputAllowed) "Controlling" else "View only")
+            },
             onRelease = { if (controller.inputView === it) controller.inputView = null },
         )
 
@@ -437,6 +445,7 @@ fun ReceiverScreen(
                     if (on) "Privacy Shield is on: the Mac's screen is covered" else "Privacy Shield is off: the Mac's screen shows this session",
                     color = androidx.compose.ui.graphics.Color.White, style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = (insets.top + 12).dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite }
                         .background(androidx.compose.ui.graphics.Color(0xE6202124), RoundedCornerShape(50)).padding(horizontal = 14.dp, vertical = 9.dp),
                 )
             }
@@ -473,8 +482,10 @@ private fun NaturalTouchHint(onDone: () -> Unit, modifier: Modifier = Modifier) 
     // Counts down only while this screen has focus: under the Settings dialog (or with the app in
     // the background) nobody can read it.
     val focused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
-    LaunchedEffect(focused) {
-        if (!focused) return@LaunchedEffect
+    val screenReader = com.raisecaterror.meowdisplay.android.ui.rememberScreenReaderRunning()
+    LaunchedEffect(focused, screenReader) {
+        // A screen reader user needs longer than twelve seconds to reach it: it stays until OK.
+        if (!focused || screenReader) return@LaunchedEffect
         kotlinx.coroutines.delay(12_000)
         onDone()
     }
@@ -486,7 +497,7 @@ private fun NaturalTouchHint(onDone: () -> Unit, modifier: Modifier = Modifier) 
         shadowElevation = 6.dp,
     ) {
         androidx.compose.foundation.layout.Row(Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
-            androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+            androidx.compose.foundation.layout.Column(Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite }) {
                 Text("Natural Touch is on", fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
                 Text(
                     "Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings → Input.",
@@ -517,6 +528,7 @@ private fun hingeFor(folds: List<CGRect>, t: RemoteViewportTransform): WHinge? {
 /** The Mac's frames on a SurfaceView; the decoder renders straight into it. */
 private fun videoSurface(context: android.content.Context, pipeline: MediaPipeline): SurfaceView = SurfaceView(context).apply {
     keepScreenOn = true
+    importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO   // the input view over it is "Mac screen"
     holder.addCallback(object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
             pipeline.video.setSurface(holder.surface)
@@ -576,8 +588,11 @@ private fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Uni
                 .background(Color(0xF0222224), CircleShape)
                 .border(0.75.dp, Color.White.copy(alpha = 0.14f), CircleShape)
                 .then(if (tappable) Modifier.clickable(role = Role.Button, onClick = onTap) else Modifier)
-                .semantics { contentDescription = title }
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                // Requesting, allowed and declined appear without a touch: say them once, politely.
+                .semantics { contentDescription = title; liveRegion = LiveRegionMode.Polite }
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center,
         ) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }

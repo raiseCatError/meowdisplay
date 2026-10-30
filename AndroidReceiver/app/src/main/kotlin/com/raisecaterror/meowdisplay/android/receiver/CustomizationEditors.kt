@@ -50,7 +50,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
@@ -180,7 +182,7 @@ internal fun ShortcutEditorDialog(
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(16.dp), shape = MaterialTheme.shapes.large) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (initial == null) "New Button" else "Edit Button", style = MaterialTheme.typography.titleLarge)
+                Text(if (initial == null) "New Button" else "Edit Button", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ItemBadge(item, 56.dp)
                     Column {
@@ -209,7 +211,10 @@ internal fun ShortcutEditorDialog(
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(if (keys.size > 1) "Key ${index + 1}" else "Key", Modifier.weight(1f))
                                 KeyPicker(usage, exclude = keys.toSet() - usage) { picked -> keys = keys.toMutableList().also { it[index] = picked } }
-                                if (keys.size > 1) TextButton(onClick = { keys = keys.filterIndexed { i, _ -> i != index } }) { Text("Remove") }
+                                if (keys.size > 1) TextButton(
+                                    onClick = { keys = keys.filterIndexed { i, _ -> i != index } },
+                                    modifier = Modifier.semantics { contentDescription = "Remove key ${index + 1}" },
+                                ) { Text("Remove") }
                             }
                         }
                         if (keys.size < KeyboardShortcut.MAXIMUM_KEYS) {
@@ -259,7 +264,9 @@ private fun DeleteConfirmation(title: String, onDelete: () -> Unit, onCancel: ()
 private fun KeyPicker(usage: Int, exclude: Set<Int> = emptySet(), onPick: (Int) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        OutlinedButton(onClick = { open = true }) { Text(appGestureCommandKeyLabel(usage)) }
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "Key ${appGestureCommandKeyLabel(usage)}" }) {
+            Text(appGestureCommandKeyLabel(usage))
+        }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.heightIn(max = 360.dp)) {
             appGestureCommandEditableKeys.filter { it.second !in exclude }.forEach { (label, value) ->
                 DropdownMenuItem(text = { Text(label) }, onClick = { onPick(value); open = false })
@@ -336,13 +343,15 @@ internal fun FunctionTrayEditor(controller: ReceiverController) {
         val item = configuration.resolvedItem
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ItemBadge(item)
-            Column(Modifier.weight(1f).clickable { editing = item.id }.semantics { contentDescription = "Edit ${item.title}" }) {
+            Column(Modifier.weight(1f).heightIn(min = 48.dp).clickable(role = Role.Button) { editing = item.id }.semantics {
+                contentDescription = "Edit ${item.title}, sends ${item.keysDescription}" + if (configuration.isVisible) "" else ", hidden"
+            }) {
                 Text(item.title)
                 Text(item.keysDescription + if (configuration.isVisible) "" else " · Hidden", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
-            ReorderButtons(index, profile.items.size) { from, to -> controller.store.updateActiveFunctionTrayProfile { it.moveItems(setOf(from), to) } }
-            Switch(checked = configuration.isVisible, onCheckedChange = { on ->
+            ReorderButtons(index, profile.items.size, item.title) { from, to -> controller.store.updateActiveFunctionTrayProfile { it.moveItems(setOf(from), to) } }
+            Switch(checked = configuration.isVisible, modifier = Modifier.semantics { contentDescription = "Show ${item.title}" }, onCheckedChange = { on ->
                 controller.store.updateActiveFunctionTrayProfile { p -> p.items = p.items.map { if (it.id == item.id) it.copy(isVisible = on) else it } }
             })
         }
@@ -411,10 +420,10 @@ private fun BuiltInActionDialog(item: ShortcutItem, customTitle: String, onSave:
 }
 
 @Composable
-private fun ReorderButtons(index: Int, count: Int, onMove: (Int, Int) -> Unit) {
-    TextButton(onClick = { onMove(index, index - 1) }, enabled = index > 0, modifier = Modifier.semantics { contentDescription = "Move up" }) { Text("↑") }
+private fun ReorderButtons(index: Int, count: Int, name: String, onMove: (Int, Int) -> Unit) {
+    TextButton(onClick = { onMove(index, index - 1) }, enabled = index > 0, modifier = Modifier.semantics { contentDescription = "Move $name up" }) { Text("↑") }
     // `moveItems` uses SwiftUI onMove semantics: moving down one row targets index + 2.
-    TextButton(onClick = { onMove(index, index + 2) }, enabled = index < count - 1, modifier = Modifier.semantics { contentDescription = "Move down" }) { Text("↓") }
+    TextButton(onClick = { onMove(index, index + 2) }, enabled = index < count - 1, modifier = Modifier.semantics { contentDescription = "Move $name down" }) { Text("↓") }
 }
 
 // MARK: - Chord palettes
@@ -438,12 +447,14 @@ internal fun ChordPaletteEditor(controller: ReceiverController) {
     actions.forEachIndexed { index, action ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ItemBadge(action)
-            Column(Modifier.weight(1f).clickable { editing = action }) {
+            Column(Modifier.weight(1f).heightIn(min = 48.dp).clickable(role = Role.Button) { editing = action }.semantics {
+                contentDescription = "Edit ${action.title}, sends ${action.keysDescription}"
+            }) {
                 Text(action.title)
                 Text(action.keysDescription, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
-            ReorderButtons(index, actions.size) { from, to -> controller.store.updateActiveProfile { it.moveActions(chord, setOf(from), to) } }
-            TextButton(onClick = { setActions(actions.filterIndexed { i, _ -> i != index }) }) { Text("Remove") }
+            ReorderButtons(index, actions.size, action.title) { from, to -> controller.store.updateActiveProfile { it.moveActions(chord, setOf(from), to) } }
+            TextButton(onClick = { setActions(actions.filterIndexed { i, _ -> i != index }) }, modifier = Modifier.semantics { contentDescription = "Remove ${action.title}" }) { Text("Remove") }
         }
     }
     if (actions.isEmpty()) Caption("No actions yet. Hold or latch ${chord.symbols} to show what you add here.")
@@ -486,7 +497,11 @@ internal fun AppGestureCommandsEditor(controller: ReceiverController) {
     var editing by remember { mutableStateOf<AppGestureCommandKind?>(null) }
     AppGestureCommandKind.entries.forEach { kind ->
         val shortcut = prefs.appGestureCommands.shortcut(kind)
-        Row(Modifier.fillMaxWidth().clickable { editing = kind }.padding(vertical = 6.dp).semantics { contentDescription = "Edit ${kind.title}" }) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { editing = kind }.padding(vertical = 6.dp)
+                .semantics { contentDescription = "Edit ${kind.title}, now ${appGestureCommandDisplayText(shortcut)}" },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(kind.title, Modifier.weight(1f))
             Text(appGestureCommandDisplayText(shortcut), fontFamily = FontFamily.Monospace)
         }

@@ -154,6 +154,10 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.heightIn
+import com.raisecaterror.meowdisplay.android.ui.rememberScreenReaderRunning
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -445,10 +449,13 @@ private fun CloseToast(notice: WindowCloseNotice, safe: CGRect, avoiding: List<C
     CenteredAt(safe.midX, max(toolbarY(safe.midX, safe, avoiding) - 64, safe.minY + 160), min(460.0, safe.width - 32)) {
         Row(
             Modifier.background(Color(0xF01C1C1E), RoundedCornerShape(14.dp)).border(0.75.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
-                .clickable(onClick = onDismiss).padding(horizontal = 14.dp, vertical = 10.dp),
+                .clickable(onClickLabel = "Dismiss", role = Role.Button, onClick = onDismiss).heightIn(min = 48.dp).padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(if (notice.isError) "⚠︎" else "✓", color = if (notice.isError) Color(0xFFFFA94D) else Color(0xFF4CD964), fontSize = 15.sp)
+            Text(
+                if (notice.isError) "⚠︎" else "✓", color = if (notice.isError) Color(0xFFFFA94D) else Color(0xFF4CD964), fontSize = 15.sp,
+                modifier = Modifier.clearAndSetSemantics {},
+            )
             Text(notice.message, color = Color.White, fontSize = 13.sp)
         }
     }
@@ -621,11 +628,12 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
     ) {
         // Search: the phone's own keyboard. Nothing typed here reaches the Mac.
         Row(
-            Modifier.fillMaxWidth().height(44.dp).background(Glass, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.16f), CircleShape)
-                .clickable { focus.requestFocus() }.padding(horizontal = 14.dp),
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).background(Glass, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                // Not a clickable: that would fold the search field and the clear button into one screen-reader stop.
+                .pointerInput(Unit) { detectTapGestures { focus.requestFocus() } }.padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("⌕", color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp)
+            Text("⌕", color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, modifier = Modifier.clearAndSetSemantics {})
             Spacer(Modifier.width(8.dp))
             Box(Modifier.weight(1f)) {
                 if (host.query.isEmpty()) Text("Search apps and windows", color = Color.White.copy(alpha = 0.55f), fontSize = 15.sp)
@@ -643,7 +651,11 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
                     }.semantics { contentDescription = "Search apps and windows on the Mac" },
                 )
             }
-            if (host.query.isNotEmpty()) Text("✕", color = Color.White.copy(alpha = 0.7f), modifier = Modifier.clickable { host.query = "" }.padding(6.dp))
+            if (host.query.isNotEmpty()) Text(
+                "✕", color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button) { host.query = "" }.padding(6.dp)
+                    .semantics { contentDescription = "Clear search" },
+            )
         }
         // The app carousel: Finder first; tap an app to show just its windows (tap again for all).
         Row(
@@ -659,8 +671,11 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
                         Modifier.size(50.dp).clip(RoundedCornerShape(12.dp))
                             .background(if (selected) StagePeekAccent.copy(alpha = 0.35f) else Color.Transparent)
                             .appHoldToDrag(controller, host, app)
-                            .clickable { if (controller.ui.value.drag == null) host.tapApp(app) }
-                            .semantics { contentDescription = app.name + if (app.running) ", running" else "" },
+                            .clickable(role = Role.Button) { if (controller.ui.value.drag == null) host.tapApp(app) }
+                            .semantics {
+                                contentDescription = app.name + if (app.running) ", running" else ""
+                                if (selected) stateDescription = "Showing only this app's windows"
+                            },
                         contentAlignment = Alignment.Center,
                     ) {
                         AppIconView(icons[app.bundleID], app.name, 40.0)
@@ -669,7 +684,7 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
                 }
             }
             Box(
-                Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)).clickable { host.launchpad = true }.semantics { contentDescription = "All apps" },
+                Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)).clickable(role = Role.Button) { host.launchpad = true }.semantics { contentDescription = "All apps" },
                 contentAlignment = Alignment.Center,
             ) { Text("⋯", color = Color.White, fontSize = 24.sp) }
         }
@@ -714,6 +729,7 @@ private fun Toolbar(host: StagePeekHost, cards: List<StagePeekCard>, safe: CGRec
 private fun ToolbarButton(label: String, glyph: String? = null, onClick: () -> Unit) {
     Box(
         Modifier
+            .minimumInteractiveComponentSize()
             .background(Color(0xE61C1C1E), CircleShape)
             .border(0.75.dp, Color.White.copy(alpha = 0.18f), CircleShape)
             .clickable(role = Role.Button, onClickLabel = label, onClick = onClick)
@@ -800,9 +816,10 @@ private fun SpatialCard(
             .clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha = 0.08f))
             .border(if (current) 2.5.dp else 1.dp, if (current) StagePeekAccent else Color.White.copy(alpha = if (inTile) 0.6f else 0.18f), RoundedCornerShape(8.dp))
             .holdToDrag(controller, host, w, { origin }, onLift = { lifted = it }, onMenu = { host.menuWindow = w })
-            .clickable { if (controller.ui.value.drag == null) host.pick(w) }
+            .clickable(role = Role.Button) { if (controller.ui.value.drag == null) host.pick(w) }
             .semantics {
                 contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (inTile) ", in a pane" else "") + (if (closing) ", closing" else "")
+                if (current) stateDescription = "Showing now"
                 customActions = listOfNotNull(
                     CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true },
                     if (closable) CustomAccessibilityAction("Close Window") { host.confirmClose = w; true } else null,
@@ -893,7 +910,7 @@ private fun Gallery(
                                 LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
                                 Column(
                                     Modifier.width(76.dp).appHoldToDrag(controller, host, app)
-                                        .clickable { if (controller.ui.value.drag == null) { host.query = ""; host.tapApp(app, forceFilter = true) } }
+                                        .clickable(role = Role.Button) { if (controller.ui.value.drag == null) { host.query = ""; host.tapApp(app, forceFilter = true) } }
                                         .semantics { contentDescription = app.name },
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                 ) {
@@ -915,7 +932,7 @@ private fun Gallery(
                     item(span = { GridItemSpan(columns) }) {
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Glass)
-                                .clickable { controller.files.open(query) }.padding(12.dp)
+                                .clickable(role = Role.Button) { controller.files.open(query) }.padding(12.dp)
                                 .semantics { contentDescription = "Search files on the Mac for $query" },
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -1004,9 +1021,9 @@ private fun EmptyApp(controller: WorkspaceController, ui: WorkspaceUi, app: MacA
         } else {
             Text(
                 "Open on Mac", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.graphicsLayer { alpha = if (inputAllowed) 1f else 0.5f }.background(Glass, CircleShape)
+                modifier = Modifier.graphicsLayer { alpha = if (inputAllowed) 1f else 0.5f }.minimumInteractiveComponentSize().background(Glass, CircleShape)
                     .border(0.75.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .clickable(enabled = inputAllowed) { controller.launch(app.bundleID) }.padding(horizontal = 18.dp, vertical = 10.dp),
+                    .clickable(enabled = inputAllowed, role = Role.Button) { controller.launch(app.bundleID) }.padding(horizontal = 18.dp, vertical = 10.dp),
             )
             if (!inputAllowed) RequestControlInline(compact = true)
             if (!inputAllowed) Text("Opening apps needs control of the Mac.", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, textAlign = TextAlign.Center)
@@ -1166,7 +1183,7 @@ private fun GalleryCard(
                         if (open) host.haptics(StagePeekHaptic.Tick)
                     })
                 .holdToDrag(controller, host, w, { origin }, onLift = { lifted = it; if (it) onReveal(false) }, onMenu = onMenu)
-                .clickable {
+                .clickable(role = Role.Button) {
                     if (controller.ui.value.drag != null) return@clickable
                     // A tap while a Close Window button shows only puts the card back.
                     if (host.galleryRevealed != null) { host.galleryRevealed = null; return@clickable }
@@ -1175,6 +1192,7 @@ private fun GalleryCard(
                 .semantics {
                     contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (w.pausedSpoken?.let { ", $it" } ?: "") +
                         (if (inTile) ", in a pane" else "") + (if (closing) ", closing" else "")
+                    if (current) stateDescription = "Showing now"
                     customActions = listOfNotNull(
                         CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true },
                         if (closable) CustomAccessibilityAction("Close Window") { onConfirmClose(); true } else null,
@@ -1202,7 +1220,7 @@ private fun GalleryCard(
                 if (closable && inputAllowed && !closing && shown == 0f) {
                     // Small to look at, comfortable to hit; away from the title and the badges.
                     Box(
-                        Modifier.align(Alignment.TopStart).size(40.dp).clickable(role = Role.Button, onClickLabel = "Close Window", onClick = onConfirmClose)
+                        Modifier.align(Alignment.TopStart).size(48.dp).clickable(role = Role.Button, onClickLabel = "Close Window", onClick = onConfirmClose)
                             .semantics { contentDescription = "Close Window $name" },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -1231,8 +1249,11 @@ private fun DisplayCard(controller: WorkspaceController, host: StagePeekHost, di
             .graphicsLayer { scaleX = lift; scaleY = lift }
             .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
             .holdToDrag(controller, host, controller.displayWindow(disp), { origin }, onLift = { lifted = it }, onMenu = null)
-            .clickable { if (controller.ui.value.drag == null) host.pickDisplay(disp) }
-            .semantics { contentDescription = if (disp.isMain) "Full Desktop, ${disp.name}" else disp.name },
+            .clickable(role = Role.Button) { if (controller.ui.value.drag == null) host.pickDisplay(disp) }
+            .semantics {
+                contentDescription = if (disp.isMain) "Full Desktop, ${disp.name}" else disp.name
+                if (current) stateDescription = "Showing now"
+            },
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Box(
@@ -1273,7 +1294,7 @@ private fun Launchpad(controller: WorkspaceController, ui: WorkspaceUi, host: St
         if (running.isNotEmpty()) add("Running" to running)
         add("All Apps" to apps)
     }
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)).pointerInput(Unit) { detectDragGesturesAfterLongPress(onDrag = { _, _ -> }) }.clickable { host.launchpad = false }) {
+    Box(Modifier.fillMaxSize().semantics { paneTitle = "Apps on the Mac" }.background(Color.Black.copy(alpha = 0.6f)).pointerInput(Unit) { detectDragGesturesAfterLongPress(onDrag = { _, _ -> }) }.pointerInput(Unit) { detectTapGestures { host.launchpad = false } }) {
         LazyVerticalGrid(
             columns = GridCells.Adaptive(84.dp),
             modifier = Modifier.offset { IntOffset((safe.minX * d).roundToInt(), (safe.minY * d).roundToInt()) }.size(safe.width.dp, safe.height.dp).padding(horizontal = 16.dp),
@@ -1281,7 +1302,7 @@ private fun Launchpad(controller: WorkspaceController, ui: WorkspaceUi, host: St
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Apps on the Mac", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("Apps on the Mac", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).semantics { heading() })
                     ToolbarButton("Done") { host.launchpad = false }
                 }
             }
@@ -1293,6 +1314,7 @@ private fun Launchpad(controller: WorkspaceController, ui: WorkspaceUi, host: St
                     LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
                     Column(
                         Modifier.combinedClickable(
+                            role = Role.Button, onLongClickLabel = if (app.bundleID in favorites) "Remove from favorites" else "Make a favorite",
                             onClick = { host.launchpad = false; host.openApp(app) },
                             onLongClick = {
                                 favorites = if (app.bundleID in favorites) favorites - app.bundleID else favorites + app.bundleID
@@ -1721,28 +1743,33 @@ fun WindowModePrompt(onYes: () -> Unit, onNo: () -> Unit, modifier: Modifier = M
     // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No) after a few
     // seconds, counting only while this screen has focus.
     val focused = LocalWindowInfo.current.isWindowFocused
+    val screenReader = rememberScreenReaderRunning()
     val latestNo by androidx.compose.runtime.rememberUpdatedState(onNo)
-    LaunchedEffect(focused) {
-        if (!focused) return@LaunchedEffect
+    LaunchedEffect(focused, screenReader) {
+        // With a screen reader the prompt waits for an answer: eight seconds is too short to find it.
+        if (!focused || screenReader) return@LaunchedEffect
         delay(WINDOW_PROMPT_TIMEOUT_MS)
         latestNo()
     }
     Row(
         modifier
+            .semantics { paneTitle = "Switch to Window view?" }
             .background(Color(0xF0222224), CircleShape)
             .border(0.75.dp, Color.White.copy(alpha = 0.14f), CircleShape)
-            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            .padding(start = 16.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("Switch to Window view?", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Text(
             "Yes", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.background(StagePeekAccent, CircleShape).clickable(role = Role.Button, onClick = onYes).padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.minimumInteractiveComponentSize().background(StagePeekAccent, CircleShape).clickable(role = Role.Button, onClick = onYes)
+                .padding(horizontal = 16.dp, vertical = 8.dp).semantics { contentDescription = "Yes, switch to Window view" },
         )
         Text(
             "No", color = Color.White, fontSize = 15.sp,
-            modifier = Modifier.border(0.75.dp, Color.White.copy(alpha = 0.3f), CircleShape).clickable(role = Role.Button, onClick = onNo).padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.minimumInteractiveComponentSize().border(0.75.dp, Color.White.copy(alpha = 0.3f), CircleShape).clickable(role = Role.Button, onClick = onNo)
+                .padding(horizontal = 16.dp, vertical = 8.dp).semantics { contentDescription = "No, stay on the full desktop" },
         )
     }
 }

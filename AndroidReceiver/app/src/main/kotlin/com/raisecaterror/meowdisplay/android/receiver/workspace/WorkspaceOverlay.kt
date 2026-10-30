@@ -11,7 +11,6 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.layout.Arrangement
@@ -73,7 +72,21 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -129,8 +142,8 @@ private fun RemoteViewportTransform.viewRect(r: WRect): CGRect {
 private fun PaneButton(label: String, enabled: Boolean, action: () -> Unit) {
     Text(
         label, color = Color.White, style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier.background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
-            .clickable(enabled = enabled, onClick = action)
+        modifier = Modifier.minimumInteractiveComponentSize().background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = action)
             .padding(horizontal = 14.dp, vertical = 7.dp)
             .graphicsLayer { alpha = if (enabled) 1f else 0.5f },
     )
@@ -231,13 +244,14 @@ fun WorkspaceChrome(
                 if (status != null) {
                     Column(Modifier.align(Alignment.Center).padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
-                            Modifier.background(Chip, RoundedCornerShape(10.dp)).clickable { controller.openOverview(replacing = id) }
+                            Modifier.minimumInteractiveComponentSize().background(Chip, RoundedCornerShape(10.dp))
+                                .clickable(onClickLabel = "Choose a window for this pane", role = Role.Button) { controller.openOverview(replacing = id) }
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             // Still working: a live spinner (still with the system's animations off).
                             if (remote?.state == TileStatus.Waiting || remote?.state == TileStatus.Retrying) {
-                                androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                                androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp).clearAndSetSemantics {}, color = Color.White, strokeWidth = 2.dp)
                             }
                             Text(status, color = Color.White, style = MaterialTheme.typography.bodyMedium)
                         }
@@ -277,8 +291,8 @@ fun WorkspaceChrome(
                             Text(
                                 if (bundle in ui.launching) "Opening on the Mac…" else "Open on Mac", color = Color.White,
                                 style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
-                                    .clickable(enabled = inputAllowed && bundle !in ui.launching) { controller.launch(bundle) }
+                                modifier = Modifier.minimumInteractiveComponentSize().background(Chip, CircleShape).border(0.75.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                    .clickable(enabled = inputAllowed && bundle !in ui.launching, role = Role.Button) { controller.launch(bundle) }
                                     .padding(horizontal = 14.dp, vertical = 7.dp)
                                     .graphicsLayer { alpha = if (inputAllowed) 1f else 0.5f },
                             )
@@ -300,8 +314,10 @@ fun WorkspaceChrome(
                         if (ui.remote?.hostFocus == HostFocus.OtherWindowFocused) "Typing paused: another window is in front on the Mac. Tap to resume."
                         else "Typing paused: another app is in front on the Mac. Tap to resume.",
                         color = Color.White, style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp).background(Chip, RoundedCornerShape(10.dp))
-                            .clickable { controller.focus(id) }.padding(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp).minimumInteractiveComponentSize().background(Chip, RoundedCornerShape(10.dp))
+                            .clickable(role = Role.Button) { controller.focus(id) }
+                            .semantics { liveRegion = LiveRegionMode.Polite }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
                     )
                 }
             }
@@ -346,7 +362,18 @@ fun WorkspaceChrome(
                                 controller.resize(current, delta.toDouble())
                             }
                         }
-                        .semantics { contentDescription = "Resize panes" },
+                        .semantics {
+                            contentDescription = "Resize panes"
+                            // Dragging is not possible with a screen reader: nudge the divider a step instead.
+                            customActions = listOf(
+                                CustomAccessibilityAction(if (horizontal) "Move divider left" else "Move divider up") {
+                                    controller.resize(current, -0.05); controller.endResize(); true
+                                },
+                                CustomAccessibilityAction(if (horizontal) "Move divider right" else "Move divider down") {
+                                    controller.resize(current, 0.05); controller.endResize(); true
+                                },
+                            )
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(Modifier.size(if (horizontal) 6.dp else 44.dp, if (horizontal) 44.dp else 6.dp).background(Color.White.copy(alpha = 0.85f), CircleShape))
@@ -367,7 +394,10 @@ fun WorkspaceChrome(
                                 text = { Text(s.name) },
                                 onClick = { layoutsOpen = false; controller.applySaved(s.id) },
                                 trailingIcon = {
-                                    TextButton(onClick = { controller.deleteSavedLayout(s.id) }) { Text("Delete", color = Color(0xFFFF6B6B)) }
+                                    TextButton(
+                                        onClick = { controller.deleteSavedLayout(s.id) },
+                                        modifier = Modifier.semantics { contentDescription = "Delete layout ${s.name}" },
+                                    ) { Text("Delete", color = Color(0xFFFF6B6B)) }
                                 },
                             )
                         }
@@ -560,7 +590,17 @@ private fun PaneLabel(
                     }
                 }
             }
-            .semantics { contentDescription = "$text" + (if (active && shown) ", typing goes here" else "") + ". Hold for pane options" }
+            .semantics {
+                // The finger gestures above are not available to a screen reader: expose them as actions.
+                contentDescription = text
+                role = Role.Button
+                if (shown) stateDescription = if (active) "Showing, typing goes here" else "Showing"
+                onClick(label = if (tab != null && !shown) "Show this window" else "Type in this pane") {
+                    if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id)
+                    true
+                }
+                onLongClick(label = "Pane options") { onMenu(tab); true }
+            }
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -584,11 +624,12 @@ private fun PaneMenu(
         Text(
             label, color = if (!enabled) Color.White.copy(alpha = 0.4f) else if (destructive) Color(0xFFFF6B6B) else Color.White,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.fillMaxWidth().clickable(enabled = enabled) { onClose(); action() }.padding(horizontal = 16.dp, vertical = 11.dp),
+            modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button) { onClose(); action() }
+                .heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically).padding(horizontal = 16.dp),
         )
     }
     Column(
-        modifier.width(252.dp).background(Color(0xF2232326), RoundedCornerShape(14.dp)).border(0.75.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
+        modifier.semantics { paneTitle = "Pane options" }.width(252.dp).background(Color(0xF2232326), RoundedCornerShape(14.dp)).border(0.75.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
             .padding(vertical = 6.dp).verticalScroll(rememberScrollState()),
     ) {
         row(if (full) "Exit Fullscreen" else "Fullscreen on This Device") { if (full) controller.exitLocalFullscreen() else controller.enterLocalFullscreen(m.tile) }
@@ -698,7 +739,10 @@ fun WorkspaceDropOverlay(controller: WorkspaceController, origin: CGPoint) {
                     .border(1.dp, Color.White.copy(alpha = if (over) 0.9f else 0.35f), CircleShape),
                 horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (over) "✕  Release to Cancel" else "✕  Drop Here to Cancel", color = Color.White, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (over) "✕  Release to Cancel" else "✕  Drop Here to Cancel", color = Color.White, style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.semantics { contentDescription = if (over) "Release to cancel" else "Drop here to cancel" },
+                )
             }
         }
     }
@@ -729,11 +773,12 @@ fun WindowRail(controller: WorkspaceController) {
                         val b = c.boundsInWindow()
                         controller.railHandle.value = CGRect(b.left / d, b.top / d, b.width / d, b.height / d)
                     }
-                    .clickable { controller.setRailExpanded(true) }
+                    .clickable(role = Role.Button) { controller.setRailExpanded(true) }
                     .semantics {
                         contentDescription = "Show windows"
                         current?.let { stateDescription = "Now showing $it" }
                     }
+                    .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
                     .padding(10.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -784,15 +829,17 @@ fun WindowRail(controller: WorkspaceController) {
 private fun RailCard(w: CatalogWindow, thumb: ImageBitmap?, current: Boolean, onPick: () -> Unit, onAdd: (() -> Unit)?) {
     Column(
         Modifier.width(132.dp).clip(RoundedCornerShape(10.dp)).border(if (current) 2.dp else 0.dp, if (current) Accent else Color.Transparent, RoundedCornerShape(10.dp))
-            .clickable(onClick = onPick).semantics {
+            .clickable(role = Role.Button, onClick = onPick).semantics {
                 contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}"
                 if (current) stateDescription = "Showing"
+                // The "+" inside is merged into this card, so a screen reader reaches it as an action here.
+                if (onAdd != null) customActions = listOf(CustomAccessibilityAction("Add ${w.app} as a new tile") { onAdd(); true })
             },
     ) {
         Box(Modifier.fillMaxWidth().height(64.dp).background(Color(0xFF2C2C2E))) {
             thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
-            if (onAdd != null) Text("+", color = Color.White, modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).background(Chip, CircleShape).clickable(onClick = onAdd)
-                .semantics { contentDescription = "Add ${w.app} as a new tile" }.padding(horizontal = 8.dp, vertical = 2.dp))
+            if (onAdd != null) Text("+", color = Color.White, modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).minimumInteractiveComponentSize().background(Chip, CircleShape)
+                .clickable(role = Role.Button, onClick = onAdd).clearAndSetSemantics {}.padding(horizontal = 8.dp, vertical = 2.dp))
         }
         Text(w.app, color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
     }
@@ -818,18 +865,19 @@ fun WindowOverview(controller: WorkspaceController, macName: String, inputAllowe
                     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(if (ui.replacingTile != null) "Choose a window for this tile" else "Windows on $macName",
-                                style = MaterialTheme.typography.titleLarge, color = Color.White, modifier = Modifier.weight(1f))
+                                style = MaterialTheme.typography.titleLarge, color = Color.White, modifier = Modifier.weight(1f).semantics { heading() })
                             TextButton(onClick = controller::closeOverview) { Text("Done") }
                         }
-                        OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true, placeholder = { Text("Search windows and apps") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true, placeholder = { Text("Search windows and apps") },
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Search windows and apps" })
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Full Desktop:", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+                            Text("Full Desktop:", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { heading() })
                             FilledTonalButton(onClick = { controller.closeOverview(); onMirror() }) { Text("Mirror") }
                             FilledTonalButton(onClick = { controller.closeOverview(); onExtend() }) { Text("Extend") }
                         }
                         if (ui.windowMode) LayoutPresets(ui.capacity, ui.layout.tiles.size, onPick = controller::applyPreset)
                         if (ui.stacked.isNotEmpty()) {
-                            Text("Hidden on this screen", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge)
+                            Text("Hidden on this screen", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
                             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 ui.stacked.forEach { id ->
                                     FilledTonalButton(onClick = { controller.bringBack(id); controller.closeOverview() }) {
@@ -873,17 +921,19 @@ fun WindowOverview(controller: WorkspaceController, macName: String, inputAllowe
 }
 
 @Composable
-private fun SectionLabel(text: String) = Text(text, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+private fun SectionLabel(text: String) = Text(text, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp).semantics { heading() })
 
 @Composable
 private fun OverviewCard(w: CatalogWindow, thumb: ImageBitmap?, icon: ImageBitmap?, current: Boolean, onPick: () -> Unit, onAdd: (() -> Unit)?) {
     Column(
         Modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF1F1F22))
             .border(if (current) 2.dp else 0.dp, if (current) Accent else Color.Transparent, RoundedCornerShape(12.dp))
-            .clickable(onClick = onPick)
+            .clickable(role = Role.Button, onClick = onPick)
             .semantics {
                 contentDescription = "${w.app}: ${w.title.ifEmpty { "untitled window" }}" + (w.pausedSpoken?.let { ", $it" } ?: "")
                 if (current) stateDescription = "Showing"
+                // The "Add" inside is merged into this card, so a screen reader reaches it as an action here.
+                if (onAdd != null) customActions = listOf(CustomAccessibilityAction("Add ${w.app} as a new tile") { onAdd(); true })
             },
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 10f).background(Color(0xFF2C2C2E))) {
@@ -892,8 +942,8 @@ private fun OverviewCard(w: CatalogWindow, thumb: ImageBitmap?, icon: ImageBitma
             w.pausedBadge?.let { paused -> Text(paused, color = Color.White, style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Chip, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) }
             if (onAdd != null) Text("Add", color = Color.White, style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(Chip, RoundedCornerShape(8.dp)).clickable(onClick = onAdd)
-                    .semantics { contentDescription = "Add ${w.app} as a new tile" }.padding(horizontal = 8.dp, vertical = 4.dp))
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).minimumInteractiveComponentSize().background(Chip, RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button, onClick = onAdd).clearAndSetSemantics {}.padding(horizontal = 8.dp, vertical = 4.dp))
         }
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             icon?.let { Image(it, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)) }
@@ -910,7 +960,7 @@ private fun AppRow(name: String, icon: ImageBitmap?, action: String, enabled: Bo
     Row(Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xFF1F1F22)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
         icon?.let { Image(it, null, Modifier.size(22.dp)); Spacer(Modifier.width(8.dp)) }
         Text(name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        TextButton(onClick = onClick, enabled = enabled) { Text(action) }
+        TextButton(onClick = onClick, enabled = enabled, modifier = Modifier.semantics { contentDescription = "$action $name" }) { Text(action) }
     }
 }
 
@@ -922,8 +972,12 @@ fun LayoutPresets(capacity: Int, tileCount: Int, onPick: (WPreset) -> Unit) {
             val node = preset.node((0 until preset.slotCount).map { "s$it" })
             val slots = WGeometry.frames(com.raisecaterror.meowdisplay.core.workspace.WLayout.of(node, (0 until preset.slotCount).associate { "s$it" to com.raisecaterror.meowdisplay.core.workspace.WTile("s$it") }), WSize(160.0, 100.0)).slots
             Canvas(
-                Modifier.size(52.dp, 34.dp).clickable { onPick(preset) }
-                    .semantics { contentDescription = "Layout: ${preset.title}" },
+                Modifier.minimumInteractiveComponentSize().size(52.dp, 34.dp).clickable(role = Role.Button) { onPick(preset) }
+                    .semantics {
+                        contentDescription = "Layout: ${preset.title}"
+                        // The blue outline marks layouts with as many panes as there are now.
+                        if (preset.slotCount == tileCount) stateDescription = "Same number of panes as now"
+                    },
             ) {
                 val stroke = Stroke(width = 1.5f * density)
                 for (r in slots) {
@@ -953,7 +1007,7 @@ private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Doub
     Box(Modifier.fillMaxSize()) {
         if (m.open.isNotEmpty()) {
             // Tap anywhere else to close; nothing reaches the Mac while a menu is open.
-            Box(Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controller.menus.close() })
+            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { controller.menus.close() } })
         }
         Row(
             Modifier.offset { IntOffset(((pane.minX + 6) * density).roundToInt(), (top * density).roundToInt()) }
@@ -973,7 +1027,8 @@ private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Doub
                     fontWeight = if (item == m.top.first()) FontWeight.Bold else FontWeight.Normal,
                     modifier = Modifier.onGloballyPositioned { c -> titleX[item.index] = c.positionInParent().x / density.toDouble() }
                         .clip(RoundedCornerShape(6.dp)).background(if (open) Accent.copy(alpha = 0.85f) else Color.Transparent)
-                        .clickable(enabled = item.enabled) { controller.menus.openMenu(item) }
+                        .clickable(enabled = item.enabled, role = Role.Button) { controller.menus.openMenu(item) }
+                        .semantics { if (open) stateDescription = "Open" }
                         .padding(horizontal = 8.dp, vertical = 5.dp),
                 )
             }
@@ -987,11 +1042,15 @@ private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Doub
                 Modifier.offset { IntOffset((x * density).roundToInt(), (y * density).roundToInt()) }.width(width.dp)
                     .heightIn(max = maxOf(120.0, minOf(460.0, bounds.maxY - y - 8)).dp)
                     .background(Color(0xF2232326), RoundedCornerShape(12.dp)).border(0.75.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(12.dp))
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
+                    // Swallows taps (a clickable here would merge the menu's text into one screen-reader stop).
+                    .semantics { paneTitle = level.title.ifEmpty { "Menu" } }
+                    .pointerInput(Unit) { detectTapGestures { } },
             ) {
                 if (m.open.size > 1) {
                     Text("‹  " + level.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1,
-                        modifier = Modifier.fillMaxWidth().clickable { controller.menus.back() }.padding(horizontal = 12.dp, vertical = 9.dp))
+                        modifier = Modifier.fillMaxWidth().clickable(role = Role.Button) { controller.menus.back() }
+                            .semantics { contentDescription = "Back from ${level.title}" }
+                            .heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically).padding(horizontal = 12.dp))
                     Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color.White.copy(alpha = 0.2f)))
                 }
                 when {
@@ -1004,15 +1063,18 @@ private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Doub
                                 Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(0.5.dp).background(Color.White.copy(alpha = 0.2f)))
                             } else {
                                 Row(
-                                    Modifier.fillMaxWidth().clickable(enabled = item.enabled) {
+                                    Modifier.fillMaxWidth().clickable(enabled = item.enabled, role = Role.Button) {
                                         if (item.hasSubmenu) controller.menus.openSubmenu(item) else controller.menus.press(item)
-                                    }.padding(horizontal = 10.dp, vertical = 8.dp).graphicsLayer { alpha = if (item.enabled) 1f else 0.4f },
+                                    }.semantics {
+                                        val states = listOfNotNull(if (item.checked) "Checked" else null, if (item.hasSubmenu) "Has a submenu" else null)
+                                        if (states.isNotEmpty()) stateDescription = states.joinToString(", ")
+                                    }.heightIn(min = 48.dp).padding(horizontal = 10.dp).graphicsLayer { alpha = if (item.enabled) 1f else 0.4f },
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(if (item.checked) "✓" else "", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(18.dp))
+                                    Text(if (item.checked) "✓" else "", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(18.dp).clearAndSetSemantics {})
                                     Text(item.title, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                     item.shortcut?.let { Text(it, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp)) }
-                                    if (item.hasSubmenu) Text("›", color = Color.White.copy(alpha = 0.6f), fontSize = 16.sp, modifier = Modifier.padding(start = 8.dp))
+                                    if (item.hasSubmenu) Text("›", color = Color.White.copy(alpha = 0.6f), fontSize = 16.sp, modifier = Modifier.padding(start = 8.dp).clearAndSetSemantics {})
                                 }
                             }
                         }

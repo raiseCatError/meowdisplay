@@ -77,8 +77,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -415,13 +420,13 @@ fun RemoteMediaPlayer(files: RemoteFilesModel, x: Int, size: Long, video: Boolea
                     },
                     modifier = Modifier.fillMaxWidth().aspectRatio(aspect, matchHeightConstraintsFirst = false).semantics { contentDescription = "Movie" },
                 )
-            } else Text("♫", color = Color.White.copy(alpha = 0.6f), fontSize = 64.sp)
+            } else Text("♫", color = Color.White.copy(alpha = 0.6f), fontSize = 64.sp, modifier = Modifier.clearAndSetSemantics {})
             if (!prepared) CircularProgressIndicator(color = Color(0xFF5499FF), modifier = Modifier.size(30.dp), strokeWidth = 2.5.dp)
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(if (playing) "❚❚" else "▶", color = Color.White, fontSize = 18.sp,
-                modifier = Modifier.clip(CircleShape).clickable(enabled = prepared) {
+                modifier = Modifier.minimumInteractiveComponentSize().clip(CircleShape).clickable(enabled = prepared, role = Role.Button) {
                     if (playing) { player.pause(); playing = false } else { player.start(); playing = true }
                 }.padding(10.dp).semantics { contentDescription = if (playing) "Pause" else "Play" })
             Text(clock(scrubbing?.toInt() ?: position), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
@@ -430,7 +435,10 @@ fun RemoteMediaPlayer(files: RemoteFilesModel, x: Int, size: Long, video: Boolea
                 onValueChange = { scrubbing = it },
                 onValueChangeFinished = { scrubbing?.let { runCatching { player.seekTo(it.toInt()) }; position = it.toInt() }; scrubbing = null },
                 valueRange = 0f..maxOf(1, duration).toFloat(), enabled = prepared && duration > 0,
-                modifier = Modifier.weight(1f).semantics { contentDescription = "Position" },
+                modifier = Modifier.weight(1f).semantics {
+                    contentDescription = "Position"
+                    stateDescription = clock(scrubbing?.toInt() ?: position) + " of " + clock(duration)
+                },
             )
             Text(clock(duration), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
         }
@@ -506,7 +514,7 @@ fun RemoteFullImage(file: File, placeholder: ImageBitmap?) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
-    Image(shown, null, contentScale = ContentScale.Fit,
+    Image(shown, "Preview of ${file.name}", contentScale = ContentScale.Fit,
         modifier = Modifier.fillMaxSize().padding(10.dp)
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, z, _ ->
@@ -590,8 +598,11 @@ fun RemoteUploadConflictDialog(transfers: RemoteTransferQueue, canReplace: Boole
         text = {
             Column {
                 Text("Replace moves the item on the Mac to its Trash.")
-                if (several) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { forAll = !forAll }) {
-                    Checkbox(checked = forAll, onCheckedChange = { forAll = it }); Text("Do this for the rest")
+                if (several) Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.heightIn(min = 48.dp).toggleable(value = forAll, role = Role.Checkbox, onValueChange = { forAll = it }),
+                ) {
+                    Checkbox(checked = forAll, onCheckedChange = null); Text("Do this for the rest", modifier = Modifier.padding(start = 8.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 8.dp)) {
                     TextButton(onClick = { transfers.resolveConflict(item.id, RemoteFileConflictChoice.KeepBoth, forAll) }) { Text("Keep Both") }
@@ -702,7 +713,7 @@ fun RemoteInfoDialog(sheet: RemoteFileInfoSheet, onDismiss: () -> Unit) {
                     i.permissions.takeIf { it.isNotEmpty() }?.let { "Permissions" to it },
                     "Can be changed" to if (i.writable && !i.locked) "Yes" else "No",
                 ).forEach { (k, v) ->
-                    Row { Text(k, modifier = Modifier.width(120.dp), color = Color.Gray); Text(v) }
+                    Row(Modifier.semantics(mergeDescendants = true) {}) { Text(k, modifier = Modifier.width(120.dp), color = Color.Gray); Text(v) }
                 }
             }
         },

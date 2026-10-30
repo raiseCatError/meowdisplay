@@ -9,7 +9,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,8 +59,18 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -139,7 +148,8 @@ fun RemoteFinderOverlay(
         // The dim backdrop owns every touch: nothing here reaches the Mac.
         Box(
             Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { files.close() },
+                // Not a clickable: a screen reader reaches Close in the header, and this would only be an unlabeled stop.
+                .pointerInput(Unit) { detectTapGestures { files.close() } },
         )
         val width = min(safe.width - 16, 760.0)
         val height = max(240.0, safe.height - 16)
@@ -147,7 +157,9 @@ fun RemoteFinderOverlay(
             Modifier.offset { IntOffset(((safe.midX - width / 2) * d).roundToInt(), ((safe.midY - height / 2) * d).roundToInt()) }
                 .size(width.dp, height.dp)
                 .clip(RoundedCornerShape(24.dp)).background(Panel).border(0.75.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(24.dp))
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
+                .semantics { paneTitle = "Files on $macName" }
+                // Swallows taps so they don't reach the scrim; a clickable here would merge the whole panel into one screen-reader stop.
+                .pointerInput(Unit) { detectTapGestures { } },
         ) {
             FinderPanel(controller, files, ui, macName, inputAllowed, actions)
         }
@@ -158,7 +170,8 @@ fun RemoteFinderOverlay(
                 Modifier.offset { IntOffset(((safe.midX - pw / 2) * d).roundToInt(), ((safe.midY - ph / 2) * d).roundToInt()) }
                     .size(pw.dp, ph.dp)
                     .clip(RoundedCornerShape(22.dp)).background(Color(0xFC2A2A2E)).border(0.75.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
+                    .semantics { paneTitle = "Quick Look: ${p.entry.name}" }
+                    .pointerInput(Unit) { detectTapGestures { } },
             ) { PreviewCard(controller, files, ui, p, inputAllowed) }
         }
         ui.notice?.let { n ->
@@ -179,11 +192,13 @@ fun RemoteFinderOverlay(
             }
             // Above the preview's buttons.
             Box(Modifier.fillMaxWidth().offset { IntOffset(0, ((safe.maxY - 150) * d).roundToInt()) }, contentAlignment = Alignment.Center) {
-                Row(Modifier.padding(horizontal = 16.dp).background(Color(0xF0333338), CircleShape).padding(horizontal = 16.dp, vertical = 10.dp),
+                Row(Modifier.padding(horizontal = 16.dp).background(Color(0xF0333338), CircleShape).padding(horizontal = 16.dp, vertical = 10.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
                     action?.let { (label, run) ->
-                        Text(label, color = FinderAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable(onClick = run).padding(4.dp))
+                        Text(label, color = FinderAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                            modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button, onClick = run).padding(4.dp))
                     }
                 }
             }
@@ -248,7 +263,7 @@ private fun GrantBar(files: RemoteFilesModel, ui: RemoteFilesUi) {
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box {
             Text((if (g.readOnly) "🔒 " else "✎ ") + grantSummary(g) + "  ▾", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                modifier = Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.12f)).clickable { menu = true }
+                modifier = Modifier.minimumInteractiveComponentSize().clip(CircleShape).background(Color.White.copy(alpha = 0.12f)).clickable(role = Role.Button) { menu = true }
                     .padding(horizontal = 10.dp, vertical = 5.dp).semantics { contentDescription = "Files access: " + grantDescription(g) })
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text(grantDescription(g), fontSize = 12.sp) }, onClick = {}, enabled = false)
@@ -264,7 +279,8 @@ private fun GrantBar(files: RemoteFilesModel, ui: RemoteFilesUi) {
         ui.clipboard?.let { c ->
             if (ui.location is RemoteFilesLocation.Folder) {
                 Pill(if (c.move) "Move ${c.names.size} Here" else "Paste ${c.names.size}", enabled = ui.canPaste) { files.paste() }
-                Text("✕", color = Dim, modifier = Modifier.clickable { files.clearClipboard() }.padding(6.dp).semantics { contentDescription = "Clear Paste" })
+                Text("✕", color = Dim, modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button) { files.clearClipboard() }.padding(6.dp)
+                    .semantics { contentDescription = "Clear Paste" })
             }
         }
     }
@@ -277,8 +293,10 @@ private fun SelectionBar(files: RemoteFilesModel, ui: RemoteFilesUi) {
     val all = ui.selection.size == ui.visibleEntries.size && ui.visibleEntries.isNotEmpty()
     Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(if (all) "None" else "All", color = FinderAccent, fontSize = 14.sp, modifier = Modifier.clickable { files.selectAll(!all) }.padding(6.dp))
-        Text("${chosen.size} selected", color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text(if (all) "None" else "All", color = FinderAccent, fontSize = 14.sp,
+            modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button) { files.selectAll(!all) }.padding(6.dp)
+                .semantics { contentDescription = if (all) "Select none" else "Select all" })
+        Text("${chosen.size} selected", color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
         val none = chosen.isEmpty()
         if (g.canDownload) {
             BarAction("⤓", "Save to Device", none) { files.save(chosen) }
@@ -295,9 +313,9 @@ private fun SelectionBar(files: RemoteFilesModel, ui: RemoteFilesUi) {
 
 @Composable
 private fun BarAction(glyph: String, label: String, disabled: Boolean, onClick: () -> Unit) {
-    Box(Modifier.size(38.dp).clip(CircleShape).clickable(enabled = !disabled, onClick = onClick).semantics { contentDescription = label },
+    Box(Modifier.size(48.dp).clip(CircleShape).clickable(enabled = !disabled, role = Role.Button, onClick = onClick).semantics { contentDescription = label },
         contentAlignment = Alignment.Center) {
-        Text(glyph, color = Color.White.copy(alpha = if (disabled) 0.3f else 1f), fontSize = 18.sp)
+        Text(glyph, modifier = Modifier.clearAndSetSemantics {}, color = Color.White.copy(alpha = if (disabled) 0.3f else 1f), fontSize = 18.sp)
     }
 }
 
@@ -313,7 +331,7 @@ private fun Header(controller: WorkspaceController, files: RemoteFilesModel, ui:
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         RoundButton("‹", "Back", enabled = ui.canGoBack) { files.goBack() }
         Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f))
+            modifier = Modifier.weight(1f).semantics { heading() })
         if (ui.access == RemoteFilesAccess.Ready && ui.location is RemoteFilesLocation.Folder) {
             Row(Modifier.clip(RoundedCornerShape(9.dp)).background(Color.White.copy(alpha = 0.1f))) {
                 StyleButton("☰", "List", ui.style == RemoteFilesStyle.List) { files.setStyle(RemoteFilesStyle.List) }
@@ -328,14 +346,16 @@ private fun Header(controller: WorkspaceController, files: RemoteFilesModel, ui:
             Box {
                 RoundButton("⇅", if (active > 0) "Transfers, $active running" else "Transfers") { actions.transfers = true }
                 if (active > 0) Text("$active", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).background(FinderAccent, CircleShape).padding(horizontal = 5.dp))
+                    modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).background(FinderAccent, CircleShape).padding(horizontal = 5.dp)
+                        .clearAndSetSemantics {})
             }
         }
         val inFolder = ui.access == RemoteFilesAccess.Ready && ui.location is RemoteFilesLocation.Folder
         val g = ui.grant
         if (inFolder && ui.selecting) {
             Text("Done", color = FinderAccent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.clip(CircleShape).clickable { files.setSelecting(false) }.padding(horizontal = 8.dp, vertical = 6.dp))
+                modifier = Modifier.minimumInteractiveComponentSize().clip(CircleShape).clickable(role = Role.Button) { files.setSelecting(false) }
+                    .padding(horizontal = 8.dp, vertical = 6.dp).semantics { contentDescription = "Done selecting" })
         } else Box {
             RoundButton("⋯", "More") { menu = true }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -377,19 +397,19 @@ val FINDER_BUNDLE_IDS = setOf("com.apple.finder", "app.meowdisplay.demo.files")
 @Composable
 private fun RoundButton(glyph: String, label: String, enabled: Boolean = true, onClick: () -> Unit) {
     Box(
-        Modifier.size(36.dp).clip(CircleShape).background(Color.White.copy(alpha = if (enabled) 0.14f else 0.05f))
-            .clickable(enabled = enabled, onClick = onClick).semantics { contentDescription = label },
+        Modifier.minimumInteractiveComponentSize().size(36.dp).clip(CircleShape).background(Color.White.copy(alpha = if (enabled) 0.14f else 0.05f))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
-    ) { Text(glyph, color = Color.White.copy(alpha = if (enabled) 1f else 0.35f), fontSize = if (glyph == "‹") 24.sp else 16.sp) }
+    ) { Text(glyph, modifier = Modifier.clearAndSetSemantics {}, color = Color.White.copy(alpha = if (enabled) 1f else 0.35f), fontSize = if (glyph == "‹") 24.sp else 16.sp) }
 }
 
 @Composable
 private fun StyleButton(glyph: String, label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
-        Modifier.size(width = 40.dp, height = 32.dp).background(if (selected) Color.White.copy(alpha = 0.22f) else Color.Transparent)
-            .clickable(onClick = onClick).semantics { contentDescription = label + if (selected) ", selected" else "" },
+        Modifier.minimumInteractiveComponentSize().size(width = 40.dp, height = 32.dp).background(if (selected) Color.White.copy(alpha = 0.22f) else Color.Transparent)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick).semantics { contentDescription = "$label view" },
         contentAlignment = Alignment.Center,
-    ) { Text(glyph, color = Color.White, fontSize = 15.sp) }
+    ) { Text(glyph, color = Color.White, fontSize = 15.sp, modifier = Modifier.clearAndSetSemantics {}) }
 }
 
 @Composable
@@ -397,14 +417,14 @@ private fun SearchField(ui: RemoteFilesUi, files: RemoteFilesModel) {
     val placeholder = (ui.location as? RemoteFilesLocation.Folder)?.let { "Search " + (it.path.lastOrNull() ?: ui.currentRoot?.name.orEmpty()) }
         ?: "Search all approved folders"
     Row(
-        Modifier.padding(horizontal = 14.dp).padding(bottom = 8.dp).fillMaxWidth().height(42.dp)
+        Modifier.padding(horizontal = 14.dp).padding(bottom = 8.dp).fillMaxWidth().heightIn(min = 42.dp)
             .background(Color.White.copy(alpha = 0.1f), CircleShape).padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("⌕", color = Dim, fontSize = 18.sp)
+        Text("⌕", color = Dim, fontSize = 18.sp, modifier = Modifier.clearAndSetSemantics {})
         Spacer(Modifier.width(8.dp))
         Box(Modifier.weight(1f)) {
-            if (ui.query.isEmpty()) Text(placeholder, color = Color.White.copy(alpha = 0.5f), fontSize = 15.sp, maxLines = 1)
+            if (ui.query.isEmpty()) Text(placeholder, color = Color.White.copy(alpha = 0.5f), fontSize = 15.sp, maxLines = 1, modifier = Modifier.clearAndSetSemantics {})
             BasicTextField(
                 value = ui.query, onValueChange = files::setQuery, singleLine = true,
                 textStyle = TextStyle(color = Color.White, fontSize = 15.sp), cursorBrush = SolidColor(FinderAccent),
@@ -412,7 +432,10 @@ private fun SearchField(ui: RemoteFilesUi, files: RemoteFilesModel) {
                 modifier = Modifier.fillMaxWidth().semantics { contentDescription = placeholder },
             )
         }
-        if (ui.query.isNotEmpty()) Text("✕", color = Dim, modifier = Modifier.clickable { files.setQuery("") }.padding(6.dp))
+        if (ui.query.isNotEmpty()) Text(
+            "✕", color = Dim,
+            modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button) { files.setQuery("") }.padding(6.dp).semantics { contentDescription = "Clear search" },
+        )
     }
 }
 
@@ -425,10 +448,11 @@ private fun Breadcrumbs(ui: RemoteFilesUi, files: RemoteFilesModel) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp)) {
         itemsIndexed(crumbs) { i, (title, location) ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (i > 0) Text("›", color = Dim, fontSize = 13.sp, modifier = Modifier.padding(end = 4.dp))
+                if (i > 0) Text("›", color = Dim, fontSize = 13.sp, modifier = Modifier.padding(end = 4.dp).clearAndSetSemantics {})
                 val last = i == crumbs.size - 1
                 Text(title, color = if (last) Color.White else Dim, fontSize = 14.sp, fontWeight = if (last) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { files.go(location) }.padding(horizontal = 4.dp, vertical = 2.dp))
+                    maxLines = 1, modifier = Modifier.minimumInteractiveComponentSize().clip(RoundedCornerShape(6.dp)).clickable(role = Role.Button) { files.go(location) }
+                        .semantics { if (last) stateDescription = "Current folder" }.padding(horizontal = 4.dp, vertical = 2.dp))
             }
         }
     }
@@ -437,16 +461,16 @@ private fun Breadcrumbs(ui: RemoteFilesUi, files: RemoteFilesModel) {
 @Composable
 private fun Message(glyph: String, title: String, detail: String, progress: Boolean = false, retry: (() -> Unit)? = null, retryLabel: String = "Try Again") {
     Column(Modifier.fillMaxSize().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Text(glyph, fontSize = 38.sp)
+        Text(glyph, fontSize = 38.sp, modifier = Modifier.clearAndSetSemantics {})
         Spacer(Modifier.height(12.dp))
-        Text(title, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+        Text(title, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.semantics { heading() })
         Spacer(Modifier.height(8.dp))
         Text(detail, color = Dim, fontSize = 14.sp, textAlign = TextAlign.Center, modifier = Modifier.width(400.dp))
         if (progress) { Spacer(Modifier.height(14.dp)); CircularProgressIndicator(color = FinderAccent, modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp) }
         if (retry != null) {
             Spacer(Modifier.height(14.dp))
-            Text(retryLabel, color = Color.White, fontSize = 15.sp, modifier = Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.14f))
-                .clickable(onClick = retry).padding(horizontal = 18.dp, vertical = 9.dp))
+            Text(retryLabel, color = Color.White, fontSize = 15.sp, modifier = Modifier.minimumInteractiveComponentSize().clip(CircleShape).background(Color.White.copy(alpha = 0.14f))
+                .clickable(role = Role.Button, onClick = retry).padding(horizontal = 18.dp, vertical = 9.dp))
         }
     }
 }
@@ -486,7 +510,7 @@ private fun Locations(files: RemoteFilesModel, ui: RemoteFilesUi) {
 
 @Composable
 private fun SectionTitle(text: String) =
-    Text(text, color = Dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp))
+    Text(text, color = Dim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp).semantics { heading() })
 
 @Composable
 private fun Folder(controller: WorkspaceController, files: RemoteFilesModel, ui: RemoteFilesUi, actions: FinderActions) {
@@ -550,7 +574,8 @@ private fun EntryRow(controller: WorkspaceController, files: RemoteFilesModel, u
     val selected = e.id in ui.selection
     Box {
         ListRow(
-            e.name, detail, {
+            e.name, detail, spoken = listOfNotNull(e.name, kindName(e.kind), detail.takeIf { it.isNotEmpty() }).joinToString(", "),
+            selection = if (ui.selecting) selected else null, icon = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (selectable) SelectionMark(selected)
                     Thumb(controller, files, ui, e, 30.0)
@@ -564,7 +589,7 @@ private fun EntryRow(controller: WorkspaceController, files: RemoteFilesModel, u
 
 @Composable
 private fun SelectionMark(selected: Boolean) {
-    Text(if (selected) "◉" else "○", color = if (selected) FinderAccent else Dim, fontSize = 16.sp, modifier = Modifier.padding(end = 4.dp))
+    Text(if (selected) "◉" else "○", color = if (selected) FinderAccent else Dim, fontSize = 16.sp, modifier = Modifier.padding(end = 4.dp).clearAndSetSemantics {})
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -580,8 +605,11 @@ private fun GridTile(controller: WorkspaceController, files: RemoteFilesModel, u
                 ui.highlighted == e.name -> FinderAccent.copy(alpha = 0.35f)
                 else -> Color.Transparent
             })
-                .combinedClickable(onLongClick = { menu = true }) { files.tap(e) }
-                .padding(6.dp).semantics { contentDescription = e.name + ", " + kindName(e.kind) },
+                .combinedClickable(role = Role.Button, onLongClickLabel = "More actions", onLongClick = { menu = true }) { files.tap(e) }
+                .padding(6.dp).semantics {
+                    contentDescription = e.name + ", " + kindName(e.kind)
+                    if (ui.selecting) stateDescription = if (selected) "Selected" else "Not selected"
+                },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(Modifier.size(width = 84.dp, height = 76.dp), contentAlignment = Alignment.Center) {
@@ -636,11 +664,16 @@ private fun EntryMenu(files: RemoteFilesModel, ui: RemoteFilesUi, e: RemoteFileE
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ListRow(name: String, detail: String?, icon: @Composable () -> Unit, chevron: Boolean, highlighted: Boolean = false,
-                onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+                onLongClick: (() -> Unit)? = null, spoken: String = listOfNotNull(name, detail?.takeIf { it.isNotEmpty() }).joinToString(", "),
+                selection: Boolean? = null, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(if (highlighted) FinderAccent.copy(alpha = 0.35f) else Color.Transparent)
-            .combinedClickable(onLongClick = onLongClick, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp)
-            .semantics { contentDescription = name },
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).background(if (highlighted) FinderAccent.copy(alpha = 0.35f) else Color.Transparent)
+            .combinedClickable(role = Role.Button, onLongClickLabel = onLongClick?.let { "More actions" }, onLongClick = onLongClick, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .semantics {
+                contentDescription = spoken
+                if (selection != null) stateDescription = if (selection) "Selected" else "Not selected"
+            },
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(Modifier.size(width = 36.dp, height = 34.dp), contentAlignment = Alignment.Center) { icon() }
@@ -648,7 +681,7 @@ private fun ListRow(name: String, detail: String?, icon: @Composable () -> Unit,
             Text(name, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (!detail.isNullOrEmpty()) Text(detail, color = Dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (chevron) Text("›", color = Color.White.copy(alpha = 0.4f), fontSize = 18.sp)
+        if (chevron) Text("›", color = Color.White.copy(alpha = 0.4f), fontSize = 18.sp, modifier = Modifier.clearAndSetSemantics {})
     }
 }
 
@@ -670,7 +703,7 @@ private fun KindIcon(kind: RemoteFileKind, size: Double) {
         RemoteFileKind.Audio -> "🎵"; RemoteFileKind.Pdf -> "📕"; RemoteFileKind.Archive -> "📦"; RemoteFileKind.Text -> "📝"
         RemoteFileKind.Document -> "📄"; RemoteFileKind.File -> "📄"
     }
-    Text(glyph, fontSize = (size * 0.7).sp)
+    Text(glyph, fontSize = (size * 0.7).sp, modifier = Modifier.clearAndSetSemantics {})
 }
 
 @Composable
@@ -692,7 +725,7 @@ private fun Applications(controller: WorkspaceController, inputAllowed: Boolean)
             items(apps, key = { it.bundleID }) { app ->
                 LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
                 Column(
-                    Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = inputAllowed) { controller.launch(app.bundleID) }
+                    Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = inputAllowed, role = Role.Button) { controller.launch(app.bundleID) }
                         .padding(4.dp).semantics { contentDescription = "Open ${app.name} on the Mac" },
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -727,9 +760,10 @@ private fun PreviewCard(controller: WorkspaceController, files: RemoteFilesModel
     val still = (p.content as? RemotePreviewContent.Image)?.let { c -> remember(c.jpegBase64) { controller.decodeStill(c.jpegBase64, RemoteFilesModel.PREVIEW_SIDE) } }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            KindIcon(p.entry.kind, 24.0)
+            Box(Modifier.clearAndSetSemantics {}) { KindIcon(p.entry.kind, 24.0) }
             Column(Modifier.weight(1f)) {
-                Text(p.entry.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(p.entry.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.semantics { heading() })
                 Text(listOfNotNull(kindName(p.entry.kind), formatSize(p.entry.size).takeIf { !p.entry.isDirectory }, formatDate(p.entry.modified).ifEmpty { null })
                     .joinToString(" · "), color = Dim, fontSize = 12.sp, maxLines = 1)
             }
@@ -760,7 +794,8 @@ private fun PreviewCard(controller: WorkspaceController, files: RemoteFilesModel
                 is RemoteFileViewer.Content.Failed -> Row(Modifier.align(Alignment.BottomCenter).padding(12.dp).background(Color(0xE0333338), CircleShape)
                     .padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(if (vc.code == "unsupported") "This format can't play here." else RemoteFilesFormat.errorText(vc.code), color = Color.White, fontSize = 12.sp)
-                    if (vc.code != "unsupported") Text("Retry", color = FinderAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { files.retryViewer() })
+                    if (vc.code != "unsupported") Text("Retry", color = FinderAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button) { files.retryViewer() })
                 }
                 else -> Unit
             }
@@ -800,7 +835,7 @@ private fun PreviewContent(controller: WorkspaceController, files: RemoteFilesMo
         RemotePreviewContent.Loading -> CircularProgressIndicator(color = FinderAccent, modifier = Modifier.size(30.dp), strokeWidth = 2.5.dp)
         is RemotePreviewContent.Image -> {
             val image = remember(c.jpegBase64) { controller.decodeStill(c.jpegBase64, RemoteFilesModel.PREVIEW_SIDE) }
-            if (image == null) Unavailable(p) else ZoomableImage(image)
+            if (image == null) Unavailable(p) else ZoomableImage(image, p.entry.name)
         }
         is RemotePreviewContent.Text -> SelectionContainer {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) {
@@ -832,12 +867,12 @@ private fun Unavailable(p: RemotePreview) {
 }
 
 @Composable
-private fun ZoomableImage(image: ImageBitmap) {
+private fun ZoomableImage(image: ImageBitmap, name: String) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
     var panY by remember { mutableFloatStateOf(0f) }
     Image(
-        image, null, contentScale = ContentScale.Fit,
+        image, "Preview of $name", contentScale = ContentScale.Fit,
         modifier = Modifier.fillMaxSize().padding(10.dp)
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, z, _ ->
@@ -854,8 +889,9 @@ private fun ZoomableImage(image: ImageBitmap) {
 private fun Pill(text: String, prominent: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     Text(
         text, color = Color.White.copy(alpha = if (enabled) 1f else 0.4f), fontSize = 14.sp, fontWeight = if (prominent) FontWeight.SemiBold else FontWeight.Normal,
-        modifier = Modifier.clip(CircleShape).background(if (prominent && enabled) FinderAccent else Color.White.copy(alpha = 0.14f))
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
+        modifier = Modifier.minimumInteractiveComponentSize().clip(CircleShape).background(if (prominent && enabled) FinderAccent else Color.White.copy(alpha = 0.14f))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp)
+            .semantics { if (text == "⌕") contentDescription = "Show in folder" },
     )
 }
 

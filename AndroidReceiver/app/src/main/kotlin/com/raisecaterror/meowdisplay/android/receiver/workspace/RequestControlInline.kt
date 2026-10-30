@@ -12,7 +12,10 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,12 +42,13 @@ fun RequestControlInline(compact: Boolean = false, modifier: Modifier = Modifier
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         when (control.state) {
             InputWireState.Requesting -> {
-                CircularProgressIndicator(Modifier.size(14.dp), color = dim, strokeWidth = 2.dp)
-                Text("Awaiting approval on the Mac…", color = dim, fontSize = 12.sp)
+                CircularProgressIndicator(Modifier.size(14.dp).clearAndSetSemantics {}, color = dim, strokeWidth = 2.dp)
+                Text("Awaiting approval on the Mac…", color = dim, fontSize = 12.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }
-            InputWireState.RequestsDisabled -> Text("This Mac doesn't take control requests from this device.", color = dim, fontSize = 12.sp)
+            InputWireState.RequestsDisabled -> Text("This Mac doesn't take control requests from this device.", color = dim, fontSize = 12.sp,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             InputWireState.NotAllowed -> {
-                Text("Not allowed.", color = dim, fontSize = 12.sp)
+                Text("Not allowed.", color = dim, fontSize = 12.sp, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                 SmallRequestButton("Ask Again", control.request)
             }
             else -> {

@@ -59,8 +59,15 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -225,7 +232,7 @@ private fun EditorTopBar(
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onCancel) { Text("Cancel") }
-            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
+            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, textAlign = TextAlign.Center, modifier = Modifier.weight(1f).semantics { heading() })
             Button(onClick = onDone) { Text("Done") }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -387,7 +394,27 @@ private fun LayoutCanvas(
                                 drags[placement.id] = (drags[placement.id] ?: Offset.Zero) + amount
                             }
                         }
-                        .semantics { contentDescription = placement.kind.editorTitle(functionItems) + if (isSelected) ", selected" else "" },
+                        .semantics {
+                            // Tapping selects and dragging moves; a screen reader gets both as actions (moves go through the same drop and snapping).
+                            contentDescription = placement.kind.editorTitle(functionItems)
+                            role = Role.Button
+                            stateDescription = if (isSelected) "Selected" else "Not selected"
+                            onClick(label = "Select") { currentSelect(placement.id); true }
+                            fun nudge(dx: Double, dy: Double): Boolean {
+                                val c = latest
+                                currentSelect(placement.id)
+                                currentDrop(placement.id, CustomLayoutGeometry.droppedPosition(
+                                    CGPoint(c.frame.midX + dx, c.frame.midY + dy), c.area, c.frame.width, c.snapToEdges, c.snapToGuides,
+                                ))
+                                return true
+                            }
+                            customActions = listOf(
+                                CustomAccessibilityAction("Move left") { nudge(-NUDGE, 0.0) },
+                                CustomAccessibilityAction("Move right") { nudge(NUDGE, 0.0) },
+                                CustomAccessibilityAction("Move up") { nudge(0.0, -NUDGE) },
+                                CustomAccessibilityAction("Move down") { nudge(0.0, NUDGE) },
+                            )
+                        },
                     contentAlignment = Alignment.Center,
                 ) { ControlFaceView(placement.kind, functionItems, (frame.width * scale).dp) }
               }
@@ -395,6 +422,9 @@ private fun LayoutCanvas(
         }
     }
 }
+
+/** One screen-reader move, in the layout's own units: more than a snapping step, so a nudge always lands somewhere new. */
+private const val NUDGE = 48.0
 
 private class DragContext(val frame: CGRect, val scale: Float, val area: CGRect, val snapToEdges: Boolean, val snapToGuides: Boolean)
 
@@ -409,7 +439,7 @@ private fun PlacementInspector(
     onDeselect: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(placement.kind.editorTitle(functionItems), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        Text(placement.kind.editorTitle(functionItems), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).semantics { heading() })
         TextButton(onClick = onDeselect) { Text("Layout Options") }
     }
     LabeledSlider("Size", placement.size.toFloat(),
@@ -424,7 +454,8 @@ private fun PlacementInspector(
         Column {
             Row { Text("Palette Distance", Modifier.weight(1f)); Text("%.1f×".format(style.spacing)) }
             Slider(style.spacing.toFloat(), { value -> onRestyle { it.copy(spacing = value.toDouble()) } },
-                valueRange = PalettePresentation.spacingRange.start.toFloat()..PalettePresentation.spacingRange.endInclusive.toFloat())
+                valueRange = PalettePresentation.spacingRange.start.toFloat()..PalettePresentation.spacingRange.endInclusive.toFloat(),
+                modifier = Modifier.semantics { contentDescription = "Palette Distance"; stateDescription = "%.1f times".format(style.spacing) })
         }
         Toggle("Toward Screen Center", style.directionDegrees == null) { on -> onRestyle { it.copy(directionDegrees = if (on) null else 0.0) } }
         style.directionDegrees?.let { degrees ->
@@ -432,13 +463,16 @@ private fun PlacementInspector(
                 Row { Text("Palette Direction", Modifier.weight(1f)); Text("${degrees.roundToInt()}°") }
                 // 15° steps across −180…180, as iOS.
                 Slider(degrees.toFloat(), { value -> onRestyle { it.copy(directionDegrees = (value / 15f).roundToInt() * 15.0) } },
-                    valueRange = -180f..180f, steps = 23)
+                    valueRange = -180f..180f, steps = 23,
+                    modifier = Modifier.semantics { contentDescription = "Palette Direction"; stateDescription = "${degrees.roundToInt()} degrees" })
             }
         }
         Caption("The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile (Settings → Controls → Shortcut Palettes).")
     }
     if (CustomLayoutEditing.isRemovable(placement.kind)) {
-        TextButton(onClick = onRemove) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+        TextButton(onClick = onRemove, modifier = Modifier.semantics { contentDescription = "Remove ${placement.kind.editorTitle(functionItems)}" }) {
+            Text("Remove", color = MaterialTheme.colorScheme.error)
+        }
     } else {
         Caption("Settings always stays on the layout so you can reach these options.")
     }
