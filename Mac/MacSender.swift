@@ -1775,6 +1775,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if stopped { return }
             }
             Log.info("Screen Recording permission granted")
+            let selfBox = self.selfBox
+            queue.async { selfBox.currentOnQueue()?.syncWorkspaceSuspension() }
         }
 
         let (admitted, admittedGeneration) = try await awaitAdmittedConnection()
@@ -3047,6 +3049,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sessionInputGrant.set(false)
         mirrorUnavailableOfferGeneration = nil
         wakeStabilizationAssertion?.release()
+        streamingDisplayAwake.set(watching: false)
         inputInjector?.cancelActiveInput()
         _ = updateCaptureState { state in
             state.stop()
@@ -3654,6 +3657,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         inputInjector?.cancelActiveInput()
         invalidateCapturePipeline()
         captureOwnership.release(stoppedStream)
+        // Screen Recording turned off under a live session: stop keeping the display awake until
+        // it is allowed again (startup re-syncs after the permission comes back).
+        if (error as? SCStreamError)?.code == .userDeclined || !CGPreflightScreenCaptureAccess() {
+            Log.info("wakeDebug: Screen Recording not allowed after the stop; display may sleep")
+            streamingDisplayAwake.set(watching: false)
+        }
         scheduleCaptureRecovery()
     }
 
@@ -7258,7 +7267,9 @@ extension MacSender {
         let paused = phase == .pausing || phase == .paused || phase == .stopped
         workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
         windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
-        streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted)
+        // Without Screen Recording there is nothing to keep the display awake for.
+        streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted
+                                  && CGPreflightScreenCaptureAccess())
     }
 
 

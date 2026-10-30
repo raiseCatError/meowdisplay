@@ -1241,6 +1241,7 @@ final class SenderController: ObservableObject {
     private func loginSessionConsoleChanged(onConsole: Bool) {
         guard LoginSessionConsole.shared.set(onConsole: onConsole) else { return }
         Log.info("sessionDebug: this login session is \(onConsole ? "on the console" : "switched out")")
+        DisplayAwakeLedger.shared.setOnConsole(onConsole)
         if !onConsole {
             // Switching out ends control, not just input: held keys and
             // buttons are released now, every grant is revoked (the

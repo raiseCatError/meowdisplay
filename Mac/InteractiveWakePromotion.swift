@@ -1,3 +1,4 @@
+import Foundation
 import IOKit.pwr_mgt
 
 /// Answers one question: does declaring remote user activity promote a
@@ -109,44 +110,89 @@ final class WakeStabilizationAssertion {
     }
 }
 
-/// Keeps the Mac's display awake for as long as a device is watching (admitted, video on, not
-/// paused), on every route and in every mode. A sleeping display stops the window server, and
-/// every capture then delivers nothing: Mirror and Extend freeze, and Window-mode panes (Full
-/// Desktop included) stall and retry until they give up. That happened whenever the Mac sat idle
-/// during a session, for example covered by the Privacy Shield, once the 60 s session
-/// stabilization hold ran out. Display sleep only (the Mac's lock, lid and system sleep still
-/// apply), one public IOKit assertion, released as soon as nobody is watching.
-final class StreamingDisplayAwake {
+/// Keeps the Mac's display awake while at least one device is watching (admitted, video on, not
+/// paused, Screen Recording allowed), on every route and in every mode.
+///
+/// Why the display and not just the system: when the displays sleep, ScreenCaptureKit stops every
+/// stream with -3815 "Failed to find any displays or windows to capture" (logged 2026-10-30
+/// 18:41:58, 60 ms after screensDidSleep), and with "require password immediately" the Mac locks
+/// too. Keeping the system awake alone leaves the stream dead. `PreventUserIdleDisplaySleep` is
+/// the narrowest public assertion that keeps capture alive: it only stops *idle* display sleep.
+/// Closing the lid, the Mac's own sleep command, and the user's lock still apply, and it is never
+/// user activity (unlike `IOPMAssertionDeclareUserActivity`), so it doesn't wake a sleeping
+/// display or postpone the screen saver's lock beyond the display.
+///
+/// One assertion for the whole app, counted across viewers: it is created when the first device
+/// starts watching and released when the last one stops. It is also released while this login
+/// session is switched out (another user has the console). powerd releases it if the app exits.
+final class DisplayAwakeLedger: @unchecked Sendable {
+    static let shared = DisplayAwakeLedger(onConsole: LoginSessionConsole.shared.isOnConsole)
     static let reason = "MEOW Streaming to a device"
 
+    private let lock = NSLock()
     private let create: (String) -> IOPMAssertionID?
     private let release: (IOPMAssertionID) -> Void
+    private var watchers = Set<UUID>()
+    private var onConsole: Bool
     private var assertionID: IOPMAssertionID?
 
-    var isHeld: Bool { assertionID != nil }
-
-    init(create: @escaping (String) -> IOPMAssertionID? = { reason in
+    init(onConsole: Bool = true,
+         create: @escaping (String) -> IOPMAssertionID? = { reason in
              var id = IOPMAssertionID(0)
              let r = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
                                                  IOPMAssertionLevel(kIOPMAssertionLevelOn), reason as CFString, &id)
              return r == kIOReturnSuccess ? id : nil
          },
          release: @escaping (IOPMAssertionID) -> Void = { IOPMAssertionRelease($0) }) {
+        self.onConsole = onConsole
         self.create = create
         self.release = release
     }
 
-    /// Idempotent: holds one assertion while `watching`, none otherwise.
-    func set(watching: Bool) {
-        if watching, assertionID == nil {
-            assertionID = create(Self.reason)
-            Log.info("wakeDebug: streamingDisplayAwake \(assertionID.map { "held id=\($0)" } ?? "refused")")
-        } else if !watching, let id = assertionID {
-            release(id)
-            assertionID = nil
-            Log.info("wakeDebug: streamingDisplayAwake released")
-        }
+    var isHeld: Bool { lock.lock(); defer { lock.unlock() }; return assertionID != nil }
+    var watcherCount: Int { lock.lock(); defer { lock.unlock() }; return watchers.count }
+    func isWatching(_ watcher: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return watchers.contains(watcher) }
+
+    /// Idempotent per watcher.
+    func set(_ watcher: UUID, watching: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let changed = watching ? watchers.insert(watcher).inserted : watchers.remove(watcher) != nil
+        guard changed else { return }
+        reconcile()
     }
 
-    deinit { if let id = assertionID { release(id) } }
+    /// Fast User Switching: nobody here can see this session's displays while it is switched out.
+    func setOnConsole(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard onConsole != value else { return }
+        onConsole = value
+        reconcile()
+    }
+
+    /// `lock` held.
+    private func reconcile() {
+        let wanted = onConsole && !watchers.isEmpty
+        if wanted, assertionID == nil {
+            assertionID = create(Self.reason)
+            Log.info("wakeDebug: streamingDisplayAwake \(assertionID.map { "held id=\($0)" } ?? "refused") watchers=\(watchers.count)")
+        } else if !wanted, let id = assertionID {
+            release(id)
+            assertionID = nil
+            Log.info("wakeDebug: streamingDisplayAwake released watchers=\(watchers.count) onConsole=\(onConsole)")
+        }
+    }
+}
+
+/// One sender's share of `DisplayAwakeLedger`. Going away stops its watch.
+final class StreamingDisplayAwake {
+    private let ledger: DisplayAwakeLedger
+    private let id = UUID()
+
+    init(ledger: DisplayAwakeLedger = .shared) { self.ledger = ledger }
+
+    var isWatching: Bool { ledger.isWatching(id) }
+
+    func set(watching: Bool) { ledger.set(id, watching: watching) }
+
+    deinit { ledger.set(id, watching: false) }
 }
