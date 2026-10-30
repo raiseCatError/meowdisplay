@@ -573,6 +573,7 @@ private fun PaneMenu(
             Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(0.5.dp).background(Color.White.copy(alpha = 0.25f)))
             row("Minimize on Mac", enabled = inputAllowed) { controller.minimizeRemoteWindow(m.tile) }
             row("Close Window on Mac…", enabled = inputAllowed, destructive = true, action = onCloseWindow)
+            if (!inputAllowed) RequestControlInline(compact = true)
             if (!inputAllowed) Text("Minimize and Close need control of the Mac.", color = Color.White.copy(alpha = 0.65f),
                 style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         }

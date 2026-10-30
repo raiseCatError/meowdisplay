@@ -193,6 +193,10 @@ fun ReceiverScreen(
         onDispose { accessibility.removeTouchExplorationStateChangeListener(listener) }
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(
+        com.raisecaterror.meowdisplay.android.receiver.workspace.LocalControlRequest provides
+            com.raisecaterror.meowdisplay.android.receiver.workspace.InlineControlRequest(state.inputState) { controller.requestInputTapped() },
+    ) {
     BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
         val widthDp = maxWidth.value.toDouble()
         val heightDp = maxHeight.value.toDouble()
@@ -436,6 +440,7 @@ fun ReceiverScreen(
             RemoteFinderOverlay(it, macName, CGRect(insets.leading, top, widthDp - insets.leading - insets.trailing, heightDp - top - insets.bottom),
                 state.inputAllowed)
         }
+    }
     }
 }
 

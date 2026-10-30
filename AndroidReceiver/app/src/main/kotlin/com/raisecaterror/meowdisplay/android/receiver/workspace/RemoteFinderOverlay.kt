@@ -679,6 +679,7 @@ private fun Applications(controller: WorkspaceController, inputAllowed: Boolean)
     // The running apps from the window list until the Mac's full app list arrives.
     val apps = ws.apps.ifEmpty { ws.catalog?.apps.orEmpty().map { com.raisecaterror.meowdisplay.core.workspace.MacApp(it.bundleID, it.name, true, 0) } }
     Column(Modifier.fillMaxSize()) {
+        if (!inputAllowed) RequestControlInline()
         if (!inputAllowed) Text("Ask for control of the Mac to open apps there.", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(16.dp))
         if (apps.isEmpty()) Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = FinderAccent, modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)

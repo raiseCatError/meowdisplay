@@ -416,13 +416,13 @@ private fun CompactCloseButton(w: CatalogWindow, card: StagePeekCard, inputAllow
         Modifier.offset { IntOffset((x * d).roundToInt(), ((card.center.y - height / 2) * d).roundToInt()) }
             .size((COMPACT_REVEAL - 8).dp, height.dp)
             .background(if (inputAllowed) CloseRed else Color(0xFF6B6B70), RoundedCornerShape(11.dp))
-            .clickable(role = Role.Button, onClickLabel = "Close Window", onClick = onClose)
+            .clickable(role = Role.Button, onClickLabel = "Close Window", onClick = LocalControlRequest.current.let { cr -> { if (inputAllowed) onClose() else cr?.request?.invoke(); Unit } })
             .semantics { contentDescription = if (inputAllowed) "Close Window $name" else "Close Window needs control" },
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(if (inputAllowed) "✕" else "🔒", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(if (inputAllowed) "Close Window" else "Needs Control", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            Text(if (inputAllowed) "Close Window" else (LocalControlRequest.current?.gatedLabel ?: "Needs Control"), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center, maxLines = 2)
         }
     }
@@ -919,7 +919,8 @@ private fun EmptyApp(controller: WorkspaceController, ui: WorkspaceUi, app: MacA
                     .border(0.75.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                     .clickable(enabled = inputAllowed) { controller.launch(app.bundleID) }.padding(horizontal = 18.dp, vertical = 10.dp),
             )
-            if (!inputAllowed) Text("Opening apps needs control of the Mac. Use Request Control first.", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, textAlign = TextAlign.Center)
+            if (!inputAllowed) RequestControlInline(compact = true)
+            if (!inputAllowed) Text("Opening apps needs control of the Mac.", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, textAlign = TextAlign.Center)
             if (ui.launchFailed == app.bundleID) Text("The Mac couldn't open ${app.name}.", color = Color(0xFFFFA94D), fontSize = 12.sp)
         }
     }
@@ -1027,12 +1028,12 @@ private fun GalleryCard(
                 Column(
                     Modifier.width((width - 8f).coerceAtLeast(0f).dp).fillMaxHeight().graphicsLayer { alpha = min(1f, width / 60f) }
                         .background(if (inputAllowed) CloseRed else Color(0xFF6B6B70), RoundedCornerShape(12.dp))
-                        .clickable(role = Role.Button, onClickLabel = "Close Window") { onReveal(false); controller.closeWindow(w) }
+                        .clickable(role = Role.Button, onClickLabel = "Close Window", onClick = LocalControlRequest.current.let { cr -> { onReveal(false); if (inputAllowed) controller.closeWindow(w) else cr?.request?.invoke(); Unit } })
                         .semantics { contentDescription = if (inputAllowed) "Close Window $name" else "Close Window needs control" },
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
                 ) {
                     Text(if (inputAllowed) "✕" else "🔒", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text(if (inputAllowed) "Close Window" else "Needs Control", color = Color.White, fontSize = 11.sp,
+                    Text(if (inputAllowed) "Close Window" else (LocalControlRequest.current?.gatedLabel ?: "Needs Control"), color = Color.White, fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, maxLines = 2)
                 }
             }
