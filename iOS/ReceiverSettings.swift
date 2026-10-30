@@ -451,9 +451,11 @@ private struct DisplaySettingsPage: View {
                             Spacer()
                             if state.selectedUUID == display.uuid {
                                 Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                                    .accessibilityHidden(true)
                             }
                         }
                     }
+                    .accessibilityAddTraits(state.selectedUUID == display.uuid ? .isSelected : [])
                 }
                 if let selected = state.selectedUUID, !state.displays.contains(where: { $0.uuid == selected }) {
                     Text("Selected display unavailable")
@@ -1086,6 +1088,7 @@ private struct ControlSettingsPage: View {
                 } maximumValueLabel: {
                     Image(systemName: "circle.fill").font(.system(size: 16)).accessibilityHidden(true)
                 }
+                .accessibilityValue(Text(controlStore.preferences.padControlScale, format: .percent.precision(.fractionLength(0))))
             }
             .settingsAnchor("controlSize")
         } header: {
@@ -1147,6 +1150,8 @@ private struct AudioSettingsPage: View {
                         }),
                         in: Double(AVSyncOffset.range.lowerBound)...Double(AVSyncOffset.range.upperBound),
                         step: Double(AVSyncOffset.stepMs))
+                    .accessibilityLabel(Text("A/V Sync"))
+                    .accessibilityValue(avSyncOffsetLabel(controlStore.preferences.avSyncOffsetMs))
                     SettingNote("Adjust if sound plays slightly before or after the picture.")
                 }
                 VStack(alignment: .leading, spacing: 4) {

@@ -374,11 +374,13 @@ private struct CustomLayoutHelpSheet: View {
     private func step(_ number: Int, _ title: LocalizedStringKey, _ detail: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "\(number).circle.fill").font(.title2).foregroundStyle(.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
                 Text(detail).font(.subheadline).foregroundStyle(.secondary)
             }
         }
+        .accessibilityElement(children: .combine)
         .padding(.vertical, 2)
     }
 }
@@ -589,6 +591,7 @@ struct CustomLayoutEditorScreen: View {
     private var firstRunTip: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "hand.draw").font(.title2).foregroundStyle(.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Arrange your controls").font(.headline)
                 Text("Drag a control to move it, and tap it to change its size or shortcut palette. Use Preview to try the layout — it never sends anything to your Mac.")

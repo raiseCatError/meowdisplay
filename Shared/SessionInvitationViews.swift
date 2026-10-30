@@ -65,6 +65,7 @@ struct SessionInvitationWaitingCard: View {
     var body: some View {
         HStack(spacing: 12) {
             ProgressView()
+                .accessibilityHidden(true)
             Text("Waiting for \(peerName) to accept…")
                 .font(.callout)
             Spacer(minLength: 8)
@@ -74,6 +75,7 @@ struct SessionInvitationWaitingCard: View {
         .padding(.vertical, 12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .padding()
+        .accessibilityElement(children: .contain)
     }
 }
 

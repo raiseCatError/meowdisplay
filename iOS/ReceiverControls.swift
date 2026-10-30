@@ -635,6 +635,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .background(frameReader("tray:more"))
                     .background(chip(selected: false))
                     .accessibilityLabel(ControlTrayItem.settings.title)
+                    .accessibilityInputLabels(ControlTrayItem.settings.spokenNames)
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
@@ -883,6 +884,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .background(frameReader("modifier:\(modifier.rawValue)"))
             .background(chip(selected: selected))
             .accessibilityLabel(modifier.title)
+            .accessibilityInputLabels(ControlTrayItem.item(for: modifier).spokenNames)
             .accessibilityValue(selected ? "On" : "Off")
             .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
     }
@@ -902,6 +904,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .background(frameReader("tray:\(item.rawValue)"))
         .background(chip(selected: false))
         .accessibilityLabel(item.title)
+        .accessibilityInputLabels(item.spokenNames)
+        .accessibilityValue(item == .keyboard ? (keyboardActive ? Text("On") : Text("Off")) : Text(""))
         .trayButtonAccessibility { activateForAccessibility(item) }
     }
 
@@ -1267,6 +1271,7 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: selected, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(modifier.title)
+                .accessibilityInputLabels(ControlTrayItem.item(for: modifier).spokenNames)
                 .accessibilityValue(selected ? "On" : "Off")
                 .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
         case .escape, .tab:
@@ -1279,6 +1284,7 @@ extension ReceiverControlOverlay {
                 .background(PadChip(selected: false, onRail: true))
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(item.title)
+                .accessibilityInputLabels(item.spokenNames)
                 .trayButtonAccessibility { activateForAccessibility(item) }
         case .dismissKeyboard:
             Image(systemName: "keyboard.chevron.compact.down")
@@ -1341,7 +1347,7 @@ extension ReceiverControlOverlay {
             if store.moveViewActive {
                 moveViewBanner
                     .position(x: containerSize.width / 2, y: safeInsets.top + 34)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
         }
         .coordinateSpace(name: "receiverControls")
@@ -1723,7 +1729,12 @@ extension ReceiverControlOverlay {
                     }
                     .position(x: frame.midX, y: frame.midY)
                     .accessibilityLabel(modifier.title)
+                    .accessibilityInputLabels(ControlTrayItem.item(for: modifier).spokenNames)
                     .accessibilityValue(selected ? "On" : "Off")
+                    .trayButtonAccessibility {
+                        apply(interaction.toggleAssistModifier(modifier))
+                        store.beginAutoHideActivity()
+                    }
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
@@ -1820,6 +1831,7 @@ extension ReceiverControlOverlay {
         .position(x: frame.midX, y: frame.minY + (diameter + (hint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(padAccessibilityLabel(kind))
+        .accessibilityInputLabels(padSpokenNames(kind))
         .accessibilityValue(kind.modifier != nil || kind == .moveView ? (selected ? "On" : "Off") : "")
         .trayButtonAccessibility {
             switch kind {
@@ -1832,6 +1844,11 @@ extension ReceiverControlOverlay {
                 break
             }
         }
+    }
+
+    private func padSpokenNames(_ kind: CustomControlKind) -> [String] {
+        if case .tray(let item) = kind { return item.spokenNames }
+        return [padAccessibilityLabel(kind)]
     }
 
     private func padAccessibilityLabel(_ kind: CustomControlKind) -> String {
@@ -2436,6 +2453,22 @@ struct ShortcutButtonFaceView: View {
 /// The real control source: the live session's state and wire.
 extension StreamReceiver: ReceiverControlSource {
     var controlSessionPhase: ReceiverSessionPhase { session.phase }
+}
+
+extension ControlTrayItem {
+    /// What Voice Control accepts for a tray key whose face is a glyph
+    /// (⌘, esc, a symbol): the full name first, then the short spoken form.
+    var spokenNames: [String] {
+        switch self {
+        case .command: return [title, String(localized: "Cmd", comment: "Spoken short name for the Command key.")]
+        case .option: return [title, String(localized: "Alt", comment: "Spoken short name for the Option key.")]
+        case .control: return [title, String(localized: "Ctrl", comment: "Spoken short name for the Control key.")]
+        case .escape: return [title, String(localized: "Esc", comment: "Spoken short name for the Escape key.")]
+        case .dock: return [title, String(localized: "Dock")]
+        case .settings: return [title, String(localized: "Gear", comment: "Spoken name for the settings gear icon.")]
+        case .shift, .tab, .keyboard: return [title]
+        }
+    }
 }
 
 private extension View {

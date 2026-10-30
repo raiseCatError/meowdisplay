@@ -60,6 +60,7 @@ struct ReceiverScreen: View {
     @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     // First-run onboarding (issue #49): explain the Mac app is required.
@@ -82,6 +83,11 @@ struct ReceiverScreen: View {
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
+    }
+
+    /// Banners slide in from an edge; with Reduce Motion they only fade.
+    private func slideTransition(from edge: Edge) -> AnyTransition {
+        reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
 
     // Streaming = connected and the video format is known.
@@ -427,7 +433,7 @@ struct ReceiverScreen: View {
                             .position(x: canvas.midX,
                                       y: keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(slideTransition(from: .bottom))
                     }
                     if inputReachesMac, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
@@ -470,7 +476,7 @@ struct ReceiverScreen: View {
                             onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
                             onNo: { windowPromptAnswered = true })
                             .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .transition(slideTransition(from: .top))
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
                                        inputAllowed: inputReachesMac,
@@ -560,7 +566,7 @@ struct ReceiverScreen: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.regularMaterial, in: Capsule())
                     .padding(.top, 52)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(slideTransition(from: .top))
                     .accessibilityAddTraits(.isStaticText)
             }
         }
@@ -571,7 +577,7 @@ struct ReceiverScreen: View {
                 PairedToast()
                     .padding(.top, 12)
                     .padding(.horizontal, 16)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(slideTransition(from: .top))
             }
         }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
@@ -723,6 +729,11 @@ struct ReceiverScreen: View {
             if isConnected {
                 hasConnectedBefore = true
                 showOnboarding = false
+                // The picture appears without any action here: say so.
+                let host = model.workspace.hostName
+                UIAccessibility.post(notification: .announcement,
+                                     argument: host.isEmpty ? String(localized: "Connected")
+                                                            : String(localized: "Connected to \(host)"))
             }
         }
         .onChange(of: screenAwakeInputs) { ScreenAwakeController.shared.update($0) }
@@ -871,6 +882,10 @@ struct ReceiverInterruptionOverlay: View {
     let onReconnect: () -> Void
     let onBackToHome: () -> Void
 
+    private func announce() {
+        UIAccessibility.post(notification: .announcement, argument: "\(interruption.title). \(interruption.message)")
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             if interruption == .reconnecting {
@@ -909,6 +924,10 @@ struct ReceiverInterruptionOverlay: View {
         // receiver surface below might still want.
         .allowsHitTesting(interruption.offersManualReconnect || interruption.offersBackToHome)
         .animation(.snappy(duration: 0.2), value: interruption)
+        .accessibilityElement(children: .contain)
+        // Connection lost / reconnecting appears on its own: say it once per change.
+        .onAppear { announce() }
+        .onChange(of: interruption) { _ in announce() }
     }
 }
 
@@ -1520,6 +1539,7 @@ struct IdleView: View {
             Button("Pair") { receiver.pairWithMac(result) }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel(Text("Pair with \(mac.name)"))
+                .accessibilityInputLabels([Text("Pair with \(mac.name)"), Text("Pair")])
         }
     }
 
@@ -1548,6 +1568,11 @@ struct IdleView: View {
             .accessibilityLabel(failed ? Text("Try again with \(mac.name)")
                                        : hasWakeHint ? Text("Wake and connect to \(mac.name)")
                                                      : Text("Connect to \(mac.name)"))
+            // Voice Control: the visible words work too ("Tap Wake & Connect").
+            .accessibilityInputLabels(failed ? [Text("Try again with \(mac.name)"), Text("Try Again")]
+                                      : hasWakeHint ? [Text("Wake and connect to \(mac.name)"), Text("Wake & Connect"),
+                                                       Text("Wake and Connect")]
+                                                    : [Text("Connect to \(mac.name)"), Text("Connect")])
         } else {
             Menu {
                 Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
@@ -1560,6 +1585,10 @@ struct IdleView: View {
             .buttonStyle(.borderedProminent)
             .fixedSize()
             .accessibilityLabel(Text("Connect to \(mac.name)"))
+            .accessibilityInputLabels([Text("Connect to \(mac.name)"), Text("Connect")])
+            // The long-press menu isn't reachable by every assistive technology: offer its choices as actions.
+            .accessibilityAction(named: Text("Connect with Mirror")) { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
+            .accessibilityAction(named: Text("Connect with Extend")) { receiver.connectPrimary(peerID: peerID, mode: .extend) }
         }
     }
 
@@ -1589,6 +1618,7 @@ struct IdleView: View {
         .buttonStyle(.borderless)   // a plain icon, not a filled bubble
         .fixedSize()
         .accessibilityLabel(Text("More for \(mac.name)"))
+        .accessibilityInputLabels([Text("More for \(mac.name)"), Text("More")])
     }
 
     private func remoteStatusText(peerID: String) -> String {
@@ -1762,11 +1792,13 @@ struct OnboardingView: View {
                         .font(.system(size: 56, weight: .light))
                         .foregroundStyle(.tint)
                         .padding(.top, 24)
+                        .accessibilityHidden(true)
 
                     VStack(spacing: 10) {
                         Text("One more app to go")
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
+                            .accessibilityAddTraits(.isHeader)
                         Text("You also need the **MeowDisplay Mac app**, open on your Mac.")
                             .font(.body)
                             .foregroundStyle(.secondary)
@@ -2580,6 +2612,13 @@ struct VideoLayerView: UIViewRepresentable {
             // The zoomed/panned content layer can extend beyond `bounds` —
             // clip it so it never bleeds into sibling SwiftUI content.
             clipsToBounds = true
+            // VoiceOver: the picture is one element, and direct interaction
+            // passes touches straight through to the Mac instead of VoiceOver
+            // consuming them. Touch handling is unchanged.
+            isAccessibilityElement = true
+            accessibilityLabel = String(localized: "Mac screen")
+            accessibilityHint = String(localized: "Touch the picture directly to control your Mac.")
+            accessibilityTraits = [.allowsDirectInteraction]
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
@@ -3090,6 +3129,7 @@ struct VideoLayerView: UIViewRepresentable {
         func setAllowInput(_ allowed: Bool) {
             guard allowed != allowsInput else { return }
             allowsInput = allowed
+            accessibilityValue = allowed ? nil : String(localized: "Viewing only. Control is off.")
             updateInputGate()
             guard !allowed else { return }
             clearInputStateForPause()
@@ -4948,18 +4988,21 @@ enum ActiveScene {
 
 /// Full-desktop view: a small yes/no offer to switch to Window view.
 private struct WindowModePrompt: View {
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     let onYes: () -> Void
     let onNo: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "rectangle.split.2x1")
+                .accessibilityHidden(true)
             Text("Switch to Window view?").font(.subheadline.weight(.semibold))
             Button("Yes", action: onYes)
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("windowModePromptYes")
+                .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
             Button("No", action: onNo)
                 .font(.subheadline)
                 .buttonStyle(.bordered)
@@ -4975,9 +5018,10 @@ private struct WindowModePrompt: View {
         .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
-        .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
         // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No).
+        // Not while VoiceOver is running: reading it and finding the buttons takes longer than 8 seconds.
         .task {
+            guard !voiceOverEnabled else { return }
             try? await Task.sleep(nanoseconds: 8_000_000_000)
             if !Task.isCancelled { onNo() }
         }
@@ -5011,6 +5055,12 @@ private struct InputPromptButton: View {
         .padding(.horizontal, 8)
         .disabled(!isActionable)
         .accessibilityHint(isActionable ? Text("Asks your Mac to let this device control it.") : Text(""))
+        // Control granted or refused arrives without any action on this device: say it.
+        .onChange(of: kind) { new in
+            if new == .enabled || new == .unavailable {
+                UIAccessibility.post(notification: .announcement, argument: title)
+            }
+        }
     }
 
     private var isActionable: Bool { kind == .requestInput || kind == .enableInput }
@@ -5040,15 +5090,18 @@ private struct InputPromptButton: View {
 /// where Classic is. Shown once; dismissed by the button or after a while.
 struct NaturalTouchHint: View {
     let onDone: () -> Void
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "hand.tap")
                 .font(.title3)
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Natural Touch is on")
                     .font(.subheadline.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text("Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings → Input.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -5063,6 +5116,8 @@ struct NaturalTouchHint: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("naturalTouchHint")
         .task {
+            // With VoiceOver the note stays until OK is activated; it takes longer to read.
+            guard !voiceOverEnabled else { return }
             try? await Task.sleep(nanoseconds: 12_000_000_000)
             onDone()
         }

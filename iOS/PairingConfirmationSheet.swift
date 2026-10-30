@@ -7,22 +7,33 @@ struct PairingConfirmationSheet: View {
     @ObservedObject var prompt: PairingPromptModel
 
     var body: some View {
-        Group {
-            if let pending = prompt.pending {
-                sas(pending)
-            } else if let confirmed = prompt.confirmedLocally {
-                waiting(confirmed)
+        // Scrolls so large text or a small screen never cuts off the code or the buttons.
+        ScrollView {
+            Group {
+                if let pending = prompt.pending {
+                    sas(pending)
+                } else if let confirmed = prompt.confirmedLocally {
+                    waiting(confirmed)
+                }
             }
+            .frame(maxWidth: .infinity)
+            .padding(28)
         }
-        .padding(28)
-        .presentationDetents([.medium])
+        .scrollBounceBehavior(.basedOnSize)
+        .presentationDetents([.medium, .large])
         .interactiveDismissDisabled()
     }
 
     private func sas(_ pending: PendingPairing) -> some View {
         VStack(spacing: 20) {
             Text("Pair with \(pending.peerName)?").font(.title3.bold())
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
+            // Read the code one digit at a time, not as one large number.
             Text(pending.sas).font(.system(.largeTitle, design: .monospaced)).bold()
+                .speechSpellsOutCharacters()
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
             VStack(spacing: 4) {
                 Text(PairingCopy.sasTitle).font(.subheadline.weight(.semibold))
                 Text(PairingCopy.sasHelper)
@@ -43,6 +54,7 @@ struct PairingConfirmationSheet: View {
         VStack(spacing: 14) {
             ProgressView().controlSize(.large)
             Text(PairingCopy.waitingTitle).font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Text(PairingCopy.waitingHelper(
                 otherDevice: PairingCopy.otherDevice(localIsMac: false, peerName: confirmed.peerName)))
                 .font(.subheadline).foregroundStyle(.secondary)

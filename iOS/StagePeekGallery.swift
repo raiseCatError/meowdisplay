@@ -783,7 +783,8 @@ struct StagePeekLaunchpad: View {
                         }
                     }
                     .accessibilityLabel(app.name)
-                    .accessibilityValue(app.running ? String(localized: "Running") : String(localized: "Not running"))
+                    .accessibilityValue((app.running ? String(localized: "Running") : String(localized: "Not running"))
+                                        + (favorites.contains(app.bundleID) ? ", " + String(localized: "Favorite") : ""))
                 }
             }
         }

@@ -36,8 +36,12 @@ struct RemotePairingView: View {
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
                     .onChange(of: host) { _ in errorMessage = nil }
+                    .onChange(of: errorMessage) { message in
+                        if let message { UIAccessibility.post(notification: .announcement, argument: message) }
+                    }
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(.red)
+                        .accessibilityLabel(Text("Error: \(errorMessage)"))
                 }
                 Button("Pair") { start() }
                     .disabled(host.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -55,6 +59,7 @@ struct RemotePairingView: View {
             ProgressView().controlSize(.large)
             let waiting = receiver.pairingPrompt.confirmedLocally
             Text(waiting == nil ? PairingCopy.connectingTitle : PairingCopy.waitingTitle).font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Text(waiting == nil
                  ? PairingCopy.connectingHelper(target: .mac)
                  : PairingCopy.waitingHelper(otherDevice: PairingCopy.otherDevice(localIsMac: false, peerName: waiting?.peerName ?? "")))
@@ -76,7 +81,9 @@ struct RemotePairingView: View {
     private func failure(_ kind: RemotePairingFailureKind) -> some View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text(kind.title).font(.headline).multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
             if let detail = kind.detail {
                 Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }

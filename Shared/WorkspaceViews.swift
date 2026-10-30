@@ -252,7 +252,7 @@ struct WorkspaceChromeView: View {
                         HStack(spacing: 8) {
                             // Still working: a live spinner (a still hourglass with Reduce Motion).
                             if let s = model.tileState(id)?.status, s == .waiting || s == .retrying {
-                                if reduceMotion { Image(systemName: "hourglass").foregroundStyle(.white.opacity(0.8)) }
+                                if reduceMotion { Image(systemName: "hourglass").foregroundStyle(.white.opacity(0.8)).accessibilityHidden(true) }
                                 else { ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small) }
                             }
                             Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
@@ -446,6 +446,7 @@ struct WorkspaceChromeView: View {
                 })
         .accessibilityLabel(text + (shown ? "" : ", tab"))
         .accessibilityHint(shown ? "Selects this pane for typing. Hold for options or to move it." : "Shows this tab.")
+        .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: "Options") { menu = target }
     }
 
@@ -523,7 +524,7 @@ struct WorkspaceChromeView: View {
             action()
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: symbol).frame(width: 20)
+                Image(systemName: symbol).frame(width: 20).accessibilityHidden(true)
                 Text(title)
                 Spacer(minLength: 0)
             }
@@ -625,6 +626,15 @@ struct WorkspaceChromeView: View {
                         model.endResize()
                     })
                 .accessibilityLabel("Resize tiles")
+                .accessibilityHint("Swipe up or down to move the divider.")
+                .accessibilityAdjustableAction { direction in
+                    // VoiceOver can't drag: one step is 5% of the picture.
+                    switch direction {
+                    case .increment: model.resize(divider, delta: 0.05); model.endResize()
+                    case .decrement: model.resize(divider, delta: -0.05); model.endResize()
+                    @unknown default: break
+                    }
+                }
         }
         HStack(spacing: 14) {
             if model.canUndo { Button("Undo") { model.undo() } }
@@ -811,6 +821,20 @@ private struct RailCard: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "window" : window.title)")
         .accessibilityValue(current ? "Showing" : "")
+        .addAsTileAction(window.app, onAdd)
+    }
+}
+
+private extension View {
+    /// The small Add button sits inside the card's own button, which VoiceOver treats as one
+    /// element: offer Add as an action on the card instead.
+    @ViewBuilder
+    func addAsTileAction(_ app: String, _ onAdd: (() -> Void)?) -> some View {
+        if let onAdd {
+            accessibilityAction(named: Text("Add \(app) as a new tile"), onAdd)
+        } else {
+            self
+        }
     }
 }
 
@@ -833,6 +857,7 @@ struct WindowOverviewView: View {
                 HStack {
                     Text(model.replacingTile != nil ? "Choose a window for this tile" : "Windows on \(macName)")
                         .font(.title2.weight(.semibold)).foregroundStyle(.white)
+                        .accessibilityAddTraits(.isHeader)
                     Spacer()
                     Button("Done") { model.closeOverview() }.keyboardShortcut(.cancelAction)
                 }
@@ -845,6 +870,7 @@ struct WindowOverviewView: View {
                 if model.windowMode { WorkspacePresetsView(capacity: model.capacity, tileCount: model.layout.tiles.count) { model.apply($0) } }
                 if !model.stacked.isEmpty {
                     Text("Hidden on this screen").font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7))
+                        .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal) {
                         HStack { ForEach(model.stacked, id: \.self) { id in
                             Button(model.tileState(id)?.app.isEmpty == false ? model.tileState(id)!.app : "Window") { model.bringBack(id); model.closeOverview() }
@@ -888,11 +914,13 @@ struct WindowOverviewView: View {
         VStack(alignment: .leading, spacing: 6) {
             if !noWindow.isEmpty {
                 Text("Running, no open window").font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
                 ForEach(noWindow, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Bring Forward") }
             }
             if !installed.isEmpty {
                 Text(inputAllowed ? "Open an app" : "Open an app (needs control of the Mac)")
                     .font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
                 ForEach(installed, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Open") }
             }
         }
@@ -904,6 +932,9 @@ struct WindowOverviewView: View {
             Text(name).foregroundStyle(.white).lineLimit(1)
             Spacer()
             Button(action) { model.launch(bundle) }.disabled(!inputAllowed)
+                // Every row says "Open": name the app, and keep the short word for Voice Control.
+                .accessibilityLabel("\(action) \(name)")
+                .accessibilityInputLabels(["\(action) \(name)", action])
         }
         .padding(8)
         .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 10))
@@ -955,6 +986,7 @@ private struct OverviewCard: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(window.app): \(window.title.isEmpty ? "untitled window" : window.title)" + (window.pausedSpoken.map { ", \($0)" } ?? ""))
         .accessibilityValue(current ? "Showing" : "")
+        .addAsTileAction(window.app, onAdd)
     }
 }
 
@@ -982,6 +1014,7 @@ struct WorkspacePresetsView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Layout: \(preset.title)")
+                    .accessibilityAddTraits(preset.slotCount == tileCount ? .isSelected : [])
                 }
             }
         }
@@ -1252,7 +1285,7 @@ struct PaneMenuBar: View {
             if menus.open.count > 1 {
                 Button { menus.back() } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.left").font(.caption.weight(.semibold))
+                        Image(systemName: "chevron.left").font(.caption.weight(.semibold)).accessibilityHidden(true)
                         Text(level.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Spacer(minLength: 0)
                     }
@@ -1260,6 +1293,8 @@ struct PaneMenuBar: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Text("Back from \(level.title)"))
+                .accessibilityInputLabels([Text("Back")])
                 Divider().overlay(Color.white.opacity(0.2))
             }
             if level.loading {
@@ -1296,10 +1331,11 @@ struct PaneMenuBar: View {
             Button { item.hasSubmenu ? menus.openSubmenu(item) : menus.press(item) } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark").font(.caption2.weight(.bold)).opacity(item.checked ? 1 : 0).frame(width: 14)
+                        .accessibilityHidden(true)
                     Text(item.title).font(.subheadline).lineLimit(1)
                     Spacer(minLength: 8)
                     if let key = item.shortcut { Text(key).font(.caption).foregroundStyle(.white.opacity(0.55)) }
-                    if item.hasSubmenu { Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.6)) }
+                    if item.hasSubmenu { Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.6)).accessibilityHidden(true) }
                 }
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .contentShape(Rectangle())
@@ -1307,6 +1343,8 @@ struct PaneMenuBar: View {
             }
             .buttonStyle(.plain)
             .disabled(!item.enabled)
+            .accessibilityAddTraits(item.checked ? .isSelected : [])
+            .accessibilityHint(item.hasSubmenu ? Text("Opens a submenu.") : Text(""))
         }
     }
 

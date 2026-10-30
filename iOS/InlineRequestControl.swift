@@ -32,7 +32,7 @@ struct RequestControlInline: View {
                     ProgressView().controlSize(.small)
                     Text("Awaiting approval on the Mac…").font(.caption)
                 case .requestsDisabled:
-                    Image(systemName: "lock")
+                    Image(systemName: "lock").accessibilityHidden(true)
                     Text("This Mac doesn't take control requests from this device.").font(.caption)
                 case .notAllowed:
                     Text("Not allowed.").font(.caption)

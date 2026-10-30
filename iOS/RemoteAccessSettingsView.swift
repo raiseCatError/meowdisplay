@@ -76,9 +76,16 @@ struct RemoteEndpointEditorView: View {
                 TextField("Port", text: $port)
                     .keyboardType(.numberPad)
                     .onChange(of: port) { _ in errorMessage = nil; savedConfirmation = false }
+                    .onChange(of: errorMessage) { message in
+                        if let message { UIAccessibility.post(notification: .announcement, argument: message) }
+                    }
+                    .onChange(of: savedConfirmation) { saved in
+                        if saved { UIAccessibility.post(notification: .announcement, argument: String(localized: "Saved")) }
+                    }
 
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(.red)
+                        .accessibilityLabel(Text("Error: \(errorMessage)"))
                 } else if savedConfirmation {
                     Text("Saved").font(.caption).foregroundStyle(.secondary)
                 }

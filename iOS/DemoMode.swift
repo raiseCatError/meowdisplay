@@ -226,6 +226,8 @@ struct DemoSettingsPage: View {
                     }),
                        in: Double(AVSyncOffset.range.lowerBound)...Double(AVSyncOffset.range.upperBound),
                        step: Double(AVSyncOffset.stepMs))
+                .accessibilityLabel(Text("A/V Sync"))
+                .accessibilityValue("\(controlStore.preferences.avSyncOffsetMs) ms")
                 SettingNote("Adjust if sound plays slightly before or after the picture.")
             }
             Button("Resync") { demo.log("Demo audio resynced") }

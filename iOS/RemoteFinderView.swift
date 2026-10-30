@@ -16,6 +16,7 @@ struct RemoteFinderView: View {
 
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showTransfers = false
     @State private var importingFiles = false
     @State private var importingFolder = false
@@ -39,19 +40,19 @@ struct RemoteFinderView: View {
                 RemoteFilePreviewCard(files: files, workspace: workspace, preview: preview, inputAllowed: inputAllowed)
                     .frame(width: min(safe.width - 24, 640), height: max(220, safe.height - 40))
                     .position(x: safe.midX, y: safe.midY)
-                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
                     .zIndex(2)
             }
             if !files.exportBatches.isEmpty {
                 RemoteExportProgressBar(transfers: files.transfers, batches: files.exportBatches) { files.cancelExports() }
                     .position(x: safe.midX, y: safe.maxY - (files.notice == nil ? 48 : 110))
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     .zIndex(3)
             }
             if let notice = files.notice {
                 noticeView(notice)
                     .position(x: safe.midX, y: safe.maxY - 40)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     .zIndex(3)
             }
         }
@@ -343,7 +344,7 @@ struct RemoteFinderView: View {
                 HStack(spacing: 4) {
                     let crumbs = files.breadcrumbs
                     ForEach(Array(crumbs.enumerated()), id: \.offset) { i, crumb in
-                        if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
+                        if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary).accessibilityHidden(true) }
                         Button(crumb.title) { files.go(crumb.location) }
                             .font(.subheadline.weight(i == crumbs.count - 1 ? .semibold : .regular))
                             .foregroundStyle(i == crumbs.count - 1 ? .primary : .secondary)
@@ -397,7 +398,9 @@ struct RemoteFinderView: View {
                          progress: Bool = false, retry: Bool = false) -> some View {
         VStack(spacing: 12) {
             Image(systemName: symbol).font(.system(size: 40, weight: .light)).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text(title).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
             Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             if progress { ProgressView().padding(.top, 4) }
             if retry {
@@ -589,7 +592,7 @@ struct RemoteFinderView: View {
                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                icon.frame(width: 36, height: 34)
+                icon.frame(width: 36, height: 34).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).lineLimit(1).truncationMode(.middle)
                     if let detail, !detail.isEmpty {
@@ -597,7 +600,7 @@ struct RemoteFinderView: View {
                     }
                 }
                 Spacer(minLength: 8)
-                if chevron { Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary) }
+                if chevron { Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary).accessibilityHidden(true) }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -694,6 +697,8 @@ struct RemoteFinderView: View {
         .frame(maxWidth: 520)
         .glass(Capsule())
         .accessibilityElement(children: .combine)
+        // It appears after an action, away from where VoiceOver is: say it.
+        .task(id: text) { UIAccessibility.post(notification: .announcement, argument: text) }
     }
 }
 
@@ -957,9 +962,9 @@ private struct RemoteFilePreviewCard: View {
                     Button { files.openOnMac(preview.entry) } label: { Label("Default App", systemImage: "macbook") }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "macbook")
+                        Image(systemName: "macbook").accessibilityHidden(true)
                         Text("Open on Mac")
-                        if !paneApps.isEmpty || !macApps.isEmpty { Image(systemName: "chevron.down").font(.caption2.weight(.bold)) }
+                        if !paneApps.isEmpty || !macApps.isEmpty { Image(systemName: "chevron.down").font(.caption2.weight(.bold)).accessibilityHidden(true) }
                     }
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -984,6 +989,7 @@ private struct RemoteFilePreviewCard: View {
         Button(action: action) {
             VStack(spacing: 3) {
                 Image(systemName: symbol).font(.system(size: 19, weight: .regular)).frame(height: 22)
+                    .accessibilityHidden(true)
                 Text(title).font(.caption2)
             }
             .frame(minWidth: 58, minHeight: 44)
