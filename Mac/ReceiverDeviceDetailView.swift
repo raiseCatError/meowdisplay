@@ -97,6 +97,7 @@ struct ReceiverDeviceDetailView: View {
             }
 
             filesSection
+            clipboardSection
 
             networkTransportSection
 
@@ -183,6 +184,42 @@ struct ReceiverDeviceDetailView: View {
                 Text(policy.scope == .allAccessible && policy.access == .always
                      ? "All Accessible Files: the home folder and connected drives, only where macOS lets MeowDisplay read (it may ask you first). Never ~/Library, other users' files or protected locations."
                      : "Approved folders are chosen in Settings ▸ Displays. Replaced and deleted items go to the Trash. Files access never gives control of this Mac, and control never gives Files access.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Unified Clipboard for this device: Ask each session / Always / Block, and which way.
+    /// Independent of Files and of control.
+    @ViewBuilder
+    private var clipboardSection: some View {
+        let hub = ClipboardHub.shared
+        let policy = hub.policy(peerID: peerID)
+        let locked = controller.anySessionHasEffectiveInput
+        Section {
+            Picker("Access", selection: Binding(
+                get: { policy.access },
+                set: { var p = policy; p.access = $0; hub.setPolicy(p, peerID: peerID); controller.objectWillChange.send() })) {
+                Text("Ask Every Session").tag(ClipboardAccess.ask)
+                Text("Always Allow").tag(ClipboardAccess.always)
+                Text("Block").tag(ClipboardAccess.block)
+            }
+            Picker("Direction", selection: Binding(
+                get: { policy.direction },
+                set: { var p = policy; p.direction = $0; hub.setPolicy(p, peerID: peerID); controller.objectWillChange.send() })) {
+                Text("Both Ways").tag(ClipDirection.both)
+                Text("Mac to Device Only").tag(ClipDirection.toDevice)
+                Text("Device to Mac Only").tag(ClipDirection.toMac)
+            }
+            .disabled(policy.access == .block)
+            Button("Revoke Clipboard Access Now", role: .destructive) { hub.revoke(peerID: peerID) }
+        } header: {
+            Text("Clipboard")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if locked { Text("Clipboard access can't be widened while a device controls this Mac. Narrowing and Revoke always work.") }
+                Text("Works only while Unified Clipboard is on in Settings ▸ Clipboard and the device turned it on too. Clipboard access never gives control of this Mac or access to its files.")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

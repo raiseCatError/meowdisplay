@@ -5,7 +5,7 @@ import Combine
 /// used across Mac Receiver and iOS where it applies — see their own
 /// category types for the (smaller) sets that make sense there.
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case overview, displays, streaming, input, devices, remoteAccess, displayRole, system
+    case overview, displays, streaming, input, devices, clipboard, remoteAccess, displayRole, system
     #if DEBUG
     case developer
     #endif
@@ -19,6 +19,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .streaming: return String(localized: "Streaming")
         case .input: return String(localized: "Input")
         case .devices: return String(localized: "Devices")
+        case .clipboard: return String(localized: "Clipboard")
         case .remoteAccess: return String(localized: "Remote Access")
         case .displayRole: return String(localized: "This Mac as a Display")
         case .system: return String(localized: "System")
@@ -35,6 +36,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .streaming: return "antenna.radiowaves.left.and.right"
         case .input: return "hand.tap"
         case .devices: return "list.bullet.rectangle"
+        case .clipboard: return "doc.on.clipboard"
         case .remoteAccess: return "network"
         case .displayRole: return "display.and.arrow.down"
         case .system: return "gearshape"
@@ -94,6 +96,8 @@ struct SettingsSearchIndex {
                 keywords = ["input", "touch", "control", "mouse", "keyboard", "gesture", "accessibility", "allow input"]
             case .devices:
                 keywords = ["devices", "device", "ipad", "iphone", "connected", "known devices", "pair"]
+            case .clipboard:
+                keywords = ["clipboard", "copy", "paste", "unified clipboard", "pasteboard", "sync", "share clipboard"]
             case .remoteAccess:
                 keywords = ["remote", "remote access", "tailscale", "magicdns", "endpoint", "private network"]
             case .displayRole:

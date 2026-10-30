@@ -543,7 +543,10 @@ final class SenderController: ObservableObject {
         }
     }
 
-    @Published var sessions: [DeviceSession] = []
+    @Published var sessions: [DeviceSession] = [] {
+        // Clipboard grants and transfers end with their session.
+        didSet { ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id))) }
+    }
     private var suppressModeRestart = false
     /// Per-device Mirror/Extend authority (issue #20). Starts from the stored
     /// Mac defaults; every mode-affecting event goes through it.
@@ -1045,6 +1048,7 @@ final class SenderController: ObservableObject {
 
     init() {
         _ = TrustStore.shared.ownIdentity()
+        ClipboardHub.shared.anySessionHasEffectiveInput = { [weak self] in self?.anySessionHasEffectiveInput ?? true }
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
         pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
@@ -1926,6 +1930,7 @@ final class SenderController: ObservableObject {
                 ReceiverInputAuthorizationStore.removePolicy(peerID: $0)
                 // Files grants belong to this trust relationship too.
                 FilesDevicePolicyStore.removePolicy(peerID: $0)
+                ClipboardDevicePolicyStore.removePolicy(peerID: $0)
             },
             removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender) },
             removeNetworkTransportState: {
@@ -2719,6 +2724,13 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.handleFilesConsentRequest(session: session, generation: generation, capabilities: capabilities)
         }
+        sender.onClipboardMessage = { [weak self, weak session] generation, message in
+            guard let self, let session, self.owns(session) else { return }
+            let sender = session.sender
+            ClipboardHub.shared.handle(ClipboardPeerRef(
+                sessionID: session.id, peerID: session.deviceID, name: session.name, generation: generation,
+                send: { [weak sender] m in sender?.sendClipboard(m, generation: generation) }), message)
+        }
         sender.onSessionInputGrantChanged = { [weak session] granted in
             session?.sessionInputGranted = granted
         }
@@ -2730,6 +2742,7 @@ final class SenderController: ObservableObject {
             session.inputControlRequest.invalidatePending()
             self.inputControlPrompt.cancelForEndedSession(id: session.id)
             SecurityPresentationCoordinator.dismissFilesConsent(sessionID: session.id)
+            ClipboardHub.shared.connectionReset(sessionID: session.id)
         }
         sender.onVideoEnabledRequest = { [weak self, weak session] requested in
             guard let self, let session, self.owns(session) else { return }

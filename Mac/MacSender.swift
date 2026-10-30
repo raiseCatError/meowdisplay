@@ -380,6 +380,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Remote Finder: this connection asks to browse the approved folders; answer with
     /// `resolveFilesConsent(_:generation:)` after the owner decides.
     @MainActor var onFilesConsentRequest: ((_ generation: UInt64, _ capabilities: Set<FilesCapability>?) -> Void)?
+    /// Unified Clipboard (PROTOCOL.md 6.15): a `clip` message from this admitted connection.
+    /// The hub checks the Mac's switch and the device's grant.
+    @MainActor var onClipboardMessage: ((_ generation: UInt64, _ message: [String: Any]) -> Void)?
     /// Fires when the connection changes, so a pending control-request
     /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
     @MainActor var onInputAuthorityReset: (() -> Void)? {
@@ -1397,6 +1400,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async {
             guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
             self.fileBrowser?.accessDecided(granted)
+        }
+    }
+
+    /// A clipboard message for the connection `generation`: dropped once that connection is
+    /// gone or no longer admitted.
+    func sendClipboard(_ message: [String: Any], generation: UInt64) {
+        let box = WorkspaceMessageBox(value: message)
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration,
+                  self.sessionAuthorization.isAdmitted else { return }
+            self.sendJSONObject(box.value)
         }
     }
 
@@ -5386,6 +5401,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let phase = captureStateSnapshot().phase
             guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
+        case ClipboardWire.type:
+            // Admitted sessions only (gate above); every mode. The hub on the main actor decides.
+            let box = WorkspaceMessageBox(value: obj)
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            Task { @MainActor in selfBox.resolve()?.onClipboardMessage?(generation, box.value) }
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
              WireMessage.menuRequest, WireMessage.menuPress, WireMessage.workspaceRetry, WireMessage.workspaceBackdropRequest:
             // Admitted sessions only (gate above). Window metadata exists only
@@ -6550,7 +6571,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
                                       "min": WireProtocol.minSupportedPeer]
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
-        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature]
+        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature]
         if WindowStreamingPolicy.isAllowed() {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)

@@ -448,6 +448,8 @@ struct MacSettingsDetailView: View {
                     InputSettingsView(controller: controller, permissions: permissions)
                 case .devices:
                     DevicesSettingsView(controller: controller)
+                case .clipboard:
+                    ClipboardSettingsView(controller: controller)
                 case .remoteAccess:
                     RemoteAccessSettingsView(controller: controller)
                 case .displayRole:

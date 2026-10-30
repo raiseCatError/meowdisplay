@@ -271,6 +271,7 @@ targets:
       - Mac/RemoteFilesAuthorization.swift
       - Mac/AppMenuReader.swift
       - Mac/WindowCloser.swift
+      - Mac/ClipboardHub.swift
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
