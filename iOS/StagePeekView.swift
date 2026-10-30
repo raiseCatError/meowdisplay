@@ -136,13 +136,19 @@ struct StagePeekOverlay: View {
             if model.drag != nil, !model.windowMode {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
                 WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
-            } else if model.drag != nil, case .window = model.drag?.item {
+            } else if model.drag != nil, (model.drag.map { if case .pane = $0.item { return false } else { return true } } ?? false) {
                 // Window mode: the pane chrome shows the landing areas; Cancel shows here too.
                 WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
             }
             if let d = model.drag, case .window(let w) = d.item {
                 // The card under the finger while the peek steps aside to show the panes.
                 dragPreview(w)
+                    .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
+                    .allowsHitTesting(false)
+                    .zIndex(60)
+            } else if let d = model.drag, case .app(let a) = d.item {
+                MacAppIcon(model: model, bundleID: a.bundleID, name: a.name, size: 56)
+                    .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
                     .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
                     .allowsHitTesting(false)
                     .zIndex(60)
@@ -399,6 +405,7 @@ struct StagePeekOverlay: View {
         return VStack(spacing: 10) {
             StagePeekSearchPill(query: $query, focused: $searchFocused)
             StagePeekDock(model: model, apps: dockApps, selected: appFilter, onApp: { tapApp($0) },
+                          onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
                           onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } })
         }
         .frame(width: width)

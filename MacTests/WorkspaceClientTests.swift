@@ -160,6 +160,69 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertTrue(make().savedLayouts.isEmpty)
     }
 
+    /// An app dragged onto a pane: its one window goes there; several → the person picks; none →
+    /// offered to open it (control), and its first new window then goes where it was dropped.
+    /// Nothing opens because a drag began or ended.
+    func testAnAppDroppedOnAPanePlacesItsWindowOrAsks() {
+        var sent: [[String: Any]] = []
+        var control = true
+        let m = model { sent.append($0) }
+        m.inputAllowed = { control }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 5, "com.apple.Safari"), (12, 5, "com.apple.Safari")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        let edge = CGPoint(x: 200, y: 780)   // the bottom edge: a new pane
+        func app(_ b: String) -> MacAppItem { MacAppItem(bundleID: b, name: b, running: true, windowCount: 0, lastUsed: nil) }
+        func shown() -> Set<UInt32> { Set(m.layout.tiles.values.compactMap { $0.source?.windowID }) }
+        func launches() -> [String] { sent.filter { $0["type"] as? String == WireMessage.appLaunch }.compactMap { $0["bundle"] as? String } }
+
+        // Several windows: nothing moves until one is picked.
+        m.beginDrag(.app(app("com.apple.Safari")), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: edge)
+        XCTAssertTrue(m.endDrag())
+        guard let several = m.appDrop else { return XCTFail("expected a chooser") }
+        XCTAssertEqual(several.windows.map(\.id), [11, 12])
+        XCTAssertEqual(shown(), [10])
+        m.completeAppDrop(several, with: several.windows[1])
+        XCTAssertNil(m.appDrop)
+        XCTAssertEqual(shown(), [10, 12])
+
+        // None: offered to open it; dropping alone never opens anything.
+        m.beginDrag(.app(app("com.apple.TextEdit")), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: edge)
+        XCTAssertFalse(m.endDrag())
+        guard let none = m.appDrop else { return XCTFail("expected the open offer") }
+        XCTAssertTrue(none.windows.isEmpty)
+        XCTAssertEqual(launches(), [])
+        // Without control, opening sends nothing.
+        control = false
+        m.launchForAppDrop(none)
+        XCTAssertEqual(launches(), [])
+        control = true
+        m.appDrop = none
+        m.launchForAppDrop(none)
+        XCTAssertEqual(launches(), ["com.apple.TextEdit"])
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 5, "com.apple.Safari"), (12, 5, "com.apple.Safari"), (20, 1, "com.apple.TextEdit")]))
+        XCTAssertTrue(shown().contains(20), "its first new window goes where it was dropped")
+
+        // One window: straight in, no question.
+        let before = m.layout.tiles.count
+        m.beginDrag(.app(app("com.apple.Safari")), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: CGPoint(x: 400, y: 1000))   // outside the picture: nothing
+        XCTAssertFalse(m.endDrag())
+        XCTAssertNil(m.appDrop)
+        XCTAssertEqual(m.layout.tiles.count, before)
+        m.apply(catalog([(10, 5, "dev.zed.Zed")]))
+        m.beginDrag(.app(app("dev.zed.Zed")), at: CGPoint(x: 200, y: 400))
+        m.moveDrag(to: edge)
+        XCTAssertTrue(m.endDrag())
+        XCTAssertNil(m.appDrop)
+    }
+
     /// Mirror/Extend: a window dropped on the desktop's edge starts Window mode with the
     /// desktop and the window side by side; the desktop is sent as a display, never a window.
     func testAWindowDroppedOnTheDesktopStartsWindowModeBesideIt() {

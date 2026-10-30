@@ -23,6 +23,7 @@ removed, and the arrangement comes back when the space returns.
 | Switch view | From Window view: Stage Peek's Full Desktop card, or the overview's Mirror/Extend. From the whole screen: answer Yes to "Switch to Window view?" (offered once per launch when the Mac supports it), or open the overview | Same | — |
 | Tile options | Tap a tile's name: Type Here, Change Window…, Rotate, Fill Tile / Show Whole Window, Maximize / Restore Layout, Arrange Tiles, Remove Tile, Close Window on Mac…. With one tile, open the rail and tap Arrange first (the name at the top is the rail) | Same | Same, while Arrange is on |
 | Move a tile | Press and hold its name, then drag: a highlighted area shows where it lands (middle swaps, an edge splits) | Same | Same, while Arrange is on |
+| Drag an app in | In Stage Peek, press and hold an app in the carousel or in search results, then drag it onto a pane: one window goes straight in; with several, pick which; with none, you're offered to open it on the Mac (needs control) and its first new window lands there. Nothing opens just because a drag began | Same | — |
 | Resize | Arrange Tiles, then drag the grips between tiles | Same | Same |
 
 Removing a tile never closes the Mac window. **Close Window on Mac…** is

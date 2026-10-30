@@ -137,3 +137,39 @@ struct StagePeekCardGestures: UIViewRepresentable {
         }
     }
 }
+
+extension StagePeekCardGestures {
+    /// An app icon's touches: a tap picks it; press, hold and move drags the app onto a pane
+    /// (its window goes there; several → the person picks one; none → offered to open it).
+    /// A hold released in place does nothing, and nothing opens just because a drag began.
+    @MainActor
+    static func app(_ app: MacAppItem, model: WorkspaceModel, heldAt: Binding<CGPoint>, clock: CardGestureClock? = nil,
+                    onTap: @escaping () -> Void, onDragEnded: @escaping (Bool) -> Void) -> StagePeekCardGestures {
+        StagePeekCardGestures(
+            onTap: { guard model.drag == nil else { return }; onTap() },
+            onHold: { p in
+                clock?.mark()
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                heldAt.wrappedValue = p
+            },
+            onHoldMove: { p in
+                clock?.mark()
+                if model.drag == nil {
+                    let h = heldAt.wrappedValue
+                    guard hypot(p.x - h.x, p.y - h.y) > Coordinator.moveSlop else { return }
+                    model.beginDrag(.app(app), at: p)
+                } else {
+                    model.moveDrag(to: p)
+                }
+            },
+            onHoldEnd: { p, _ in
+                clock?.mark()
+                guard model.drag != nil else { return }
+                model.moveDrag(to: p)
+                let dropped = model.endDrag()
+                if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
+                onDragEnded(dropped)
+            },
+            onHoldCancel: { if model.drag != nil { model.cancelDrag() } })
+    }
+}

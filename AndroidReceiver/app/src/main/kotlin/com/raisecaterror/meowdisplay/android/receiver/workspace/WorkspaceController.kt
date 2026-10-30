@@ -83,8 +83,14 @@ data class WorkspaceDrag(val item: Item, val location: CGPoint) {
         data class Window(val window: CatalogWindow) : Item
         /** A pane's label (all its windows), or one of its tabs. */
         data class Pane(val tile: String, val tab: Int?) : Item
+        /** An app from Stage Peek's carousel or search: its window when it has one; several → the
+         *  person picks; none → offered to open it (never just because a drag began). */
+        data class App(val app: MacApp) : Item
     }
 }
+
+/** An app dropped on a pane, waiting for the person: pick one of its [windows], or open it. */
+data class AppDrop(val app: MacApp, val windows: List<CatalogWindow>, val target: WWindowDrop, val seq: Long = System.nanoTime())
 
 data class WorkspaceUi(
     /** The connected Mac offers Window mode. */
@@ -130,6 +136,8 @@ data class WorkspaceUi(
     /** What happened to the last Close Window (shown briefly over Stage Peek). */
     val closeNotice: WindowCloseNotice? = null,
     val drag: WorkspaceDrag? = null,
+    /** An app dropped on a pane, waiting for a choice (see [AppDrop]). */
+    val appDrop: AppDrop? = null,
     /** "Fullscreen on This Device": this pane fills the screen locally; the arrangement is kept. */
     val localFullscreen: String? = null,
     /** Bumped on any touch on the picture: reveals the fullscreen strip. */
@@ -381,6 +389,7 @@ class WorkspaceController(
         publish()
         if (catalogAwaitingSend) { catalogAwaitingSend = false; scheduleSend(0) }
         requestThumbnails(catalog)
+        placePendingAppWindow(catalog)
     }
 
     /** Visible cards first; nothing asked twice within a few seconds; failures back off. */
@@ -1119,7 +1128,7 @@ class WorkspaceController(
         if (overCancelZone(p)) return null
         val s = state.value
         if (!s.windowMode) {
-            if (s.drag?.item !is WorkspaceDrag.Item.Window) return null
+            if (s.drag?.item !is WorkspaceDrag.Item.Window && s.drag?.item !is WorkspaceDrag.Item.App) return null
             val g = desktopFrame
             if (g.isEmpty || !g.contains(p)) return null
             // No display listed (an older Mac): the window simply shows in Window mode.
@@ -1139,26 +1148,62 @@ class WorkspaceController(
         state.update { it.copy(drag = null) }
         target ?: return false
         return when (val item = d.item) {
-            is WorkspaceDrag.Item.Window -> {
-                if (!state.value.windowMode) {
-                    // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
-                    val desk = desktopLayout() ?: run { choose(item.window, asNewTile = false); return true }
-                    val source = source(item.window) ?: return false
-                    nextTile++ // the desktop pane's id
-                    val (next, focusTile) = dropping(source, target, desk)
-                    history.record(saved)
-                    saved = next.compacted()
-                    state.update { it.copy(localFullscreen = null) }
-                    refreshMissing(); persist(); publish()
-                    media.session.requestDisplayMode(DisplayMode.Window)
-                    focusTile?.let(::focus)
-                    true
-                } else {
-                    drop(item.window, target); true
-                }
-            }
+            is WorkspaceDrag.Item.Window -> place(item.window, target)
             is WorkspaceDrag.Item.Pane -> { dropTile(item.tile, item.tab, target); true }
+            is WorkspaceDrag.Item.App -> {
+                val windows = state.value.catalog?.windows.orEmpty().filter { it.bundleID == item.app.bundleID }
+                if (windows.size == 1) return place(windows[0], target)
+                // Several: which one. None: offer to open it, then place its first window there.
+                state.update { it.copy(appDrop = AppDrop(item.app, windows, target)) }
+                windows.isNotEmpty()
+            }
         }
+    }
+
+    /** A window dropped on a pane (or, outside Window mode, beside the desktop). */
+    private fun place(window: CatalogWindow, target: WWindowDrop): Boolean {
+        if (state.value.windowMode) { drop(window, target); return true }
+        // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
+        val desk = desktopLayout() ?: run { choose(window, asNewTile = false); return true }
+        val source = source(window) ?: return false
+        nextTile++ // the desktop pane's id
+        val (next, focusTile) = dropping(source, target, desk)
+        history.record(saved)
+        saved = next.compacted()
+        state.update { it.copy(localFullscreen = null) }
+        refreshMissing(); persist(); publish()
+        media.session.requestDisplayMode(DisplayMode.Window)
+        focusTile?.let(::focus)
+        return true
+    }
+
+    /** Opened from a drop: its first new window goes where it was dropped (for up to 20 s). */
+    private data class PendingAppPlacement(val bundleID: String, val target: WWindowDrop, val known: Set<Long>, val until: Long)
+    private var pendingAppPlacement: PendingAppPlacement? = null
+
+    /** The window picked for an app drop. */
+    fun completeAppDrop(d: AppDrop, window: CatalogWindow) {
+        state.update { it.copy(appDrop = null) }
+        place(window, d.target)
+    }
+
+    /** Open the dropped app on the Mac (explicit; needs control), then place its first window. */
+    fun launchForAppDrop(d: AppDrop) {
+        state.update { it.copy(appDrop = null) }
+        if (!inputAllowed) return
+        val known = state.value.catalog?.windows.orEmpty().filter { it.bundleID == d.app.bundleID }.map { it.id }.toSet()
+        pendingAppPlacement = PendingAppPlacement(d.app.bundleID, d.target, known, SystemClock.uptimeMillis() + 20_000)
+        launch(d.app.bundleID)
+    }
+
+    fun cancelAppDrop() = state.update { it.copy(appDrop = null) }
+
+    private fun placePendingAppWindow(catalog: WindowCatalog) {
+        val p = pendingAppPlacement ?: return
+        if (SystemClock.uptimeMillis() > p.until) { pendingAppPlacement = null; return }
+        val w = catalog.windows.firstOrNull { it.bundleID == p.bundleID && it.id !in p.known } ?: return
+        pendingAppPlacement = null
+        place(w, p.target)
     }
 
     // MARK: Local fullscreen (receiver only)

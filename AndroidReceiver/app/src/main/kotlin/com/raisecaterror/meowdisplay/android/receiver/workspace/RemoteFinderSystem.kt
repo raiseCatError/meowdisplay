@@ -31,6 +31,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import com.raisecaterror.meowdisplay.core.workspace.CatalogWindow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -598,6 +602,45 @@ fun RemoteUploadConflictDialog(transfers: RemoteTransferQueue, canReplace: Boole
         },
         confirmButton = {},
         dismissButton = { TextButton(onClick = { transfers.cancel(item.id) }) { Text("Stop Upload") } },
+    )
+}
+
+/**
+ * After an app is dropped on a pane: which of its windows (several), or open it on the Mac (none;
+ * needs control). Nothing opens or moves until the person picks.
+ */
+@Composable
+fun AppDropDialog(
+    drop: AppDrop, inputAllowed: Boolean, onPick: (CatalogWindow) -> Unit, onOpen: () -> Unit,
+    onRequestControl: () -> Unit, onCancel: () -> Unit,
+) {
+    val name = drop.app.name
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Text(when {
+                drop.windows.isNotEmpty() -> "Which $name window?"
+                drop.app.running -> "$name has no windows you can show. Open a new one on the Mac?"
+                else -> "Open $name on the Mac?"
+            })
+        },
+        text = {
+            if (drop.windows.isNotEmpty()) {
+                Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                    for (w in drop.windows) TextButton(onClick = { onPick(w) }) { Text(w.title.ifEmpty { "Untitled Window" }) }
+                }
+            } else {
+                Text(if (inputAllowed) "Its first new window goes where you dropped it." else "Opening apps needs control of the Mac.")
+            }
+        },
+        confirmButton = {
+            when {
+                drop.windows.isNotEmpty() -> {}
+                inputAllowed -> TextButton(onClick = onOpen) { Text("Open on Mac") }
+                else -> TextButton(onClick = onRequestControl) { Text("Request Control") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
 }
 

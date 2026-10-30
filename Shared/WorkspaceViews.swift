@@ -925,6 +925,41 @@ struct WorkspacePresetsView: View {
     }
 }
 
+/// After an app is dropped on a pane: which of its windows (several), or open it on the Mac
+/// (none; needs control). Nothing opens or moves until the person picks.
+struct WorkspaceAppDropDialogs: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+    var onRequestControl: () -> Void
+
+    func body(content: Content) -> some View {
+        let d = model.appDrop
+        content.confirmationDialog(title(d), isPresented: Binding(get: { model.appDrop != nil }, set: { if !$0 { model.cancelAppDrop() } }),
+                                   titleVisibility: .visible, presenting: d) { d in
+            if !d.windows.isEmpty {
+                ForEach(d.windows) { w in
+                    Button(w.title.isEmpty ? String(localized: "Untitled Window") : w.title) { model.completeAppDrop(d, with: w) }
+                }
+            } else if model.inputAllowed() {
+                Button("Open on Mac") { model.launchForAppDrop(d) }
+            } else {
+                Button("Request Control") { model.cancelAppDrop(); onRequestControl() }
+            }
+            Button("Cancel", role: .cancel) { model.cancelAppDrop() }
+        } message: { d in
+            if d.windows.isEmpty {
+                Text(model.inputAllowed() ? "Its first new window goes where you dropped it." : "Opening apps needs control of the Mac.")
+            }
+        }
+    }
+
+    private func title(_ d: WorkspaceModel.AppDrop?) -> String {
+        guard let d else { return "" }
+        if !d.windows.isEmpty { return String(localized: "Which \(d.app.name) window?") }
+        return d.app.running ? String(localized: "\(d.app.name) has no windows you can show. Open a new one on the Mac?")
+                             : String(localized: "Open \(d.app.name) on the Mac?")
+    }
+}
+
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).

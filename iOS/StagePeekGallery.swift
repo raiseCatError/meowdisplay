@@ -100,8 +100,10 @@ struct StagePeekDock: View {
     let apps: [MacAppItem]
     let selected: String?
     let onApp: (MacAppItem) -> Void
+    var onDragEnded: (Bool) -> Void = { _ in }
     let onLaunchpad: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var heldAt: CGPoint = .zero
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -118,6 +120,8 @@ struct StagePeekDock: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    // Tap picks it; press, hold and move drags the app onto a pane.
+                    .overlay(StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, onTap: { onApp(app) }, onDragEnded: onDragEnded))
                     .onAppear { model.requestIcons([app.bundleID]) }
                     .accessibilityLabel(app.name)
                     .accessibilityValue(app.running ? (app.windowCount == 1 ? String(localized: "Running, 1 window")
@@ -628,6 +632,8 @@ struct StagePeekGallery: View {
             }
         }
         .buttonStyle(.plain)
+        .overlay(StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, clock: cardGestureClock,
+                                           onTap: { onApp(app) }, onDragEnded: onDragEnded))
         .onAppear { model.requestIcons([app.bundleID]) }
         .accessibilityLabel(app.name)
     }

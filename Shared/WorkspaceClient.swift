@@ -393,6 +393,9 @@ struct WorkspaceDrag: Equatable {
         case window(CatalogWindowItem)
         /// A pane's label (all its windows), or one of its tabs.
         case pane(String, tab: Int?)
+        /// An app from Stage Peek's carousel, search or Launchpad: its window when it has one;
+        /// several → the person picks; none → offered to open it (never just because a drag began).
+        case app(MacAppItem)
     }
     var item: Item
     /// Global (screen) coordinates.
@@ -640,6 +643,7 @@ final class WorkspaceModel: ObservableObject {
         Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
         if c.starting { return }
         catalog = c
+        defer { placePendingAppWindow() }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var missing = Set<String>()
         var rebased = saved
@@ -1263,7 +1267,8 @@ final class WorkspaceModel: ObservableObject {
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
         if overCancelZone(p) { return nil }
         if !windowMode {
-            guard case .window = drag?.item, desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
+            switch drag?.item { case .window?, .app?: break; default: return nil }
+            guard desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
             // No display listed (an older Mac): the window simply shows in Window mode.
             guard let desk = desktopLayout() else { return .replace(tile: Self.noDesktop, preview: WorkspaceRect(x: 0, y: 0, width: 1, height: 1)) }
             let g = desktopPictureGlobal
@@ -1292,26 +1297,73 @@ final class WorkspaceModel: ObservableObject {
         guard let target else { return false }
         switch d.item {
         case .window(let w):
-            if !windowMode {
-                // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
-                guard let desk = desktopLayout() else { switchTo(w); return true }
-                guard let source = source(for: w) else { return false }
-                nextTile += 1   // the desktop pane's id
-                let (next, focusTile) = dropping(source, on: target, in: desk)
-                history.record(saved)
-                saved = next.compacted()
-                localFullscreen = nil
-                refreshMissing(); persist(); publish()
-                requestWindowMode()
-                if let focusTile { focus(focusTile) }
-                return true
-            }
-            drop(w, on: target)
-            return true
+            return place(w, on: target)
         case .pane(let id, let tab):
             dropTile(id, tab: tab, on: target)
             return true
+        case .app(let app):
+            let windows = (catalog?.windows ?? []).filter { $0.bundleID == app.bundleID }
+            if windows.count == 1 { return place(windows[0], on: target) }
+            // Several: which one. None: offer to open it, then place its first window there.
+            appDrop = AppDrop(app: app, windows: windows, target: target)
+            return windows.isEmpty ? false : true
         }
+    }
+
+    /// An app dropped on a pane, waiting for the person: pick one of its windows, or open it.
+    struct AppDrop: Identifiable, Equatable {
+        let id = UUID()
+        var app: MacAppItem
+        var windows: [CatalogWindowItem]
+        var target: WorkspaceWindowDrop
+    }
+    @Published var appDrop: AppDrop?
+    /// Opened from a drop: its first new window goes where it was dropped (for up to 20 s).
+    private var pendingAppPlacement: (bundle: String, target: WorkspaceWindowDrop, known: Set<UInt32>, until: Date)?
+
+    /// The window picked for an app drop.
+    func completeAppDrop(_ d: AppDrop, with w: CatalogWindowItem) {
+        appDrop = nil
+        _ = place(w, on: d.target)
+    }
+
+    /// Open the dropped app on the Mac (explicit; needs control), then place its first window.
+    func launchForAppDrop(_ d: AppDrop) {
+        appDrop = nil
+        guard inputAllowed() else { return }
+        pendingAppPlacement = (d.app.bundleID, d.target, Set((catalog?.windows ?? []).filter { $0.bundleID == d.app.bundleID }.map(\.id)),
+                               Date().addingTimeInterval(20))
+        launch(d.app.bundleID)
+    }
+
+    func cancelAppDrop() { appDrop = nil }
+
+    private func placePendingAppWindow() {
+        guard let p = pendingAppPlacement else { return }
+        if Date() > p.until { pendingAppPlacement = nil; return }
+        guard let w = catalog?.windows.first(where: { $0.bundleID == p.bundle && !p.known.contains($0.id) }) else { return }
+        pendingAppPlacement = nil
+        _ = place(w, on: p.target)
+    }
+
+    /// A window dropped on a pane (or, outside Window mode, beside the desktop).
+    private func place(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) -> Bool {
+        if !windowMode {
+            // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
+            guard let desk = desktopLayout() else { switchTo(w); return true }
+            guard let source = source(for: w) else { return false }
+            nextTile += 1   // the desktop pane's id
+            let (next, focusTile) = dropping(source, on: target, in: desk)
+            history.record(saved)
+            saved = next.compacted()
+            localFullscreen = nil
+            refreshMissing(); persist(); publish()
+            requestWindowMode()
+            if let focusTile { focus(focusTile) }
+            return true
+        }
+        drop(w, on: target)
+        return true
     }
 
     func minimizeRemoteWindow(_ tile: String) {

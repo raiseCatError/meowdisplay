@@ -64,6 +64,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -386,10 +387,9 @@ fun StagePeekOverlay(
                     bottom = toolbarY(safe.midX, safe, avoiding) - 26,
                 )
             }
-            if (!dragging) {
-                TopControls(host, controller, dockApps, icons, safe, shownExpansion, appear, avoiding)
-                Toolbar(host, cards, safe, avoiding)
-            }
+            // Kept (invisible) while dragging, so a drag that began on the app carousel keeps its gesture.
+            TopControls(host, controller, dockApps, icons, safe, shownExpansion, if (dragging) 0f else appear, avoiding)
+            if (!dragging) Toolbar(host, cards, safe, avoiding)
         }
         if (host.launchpad) Launchpad(controller, ui, host, icons, inputAllowed, safe)
         if (dragging) {
@@ -397,6 +397,13 @@ fun StagePeekOverlay(
             WorkspaceDropOverlay(controller, CGPoint(frame.minX, frame.minY))
             val d = ui.drag
             if (d != null && d.item is WorkspaceDrag.Item.Window) DragPreview(d.item.window, controller.still(d.item.window), icons[d.item.window.bundleID], d.location, frame)
+            if (d != null && d.item is WorkspaceDrag.Item.App) {
+                val px = LocalDensity.current.density
+                Box(Modifier.offset { IntOffset(((d.location.x - frame.minX - 28) * px).roundToInt(), ((d.location.y - frame.minY - 28) * px).roundToInt()) }
+                    .graphicsLayer { alpha = 0.95f; scaleX = 1.08f; scaleY = 1.08f }) {
+                    AppIconView(icons[d.item.app.bundleID], d.item.app.name, 56.0)
+                }
+            }
         }
         if (strip != null) StripView(strip, edge, host, onStripFrame)
         ui.closeNotice?.let { CloseToast(it, safe, avoiding) { controller.dismissCloseNotice() } }
@@ -651,7 +658,8 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
                     Box(
                         Modifier.size(50.dp).clip(RoundedCornerShape(12.dp))
                             .background(if (selected) StagePeekAccent.copy(alpha = 0.35f) else Color.Transparent)
-                            .clickable { host.tapApp(app) }
+                            .appHoldToDrag(controller, host, app)
+                            .clickable { if (controller.ui.value.drag == null) host.tapApp(app) }
                             .semantics { contentDescription = app.name + if (app.running) ", running" else "" },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -884,7 +892,9 @@ private fun Gallery(
                             items(results.apps.take(30), key = { it.bundleID }) { app ->
                                 LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
                                 Column(
-                                    Modifier.width(76.dp).clickable { host.query = ""; host.tapApp(app, forceFilter = true) }.semantics { contentDescription = app.name },
+                                    Modifier.width(76.dp).appHoldToDrag(controller, host, app)
+                                        .clickable { if (controller.ui.value.drag == null) { host.query = ""; host.tapApp(app, forceFilter = true) } }
+                                        .semantics { contentDescription = app.name },
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                 ) {
                                     AppIconView(icons[app.bundleID], app.name, 48.0)
@@ -1013,7 +1023,23 @@ private fun EmptyApp(controller: WorkspaceController, ui: WorkspaceUi, app: MacA
 private fun Modifier.holdToDrag(
     controller: WorkspaceController, host: StagePeekHost, item: CatalogWindow, origin: () -> CGPoint,
     onLift: (Boolean) -> Unit, onMenu: (() -> Unit)?,
-): Modifier = pointerInput(item.id, onMenu != null) {
+): Modifier = holdToDrag(controller, host, item.id, WorkspaceDrag.Item.Window(item), origin, onLift, onMenu)
+
+/**
+ * An app icon: press, hold and move drags the app onto a pane (its window goes there; several →
+ * the person picks; none → offered to open it). Lifting in place does nothing.
+ */
+private fun Modifier.appHoldToDrag(controller: WorkspaceController, host: StagePeekHost, app: MacApp): Modifier = composed {
+    val d = LocalDensity.current.density
+    var origin by remember { mutableStateOf(CGPoint.zero) }
+    onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
+        .holdToDrag(controller, host, app.bundleID, WorkspaceDrag.Item.App(app), { origin }, onLift = {}, onMenu = null)
+}
+
+private fun Modifier.holdToDrag(
+    controller: WorkspaceController, host: StagePeekHost, key: Any, item: WorkspaceDrag.Item, origin: () -> CGPoint,
+    onLift: (Boolean) -> Unit, onMenu: (() -> Unit)?,
+): Modifier = pointerInput(key, onMenu != null) {
     var at = CGPoint.zero
     var start = CGPoint.zero
     var dragging = false
@@ -1034,7 +1060,7 @@ private fun Modifier.holdToDrag(
             if (!dragging) {
                 if (hypot(at.x - start.x, at.y - start.y) <= 12) return@detectDragGesturesAfterLongPress
                 dragging = true
-                controller.beginDrag(WorkspaceDrag.Item.Window(item), at)
+                controller.beginDrag(item, at)
             } else {
                 controller.moveDrag(at)
             }

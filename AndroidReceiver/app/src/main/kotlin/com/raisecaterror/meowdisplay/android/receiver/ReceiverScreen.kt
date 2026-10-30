@@ -440,6 +440,13 @@ fun ReceiverScreen(
                         .background(androidx.compose.ui.graphics.Color(0xE6202124), RoundedCornerShape(50)).padding(horizontal = 14.dp, vertical = 9.dp),
                 )
             }
+            // An app dropped on a pane: pick one of its windows, or open it.
+            wui.appDrop?.let { d ->
+                com.raisecaterror.meowdisplay.android.receiver.workspace.AppDropDialog(
+                    d, state.inputAllowed, onPick = { ws.completeAppDrop(d, it) }, onOpen = { ws.launchForAppDrop(d) },
+                    onRequestControl = { ws.cancelAppDrop(); controller.requestInputTapped() }, onCancel = ws::cancelAppDrop,
+                )
+            }
         }
         // Unified Clipboard prompts (send a copy, the Mac's files), above the bottom controls.
         workspace?.let {
