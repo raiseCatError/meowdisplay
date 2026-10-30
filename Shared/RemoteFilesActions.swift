@@ -679,12 +679,22 @@ extension RemoteFilesModel {
         export = RemoteFilesExport(mode: b.mode, urls: urls, directory: dir, failed: b.failed)
     }
 
+    /// Stops preparing copies for Save or Share; what was copied so far is removed.
+    func cancelExports() {
+        let ids = Set(exportBatches.keys)
+        exportBatches = [:]
+        for item in transfers.items where ids.contains(item.batch) && !item.state.isFinished { transfers.cancel(item.id) }
+        for b in ids { try? FileManager.default.removeItem(at: RemoteTransferQueue.cacheDirectory.appendingPathComponent("export-" + b.uuidString, isDirectory: true)) }
+    }
+
     /// The save or share sheet is done: the copies on this device go.
     func exportFinished(_ e: RemoteFilesExport, completed: Bool) {
         try? FileManager.default.removeItem(at: e.directory)
         if export?.id == e.id { export = nil }
         if completed, e.mode == .save {
             show(.text(e.failed > 0 ? String(localized: "Saved. \(e.failed) couldn't be copied.") : String(localized: "Saved to this device.")))
+        } else if completed {
+            show(.text(e.failed > 0 ? String(localized: "Shared. \(e.failed) couldn't be copied.") : String(localized: "Shared.")))
         }
     }
 

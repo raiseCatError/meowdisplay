@@ -42,6 +42,12 @@ struct RemoteFinderView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
                     .zIndex(2)
             }
+            if !files.exportBatches.isEmpty {
+                RemoteExportProgressBar(transfers: files.transfers, batches: files.exportBatches) { files.cancelExports() }
+                    .position(x: safe.midX, y: safe.maxY - (files.notice == nil ? 48 : 110))
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(3)
+            }
             if let notice = files.notice {
                 noticeView(notice)
                     .position(x: safe.midX, y: safe.maxY - 40)
@@ -55,9 +61,9 @@ struct RemoteFinderView: View {
         .accessibilityAction(.escape) { files.close() }
         .sheet(isPresented: $showTransfers) { RemoteTransfersSheet(transfers: files.transfers) }
         .sheet(item: $files.info) { RemoteFileInfoView(sheet: $0) }
-        .sheet(item: $files.export) { e in
-            RemoteExportPresenter(export: e) { ok in files.exportFinished(e, completed: ok) }
-                .ignoresSafeArea()
+        .onChange(of: files.export?.id) { _ in
+            guard let e = files.export else { return }
+            RemoteExportPresenting.present(e) { ok in files.exportFinished(e, completed: ok) }
         }
         .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { files.upload(urls) }
@@ -916,53 +922,69 @@ private struct RemoteFilePreviewCard: View {
 
     private var actions: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 10) {
-                if preview.entry.location != nil {
-                    Button { files.showInFolder(preview.entry) } label: { Label("Show in Folder", systemImage: "folder") }
-                        .buttonStyle(.bordered)
-                        .labelStyle(.iconOnly)
-                }
+            HStack(alignment: .center, spacing: 4) {
                 if grant.canDownload {
-                    Button { files.save([preview.entry]) } label: { Label("Save to Device", systemImage: "square.and.arrow.down") }
-                        .buttonStyle(.bordered)
-                        .labelStyle(.iconOnly)
-                    Button { files.share([preview.entry]) } label: { Label("Share", systemImage: "square.and.arrow.up") }
-                        .buttonStyle(.bordered)
-                        .labelStyle(.iconOnly)
+                    previewAction("Save", "square.and.arrow.down") { files.save([preview.entry]) }
+                        .accessibilityLabel("Save to Device")
+                    previewAction("Share", "square.and.arrow.up") { files.share([preview.entry]) }
                 }
-                Spacer()
-                if !paneApps.isEmpty || !macApps.isEmpty {
-                    Menu {
-                        if !paneApps.isEmpty {
-                            Section("Open in a pane's app") {
-                                ForEach(paneApps, id: \.bundleID) { app in
-                                    Button(app.name) { files.openOnMac(preview.entry, inApp: app.bundleID) }
+                if preview.entry.location != nil {
+                    previewAction("Folder", "folder") { files.showInFolder(preview.entry) }
+                        .accessibilityLabel("Show in Folder")
+                }
+                Spacer(minLength: 12)
+                // One button: tap opens with the Mac's default app; hold (or the chevron) to choose.
+                Menu {
+                    if !paneApps.isEmpty {
+                        Section("Open in a pane's app") {
+                            ForEach(paneApps, id: \.bundleID) { app in
+                                Button(app.name) { files.openOnMac(preview.entry, inApp: app.bundleID) }
+                            }
+                        }
+                    }
+                    if !macApps.isEmpty {
+                        Section("Open on the Mac with") {
+                            ForEach(macApps) { app in
+                                Button(app.isDefault ? String(localized: "\(app.name) (default)") : app.name) {
+                                    files.openOnMac(preview.entry, inApp: app.bundleID)
                                 }
                             }
                         }
-                        if !macApps.isEmpty {
-                            Section("Open on the Mac with") {
-                                ForEach(macApps) { app in
-                                    Button(app.isDefault ? String(localized: "\(app.name) (default)") : app.name) {
-                                        files.openOnMac(preview.entry, inApp: app.bundleID)
-                                    }
-                                }
-                            }
-                        }
-                    } label: { Label("Open With", systemImage: "rectangle.split.2x1") }
-                        .buttonStyle(.bordered)
-                        .disabled(!inputAllowed)
-                }
-                Button { files.openOnMac(preview.entry) } label: { Label("Open on Mac", systemImage: "macbook") }
-                    .buttonStyle(.borderedProminent)
-                    .tint(meowAccent)
-                    .disabled(!inputAllowed)
+                    }
+                    Button { files.openOnMac(preview.entry) } label: { Label("Default App", systemImage: "macbook") }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "macbook")
+                        Text("Open on Mac")
+                        if !paneApps.isEmpty || !macApps.isEmpty { Image(systemName: "chevron.down").font(.caption2.weight(.bold)) }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16).frame(height: 40)
+                    .background(meowAccent.opacity(inputAllowed ? 1 : 0.35), in: Capsule())
+                } primaryAction: { files.openOnMac(preview.entry) }
+                .disabled(!inputAllowed)
+                .accessibilityHint("Hold to choose the app")
             }
             if !inputAllowed {
                 Text("Opening on the Mac needs control of the Mac.").font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
+    }
+
+    /// An icon over a short label, like the Files app's bar: consistent size and spacing.
+    private func previewAction(_ title: LocalizedStringKey, _ symbol: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 19, weight: .regular)).frame(height: 22)
+                Text(title).font(.caption2)
+            }
+            .frame(minWidth: 58, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
     }
 }
 

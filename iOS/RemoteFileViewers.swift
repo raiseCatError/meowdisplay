@@ -262,6 +262,86 @@ struct RemoteQuickLookView: UIViewControllerRepresentable {
 
 /// The system's Save to Files picker or share sheet for copies from the Mac; the copies are
 /// removed once it is done.
+/// Save (the system "Save to Files" picker) or Share (the share sheet) for copies made on this
+/// device, presented from the top-most view controller. Inside a SwiftUI sheet these showed
+/// nothing or a blank sheet, and tearing the sheet down deleted the copies early.
+/// `done` runs once; a shared copy stays a minute so the receiving app can still read it.
+@MainActor
+enum RemoteExportPresenting {
+    private static var active: Coordinator?
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        private var done: ((Bool) -> Void)?
+        init(done: @escaping (Bool) -> Void) { self.done = done }
+        func finish(_ ok: Bool) { let d = done; done = nil; d?(ok) }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { finish(true) }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { finish(false) }
+    }
+
+    static func present(_ export: RemoteFilesExport, done: @escaping (Bool) -> Void) {
+        guard let top = topViewController() else { done(false); return }
+        active?.finish(false)
+        let c = Coordinator { ok in active = nil; done(ok) }
+        active = c
+        switch export.mode {
+        case .save:
+            let picker = UIDocumentPickerViewController(forExporting: export.urls, asCopy: true)
+            picker.delegate = c
+            top.present(picker, animated: true)
+        case .share:
+            let sheet = UIActivityViewController(activityItems: export.urls, applicationActivities: nil)
+            sheet.completionWithItemsHandler = { _, completed, _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + (completed ? 60 : 0)) { c.finish(completed) }
+            }
+            if let pop = sheet.popoverPresentationController {   // iPad: required, centred near the bottom
+                pop.sourceView = top.view
+                pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 1, height: 1)
+                pop.permittedArrowDirections = []
+            }
+            top.present(sheet, animated: true)
+        }
+    }
+
+    static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.filter { $0.activationState == .foregroundActive }.flatMap(\.windows) + scenes.flatMap(\.windows)
+        var top = (windows.first { $0.isKeyWindow } ?? windows.first)?.rootViewController
+        while let p = top?.presentedViewController, !p.isBeingDismissed { top = p }
+        return top
+    }
+}
+
+/// Copies from the Mac being prepared for Save or Share: one bar with the batch's progress.
+struct RemoteExportProgressBar: View {
+    @ObservedObject var transfers: RemoteTransferQueue
+    let batches: [UUID: RemoteFilesExportBatch]
+    let cancel: () -> Void
+
+    var body: some View {
+        let items = transfers.items.filter { batches[$0.batch] != nil }
+        let total = items.reduce(Int64(0)) { $0 + max($1.size, 0) }
+        let done = items.reduce(Int64(0)) { $0 + min($1.transferred, max($1.size, 0)) }
+        let share = batches.values.contains { $0.mode == .share }
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(share ? "Preparing to share…" : "Copying to this device…").font(.footnote.weight(.semibold))
+                if total > 0 {
+                    ProgressView(value: Double(done), total: Double(total))
+                    Text("\(ByteCountFormatter.string(fromByteCount: done, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))")
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                } else {
+                    ProgressView(value: nil as Double?).progressViewStyle(.linear)
+                }
+            }
+            Button("Cancel", action: cancel).buttonStyle(.bordered).controlSize(.small)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(maxWidth: 420)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct RemoteExportPresenter: UIViewControllerRepresentable {
     let export: RemoteFilesExport
     let done: (Bool) -> Void

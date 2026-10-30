@@ -278,7 +278,7 @@ final class RemoteFilesModel: ObservableObject {
     var macKey: () -> String? = { nil }
     var waiters: [Int: CheckedContinuation<RemoteFilesReply, Never>] = [:]
     var viewerTransfer: (id: UUID, entry: RemoteFileEntry)?
-    var exportBatches: [UUID: RemoteFilesExportBatch] = [:]
+    @Published var exportBatches: [UUID: RemoteFilesExportBatch] = [:]
     var streams: [Int: RemoteFileStream] = [:]
     var refreshTask: Task<Void, Never>?
 

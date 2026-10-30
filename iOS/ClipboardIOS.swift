@@ -219,8 +219,9 @@ struct ClipboardBanner: View {
                     .task { try? await Task.sleep(nanoseconds: 2_500_000_000); clipboard.dismissNotice() }
             }
         }
-        .sheet(item: $clipboard.export) { e in
-            RemoteExportPresenter(export: e) { ok in clipboard.exportFinished(e, completed: ok) }
+        .onChange(of: clipboard.export?.id) { _ in
+            guard let e = clipboard.export else { return }
+            RemoteExportPresenting.present(e) { ok in clipboard.exportFinished(e, completed: ok) }
         }
     }
 
