@@ -3671,7 +3671,12 @@ final class SenderController: ObservableObject {
         }
     }
 
+    /// Not Now / timeout cooldowns per device, across its sessions.
+    private var inputControlCooldowns = InputControlRequestCooldowns()
+
     private func presentInputControlPrompt(session: DeviceSession, peerID: String, connectionGeneration: UInt64) {
+        // A device declined (or left unanswered) recently can't reconnect for a new prompt.
+        guard !inputControlCooldowns.isCoolingDown(peerID: peerID) else { return }
         guard let generation = session.inputControlRequest.beginRequest() else {
             // Duplicate while pending (coalesced into the existing prompt)
             // or within the post-decision cooldown — no new prompt, no
@@ -3697,6 +3702,7 @@ final class SenderController: ObservableObject {
             // and a replacement began, or a duplicate resolution raced in).
             return
         }
+        inputControlCooldowns.record(decision, peerID: peerID)
         // `InputControlRequestPlan` fixes a real ordering bug: persisting
         // BEFORE granting means `.alwaysAllowDevice`'s widening is judged
         // by whatever OTHER sessions currently have effective input, never

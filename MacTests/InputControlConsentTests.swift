@@ -161,4 +161,29 @@ final class InputControlConsentTests: XCTestCase {
         XCTAssertTrue(plan.grantSession)
         XCTAssertNil(plan.denyState)
     }
+
+    // MARK: - Consent prompts answer only to the person at the Mac
+
+    func testGrantsCountOnlyForHardwareOrAccessibilityPresses() {
+        XCTAssertTrue(ConsentInputPolicy.acceptsGrant(sourcePID: 0), "the Mac's own mouse, trackpad or keyboard")
+        XCTAssertTrue(ConsentInputPolicy.acceptsGrant(sourcePID: nil), "VoiceOver and other accessibility presses carry no event")
+        XCTAssertFalse(ConsentInputPolicy.acceptsGrant(sourcePID: Int64(ProcessInfo.processInfo.processIdentifier)),
+                       "input a device injects is posted by MeowDisplay itself")
+        XCTAssertFalse(ConsentInputPolicy.acceptsGrant(sourcePID: 4242), "nor by any other process")
+        XCTAssertGreaterThanOrEqual(ConsentInputPolicy.armDelay, 1)
+    }
+
+    // A declined device can't reconnect to put a new prompt on the Mac at once: the cooldown
+    // belongs to the device, not to one session.
+    func testNotNowCoolsTheDeviceDownAcrossItsSessions() {
+        var cooldowns = InputControlRequestCooldowns()
+        let now = Date()
+        cooldowns.record(.notNow, peerID: "phone", now: now)
+        XCTAssertTrue(cooldowns.isCoolingDown(peerID: "phone", now: now.addingTimeInterval(1)))
+        XCTAssertFalse(cooldowns.isCoolingDown(peerID: "tablet", now: now.addingTimeInterval(1)), "each device on its own")
+        XCTAssertFalse(cooldowns.isCoolingDown(peerID: "phone", now: now.addingTimeInterval(InputControlRequestLifecycle.cooldown + 1)))
+        cooldowns.record(.allowSession, peerID: "tablet", now: now)
+        XCTAssertFalse(cooldowns.isCoolingDown(peerID: "tablet", now: now), "an answer other than Not Now sets none")
+    }
+
 }

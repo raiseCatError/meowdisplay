@@ -280,6 +280,7 @@ targets:
       - Mac/StageStripAccess.swift
       - Mac/LocalNetworkAccess.swift
       - Mac/PrivacyShieldPolicy.swift
+      - Mac/ConsentInputPolicy.swift
       - Mac/MacScreenLock.swift
       - Mac/WindowBrowserService.swift
       - Mac/RemoteFileBrowser.swift
