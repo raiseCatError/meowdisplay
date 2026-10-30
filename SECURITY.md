@@ -234,10 +234,15 @@ Settings ▸ System. Each connected device is told whether it's on.
 - Clicks and keys pass through it, so someone at the Mac can still type or
   click without seeing. It's a viewing shield, not an input lock.
 - Removing the cover needs a click from the Mac's own mouse or trackpad
-  (clicks injected for a device are ignored) and the Mac's login password,
-  asked by macOS; MeowDisplay never sees the password. While macOS asks, no
-  remote input reaches the Mac (MeowDisplay drops it), so the password can
-  only come from the Mac's own keyboard, and devices don't see the prompt.
+  (clicks injected for a device are ignored) and the owner's confirmation,
+  asked by macOS: Touch ID or the login password (macOS may also accept an
+  unlocked, paired Apple Watch). MeowDisplay never sees the password. While
+  macOS asks, nothing a device sends changes the Mac: MeowDisplay handles
+  only liveness and connection messages and drops everything else (input,
+  window actions, menus, app launches, Lock Mac, files, clipboard, window
+  lists and thumbnails), and only lets go of keys or buttons a device was
+  holding. Devices keep the last picture from before the prompt (no new
+  frame is sent until it closes), so they don't see it.
   The cover stays above every app window meanwhile; if the prompt can't be
   seen above it, the Mac stays covered (it fails closed). It covers again
   after the chosen time (5 minutes by default) without physical input at the
@@ -249,8 +254,16 @@ Settings ▸ System. Each connected device is told whether it's on.
   that's logged.
 - A device that connects after a reveal brings the cover back, so what each
   device is told on connecting is true.
-- Turning either setting off asks for confirmation, and for the login
-  password (typed on the Mac) while the cover is up.
+- Turning either setting off asks for confirmation, and for Touch ID or the
+  login password (at the Mac) while the cover is up. A setting changed
+  outside MeowDisplay's Settings (for example with `defaults write`) can
+  turn the shield on but doesn't remove a cover that is up.
+- **What it doesn't survive.** The cover is drawn by the MeowDisplay app
+  itself. A normal Quit, `kill` or `killall` locks this Mac's screen
+  before MeowDisplay exits; a force quit (SIGKILL) or a crash removes the
+  cover at once with no lock. A separate process that would keep the Mac
+  covered in that case is a prototype under assessment, not shipped. The
+  Privacy Shield is a viewing shield for people near the Mac, not a lock.
 
 ## What this doesn't claim
 

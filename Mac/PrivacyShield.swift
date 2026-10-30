@@ -132,11 +132,25 @@ final class PrivacyShield {
         update()
     }
 
-    /// Settings changed (turned on or off, relock time).
-    func settingsChanged() { update() }
+    /// The settings as they stand while the cover is up (PrivacyShieldPolicy.latched); nil while
+    /// it isn't, when the stored settings are read as they are.
+    private var latch: (remote: Bool, local: Bool)?
+    private var remoteOn: Bool { latch?.remote ?? PrivacyShieldPolicy.isOn(remote: true) }
+    private var localOn: Bool { latch?.local ?? PrivacyShieldPolicy.isOn(remote: false) }
+
+    /// Settings changed (turned on or off, relock time). `ownerConfirmed`: MeowDisplay's own
+    /// Settings confirmed it with Touch ID or the password at this Mac (needed to turn one off
+    /// while the cover is up).
+    func settingsChanged(ownerConfirmed: Bool = false) {
+        if let current = latch {
+            latch = PrivacyShieldPolicy.latched(current, stored: (PrivacyShieldPolicy.isOn(remote: true), PrivacyShieldPolicy.isOn(remote: false)),
+                                                ownerConfirmed: ownerConfirmed)
+        }
+        update()
+    }
 
     private var wantsCover: Bool {
-        PrivacyShieldPolicy.shouldCover(remoteOn: PrivacyShieldPolicy.isOn(remote: true), localOn: PrivacyShieldPolicy.isOn(remote: false),
+        PrivacyShieldPolicy.shouldCover(remoteOn: remoteOn, localOn: localOn,
                                         sessions: Array(connected.values), revealed: revealed,
                                         physicalIdle: ProcessInfo.processInfo.systemUptime - lastPhysicalInput, relockAfter: relockAfter,
                                         held: held)
@@ -145,7 +159,7 @@ final class PrivacyShield {
     func update() {
         if revealed, ProcessInfo.processInfo.systemUptime - lastPhysicalInput >= relockAfter { revealed = false }
         if wantsCover { if !unlocking { rebuild() } } else { hide() }
-        let anyOn = PrivacyShieldPolicy.shouldCover(remoteOn: PrivacyShieldPolicy.isOn(remote: true), localOn: PrivacyShieldPolicy.isOn(remote: false),
+        let anyOn = PrivacyShieldPolicy.shouldCover(remoteOn: remoteOn, localOn: localOn,
                                                     sessions: Array(connected.values), revealed: false, physicalIdle: 0, relockAfter: 1,
                                                     held: held)
         if anyOn { startWatching() } else { stopWatching() }
@@ -156,6 +170,7 @@ final class PrivacyShield {
     private func hide() {
         guard showing || !shields.isEmpty else { return }
         showing = false
+        latch = nil
         // Hidden, not closed: the windows (and their left-out ids) are reused next time.
         shields.values.forEach { $0.orderOut(nil) }
         shields = [:]
@@ -169,6 +184,7 @@ final class PrivacyShield {
         guard wantsCover, !unlocking else { return }
         if !showing {
             Log.info("privacy shield: covering this Mac's screens")
+            latch = (PrivacyShieldPolicy.isOn(remote: true), PrivacyShieldPolicy.isOn(remote: false))
             coverSince = ProcessInfo.processInfo.systemUptime
             coverStep = 0
             coverLook = .bright
@@ -344,9 +360,14 @@ final class PrivacyShield {
         }
     }
 
+    /// Installed by SenderController: every session lets go of its device's held input.
+    static var releaseRemoteInput: (@MainActor () -> Void)?
+
     /// macOS asks for this Mac's login password (MeowDisplay only learns yes or no). Meanwhile no
     /// remote input reaches the Mac and devices don't see the prompt (`refresh` updates captures).
     static func askForLoginPassword(refresh: @escaping @MainActor () -> Void) async -> Bool {
+        // Let go of anything a device holds first (its releases still pass while unlocking).
+        releaseRemoteInput?()
         PrivacyShieldWindows.isUnlocking = true
         refresh()
         // The prompt appears a moment later: leave it out of the captures as soon as it's listed.
@@ -573,12 +594,12 @@ struct PrivacyShieldSettingsSection: View {
         Task { @MainActor in
             let ok = await PrivacyShield.askForLoginPassword(refresh: { PrivacyShield.shared.onWindowsChanged?({}) })
             authFailed = !ok
-            if ok { apply(off: remote); PrivacyShield.shared.unlockedLocally() }
+            if ok { apply(off: remote, ownerConfirmed: true); PrivacyShield.shared.unlockedLocally() }
         }
     }
 
-    private func apply(off remote: Bool) {
+    private func apply(off remote: Bool, ownerConfirmed: Bool = false) {
         if remote { remoteOn = false } else { localOn = false }
-        PrivacyShield.shared.settingsChanged()
+        PrivacyShield.shared.settingsChanged(ownerConfirmed: ownerConfirmed)
     }
 }

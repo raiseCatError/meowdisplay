@@ -47,7 +47,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updater = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
+    /// `kill`/`killall` (SIGTERM) while the Privacy Shield covers the screens locks this Mac's
+    /// screen before exiting, like a normal Quit. SIGKILL and a crash can't be caught: then the
+    /// cover disappears with the app (SECURITY.md says so).
+    private var terminationSignal: DispatchSourceSignal?
+
+    private func lockOnTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                guard PrivacyShield.shared.isCovering else { exit(0) }
+                Log.info("privacy shield: SIGTERM while covering; locking this Mac's screen first")
+                MacScreenLock.lock(timeout: 2) { _ in exit(0) }
+            }
+        }
+        source.resume()
+        terminationSignal = source
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        lockOnTerminationSignal()
         // Hand the updater to the settings window, which is built outside
         // the SwiftUI App scene (NSHostingView), so it can offer the same
         // button.
@@ -77,8 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Quitting while the Privacy Shield covers the screens locks this Mac's screen first, so
     // quitting never uncovers it (not when macOS is logging out, restarting or shutting down).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let systemEnding = NSAppleEventManager.shared().currentAppleEvent?
-            .attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let reason = event?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
+        let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
+        let sender = senderPID.flatMap { NSRunningApplication(processIdentifier: pid_t($0))?.bundleIdentifier }
+        let systemEnding = PrivacyShieldPolicy.isSystemEnding(quitReason: reason, senderBundleID: sender)
         let lockFirst = PrivacyShield.shared.isCovering && !systemEnding
         let stopReceiver = ReceiverController.shared.active
         guard lockFirst || stopReceiver else { return .terminateNow }
@@ -566,6 +589,9 @@ final class SenderController: ObservableObject {
         didSet {
             ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
+            PrivacyShield.releaseRemoteInput = { [weak self] in
+                for s in self?.sessions ?? [] { s.sender.releaseHeldInput() }
+            }
             PrivacyShield.shared.onWindowsChanged = { [weak self] done in
                 let group = DispatchGroup()
                 for s in self?.sessions ?? [] { group.enter(); s.sender.privacyShieldChanged { group.leave() } }

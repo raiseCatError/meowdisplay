@@ -1642,6 +1642,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         denySessionInput(state: .off)
     }
 
+    /// Lets go of anything this session's device holds down (keys, buttons, a drag), without
+    /// changing its grant: the Privacy Shield calls it before the Mac asks for its password.
+    func releaseHeldInput() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.inputInjector?.cancelActiveInput() }
+    }
+
     func setVideoEnabled(_ enabled: Bool) {
         let selfBox = self.selfBox
         queue.async {
@@ -5154,6 +5161,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return
         }
+        // While the Privacy Shield asks for the login password, nothing a device sends may change
+        // this Mac (PrivacyShieldPolicy.messagesAllowedWhileUnlocking).
+        if PrivacyShieldWindows.isUnlocking, !PrivacyShieldPolicy.handlesWhileUnlocking(type) {
+            Log.info("privacy shield: \(type) from a device dropped while the Mac asks for its password")
+            return
+        }
         switch type {
         case "ping":
             // Echo with our clock so the phone can estimate the offset
@@ -6189,6 +6202,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if mode == .window {
                 lastCaptureAt = Date()   // the carrier is alive; frames come from the workspace
+                return
+            }
+            // While the Privacy Shield asks for the login password no new picture leaves this
+            // Mac (the prompt can be in a frame before the capture filter leaves it out):
+            // devices keep the last frame from before. Capture stays alive.
+            if PrivacyShieldWindows.isUnlocking {
+                lastCaptureAt = Date()
                 return
             }
             let generation = captureGenerationNow
