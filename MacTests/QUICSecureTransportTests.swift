@@ -30,7 +30,7 @@ final class QUICSecureTransportTests: XCTestCase {
     }
 
     private func makeIdentity() throws -> TestIdentity {
-        guard let keychain else { throw XCTSkip("no temporary keychain") }
+        guard let keychain else { throw securityTestUnavailable("no temporary keychain") }
         return try keychain.makeIdentity()
     }
 
@@ -104,7 +104,7 @@ final class QUICSecureTransportTests: XCTestCase {
         }
         listener.start(queue: queue)
         waitUntil(5) { listener.port != nil && listener.state == .ready }
-        guard listener.state == .ready else { throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))") }
+        guard listener.state == .ready else { throw securityTestUnavailable("loopback QUIC listener unavailable (\(listener.state))") }
         return listener
     }
 
@@ -338,7 +338,7 @@ final class QUICSecureTransportTests: XCTestCase {
         waitUntil(5) { listener.port != nil && listener.state == .ready }
         guard listener.state == .ready, let port = listener.port else {
             listener.cancel()
-            throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))")
+            throw securityTestUnavailable("loopback QUIC listener unavailable (\(listener.state))")
         }
 
         let group = NWConnectionGroup(with: NWMultiplexGroup(to: .hostPort(host: "127.0.0.1", port: port)),
@@ -431,7 +431,7 @@ final class QUICSecureTransportTests: XCTestCase {
         waitUntil(5) { listener.port != nil && listener.state == .ready }
         guard listener.state == .ready, let port = listener.port else {
             listener.cancel()
-            throw XCTSkip("loopback QUIC listener unavailable (\(listener.state))")
+            throw securityTestUnavailable("loopback QUIC listener unavailable (\(listener.state))")
         }
 
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
