@@ -186,6 +186,11 @@ environment's protection (`check-environment.sh`) before using a secret,
 because a job naming a missing environment silently gets an unprotected one.
 `Release dry run` reports what is missing, by name only.
 
+`scripts/release/apply-environments.sh` creates and protects the seven
+environments below (branch patterns, owner approval where marked, no admin
+bypass) and then checks each one; it never touches secrets. It prints the plan
+unless given `--apply`, and is safe to re-run.
+
 | Environment (branches) | Secrets | Variables | Who creates them |
 | --- | --- | --- | --- |
 | `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization), `SPARKLE_PRIVATE_KEY` | — | Owner; a Developer ID certificate in match via `fastlane match developer_id` (Account Holder) |
