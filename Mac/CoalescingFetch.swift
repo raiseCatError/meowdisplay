@@ -16,6 +16,10 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
         /// (something just changed that the caller must see, such as a password prompt
         /// appearing; callers reacting to the same change share one request).
         case startedAfterNow
+        /// An answer from any request started at or after `epoch` (taken right after the
+        /// caller's own change), even if something else invalidated answers since: a display
+        /// the caller just created is listed by any request that started after it existed.
+        case startedSince(UInt64)
     }
 
     struct TimedOut: Error, Equatable {
@@ -53,6 +57,8 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
     static var sameMoment: Duration { .milliseconds(50) }
     private var lastStart: (sequence: UInt64, at: ContinuousClock.Instant)?
     private var cached: (value: Value, sequence: UInt64, at: ContinuousClock.Instant, took: Duration)?
+    /// The newest answer, kept even when invalidated (for `startedSince`).
+    private var latest: (value: Value, sequence: UInt64, took: Duration)?
     private var waiters: [UInt64: Waiter] = [:]
     private var nextWaiter: UInt64 = 0
     /// Requests actually sent (for tests and logs).
@@ -75,6 +81,9 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
     }
 
     var sentCount: Int { lock.withLock { requestsSent } }
+
+    /// For `startedSince`: requests numbered from here on start after this moment.
+    var epoch: UInt64 { lock.withLock { nextSequence } }
 
     func value(_ freshness: Freshness, timeout: Duration? = nil) async throws -> Answer {
         let needs: UInt64
@@ -117,6 +126,12 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
                     return .reuse(Answer(value: cached.value, fetchDuration: cached.took, waited: false))
                 }
                 return .wait(validFrom)
+            case .startedSince(let epoch):
+                if let latest, latest.sequence >= epoch {
+                    return .reuse(Answer(value: latest.value, fetchDuration: latest.took, waited: false))
+                }
+                if let newest = inFlight.max(), newest >= epoch { return .wait(epoch) }
+                return .wait(max(epoch, nextSequence))
             case .startedAfterNow:
                 if let lastStart, inFlight.contains(lastStart.sequence), now - lastStart.at <= Self.sameMoment {
                     return .wait(lastStart.sequence)
@@ -157,6 +172,9 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
         if took >= slowFetch { onSlowFetch?(took) }
         lock.lock()
         inFlight.remove(sequence)
+        if case .success(let value) = result, sequence > (latest?.sequence ?? 0) {
+            latest = (value, sequence, took)
+        }
         if case .success(let value) = result, sequence >= validFrom, sequence > (cached?.sequence ?? 0) {
             cached = (value, sequence, ContinuousClock.now, took)
         }

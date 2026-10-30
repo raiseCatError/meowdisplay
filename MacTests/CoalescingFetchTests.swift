@@ -91,6 +91,25 @@ final class CoalescingFetchTests: XCTestCase {
         XCTAssertEqual(service.calls.withLock { $0 }, 2)
     }
 
+    /// Regression (2026-10-30 22:50): the display was created, a request went out, then macOS's
+    /// reconfiguration notice invalidated answers; the start threw that request's answer away and
+    /// waited 20 s for another instead of 5 s.
+    func testAnAnswerStartedAfterTheCallersOwnChangeIsKeptThroughLaterInvalidations() async throws {
+        let (fetcher, service) = make(.milliseconds(200))
+        fetcher.invalidate()               // the display was just created
+        let since = fetcher.epoch
+        async let listed = fetcher.value(.startedSince(since))
+        try await Task.sleep(for: .milliseconds(50))
+        fetcher.invalidate()               // macOS's own notice for the same change
+        let first = try await listed
+        XCTAssertEqual(first.value, 1)
+        XCTAssertEqual(service.calls.withLock { $0 }, 1)
+        // A wait that timed out and asks again still takes that answer.
+        let again = try await fetcher.value(.startedSince(since))
+        XCTAssertEqual(again.value, 1)
+        XCTAssertFalse(again.waited)
+    }
+
     func testNoMoreThanTwoRequestsAreOut() async throws {
         let (fetcher, service) = make(.milliseconds(200))
         try await withThrowingTaskGroup(of: Void.self) { group in

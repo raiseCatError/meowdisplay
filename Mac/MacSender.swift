@@ -2574,7 +2574,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                isCancelled: () -> Bool = { false }) async throws -> SCDisplay {
         var lastDisplayCount = 0
         var answers = 0
-        var freshness: ShareableContent.Freshness = .cachedWithin(.seconds(1))
+        // Any request started from now on lists a display created before this call, even if
+        // macOS's own reconfiguration notices invalidate answers meanwhile (22:50, AltTab on:
+        // a request that would have listed it after 5 s was discarded for one that took 20 s).
+        var freshness: ShareableContent.Freshness = .startedSince(ShareableContent.broker.epoch)
         let began = ContinuousClock.now
         var reportedSlow = false
         while answers < 20 {
