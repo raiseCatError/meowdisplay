@@ -64,6 +64,21 @@ class WorkflowChecksTest < Minitest::Test
                   "release-publish.yml" => ['--draft=true', '--draft=false-ish'])
     assert_caught("publish-mac must open the gate (publish start) before publishing",
                   "release-publish.yml" => ["publish start STATE", "summary STATE"])
+    assert_caught("authorize-resume must hold the release-publish approval",
+                  "release-publish.yml" => ["run: scripts/release/check-environment.sh release-publish --require-reviewers",
+                                            "run: scripts/release/check-environment.sh release-publish"])
+    assert_caught("verify-resume must run only after authorize-resume",
+                  "release-publish.yml" => ["needs: [guard, authorize-resume]", "needs: [guard]"])
+    assert_caught("verify-resume must check the live artifacts against the recorded hashes",
+                  "release-publish.yml" => ["sha256sum -c expected.sha256", "true expected.sha256"])
+    assert_caught("verify-resume must find a successful publish-mac job",
+                  "release-publish.yml" => ['.conclusion == "success")', '.conclusion != "")'])
+    assert_caught("verify-stores must confirm store approvals live",
+                  "release-publish.yml" => ["state verify-live STATE", "state summary STATE"])
+    assert_caught("releases store versions without depending on publish-mac, authorize-resume and verify-resume",
+                  "release-publish.yml" => ["needs: [guard, publish-mac, verify-resume]", "needs: [guard, publish-mac]"])
+    assert_caught("must run only after publish-mac, or on resume only after verify-resume succeeded",
+                  "release-publish.yml" => ["(inputs.resume && needs.verify-resume.result == 'success')", "inputs.resume"])
     assert_caught("only publish-mac may touch tags, releases or assets",
                   "release-publish.yml" => ["out=$(scripts/release/release-state.sh", "gh release edit v0 --latest\n          out=$(scripts/release/release-state.sh"])
   end
@@ -153,6 +168,6 @@ class WorkflowChecksTest < Minitest::Test
     assert_caught("touches a store's review or release",
                   "release-ios.yml" => ["bundle exec fastlane ios upload_candidate", "bundle exec fastlane ios release && submit_for_review"])
     assert_caught("stores must wait for publish-mac (or a resume)",
-                  "release-publish.yml" => ["(needs.publish-mac.result == 'success' || inputs.resume)", "(inputs.resume || true)"])
+                  "release-publish.yml" => ["(!inputs.resume && needs.publish-mac.result == 'success')", "(true)"])
   end
 end
