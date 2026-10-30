@@ -106,7 +106,7 @@ jobs:
     if: ${{ !inputs.resume }}
     # macOS: the downloaded DMGs and feeds are verified again here, with the
     # same tools the candidate used, against the PUBLISHED baseline.
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-publish
     permissions:
       contents: write

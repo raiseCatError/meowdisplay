@@ -33,7 +33,7 @@ jobs:
 
   release-build:
     needs: guard
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read

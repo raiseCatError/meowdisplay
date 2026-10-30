@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Selects the Xcode named in .xcode-version (e.g. "27.1") on a GitHub macOS runner, so CI and
+# Selects the Xcode named in .xcode-version (e.g. "27.1") on the GitHub xcode-27 runner, so CI and
 # the release builds use the toolchain the apps are developed and tested with, not whatever the
 # runner image defaults to (an older compiler rejected valid Swift 6 concurrency code). Fails,
 # listing what the runner has, when that Xcode isn't installed.

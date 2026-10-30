@@ -32,7 +32,7 @@ env:
 
 jobs:
   key-continuity:
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read
@@ -76,7 +76,7 @@ jobs:
 
   sign:
     needs: key-continuity
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read
@@ -134,7 +134,7 @@ jobs:
 
   notarize:
     needs: sign
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read
@@ -186,7 +186,7 @@ jobs:
 
   package:
     needs: notarize
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read
@@ -240,7 +240,7 @@ jobs:
 
   verify-artifacts:
     needs: package
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions:
       contents: read
     outputs:
@@ -273,7 +273,7 @@ jobs:
 
   sign-feeds:
     needs: verify-artifacts
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release-build
     permissions:
       contents: read
@@ -328,7 +328,7 @@ jobs:
 
   verify-feeds:
     needs: [verify-artifacts, sign-feeds]
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions:
       contents: read
     steps:
