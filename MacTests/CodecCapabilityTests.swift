@@ -391,6 +391,59 @@ final class CodecCapabilityTests: XCTestCase {
         XCTAssertEqual(Set(reasons.map(\.rawValue)).count, reasons.count)
     }
 
+    // MARK: - Runtime HEVC failure (encode-failure safety net)
+
+    func testExplicitHEVCRecoversToH264AfterARuntimeHEVCFailure() {
+        let result = CodecSelectionPolicy.select(.init(
+            preference: .hevc, senderSupportsHEVC: true, receiverSupportsHEVC: true,
+            requestedWidth: 1920, requestedHeight: 1080, requestedFPS: 60,
+            hevcFailedAtRuntime: true))
+        XCTAssertEqual(result.codec, .h264)
+        XCTAssertEqual(result.reason, CodecSelectionPolicy.Reason.runtimeFallback.rawValue)
+    }
+
+    func testAutoRecoversToH264AfterARuntimeHEVCFailureWhereItWouldPickHEVC() {
+        // Same input as `testAutoUsesHEVCWhenH264WouldReduceAndHEVCIsMutuallySupported`.
+        let input = CodecSelectionPolicy.Input(
+            preference: .auto, senderSupportsHEVC: true, receiverSupportsHEVC: true,
+            requestedWidth: 3840, requestedHeight: 2160, requestedFPS: 120)
+        XCTAssertEqual(CodecSelectionPolicy.select(input).codec, .hevc)
+        let result = CodecSelectionPolicy.select(.init(
+            preference: .auto, senderSupportsHEVC: true, receiverSupportsHEVC: true,
+            requestedWidth: 3840, requestedHeight: 2160, requestedFPS: 120,
+            hevcFailedAtRuntime: true))
+        XCTAssertEqual(result.codec, .h264)
+        XCTAssertEqual(result.reason, CodecSelectionPolicy.Reason.runtimeFallback.rawValue)
+    }
+
+    func testRuntimeHEVCFailureLeavesH264DecisionsAndTheirReasonsUnchanged() {
+        // Auto stays H.264-first: the flag only ever rewrites an HEVC pick.
+        for preference in [CodecPreference.auto, .h264] {
+            let unflagged = CodecSelectionPolicy.select(.init(
+                preference: preference, senderSupportsHEVC: true, receiverSupportsHEVC: true,
+                requestedWidth: 1920, requestedHeight: 1080, requestedFPS: 60))
+            let flagged = CodecSelectionPolicy.select(.init(
+                preference: preference, senderSupportsHEVC: true, receiverSupportsHEVC: true,
+                requestedWidth: 1920, requestedHeight: 1080, requestedFPS: 60,
+                hevcFailedAtRuntime: true))
+            XCTAssertEqual(unflagged.codec, .h264)
+            XCTAssertEqual(flagged, unflagged)
+        }
+    }
+
+    func testReconnectToAReceiverWithoutHEVCReselectsH264() {
+        // A hello that no longer offers HEVC (no `codecs`, or `codecs`
+        // without "hevc") makes the same request resolve to H.264 — the
+        // decision `MacSender` re-runs for the live encoder on that hello.
+        for codecs in [nil, ["h264"]] as [[String]?] {
+            let result = CodecSelectionPolicy.select(.init(
+                preference: .hevc, senderSupportsHEVC: true,
+                receiverSupportsHEVC: CodecCapabilityProbe.receiverSupportsHEVC(codecs: codecs),
+                requestedWidth: 1920, requestedHeight: 1080, requestedFPS: 60))
+            XCTAssertEqual(result.codec, .h264)
+        }
+    }
+
     // MARK: - Wire message round-trip (streamCodecState)
 
     func testStreamCodecStateRoundTripsThroughWireFields() {

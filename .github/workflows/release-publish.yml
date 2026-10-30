@@ -1,0 +1,438 @@
+name: Release publish
+
+# The only workflow that makes a release public, for one candidate commit of
+# release/<version>, in the one order that keeps every failure recoverable
+# (scripts/release/lib/meow_release/publisher.rb):
+#  1. publish-mac (release-publish environment: your approval in
+#     manual-final-approval mode): the gate (every required platform approved
+#     for this exact commit, the branch still at it), then the Mac release
+#     from the verified candidate artifacts: DRAFT with both DMGs, both signed
+#     feeds and SHA256SUMS.txt -> byte-for-byte check -> Latest -> live feed
+#     check, reverting Latest if the feeds don't verify. Whatever GitHub
+#     Release is Latest IS the live Sparkle feed, so nothing becomes Latest
+#     incomplete. Nothing irreversible has happened before this step ends.
+#  2. stores: release the approved iOS version; Android publishes on Play
+#     Console's Publish click (managed publishing has no API), which the
+#     monitor detects.
+#  3. website: release.json listing only what is live, verified on the site.
+#  4. promote: a PR of the released source into main.
+#  5. finish: published, or still pending (resumed by the monitor).
+# `resume: true` (the monitor) re-runs 2-5 for a publication already in
+# progress for this commit; it can never start one.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, e.g. 2.0.0 (run from release/<version>)
+        required: true
+        type: string
+      sha:
+        description: The candidate commit (the release branch head)
+        required: true
+        type: string
+      resume:
+        description: Continue a publication already in progress (the monitor sets this)
+        required: true
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Only release/<version>, at the candidate commit
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be X.Y.Z"; exit 1; }
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit id"; exit 1; }
+          case "$GITHUB_REF" in
+            "refs/heads/release/$VERSION") ;;
+            *) echo "::error::v$VERSION is published only from release/$VERSION (got $GITHUB_REF)"; exit 1 ;;
+          esac
+          [ "$GITHUB_SHA" = "$SHA" ] || { echo "::error::release/$VERSION is at $GITHUB_SHA, not the candidate $SHA"; exit 1; }
+
+  # The stores themselves, not the recorded state, decide that every
+  # required platform is approved: one live observation (which can't move a
+  # platform backwards, so a recorded approval the store doesn't confirm
+  # fails here), then the gate. Nothing public happens before this passes.
+  verify-stores:
+    needs: guard
+    if: ${{ !inputs.resume }}
+    runs-on: ubuntu-latest
+    environment: release-stores
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Store approvals, observed live
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          state() { scripts/release/release-state.sh "$VERSION" "$@"; }
+          state monitor STATE --config .github/release-config.json --stores live
+          state gate STATE --branch-head "$SHA"
+
+  publish-mac:
+    needs: [guard, verify-stores]
+    if: ${{ !inputs.resume }}
+    # macOS: the downloaded DMGs and feeds are verified again here, with the
+    # same tools the candidate used, against the PUBLISHED baseline.
+    runs-on: xcode-27
+    environment: release-publish
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
+      - name: Environment requires an approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTO_SWITCH: ${{ vars.RELEASE_PUBLISH_MODE }}
+        run: |
+          set -euo pipefail
+          # Two independent switches make publication automatic: the committed
+          # release config AND the repository variable. Otherwise the
+          # environment must hold a required reviewer.
+          if [ "$(jq -r .publishMode .github/release-config.json)" = auto-publish-after-approval ] &&
+             [ "$AUTO_SWITCH" = auto-publish-after-approval ]; then
+            scripts/release/check-environment.sh release-publish
+          else
+            scripts/release/check-environment.sh release-publish --require-reviewers
+          fi
+      - name: Gate and start (every required platform approved for this commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/heads/release/$VERSION" | cut -f1)
+          scripts/release/release-state.sh "$VERSION" publish start STATE --config .github/release-config.json --branch-head "$head"
+      - name: Locate the candidate's verified Mac artifacts
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          record=$(scripts/release/release-state.sh "$VERSION" show STATE --platform mac --sha "$SHA" --at-least approved)
+          [ "$(jq -r .done <<< "$record")" = true ] || { echo "::error::no approved Mac candidate for $SHA"; exit 1; }
+          run_id=$(jq -r .runId <<< "$record")
+          [[ $run_id =~ ^[0-9]+$ ]] || { echo "::error::no candidate run recorded"; exit 1; }
+          # The release state is written by GitHub Actions and is not trusted
+          # as evidence: the artifacts must come from the release-candidate
+          # run for exactly this commit on this release branch, whose Mac
+          # verification succeeded.
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" \
+                  --jq '[.path, .head_sha, .head_branch, .event] | join(" ")')
+          [ "$run" = ".github/workflows/release-candidate.yml $SHA release/$VERSION push" ] ||
+            { echo "::error::run $run_id is '$run', not the release candidate of $SHA"; exit 1; }
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+                       --jq '[.jobs[] | select(.name == "mac / verify-feeds") | .conclusion] | first // "none"')
+          [ "$verified" = success ] || { echo "::error::the candidate's Mac verification is '$verified'"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          jq -r '.artifacts[] | "\(.sha256)  dist/\(.name)"' <<< "$record" > expected.sha256
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: '{dmg-*,feeds}'
+          path: dist
+          merge-multiple: true
+          run-id: ${{ steps.candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Assets are exactly the verified ones; nothing was published meanwhile
+        id: plan
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          shasum -a 256 -c expected.sha256
+          for f in "$SENDER_DMG" "$RECEIVER_DMG" "$SENDER_FEED" "$RECEIVER_FEED"; do
+            grep -q " dist/$f\$" expected.sha256 || { echo "::error::$f is not among the verified candidate artifacts"; exit 1; }
+          done
+          # Verified again, here: signatures, notarization, versions and the
+          # published app's identity for both DMGs; both feeds against the key
+          # installed copies trust.
+          scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
+          for role in sender receiver; do
+            select_app "$role"
+            scripts/release/verify-mac-artifact.sh "dist/$DMG" "$role" "$VERSION" "$VERSION" "$RUNNER_TEMP/baseline"
+            scripts/release/verify-feed.sh "dist/$FEED" "dist/$DMG" "$(cat "$RUNNER_TEMP/baseline/$role.key")" "$VERSION" "$VERSION" \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/$DMG"
+          done
+          (cd dist && shasum -a 256 "$SENDER_DMG" "$RECEIVER_DMG" "$SENDER_FEED" "$RECEIVER_FEED" > SHA256SUMS.txt)
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "::error::v$VERSION exists (maybe as a draft)"; exit 1; fi
+          echo "previous=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" >> "$GITHUB_OUTPUT"
+      - name: Create a DRAFT release (not public, not Latest, no tag yet)
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## \[/ {exit} on' CHANGELOG.md > notes.md
+          gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --draft --target "$SHA" \
+            --title "MeowDisplay $VERSION for Mac" --notes-file notes.md \
+            "dist/$SENDER_DMG" "dist/$RECEIVER_DMG" "dist/$SENDER_FEED" "dist/$RECEIVER_FEED" dist/SHA256SUMS.txt
+      - name: Verify the draft's assets byte for byte
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          names=$(gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(" ")')
+          want=$(printf '%s\n' "$SENDER_DMG" "$RECEIVER_DMG" "$SENDER_FEED" "$RECEIVER_FEED" SHA256SUMS.txt | sort | paste -sd' ' -)
+          [ "$names" = "$want" ] || { echo "::error::draft assets are '$names', expected '$want'"; exit 1; }
+          mkdir check && gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -D check
+          sed 's# dist/# check/#' expected.sha256 | shasum -a 256 -c -
+      - name: Publish as Latest (the feeds go live here)
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v$VERSION" -R "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Live feeds serve this release, else revert Latest
+        env:
+          VERSION: ${{ inputs.version }}
+          PREVIOUS: ${{ steps.plan.outputs.previous }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          . scripts/release/baseline.env
+          live_ok() {
+            for feed in "$SENDER_FEED" "$RECEIVER_FEED"; do
+              want=$(shasum -a 256 "dist/$feed" | cut -c1-64)
+              for url in "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/$feed" "$LIVE_FEED_BASE/$feed"; do
+                [ "$(curl -fsSL --max-time 30 "$url" | shasum -a 256 | cut -c1-64)" = "$want" ] || return 1
+              done
+            done
+          }
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if live_ok; then echo "Live feeds serve v$VERSION (attempt $attempt)"; exit 0; fi
+            sleep 30
+          done
+          echo "::error::Live feeds don't serve v$VERSION after 5 minutes; reverting Latest to $PREVIOUS and v$VERSION to a draft"
+          gh release edit "$PREVIOUS" -R "$GITHUB_REPOSITORY" --latest
+          gh release edit "v$VERSION" -R "$GITHUB_REPOSITORY" --draft=true
+          echo "reverted" > reverted
+          exit 1
+      - name: Record the Mac release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          state() { scripts/release/release-state.sh "$VERSION" "$@"; }
+          if [ "$(state status STATE | jq -r .publication)" != in-progress ]; then exit 0; fi
+          if [ "$JOB_STATUS" = success ]; then
+            state publish mac-published STATE --config .github/release-config.json \
+              --url "https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION"
+          elif [ -f reverted ]; then
+            state publish mac-failed STATE --config .github/release-config.json --reason "live feeds didn't verify; Latest reverted" --reverted
+          else
+            state publish mac-failed STATE --config .github/release-config.json --reason "Mac publication stopped before going live (run $GITHUB_RUN_ID)"
+          fi
+      - name: Mark the release PR as released (release-please bookkeeping)
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --state merged --base "release/$VERSION" --label "autorelease: pending" \
+                 --json number,title --jq "[.[] | select(.title | endswith(\"release $VERSION\"))][0].number // empty")
+          [ -n "$pr" ] || { echo "::warning::No merged release PR labelled 'autorelease: pending' for $VERSION; relabel it by hand"; exit 0; }
+          gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+
+  stores:
+    needs: [guard, publish-mac]
+    if: always() && needs.guard.result == 'success' && (needs.publish-mac.result == 'success' || inputs.resume)
+    runs-on: ubuntu-latest
+    environment: release-stores
+    permissions:
+      contents: write
+    outputs:
+      waiting: ${{ steps.stores.outputs.waiting }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Release the approved store versions
+        id: stores
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          out=$(scripts/release/release-state.sh "$VERSION" publish stores STATE --config .github/release-config.json --stores live)
+          echo "$out"
+          echo "waiting=$(sed -n 's/^waiting: //p' <<< "$out")" >> "$GITHUB_OUTPUT"
+
+  website:
+    needs: [guard, stores]
+    if: always() && needs.stores.result == 'success'
+    runs-on: ubuntu-latest
+    environment: website-update
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh website-update
+      - name: Release manifest (only what is live)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: scripts/release/release-state.sh "$VERSION" publish website-manifest STATE --config .github/release-config.json --out "$RUNNER_TEMP/release.json"
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: site-token
+        with:
+          client-id: ${{ vars.WEBSITE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+          owner: raiseCatError
+          repositories: MeowDisplayWebsite
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Publish release.json through the website's own pipeline
+        env:
+          SITE_TOKEN: ${{ steps.site-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: scripts/release/update-website.sh "$RUNNER_TEMP/release.json" .github/release-config.json "$VERSION"
+      - name: Record what the live site serves
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          url=$(jq -r .website.liveUrl .github/release-config.json)
+          live=$(curl -fsSL --max-time 30 "$url?ts=$(date +%s)" | jq -r .version 2>/dev/null || echo none)
+          scripts/release/release-state.sh "$VERSION" publish website-updated STATE --config .github/release-config.json \
+            --url "$url" --live-version "$live"
+
+  promote:
+    needs: [guard, stores]
+    if: always() && needs.stores.result == 'success'
+    runs-on: ubuntu-latest
+    environment: release-pr
+    permissions:
+      contents: read
+    outputs:
+      pr: ${{ steps.pr.outputs.pr }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      # The release App's key lives only in this environment; check it is
+      # really protected before a token is minted from it.
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-pr
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Propose the released source for main
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          AUTO_PROMOTE: ${{ vars.RELEASE_AUTO_PROMOTE }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --base main --head "release/$VERSION" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            gh pr create -R "$GITHUB_REPOSITORY" --base main --head "release/$VERSION" \
+              --title "chore(release): MeowDisplay $VERSION is the stable source" \
+              --body "Records the published MeowDisplay $VERSION (tag v$VERSION) as main's stable source. Merge with a merge commit: main's tree then equals the tag's."
+            pr=$(gh pr list -R "$GITHUB_REPOSITORY" --base main --head "release/$VERSION" --state open --json number --jq '.[0].number')
+          fi
+          if [ "$AUTO_PROMOTE" = enabled ]; then gh pr merge "$pr" -R "$GITHUB_REPOSITORY" --merge --auto; fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+  finish:
+    needs: [guard, stores, website, promote]
+    if: always() && needs.guard.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Published, or what is still pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          PR: ${{ needs.promote.outputs.pr }}
+        run: |
+          set -euo pipefail
+          state() { scripts/release/release-state.sh "$VERSION" "$@"; }
+          if [ "$(state status STATE | jq -r .publication)" = in-progress ]; then
+            state publish finish STATE --config .github/release-config.json ${PR:+--pr "$PR"}
+          fi
+          state summary STATE --branch-head "$SHA" | tee -a "$GITHUB_STEP_SUMMARY"

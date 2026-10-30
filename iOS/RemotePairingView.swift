@@ -26,7 +26,7 @@ struct RemotePairingView: View {
     private var form: some View {
         Form {
             Section {
-                Text("On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here.")
+                Text("On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here. The Mac shows both in Settings → Remote Access → Check Tailscale.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -36,8 +36,12 @@ struct RemotePairingView: View {
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
                     .onChange(of: host) { _ in errorMessage = nil }
+                    .onChange(of: errorMessage) { message in
+                        if let message { UIAccessibility.post(notification: .announcement, argument: message) }
+                    }
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(.red)
+                        .accessibilityLabel(Text("Error: \(errorMessage)"))
                 }
                 Button("Pair") { start() }
                     .disabled(host.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -55,6 +59,7 @@ struct RemotePairingView: View {
             ProgressView().controlSize(.large)
             let waiting = receiver.pairingPrompt.confirmedLocally
             Text(waiting == nil ? PairingCopy.connectingTitle : PairingCopy.waitingTitle).font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Text(waiting == nil
                  ? PairingCopy.connectingHelper(target: .mac)
                  : PairingCopy.waitingHelper(otherDevice: PairingCopy.otherDevice(localIsMac: false, peerName: waiting?.peerName ?? "")))
@@ -76,7 +81,9 @@ struct RemotePairingView: View {
     private func failure(_ kind: RemotePairingFailureKind) -> some View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text(kind.title).font(.headline).multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
             if let detail = kind.detail {
                 Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
@@ -102,14 +109,37 @@ struct RemotePairingView: View {
 }
 
 /// Small transient confirmation; not a notification framework.
+/// Compact success banner. Reads on black, on bright desktop content and
+/// over the Home screen: a nearly opaque system background (not a thin
+/// material that takes on whatever is behind it), a green success mark,
+/// primary text, and a hairline border plus soft shadow for separation.
 struct PairedToast: View {
     var body: some View {
-        VStack(spacing: 2) {
-            Text("Paired Successfully").font(.subheadline.weight(.semibold))
-            Text("You can now connect to this Mac.").font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .green)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Paired Successfully")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text("You can now connect to this Mac.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.leading, 14)
+        .padding(.trailing, 18)
+        .padding(.vertical, 11)
+        .background(Color(.secondarySystemGroupedBackground).opacity(0.97),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(Color.green.opacity(0.35), lineWidth: 1))
+        .shadow(color: .black.opacity(0.28), radius: 14, y: 4)
+        .frame(maxWidth: 420)
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isStaticText)
     }
 }

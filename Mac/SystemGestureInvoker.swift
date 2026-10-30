@@ -14,6 +14,8 @@ enum SystemGestureInvoker {
             Log.info("System gesture skipped: Accessibility permission is missing")
             return
         }
+        // While the Privacy Shield asks for the login password, only this Mac's own input counts.
+        guard !PrivacyShieldWindows.isUnlocking else { return }
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             Log.info("System gesture skipped: could not create CGEvent source")
             return

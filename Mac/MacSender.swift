@@ -14,6 +14,7 @@
 //   e.g. {"type":"hello","pixelsWide":2556,"pixelsHigh":1179,"scale":3}
 
 @preconcurrency import ScreenCaptureKit
+import os
 import VideoToolbox
 import Network
 import CryptoKit
@@ -55,7 +56,7 @@ enum StreamQuality: String, CaseIterable {
         switch self {
         case .best: return String(localized: "Pixel-perfect at the device's native resolution. Highest bandwidth and latency.")
         case .balanced: return String(localized: "75% capture resolution — noticeably lower latency, slight softness.")
-        case .fast: return String(localized: "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi.")
+        case .fast: return String(localized: "Half resolution — lowest latency and bandwidth, visibly softer. Good for Wi-Fi.")
         }
     }
 
@@ -91,6 +92,12 @@ struct PhoneInfo: Decodable {
     /// request. Authenticated (inside the pinned session) but only a
     /// preference — the Mac decides.
     let requestedMode: String?
+    /// Window workspaces version (PROTOCOL.md 6.10); absent = not supported.
+    let ws: Int?
+    var supportsWindowWorkspace: Bool { (ws ?? 0) >= WindowWorkspaceWire.version }
+    /// Reassembles control messages sent in parts (PROTOCOL.md 6.14); absent = not supported.
+    let chunks: Int?
+    var supportsControlChunks: Bool { (chunks ?? 0) >= ControlChunkWire.version }
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
@@ -275,6 +282,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // API for callers.
     let statusSink = MacSenderStatusSink()
 
+    /// This session reached the Mac over a remote route (Tailscale): the Privacy Shield's remote
+    /// setting applies. Set before the session starts.
+    var isRemoteSession = false
+    /// The welcome went out (the device is connected). Runs on the main actor.
+    var onWelcomed: (@MainActor @Sendable () -> Void)?
+
     @MainActor var onStatus: ((String) -> Void)? {
         get { statusSink.onStatus }
         set { statusSink.onStatus = newValue }
@@ -360,6 +373,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Receiver requests are handed to SenderController, which owns the
     /// existing authoritative session-rebuild mode-switch path.
     @MainActor var onDisplayModeRequest: ((ReceiverDisplayMode) -> Void)?
+    /// A receiver asked for Window mode (it supports workspaces and this Mac allows them).
+    @MainActor var onWindowModeRequest: (() -> Void)?
     /// The receiver requested control on the connection with this
     /// transport generation. Handed to `SenderController.
     /// handleInputControlRequested`, which owns the per-peer policy lookup,
@@ -369,6 +384,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// applied immediately by `denySessionInput` at the call site in
     /// `handleControl` and never reaches here.
     @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
+    /// Remote Finder: this connection asks to browse the approved folders; answer with
+    /// `resolveFilesConsent(_:generation:)` after the owner decides.
+    @MainActor var onFilesConsentRequest: ((_ generation: UInt64, _ capabilities: Set<FilesCapability>?) -> Void)?
+    /// Unified Clipboard (PROTOCOL.md 6.15): a `clip` message from this admitted connection.
+    /// The hub checks the Mac's switch and the device's grant.
+    @MainActor var onClipboardMessage: ((_ generation: UInt64, _ message: [String: Any]) -> Void)?
     /// Fires when the connection changes, so a pending control-request
     /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
     @MainActor var onInputAuthorityReset: (() -> Void)? {
@@ -391,9 +412,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the Mac-authoritative setting and broadcasts it to every session.
     @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
-    /// `SenderController`, which owns the canonical `mirrorDisplayUUID`
-    /// setting (the same one its own Settings picker writes) and the
-    /// existing session-rebuild path that applies it. `nil` requests Auto.
+    /// `SenderController`, which remembers it as THIS device's own source
+    /// (issue #20) and rebuilds this session only. `nil` requests Auto.
     @MainActor var onMirrorDisplayRequest: ((String?) -> Void)?
     /// Fires whenever this peer's Extend shape preference changes — from a
     /// receiver's `extendShapeRequest` or from `requestExtendShape` (the
@@ -495,6 +515,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// read and wrong for output from a session that has since been replaced.
     private var activeCodec: StreamCodec = .h264
     private var activeCodecReason: String = CodecSelectionPolicy.Reason.explicitPreference.rawValue
+    /// An HEVC session was created and then produced no frames (the encode
+    /// failure safety net). Every later codec decision on this sender
+    /// recovers to H.264 (`CodecSelectionPolicy.Reason.runtimeFallback`).
+    /// On `queue`.
+    private var hevcFailedAtRuntime = false
     /// Cached once per process: whether this Mac has a real, usable
     /// hardware HEVC encoder (VideoToolbox's actual encoder list, never an
     /// OS-version guess). `VTCopyVideoEncoderList` enumerates every
@@ -719,7 +744,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pcmPacketSeq = 0
         activeAudioIsPCM = UserDefaults.standard.string(forKey: "audioDebugMode") == "pcm"
         // FORENSIC NOTE: a previous pass's instructions told the user to
-        // `defaults write com.peetzweg.opensidecar.mac.debug ...` — the
+        // `defaults write com.raisecaterror.meowdisplay.mac.debug ...` — the
         // upstream/tracked bundle ID (`project.yml`). This checkout's local
         // signing override (`project.local.yml`, see repo CLAUDE.md) rebuilds
         // the Debug target as `com.raisecaterror.meowdisplay.mac.debug`, so
@@ -792,6 +817,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var deferredRotationRebuild = false
 
     private var lastHello: PhoneInfo?
+    /// The display stays awake while a device watches (see `StreamingDisplayAwake`). `queue` only.
+    private let streamingDisplayAwake = StreamingDisplayAwake()
     /// TCP/QUIC choice inside the network route (`TransportProtocolSelection.swift`).
     /// `queue`-confined. Sticky per logical session (this sender's lifetime).
     private var protocolSelector = TransportProtocolSelector()
@@ -806,6 +833,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
     private var inputInjector: InputInjector?
+    /// Where every injector this sender creates posts its events: the HID
+    /// event tap, except in the DEBUG input test harness.
+    private var inputEventSink: SyntheticEventSink = HIDEventTapSink()
+    #if DEBUG
+    /// Input test harness: every control message this sender writes.
+    private var sentControlObserverForTesting: (@Sendable (String) -> Void)?
+    #endif
+    /// Window mode only: this receiver's window workspace (queue-confined reference).
+    private var workspaceEngine: WindowWorkspaceEngine?
+    /// Window/app/display browsing for this receiver in every display mode (Stage Peek over Mirror/Extend).
+    private var windowBrowser: WindowBrowserService?
+    /// Remote Finder for this session (created on its first request; `queue` only).
+    private var fileBrowser: RemoteFileBrowser?
+    /// Window mode: whose sound the audio stream carries (`queue` only).
+    private var windowAudioSources: WindowAudioSources?
+    private var windowAudioGeneration: UInt64 = 0
     // Lock-guarded mirror of `sessionAuthorization`'s input grant for
     // `InputInjector`, which re-checks it under its own lock at injection
     // time; `DeviceSession` only ever mirrors it for display via
@@ -836,6 +879,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`.
     private var captureRecoveryBudget = CaptureRecoveryBudget()
     private var captureRecoveryScheduled = false
+    // Display sleep and screen lock make every recovery attempt fail until
+    // the user is back, so rounds are deferred instead of spent on them —
+    // otherwise any sleep longer than the budget ends the session. Set while
+    // deferring so the wait logs once. On `queue`.
+    private var waitingForConsole = false
 
     // Consecutive actively-refused dials on a previously connected session.
     // Refusal is unambiguous: the device is reachable but nothing listens,
@@ -851,7 +899,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // capture→encode→stream→display latency (~30ms perceived). Instead we
     // hide it from capture and stream its position on the control channel —
     // the phone draws it locally on the ~2ms path the touches use.
-    // Escape hatch: `defaults write com.peetzweg.opensidecar.mac localCursor -bool false`.
+    // Escape hatch: `defaults write com.raisecaterror.meowdisplay.mac localCursor -bool false`.
     private let localCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
         || UserDefaults.standard.bool(forKey: "localCursor")
     private var cursorTimer: DispatchSourceTimer?
@@ -869,6 +917,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
     private var lastCursorPNGHash = 0
     private var cursorSeq: UInt64 = 0
+    // Caret-following Zoom While Typing (PROTOCOL.md 6.11): while this
+    // receiver has control and reports its keyboard open, the focused text
+    // caret's rectangle is read through Accessibility and sent to it. Used
+    // on `queue` only; the reads themselves run on the shared reader queue.
+    private static let textCaretReadQueue = DispatchQueue(label: "textCaret.reader", qos: .userInitiated)
+    private var textCaretSeq: UInt64 = 0
+    private lazy var textCaretFollower = TextCaretFollower(
+        provider: AXFocusedCaretProvider(), readQueue: Self.textCaretReadQueue, ownerQueue: queue,
+        isPermitted: { [weak self] in self?.textCaretFollowingPermitted() ?? false },
+        normalize: { [weak self] in self?.normalizedTextCaret($0) },
+        send: { [weak self] in self?.sendTextCaret($0) })
     private var captureDisplayID: CGDirectDisplayID = 0
     private let captureLifecycleLock = NSLock()
     private var captureLifecycle = CaptureLifecycleState()
@@ -1116,7 +1175,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func sendDisplayModeState() {
         sendJSONObject(["type": WireMessage.displayModeState,
-                        "mode": mode.receiverMode.rawValue])
+                        "mode": mode.wireValue(receiverSupportsWindow: lastHello?.supportsWindowWorkspace == true)])
     }
 
     func pushDisplayModeState() {
@@ -1258,10 +1317,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// No-op while there is no live stream — the next `startCapture` picks
     /// up the new preference on its own, and one already starting applies
     /// it when it commits.
-    private func applyEffectiveFPSChange() {
+    ///
+    /// `rebuildEncoder` also rebuilds when the rate is unchanged — for a
+    /// codec decision that changed underneath the live encoder (a runtime
+    /// HEVC failure, or a hello that no longer offers HEVC).
+    private func applyEffectiveFPSChange(rebuildEncoder: Bool = false) {
         guard let stream = captureOwnership.liveStream, capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
         let fpsResult = effectiveFPS(width: capturePixelsWide, height: capturePixelsHigh)
-        guard fpsResult.fps != captureTargetFPS else { return }
+        guard rebuildEncoder || fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
         needsKeyframe = true
         let config = SCStreamConfiguration()
@@ -1280,6 +1343,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     do {
                         try self.setupEncoder(width: self.capturePixelsWide, height: self.capturePixelsHigh,
                                               fps: fpsResult.fps)
+                        if rebuildEncoder {
+                            self.pipelineState.rearmEncodeFailureRecovery(generation: self.captureGenerationNow)
+                        }
                     } catch {
                         Log.info("FPS-change encoder setup failed: \(error) — entering capture recovery")
                         guard self.updateCaptureState({ $0.unexpectedStop() }) else { return }
@@ -1327,6 +1393,43 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { selfBox.currentOnQueue()?.sendAllowInputState(state: .requesting) }
     }
 
+    /// The owner's answer to a Remote Finder prompt (or the device's stored policy), for the
+    /// connection that asked: the grant, or nil for no.
+    func resolveFilesConsent(_ grant: FilesGrant?, generation: UInt64) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
+            self.fileBrowser?.consentDecided(grant)
+        }
+    }
+
+    /// The owner's answer to a request for more Files capabilities: those granted, or nil for no.
+    func resolveFilesAccess(_ granted: Set<FilesCapability>?, generation: UInt64) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration else { return }
+            self.fileBrowser?.accessDecided(granted)
+        }
+    }
+
+    /// A clipboard message for the connection `generation`: dropped once that connection is
+    /// gone or no longer admitted.
+    func sendClipboard(_ message: [String: Any], generation: UInt64) {
+        let box = WorkspaceMessageBox(value: message)
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue(), generation == self.activeConnectionGeneration,
+                  self.sessionAuthorization.isAdmitted else { return }
+            self.sendJSONObject(box.value)
+        }
+    }
+
+    /// The owner revoked this device's Files access in Settings: running transfers end now.
+    func revokeFiles() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.fileBrowser?.revoke() }
+    }
+
     /// A Mac-owner (or auto-policy) decision granted control to the
     /// connection that asked (`generation`, from `onAllowInputRequest`).
     /// Only ever called from the main-actor consent flow
@@ -1338,6 +1441,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
+            // A decision that raced a Fast User Switch out of this login
+            // session grants nothing (`InputControlRequestRoute`).
+            guard LoginSessionConsole.shared.isOnConsole else {
+                Log.info("inputConsent: ignored grant while this login session is switched out")
+                self.sendAllowInputState(state: .notAllowed)
+                return
+            }
             guard self.sessionAuthorization.grantInput(generation: generation) else {
                 Log.info("inputConsent: ignored grant for superseded connection generation=\(generation)")
                 return
@@ -1362,8 +1472,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.sessionInputGrant.set(false)
             if wasGranted {
                 // Held-input cleanup: an ON -> OFF transition must never
-                // leave a stuck key/button/touch behind.
+                // leave a stuck key/button/touch behind, nor a magnify/rotate
+                // still "began" that would swallow the next grant's gesture.
                 self.inputInjector?.cancelActiveInput()
+                self.nativeAppGestureState.cancelAll()
                 self.sendJSONObject(["type": WireMessage.inputReset])
             }
             self.sendAllowInputState(state: state)
@@ -1644,6 +1756,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Async wait half of startup — see `beginStart()`. Only ever invoked
     /// from the Task `beginStart()` creates, on a `self` resolved fresh in
     /// that Task's own isolation domain.
+    /// One startup step's duration (privacy-safe: names and milliseconds only), so a slow
+    /// connection says where its time went.
+    /// This session's capture start, for `StartTrace` marks from any queue.
+    private let startTraceLock = OSAllocatedUnfairLock<StartTrace?>(initialState: nil)
+    private var startTrace: StartTrace? { startTraceLock.withLock { $0 } }
+
+    nonisolated static func logStartupStep(_ step: String, since start: ContinuousClock.Instant) {
+        let d = ContinuousClock.now - start
+        let ms = Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+        Log.info("startupStep: \(step) ms=\(ms)")
+    }
+
     private func awaitStartup() async throws {
         // Screen Recording permission: poll until granted. No auto-prompt at
         // launch — the permission panel's Grant button triggers the system
@@ -1656,25 +1780,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if stopped { return }
             }
             Log.info("Screen Recording permission granted")
+            let selfBox = self.selfBox
+            queue.async { selfBox.currentOnQueue()?.syncWorkspaceSuspension() }
         }
 
-        let ready = try await waitForHello()
-        guard authenticatedSession.isLive(generation: ready.generation) else {
-            Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
-            throw CancellationError()
-        }
-        // No virtual display, capture or media until the receiver accepted
-        // this session's invitation on the live connection (and this Mac's
-        // user approved a receiver-initiated request that needed it).
-        // Capture belongs to the connection that was admitted, which a
-        // reconnect during the wait can make a later one than `ready`'s.
-        let admittedGeneration = try await awaitSessionAdmission()
-        let admitted = try await waitForHello()
-        guard admitted.generation == admittedGeneration,
-              sessionAuthorization.isAdmitted(generation: admittedGeneration) else {
-            Log.info("sessionDebug: ignored stale capture start generation=\(admittedGeneration)")
-            throw CancellationError()
-        }
+        let (admitted, admittedGeneration) = try await awaitAdmittedConnection()
+        Log.info("startupStep: admitted generation=\(admittedGeneration) mode=\(mode.rawValue)")
+        let trace = StartTrace(mode: mode.rawValue, generation: admittedGeneration)
+        startTraceLock.withLock { $0 = trace }
 
         switch mode {
         case .mirror:
@@ -1696,12 +1809,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { @MainActor in sink.publishStatus(text) }
             }
             try await setupExtend(admitted.info, sessionGeneration: admittedGeneration)
+            try await awaitAccessibilityForInput()
+
+        case .window where !admitted.info.supportsWindowWorkspace:
+            // A device that can't pick windows (older app) gets Mirror instead
+            // of an empty canvas.
+            Log.info("workspace: receiver has no window workspaces — streaming Mirror")
+            try await onQueue { sender in sender.mode = .mirror }
+            try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
+        case .window:
+            try await startWindowWorkspace(info: admitted.info, sessionGeneration: admittedGeneration)
+            try await awaitAccessibilityForInput()
+        }
+    }
+
+    /// Touch back-channel (Milestone 3). Needs Accessibility trust;
+    /// streaming works without it, so don't interrupt with a prompt —
+    /// the permission panel's Grant button asks when the user is ready.
+    private func awaitAccessibilityForInput() async throws {
+        do {
 
             // Touch back-channel (Milestone 3). Needs Accessibility trust;
             // streaming works without it, so don't interrupt with a prompt —
             // the permission panel's Grant button asks when the user is ready.
             if !AXIsProcessTrusted() {
-                await status("Extending — grant Accessibility for touch input")
+                await status("Grant Accessibility to control this Mac from the device")
                 // Event posting is trust-checked per-post, so it starts working
                 // the moment the user grants — poll just to log/report it.
                 while !AXIsProcessTrusted() {
@@ -1715,10 +1847,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func startMirrorCapture(preferredDisplayID: CGDirectDisplayID?,
                                     sessionGeneration: UInt64? = nil) async throws {
-        let content = try await SCShareableContent.current
-        let display = preferredDisplayID.flatMap { id in
-            content.displays.first(where: { $0.displayID == id })
-        } ?? content.displays.first
+        let content = try await ShareableContent.content()
+        // A display that went away (unplugged mid-session) falls back to
+        // Automatic, which never lands on another device's extended desktop.
+        let chosenID = MirrorSourceResolver.recoveryDisplay(
+            preferred: preferredDisplayID, in: Self.mirrorSourceCandidates(content.displays),
+            excluding: VirtualDisplayRegistry.shared.displayIDs)
+        if let preferredDisplayID, chosenID != preferredDisplayID {
+            Log.info("displayDebug: mirrored display \(preferredDisplayID) is gone — "
+                + "recovering onto \(chosenID.map(String.init) ?? "none")")
+        }
+        let display = chosenID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
                           userInfo: [NSLocalizedDescriptionKey:
@@ -1733,21 +1872,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// against the current display list — an unresolvable or absent
     /// preference logs the decision and falls back to Automatic.
     private func startMirrorCaptureUsingPreference(sessionGeneration: UInt64? = nil) async throws {
-        let content = try await SCShareableContent.current
-        var display = content.displays.first
-        if let uuid = mirrorDisplayUUID {
-            if let resolved = MirrorDisplayIdentity.resolve(persistentID: uuid, in: content.displays) {
-                display = resolved
-            } else {
-                Log.info("displayDebug: mirrorSelection unavailable persistentID=\(uuid) — falling back to Automatic")
-            }
+        let content = try await ShareableContent.content()
+        let resolution = MirrorSourceResolver.resolve(
+            selectedUUID: mirrorDisplayUUID, in: Self.mirrorSourceCandidates(content.displays),
+            excluding: VirtualDisplayRegistry.shared.displayIDs)
+        if case .selectedUnavailable(let uuid, _) = resolution {
+            Log.info("displayDebug: mirrorSelection unavailable persistentID=\(uuid) — falling back to Automatic")
         }
+        let display = resolution.displayID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         guard let display else {
             throw NSError(domain: "MacSender", code: 1,
                           userInfo: [NSLocalizedDescriptionKey:
                               "No display available to mirror — connect a display, or use Extend instead."])
         }
         try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
+    }
+
+    /// ScreenCaptureKit's display list in the order it reported, reduced to
+    /// what `MirrorSourceResolver` decides on.
+    private static func mirrorSourceCandidates(_ displays: [SCDisplay]) -> [MirrorSourceCandidate] {
+        displays.map {
+            MirrorSourceCandidate(displayID: $0.displayID,
+                                  persistentID: MirrorDisplayIdentity.uuidString(for: $0.displayID))
+        }
     }
 
     /// Mirror has no usable physical source (headless): instead of failing
@@ -1878,7 +2025,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 + "bounds=(\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height))) "
                 + "mirror=\(reading.mirrorState) isMain=\(id == mainID)")
         }
-        if let content = try? await SCShareableContent.current {
+        if let content = try? await ShareableContent.content() {
             Log.info("displayDebug: topologyDiag scShareableDisplayIDs=\(content.displays.map(\.displayID))")
         }
     }
@@ -1919,6 +2066,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               productID: productID,
                               refreshRate: refreshRate,
                               restoreOrigin: restoreOrigin,
+                              owner: ObjectIdentifier(self),
                               onOriginChange: { origin, currentSize in
                                   DisplayArrangement.save(origin: origin, size: currentSize,
                                                            device: arrangementKey)
@@ -2027,8 +2175,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // is not a disconnected region (this function keeps using it after
         // the call returns), so the compiler rejects the send outright.
         let selfBox = self.selfBox
-        identities: for probe in 0..<UInt32(3) {
-            let totalOffset = baseIdentityOffset &+ probe
+        // Another connected device's live display may already hold one of
+        // this device's identities (a serial hash collision, or a fallback
+        // identity landing on another device's): skip it up front rather
+        // than retrying into macOS's refusal (issue #20).
+        let owner = ObjectIdentifier(self)
+        let plannedOffsets = VirtualDisplayIdentityPlanner.offsets(serial: serial, baseOffset: baseIdentityOffset) {
+            VirtualDisplayRegistry.shared.isClaimed($0, byOtherThan: owner)
+        }
+        if plannedOffsets.first != baseIdentityOffset {
+            Log.info("extendDebug: display identity +\(baseIdentityOffset) is held by another live session — "
+                + "probing \(plannedOffsets)")
+        }
+        identities: for (probeIndex, totalOffset) in plannedOffsets.enumerated() {
+            let probe = UInt32(probeIndex)
             // A lingering serial belongs to a just-quit twin of the CURRENT
             // identity; fresh fallback identities get a shorter window.
             var createdID: CGDirectDisplayID?
@@ -2060,8 +2220,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         name: displayName,
                         pointsWide: pointsWide, pointsHigh: pointsHigh,
                         sizeInMillimeters: mm,
-                        serialNum: serial &+ totalOffset,
-                        productID: 0x4F53 &+ totalOffset,
+                        serialNum: VirtualDisplayIdentityPlanner.identity(serial: serial, offset: totalOffset).serial,
+                        productID: VirtualDisplayIdentityPlanner.identity(serial: serial, offset: totalOffset).productID,
                         refreshRate: virtualDisplayFPS,
                         arrangementKey: arrangementKey,
                         sizeInPoints: sizeInPoints)
@@ -2071,6 +2231,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 await status("Preparing virtual display…")
             }
             guard let candidateID = createdID else { continue }
+            startTrace?.mark("displayCreated", "id=\(candidateID)")
+            // Answers from before the display existed can't list it.
+            ShareableContent.invalidate()
             do {
                 display = try await findSCDisplay(id: candidateID, isCancelled: { [weak self] in
                     self?.isExtendSetupStale(ownerGeneration: ownerGeneration) ?? true
@@ -2103,7 +2266,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 virtualDisplay = nil   // release the dead display and its serial
                 // No shareable displays at all is a permission-side failure —
                 // a different identity cannot help there.
-                if (error as NSError).domain == "MacSender", (error as NSError).code == 4 { throw error }
+                if (error as NSError).domain == "MacSender", [4, 13].contains((error as NSError).code) { throw error }
                 identityError = error as NSError
                 sawPoisonedIdentity = true
                 guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
@@ -2121,7 +2284,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vdID) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
@@ -2136,7 +2299,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                sessionGeneration: sessionGeneration)
         await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vdID)
 
-        // Debug aid (`defaults write com.peetzweg.opensidecar.mac testPattern -bool true`):
+        // Debug aid (`defaults write com.raisecaterror.meowdisplay.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
         // stream so steady-state latency can be measured without user activity.
         if UserDefaults.standard.bool(forKey: "testPattern") {
@@ -2294,7 +2457,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
             if let targetID = InputTargetResolver.displayID(
                 mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
             }
             if UserDefaults.standard.bool(forKey: "testPattern") {
                 let id = vd.displayID
@@ -2401,12 +2564,45 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on its own already stops the ~5s poll from outliving a plain
     /// disconnect (#288: a stale operation should not keep polling for dead
     /// work).
+    /// The longest a start waits for macOS to list a display before giving up with a clear error.
+    static let displayListingBudget: Duration = .seconds(45)
+
+    /// Waits for ScreenCaptureKit to list `id`. Asks through the shared broker (one request in
+    /// flight for the whole app), checks for cancellation every second while macOS's capture
+    /// service is slow, and stops after `displayListingBudget` instead of waiting without end.
     private func findSCDisplay(id: CGDirectDisplayID, expectedSize: CGSize? = nil,
                                isCancelled: () -> Bool = { false }) async throws -> SCDisplay {
         var lastDisplayCount = 0
-        for _ in 0..<20 {
+        var answers = 0
+        // Any request started from now on lists a display created before this call, even if
+        // macOS's own reconfiguration notices invalidate answers meanwhile (22:50, AltTab on:
+        // a request that would have listed it after 5 s was discarded for one that took 20 s).
+        var freshness: ShareableContent.Freshness = .startedSince(ShareableContent.broker.epoch)
+        let began = ContinuousClock.now
+        var reportedSlow = false
+        while answers < 20 {
             guard !stopped, !isCancelled() else { throw CancellationError() }
-            let content = try await SCShareableContent.current
+            let waited = ContinuousClock.now - began
+            guard waited < Self.displayListingBudget else {
+                Log.info("captureService: display \(id) not listed after \(ShareableContent.milliseconds(waited)) ms "
+                    + "(\(answers) answers) — giving up")
+                throw NSError(domain: "MacSender", code: 13, userInfo: [NSLocalizedDescriptionKey:
+                    "macOS's screen capture service didn't answer in time. Another app may be sending it many "
+                    + "requests (for example AltTab's window previews). Try again in a moment."])
+            }
+            if waited >= .seconds(3), !reportedSlow {
+                reportedSlow = true
+                Log.info("captureService: still waiting for macOS to list display \(id) after "
+                    + "\(ShareableContent.milliseconds(waited)) ms")
+                await status("Waiting for macOS screen capture to answer…")
+            }
+            let content: SCShareableContent
+            do {
+                content = try await ShareableContent.content(freshness, timeout: .seconds(1))
+            } catch is ShareableContent.TimedOut {
+                continue   // still in flight: check cancellation and the budget, then wait on
+            }
+            answers += 1
             lastDisplayCount = content.displays.count
             if let display = content.displays.first(where: {
                 $0.displayID == id
@@ -2414,8 +2610,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         || ($0.width == Int(expectedSize!.width)
                             && $0.height == Int(expectedSize!.height)))
             }) {
+                startTrace?.mark("displayListed", "id=\(id) answers=\(answers)")
                 return display
             }
+            freshness = .startedAfterNow
             try await Task.sleep(for: .milliseconds(250))
         }
         // An empty display list is a different disease from "ours is
@@ -2488,7 +2686,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let ticket = plan.ticket
         let stream: SCStream
         do {
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            // The Privacy Shield covers the Mac's own screens, never the device's picture.
+            // Off-screen ones too: the cover and its notice are registered before they appear.
+            let shieldIDs = Set(PrivacyShieldWindows.current)
+            var shield: [SCWindow] = []
+            let shieldClock = ContinuousClock.now
+            if !shieldIDs.isEmpty {
+                // Usually the answer that just listed the display. A password prompt must be seen
+                // as it is now, so that case asks again.
+                let content = try await ShareableContent.content(
+                    PrivacyShieldWindows.isUnlocking ? .startedAfterNow : .cachedWithin(.seconds(5)),
+                    timeout: Self.displayListingBudget)
+                shield = Self.privacyHidden(content, ids: shieldIDs)
+                Self.logStartupStep("shieldContent", since: shieldClock)
+            }
+            startTrace?.mark("filterReady", "excluded=\(shield.count)")
+            let filter = SCContentFilter(display: display, excludingWindows: shield)
             let config = SCStreamConfiguration()
             config.width = plan.pixelsWide
             config.height = plan.pixelsHigh
@@ -2515,12 +2728,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
             // (there is none today, but excluding it is the documented,
             // future-proof way to avoid a feedback loop).
+            if mode == .window {
+                // Window mode: this display stream only carries Mac audio and
+                // keeps the capture lifecycle; video comes from the window
+                // compositor. Tiny and slow, so it costs next to nothing.
+                config.width = 64
+                config.height = 36
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
+                config.showsCursor = false
+            }
             config.capturesAudio = plan.capturesAudio
             config.sampleRate = 48_000
             config.channelCount = 2
             config.excludesCurrentProcessAudio = true
 
+            let audioClock = ContinuousClock.now
             await audioCaptureEncoder.reset()
+            Self.logStartupStep("audioReset", since: audioClock)
             stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
@@ -2533,7 +2757,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             throw CancellationError()
         }
         do {
+            let startClock = ContinuousClock.now
             try await stream.startCapture()
+            Self.logStartupStep("streamStart", since: startClock)
+            startTrace?.mark("streamStarted")
         } catch {
             _ = try? await onQueue { sender in sender.abandonCaptureStart(ticket, startAttempted: true) }
             throw error
@@ -2551,7 +2778,84 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("sessionDebug: ignored stale capture start generation=\(plan.sessionGeneration)")
             throw CancellationError()
         }
+        startTrace?.mark("captureCommitted")
         if let text { await status(text) }
+        // Window mode: the new stream starts with the whole display's sound; narrow it again.
+        _ = try? await onQueue { sender in sender.applyWindowAudio(nil) }
+    }
+
+    /// What devices never see: the Privacy Shield's own windows (listed even before they appear)
+    /// and, while it asks for the login password, macOS's prompt.
+    private static func privacyHidden(_ content: SCShareableContent, ids: Set<CGWindowID>) -> [SCWindow] {
+        let unlocking = PrivacyShieldWindows.isUnlocking
+        return content.windows.filter {
+            ids.contains($0.windowID) || (unlocking && PrivacyShieldPolicy.unlockPromptBundleIDs.contains($0.owningApplication?.bundleIdentifier ?? ""))
+        }
+    }
+
+    /// The Privacy Shield's windows changed: the Mac's screen capture leaves them out again.
+    /// `done` runs once the capture no longer includes them (the cover waits for it before it shows).
+    func privacyShieldChanged(done: (@Sendable () -> Void)? = nil) {
+        queue.async { [self] in
+            guard mode != .window, let stream = captureOwnership.liveStream else { done?(); return }
+            let displayID = captureDisplayID
+            let box = WindowAudioStreamBox(stream: stream)
+            Task {
+                defer { done?() }
+                guard let content = try? await ShareableContent.content(.startedAfterNow),
+                      let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
+                let filter = SCContentFilter(display: display, excludingWindows: Self.privacyHidden(content, ids: Set(PrivacyShieldWindows.current)))
+                do { try await box.stream.updateContentFilter(filter) } catch { Log.info("privacy shield: capture filter update failed \((error as NSError).code)") }
+            }
+        }
+    }
+
+    /// `queue` only. Window mode: this receiver hears only the apps its panes show (nothing
+    /// when no pane shows a window); if macOS can't narrow it, normal sound (A1–A3).
+    private func applyWindowAudio(_ new: WindowAudioSources?) {
+        if let new { windowAudioSources = new }
+        guard mode == .window, let sources = windowAudioSources, let stream = captureOwnership.liveStream else { return }
+        windowAudioGeneration &+= 1
+        let generation = windowAudioGeneration
+        let displayID = captureDisplayID
+        let box = WindowAudioStreamBox(stream: stream)
+        let selfBox = self.selfBox
+        let queue = self.queue
+        Task { await Self.updateWindowAudio(sources, stream: box, displayID: displayID, generation: generation, selfBox: selfBox, queue: queue) }
+    }
+
+    private static func updateWindowAudio(_ sources: WindowAudioSources, stream box: WindowAudioStreamBox, displayID: CGDirectDisplayID,
+                                          generation: UInt64, selfBox: MacSenderSelfBox, queue: DispatchQueue) async {
+        guard let content = try? await ShareableContent.content(),
+              let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
+        let everything = SCContentFilter(display: display, excludingWindows: [])
+        var filter = everything
+        var summary = "everything"
+        if case .apps(let pids) = sources {
+            let apps = content.applications.filter { pids.contains($0.processID) }
+            if pids.isEmpty || !apps.isEmpty {
+                filter = SCContentFilter(display: display, including: apps, exceptingWindows: [])
+                summary = "\(apps.count) app(s)"
+            } else {
+                summary = "everything (apps not found)"
+            }
+        }
+        let current = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            queue.async {
+                let sender = selfBox.currentOnQueue()
+                continuation.resume(returning: sender?.windowAudioGeneration == generation && sender?.captureOwnership.liveStream === box.stream)
+            }
+        }
+        guard current else { return }
+        let stream = box.stream
+        do {
+            try await stream.updateContentFilter(filter)
+            Log.info("workspace audio: \(summary)")
+        } catch {
+            // Never mute unexpectedly: back to the whole Mac's sound.
+            Log.info("workspace audio: narrowing failed (\(error.localizedDescription)); normal audio")
+            try? await stream.updateContentFilter(everything)
+        }
     }
 
     /// `queue` only: the checks and bookkeeping that open a capture start,
@@ -2593,6 +2897,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             _ = updateCaptureState { $0.captureStarted() }
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
             startCursorEcho()
             sendDisplayState(captureStateSnapshot().receiverDisplayState)
             sendDisplayModeState()
@@ -2640,6 +2945,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if videoEnabled {
             do {
                 try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
+                startTrace?.mark("encoderReady")
             } catch {
                 abandonCaptureStart(reservation.ticket, startAttempted: false)
                 throw error
@@ -2698,6 +3004,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         audioEnabled = plan.capturesAudio
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
         startCursorEcho()
         // A capture that came back through any path (recovery, rotation,
         // identity fallback) earns the full recovery budget again — without
@@ -2705,6 +3012,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
         captureRecoveryBudget.reset()
+        waitingForConsole = false
         // Every successful capture start is authoritative. This also
         // clears a paused state retained by the receiver when changing
         // modes replaces the old session with a new sender.
@@ -2723,7 +3031,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             + "generation \(plan.captureGeneration) mode \(mode.rawValue) localCursor=\(localCursor) "
             + "video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
-        return .committed(status: "\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) "
+        return .committed(status: "\(mode == .extend ? "Extending to" : mode == .window ? "Showing windows on" : "Mirroring to") \(kind) "
             + "(\(plan.pixelsWide)×\(plan.pixelsHigh))")
     }
 
@@ -2780,6 +3088,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func stopOnQueue() {
+        stopWorkspaceEngine()
+        windowBrowser?.stop()
+        windowBrowser = nil
+        fileBrowser?.stop()
+        fileBrowser = nil
+        textCaretFollower.stop()
         let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
         // A stopped pipeline holds no admission and no grant: a late
@@ -2789,6 +3103,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sessionInputGrant.set(false)
         mirrorUnavailableOfferGeneration = nil
         wakeStabilizationAssertion?.release()
+        streamingDisplayAwake.set(watching: false)
         inputInjector?.cancelActiveInput()
         _ = updateCaptureState { state in
             state.stop()
@@ -2796,6 +3111,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         invalidateCapturePipeline(discardingLastFrame: true)
         captureDisplayID = 0   // definitive teardown — nothing is being captured anymore
+        waitingForConsole = false
         cursorTimer?.cancel()
         cursorTimer = nil
         cursorImageTimer?.cancel()
@@ -2963,6 +3279,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   self.updateCaptureState({ $0.requestPause() }) else { return }
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
+            self.workspaceEngine?.setSuspended(true)
+            self.windowBrowser?.setActive(false)
+            self.streamingDisplayAwake.set(watching: false)
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
@@ -3009,6 +3328,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue(),
                   self.updateCaptureState({ $0.requestResume() }) else { return }
             self.captureRecoveryBudget.reset()
+            self.syncWorkspaceSuspension()
             Task { await self.resumeCapture() }
         }
     }
@@ -3019,6 +3339,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         videoEnabled = enabled
+        syncWorkspaceSuspension()
         sendVideoState()
         if !enabled {
             let phase = captureStateSnapshot().phase
@@ -3087,6 +3408,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func restartVideoCapture() async {
         do {
             switch mode {
+            case .window:
+                try await reattachWindowCarrier()
             case .mirror:
                 try await startMirrorCapture(preferredDisplayID: captureDisplayID == 0 ? nil : captureDisplayID)
             case .extend:
@@ -3145,6 +3468,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         needsKeyframe = true
         do {
             switch mode {
+            case .window:
+                try await reattachWindowCarrier()
             case .mirror:
                 try await startMirrorCapture(preferredDisplayID: captureDisplayID == 0 ? nil : captureDisplayID)
             case .extend:
@@ -3386,6 +3711,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         inputInjector?.cancelActiveInput()
         invalidateCapturePipeline()
         captureOwnership.release(stoppedStream)
+        // Screen Recording turned off under a live session: stop keeping the display awake until
+        // it is allowed again (startup re-syncs after the permission comes back).
+        if (error as? SCStreamError)?.code == .userDeclined || !CGPreflightScreenCaptureAccess() {
+            Log.info("wakeDebug: Screen Recording not allowed after the stop; display may sleep")
+            streamingDisplayAwake.set(watching: false)
+        }
         scheduleCaptureRecovery()
     }
 
@@ -3400,9 +3731,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// means the size itself is the problem, not the rate — falls through
     /// to the ordinary capture-recovery/reconnect path instead of an
     /// infinite downgrade loop.
+    ///
+    /// An HEVC encoder in that state is recovered by codec first: once per
+    /// sender, the stream switches to H.264 (whose encoder then gets its own
+    /// safety net) before any rate is given up.
     private func recoverFromEncoderFailureStreak(generation: UInt64) {
         guard generation == captureGenerationNow, let stream,
               capturePixelsWide > 0, capturePixelsHigh > 0 else { return }
+        if activeCodec == .hevc, !hevcFailedAtRuntime {
+            Log.info("encoder failure safety net: HEVC produced no frames after \(encodeFailureStreakLimit) "
+                + "attempts at \(capturePixelsWide)x\(capturePixelsHigh) — falling back to H.264 for this session")
+            hevcFailedAtRuntime = true
+            applyEffectiveFPSChange(rebuildEncoder: true)
+            return
+        }
         let tiers = EncoderCapability.supportedFPSTiers
         guard let currentIndex = tiers.firstIndex(where: { $0 >= captureTargetFPS }),
               currentIndex > 0 else {
@@ -3457,8 +3799,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
               captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
         let attempt = captureRecoveryBudget.failedAttempts + 1
-        Log.info("capture recovery starting mode=\(mode.rawValue) "
-            + "attempt=\(attempt)/\(captureRecoveryBudget.maximumAttempts) delay=3s")
+        if !waitingForConsole {
+            Log.info("capture recovery starting mode=\(mode.rawValue) "
+                + "attempt=\(attempt)/\(captureRecoveryBudget.maximumAttempts) delay=3s")
+        }
         let selfBox = self.selfBox
         queue.asyncAfter(deadline: .now() + 3.0) {
             guard let self = selfBox.currentOnQueue() else { return }
@@ -3466,6 +3810,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped,
                   self.captureOwnership.liveStream == nil,
                   self.captureStateSnapshot().shouldRetryCapture else { return }
+            // A doomed attempt must not count against the budget: re-arm
+            // without running a round until the console can capture again.
+            guard self.consoleCanCapture else {
+                if !self.waitingForConsole {
+                    self.waitingForConsole = true
+                    Log.info("capture down while the display sleeps or the screen is locked — "
+                        + "waiting for the user before retrying")
+                }
+                self.scheduleCaptureRecovery()
+                return
+            }
+            if self.waitingForConsole {
+                self.waitingForConsole = false
+                Log.info("console is back — resuming capture recovery")
+            }
             Task { await self.runCaptureRecovery(attempt: attempt) }
         }
     }
@@ -3473,6 +3832,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func runCaptureRecovery(attempt: Int) async {
         let targetAvailable: Bool
         switch mode {
+        case .window:
+            targetAvailable = true   // any display can carry Window mode
         case .mirror:
             targetAvailable = captureDisplayID != 0 && DisplayHealth.isUsable(captureDisplayID)
         case .extend:
@@ -3497,6 +3858,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             case .rebuildExtendPipeline:
                 if let hello = lastHello { await reconfigure(hello) }
                 else { throw CancellationError() }
+            case .reattachWindowCarrier:
+                try await reattachWindowCarrier()
             }
             guard captureStateSnapshot().phase == .running else { return }
             Log.info("capture recovery attempt \(attempt) succeeded mode=\(mode.rawValue)")
@@ -3514,6 +3877,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 case .extend:
                     Log.info("capture recovery attempt \(attempt) falling back to Extend display-pipeline rebuild")
                     if let hello = lastHello { await reconfigure(hello) }
+                case .window:
+                    try await reattachWindowCarrier()
                 }
                 if captureStateSnapshot().phase == .running {
                     Log.info("capture recovery fallback succeeded attempt=\(attempt) mode=\(mode.rawValue)")
@@ -3546,7 +3911,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             mirrorDisplayID: display.displayID,
             virtualDisplayID: nil
         ) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant)
+            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
@@ -3641,6 +4006,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return onConsole && !locked
     }
 
+    /// Whether a recovery attempt can succeed right now. SCK finds no
+    /// capturable displays while the main display sleeps or the screen is
+    /// locked (display sleep drops capture seconds before the lock engages),
+    /// so attempts then are doomed and must not count against the budget.
+    private var consoleCanCapture: Bool {
+        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+    }
+
     /// On `queue`: after a recovery round, re-arm the loop while capture is
     /// still down — up to the cap, then declare the session gone. A capture
     /// dead this many rounds is not coming back by itself, and ending the
@@ -3722,6 +4095,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             scheduleWakeCaptureRecovery(reason: reason)
         case .extend:
             scheduleExtendTopologyHealthCheck(reason: reason)
+        case .window:
+            // Windows keep their own streams across display changes; only a
+            // wake needs the carrier rebuilt (same as Mirror).
+            guard reason == "screensDidWake" else { return }
+            let carrierSelfBox = self.selfBox
+            Task { try? await carrierSelfBox.resolve()?.reattachWindowCarrier() }
         }
     }
 
@@ -3849,7 +4228,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("wakeCapture: requestingShareableContent")
         let content: SCShareableContent
         do {
-            content = try await SCShareableContent.current
+            content = try await ShareableContent.content()
         } catch {
             Log.info("wakeCapture: shareableContentFailed error=\(error)")
             scheduleCaptureRecoveryAfterWakeFailure()
@@ -3883,9 +4262,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
         } else {
-            // Auto mode: preserve existing Automatic behavior.
+            // Auto mode: the first display, skipping other devices'
+            // MeowDisplay virtual displays (issue #20).
             Log.info("wakeCapture: selectedUUID=none(Auto)")
-            resolvedDisplay = content.displays.first
+            let automaticID = MirrorSourceResolver.automatic(
+                in: Self.mirrorSourceCandidates(content.displays),
+                excluding: VirtualDisplayRegistry.shared.displayIDs)
+            resolvedDisplay = automaticID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         }
         guard let display = resolvedDisplay else {
             Log.info("wakeCapture: displayNotFound uuid=none")
@@ -4038,6 +4421,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue(), generation == self.transportController.currentDialGeneration, !self.stopped,
                   self.transportController.currentConnection === conn, conn.state != .ready else { return }
             Log.info("dial timed out in \(conn.state) — redialing")
+            // A dial that never leaves "preparing" while the device is advertising is most often
+            // macOS Local Network privacy blocking this Mac's outgoing connections: say so.
+            let sink = self.statusSink
+            LocalNetworkAccess.check { state in
+                guard state == .denied else { return }
+                Task { @MainActor in
+                    sink.publishStatus("macOS is blocking MeowDisplay from connecting to devices. Turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network.")
+                }
+            }
             self.scheduleReconnect()
         }
         conn.stateUpdateHandler = { state in
@@ -4301,8 +4693,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // MacSenderTransportController.resetForRedial.
         if transportController.isQUICApplicationReady {
             // A live QUIC session was lost (EOF, watchdog, receive error):
-            // the redial below is its single QUIC recovery attempt.
-            protocolSelector.liveQUICLost()
+            // the redial below is its single QUIC recovery attempt — unless
+            // it died within seconds of its hello, which means this path
+            // handshakes QUIC but cannot carry it (Auto: TCP from now on).
+            let age = transportController.quicApplicationReadyAge
+            let action = protocolSelector.liveQUICLost(age: age, preference: networkPreference)
+            if action == .fallbackToTCP, case .tcp(let endpoint, let tls) = transport {
+                QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+                Log.info("quic: live session to \(endpointName) died \(String(format: "%.1f", age ?? -1))s after hello"
+                    + " — secure TCP for the rest of this session"
+                    + " (QUIC cooldown \(Int(QUICCooldownStore.defaultDuration / 60))min)")
+            }
         }
         let generation = transportController.resetForRedial()
         pipelineState.resetPendingSendsForNewTransport()
@@ -4433,6 +4834,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    // MARK: - Text caret (Mac -> receiver)
+
+    /// Following the caret needs what keyboard input needs: this
+    /// connection's own control grant and a capture that is fully running.
+    private func textCaretFollowingPermitted() -> Bool {
+        !stopped && sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
+            && captureStateSnapshot().allowsKeyboardInput
+    }
+
+    /// A caret rectangle in global points -> the space this receiver is
+    /// shown: the streamed display, or in Window mode the workspace canvas
+    /// through the tile being typed into. Nil when it is somewhere else.
+    private func normalizedTextCaret(_ global: CGRect) -> CGRect? {
+        if mode == .window { return workspaceEngine?.caretCanvasRect(forGlobal: global) }
+        guard captureDisplayID != 0 else { return nil }
+        return TextCaretNormalizer.normalized(global, in: CGDisplayBounds(captureDisplayID))
+    }
+
+    private func sendTextCaret(_ rect: CGRect?) {
+        textCaretSeq &+= 1
+        sendJSONObject(TextCaretWire.message(rect: rect, sequence: textCaretSeq))
+    }
+
     // MARK: - Local cursor echo (Mac -> phone)
 
     private func startCursorEcho() {
@@ -4476,6 +4900,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             #endif
             return
         }
+        if mode == .window {
+            // One workspace pointer: the Mac cursor in canvas coordinates
+            // while it is over a tile's window, hidden elsewhere.
+            if let p = workspaceEngine?.cursorPlacement(forGlobal: loc) {
+                // With the pane's scale and rotation: the canvas isn't the Mac display's shape, so
+                // the sprite's display-normalized size would stretch it (PROTOCOL.md 6.10).
+                let scaleChanged = lastCursorPane.map { abs($0.kx - p.kx) > $0.kx * 0.01 || $0.rotation != p.rotation } ?? true
+                if !lastCursorSent.visible || abs(p.x - lastCursorSent.x) > 0.0004 || abs(p.y - lastCursorSent.y) > 0.0004 || scaleChanged {
+                    lastCursorSent = (p.x, p.y, true)
+                    lastCursorPane = (p.kx, p.rotation)
+                    sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
+                                      p.x, p.y, p.kx, p.ky, p.rotation))
+                }
+            } else if lastCursorSent.visible {
+                lastCursorSent.visible = false
+                sendCursor("\"v\":0")
+            }
+            return
+        }
         let bounds = CGDisplayBounds(captureDisplayID)
         guard bounds.width > 0, bounds.height > 0 else {
             #if DEBUG
@@ -4516,6 +4959,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Cursor position over the authenticated main transport. The sequence
     /// lets the receiver drop reordered frames (e.g. around a path switch).
+    /// Window mode: the pane scale and rotation last sent with the cursor.
+    private var lastCursorPane: (kx: Double, rotation: Int)?
+
     private func sendCursor(_ fields: String) {
         cursorSeq &+= 1
         sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
@@ -4593,9 +5039,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Normalized against the display so the phone can size/anchor the
         // sprite without knowing capture scale or HiDPI factor.
         let msg = String(format:
-            "{\"type\":\"cursorImg\",\"nw\":%.5f,\"nh\":%.5f,\"ax\":%.3f,\"ay\":%.3f,\"png\":\"%@\"}",
+            "{\"type\":\"cursorImg\",\"nw\":%.5f,\"nh\":%.5f,\"pw\":%.2f,\"ph\":%.2f,\"ax\":%.3f,\"ay\":%.3f,\"png\":\"%@\"}",
             size.width / displaySize.width,
             size.height / displaySize.height,
+            size.width, size.height,   // points: Window mode sizes the sprite with the pane's scale
             size.width > 0 ? hot.x / size.width : 0,
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
@@ -4676,6 +5123,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func handleControl(_ payload: Data, from conn: NWConnection) {
         guard transportController.currentConnection === conn else { return }
+        handleCurrentConnectionControl(payload)
+    }
+
+    /// A control message read off the live connection (`queue` only).
+    private func handleCurrentConnectionControl(_ payload: Data) {
         lastReceived = Date()
         guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
               let type = obj["type"] as? String else {
@@ -4778,6 +5230,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if case .tcp = transport, let established = transportController.activeNetworkProtocol {
                     if established == .quic { transportController.markQUICApplicationReady() }
                     protocolSelector.established(established, preference: networkPreference)
+                    if established == .quic, transportController.currentPathReceiverIsGateway {
+                        moveOffQUICBecauseReceiverHostsNetwork()
+                    }
                 }
                 // Pinned mutual-TLS (checked above) + this application
                 // handshake together are exactly "the expected paired peer
@@ -4853,7 +5308,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // Mac's encoder stayed on HEVC. Without this resend, the
                 // receiver would misclassify the next HEVC keyframe's
                 // VPS/SPS/PPS using H.264's `&0x1F` NAL-type space.
-                sendStreamCodecState()
+                //
+                // Unless this hello no longer offers HEVC (a reconnect can
+                // land on an H.264-only build of the receiver): then the
+                // live encoder is rebuilt for the codec this hello allows,
+                // and that rebuild announces it.
+                if activeCodec == .hevc, !info.receiverSupportsHEVC,
+                   captureOwnership.liveStream != nil {
+                    Log.info("receiver no longer offers HEVC — re-selecting the codec for the live stream")
+                    applyEffectiveFPSChange(rebuildEncoder: true)
+                } else {
+                    sendStreamCodecState()
+                }
                 if info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
                     sendMirrorDisplayState()
                 }
@@ -4874,6 +5340,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     helloContinuation = nil
                     continuation.resume(returning: ApplicationReadySession(
                         info: info, generation: generation))
+                } else if mode == .window, let previous,
+                          previous.pixelsWide != info.pixelsWide || previous.pixelsHigh != info.pixelsHigh {
+                    // Receiver rotated or resized: same windows, new canvas.
+                    guard sessionAuthorization.isAdmitted else { return }
+                    let resizeSelfBox = self.selfBox
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        guard let self = resizeSelfBox.resolve(), let current = self.lastHello,
+                              current.pixelsWide == info.pixelsWide, current.pixelsHigh == info.pixelsHigh else { return }
+                        await self.resizeWindowWorkspace(for: info)
+                    }
                 } else if mode == .extend, virtualDisplay != nil, let previous,
                           previous.pixelsWide != info.pixelsWide
                           || previous.pixelsHigh != info.pixelsHigh {
@@ -4965,12 +5442,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // `scrollable` and the additive `windowDrag`.
             guard let id = obj["id"] as? Int else { return }
             guard receiverInputIsAllowed(), let injector = inputInjector,
-                  let x = obj["x"] as? Double, let y = obj["y"] as? Double else {
+                  let x = obj["x"] as? Double, let y = obj["y"] as? Double,
+                  let point = injector.globalPoint(x: x, y: y) else {
                 sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id,
                                 "scrollable": false, "windowDrag": false])
                 return
             }
-            let point = injector.globalPoint(x: x, y: y)
             let selfBox = self.selfBox
             SmartTouchTargetClassifier.queue.async {
                 let decision = SmartTouchTargetClassifier.classify(at: point)
@@ -5013,7 +5490,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             case "down":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                      isRepeat: obj["repeat"] as? Bool == true)
                 }
             case "up":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
@@ -5028,6 +5506,81 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             default:
                 break   // unknown keyboard action from a newer peer — ignore
             }
+            // The caret just moved (or is about to): read it soon.
+            textCaretFollower.noteInput()
+        case WireMessage.keyboardState:
+            // Optional (PROTOCOL.md 6.11). Reached only for an admitted
+            // session (gate above); the follower re-checks control on every
+            // step, so an open keyboard without a grant reads nothing.
+            guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
+            textCaretFollower.setKeyboardOpen(open)
+        case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
+             WireMessage.appLaunch, WireMessage.windowClose:
+            // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
+            // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
+            // Launching still needs control (checked by the service).
+            guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
+            let phase = captureStateSnapshot().phase
+            guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+        case LockMacWire.request:
+            // Admitted sessions only (gate above), every mode; needs control.
+            let req = obj["req"] as? Int
+            let selfBox = self.selfBox, queue = self.queue
+            let reply: @Sendable (LockMacResult) -> Void = { result in
+                queue.async {
+                    var m: [String: Any] = ["type": LockMacWire.result, "result": result.rawValue]
+                    if let req { m["req"] = req }
+                    selfBox.currentOnQueue()?.sendJSONObject(m)
+                }
+            }
+            guard sessionAuthorization.isAdmitted else { return }
+            guard receiverInputIsAllowed() else { reply(.control); return }
+            Log.info("lock mac: requested by the device")
+            DispatchQueue.main.async { MacScreenLock.lock(done: reply) }
+        case WireMessage.filesRequest:
+            // Admitted sessions only. Read-only, owner-approved folders; the service checks
+            // the Mac's switch, the owner's per-session approval and every path.
+            let phase = captureStateSnapshot().phase
+            guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
+        case ClipboardWire.type:
+            // Admitted sessions only (gate above); every mode. The hub on the main actor decides.
+            let box = WorkspaceMessageBox(value: obj)
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            Task { @MainActor in selfBox.resolve()?.onClipboardMessage?(generation, box.value) }
+        case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
+             WireMessage.menuRequest, WireMessage.menuPress, WireMessage.workspaceRetry, WireMessage.workspaceBackdropRequest:
+            // Admitted sessions only (gate above). Window metadata exists only
+            // while this receiver is in Window mode on this Mac.
+            guard mode == .window, lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            guard let engine = workspaceEngine else {
+                // Window mode, but its engine isn't running (startup still in progress, or it failed):
+                // say so, instead of leaving the receiver's picker silently empty. It asks again.
+                Log.info("workspace: \(type) before Window mode started — ignored")
+                return
+            }
+            engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+        case WireMessage.displayModeRequest
+            where (obj["mode"] as? String) == WindowWorkspaceWire.mode:
+            guard let info = lastHello, info.supportsWindowWorkspace, WindowStreamingPolicy.isAllowed(),
+                  desiredVideoEnabled else {
+                sendDisplayModeState()
+                return
+            }
+            inputInjector?.cancelActiveInput()
+            sendJSONObject(["type": WireMessage.inputReset])
+            if mode == .window {
+                sendDisplayModeState()
+            } else {
+                let windowSelfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = windowSelfBox.resolve() else { return }
+                    self.onWindowModeRequest?()
+                }
+            }
         case WireMessage.displayModeRequest:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.displayModeWireVersion,
@@ -5039,7 +5592,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             inputInjector?.cancelActiveInput()
             sendJSONObject(["type": WireMessage.inputReset])
-            if requestedMode == mode.receiverMode {
+            if requestedMode == mode.receiverMode, mode != .window {
                 sendDisplayModeState()
             } else {
                 let displayModeSelfBox = self.selfBox
@@ -5123,8 +5676,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.onStreamingPriorityRequest?(priority)
             }
         case WireMessage.mirrorDisplayRequest:
-            // Like every Mac-wide request, reached only for an admitted
-            // connection (see the gate at the top of `handleControl`).
+            // Like every controller-handled request, reached only for an
+            // admitted connection (see the gate at the top of `handleControl`).
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion else { return }
             let requestedUUID = obj["selectedUUID"] as? String
@@ -5318,6 +5871,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// gap held back, on this connection only.
     private func connectionAdmitted(generation: UInt64, first: Bool) {
         Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
+        syncWorkspaceSuspension()
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
         }
@@ -5329,6 +5883,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if audioEnabled { beginAudioGeneration() }
             lastCursorPNGHash = 0
             lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
             sendAllowInputState()
             if deferredRotationRebuild, let info = lastHello {
                 deferredRotationRebuild = false
@@ -5368,6 +5923,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// input the old connection held — a grant, or a request still waiting
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
+        textCaretFollower.stop()
+        // No admitted receiver: window streams stop until one is admitted again.
+        workspaceEngine?.setSuspended(true)
+        windowBrowser?.setActive(false)
+        streamingDisplayAwake.set(watching: false)
         if dropped {
             sessionInputGrant.set(false)
             inputInjector?.cancelActiveInput()
@@ -5406,6 +5966,51 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             self.sendJSONObject(["type": WireMessage.sessionInviteCancel, "id": self.sessionInvitation.id])
         }
+    }
+
+    /// The admitted connection capture belongs to. No virtual display,
+    /// capture or media until the receiver accepted this session's
+    /// invitation on the live connection (and this Mac's user approved a
+    /// receiver-initiated request that needed it).
+    ///
+    /// Startup runs once per session, so a connection superseded before
+    /// capture starts must not end it: the Personal Hotspot hot swap to TCP
+    /// lands ~60 ms after the QUIC hello, and giving up there left a session
+    /// connected and admitted with no capture and no Window mode engine
+    /// (an empty window picker). Startup follows the session to its next
+    /// live, admitted connection instead; capture still belongs only to that
+    /// admitted connection (`prepareCaptureStart`).
+    private func awaitAdmittedConnection() async throws -> (ApplicationReadySession, UInt64) {
+        for attempt in 0..<StartupHandoffPolicy.limit {
+            let ready = try await waitForHello()
+            switch StartupHandoffPolicy.afterHello(isLive: authenticatedSession.isLive(generation: ready.generation),
+                                                   attempt: attempt, stopped: stopped) {
+            case .proceed: break
+            case .follow:
+                Log.info("sessionDebug: startup follows the session — hello generation=\(ready.generation) was superseded before capture")
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            case .giveUp:
+                Log.info("sessionDebug: ignored stale capture start generation=\(ready.generation)")
+                throw CancellationError()
+            }
+            let admittedGeneration = try await awaitSessionAdmission()
+            let admitted = try await waitForHello()
+            switch StartupHandoffPolicy.afterAdmission(
+                admittedGeneration: admittedGeneration, helloGeneration: admitted.generation,
+                isAdmitted: sessionAuthorization.isAdmitted(generation: admittedGeneration), attempt: attempt, stopped: stopped) {
+            case .proceed:
+                return (admitted, admittedGeneration)
+            case .follow:
+                Log.info("sessionDebug: startup follows the session — admitted generation=\(admittedGeneration) was superseded before capture")
+                try await Task.sleep(for: .milliseconds(50))
+            case .giveUp:
+                Log.info("sessionDebug: ignored stale capture start generation=\(admittedGeneration)")
+                throw CancellationError()
+            }
+        }
+        Log.info("sessionDebug: ignored stale capture start — the connection kept changing before capture")
+        throw CancellationError()
     }
 
     private func waitForHello() async throws -> ApplicationReadySession {
@@ -5465,7 +6070,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             preference: codecPreference,
             senderSupportsHEVC: Self.senderSupportsHEVC,
             receiverSupportsHEVC: receiverSupportsHEVC,
-            requestedWidth: width, requestedHeight: height, requestedFPS: fps)
+            requestedWidth: width, requestedHeight: height, requestedFPS: fps,
+            hevcFailedAtRuntime: hevcFailedAtRuntime)
         return CodecSelectionPolicy.select(input)
     }
 
@@ -5581,6 +6187,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 return
             }
+            if mode == .window {
+                lastCaptureAt = Date()   // the carrier is alive; frames come from the workspace
+                return
+            }
             let generation = captureGenerationNow
             if wakeCaptureAwaitingFirstFrameGeneration == generation {
                 wakeCaptureAwaitingFirstFrameGeneration = nil
@@ -5605,6 +6215,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 debugSCKFrameLogGeneration = generation
                 debugSCKFrameLogCount = 0
             }
+            startTrace?.markOnce("firstFrameCaptured")
             if debugSCKFrameLogCount < 5 {
                 debugSCKFrameLogCount += 1
                 let n = debugSCKFrameLogCount
@@ -5777,6 +6388,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let pipelineState = self.pipelineState
         let queue = self.queue
         let selfBox = self.selfBox
+        let startTraceLock = self.startTraceLock
         let submitStatus = videoEncoder.submit(
             pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
         ) { status, buffer, sessionCodec in
@@ -5812,6 +6424,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // actually emitting non-trivial output — and whether it's the
             // keyframe/parameter-set-bearing packet a dimension change
             // needs — for the first few encoded frames of every generation.
+            startTraceLock.withLock { $0 }?.markOnce("firstFrameEncoded")
             let encodeLogNumber = pipelineState.nextDebugEncodeLogNumber(generation: generation)
             if let encodeLogNumber {
                 let dims = CMSampleBufferGetFormatDescription(buffer).map { CMVideoFormatDescriptionGetDimensions($0) }
@@ -5863,10 +6476,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // an unthrottled line here is ~60/sec for as long as the problem
             // lasts. Report at most once a second and carry the count: the
             // status code is the diagnosis, the rate is just a number.
-            let logAction = pipelineState.recordEncodeSubmitFailure(
-                submitStatus, at: ProcessInfo.processInfo.systemUptime
+            let (logAction, shouldAttemptRecovery) = pipelineState.recordEncodeSubmitFailure(
+                submitStatus, at: ProcessInfo.processInfo.systemUptime, generation: generation
             )
             handleEncodeFailureLogAction(logAction)
+            if shouldAttemptRecovery {
+                queue.async { selfBox.currentOnQueue()?.recoverFromEncoderFailureStreak(generation: generation) }
+            }
         }
     }
 
@@ -6102,7 +6718,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendWelcome() {
         var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
                                       "min": WireProtocol.minSupportedPeer]
+        // The device shows whether this Mac's screens are covered while it's connected.
+        welcome["privacyShield"] = PrivacyShieldPolicy.isOn(remote: isRemoteSession)
+        // Paired devices show who uses this Mac (welcome only goes over the authenticated session).
+        if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
+        if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
+        var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
+        if WindowStreamingPolicy.isAllowed() {
+            features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
+            features.append(AppMenuWire.welcomeFeature)
+            features.append(WindowCloseWire.welcomeFeature)
+        }
+        welcome["features"] = features
         sendJSONObject(welcome)
     }
 
@@ -6196,20 +6824,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Ask the receiver to update (built via JSONSerialization because the
     /// message text is user-facing prose). Dormant while minSupportedPeer is
     /// 1, but the copy must fit the platform the day a floor is raised: a
-    /// Mac receiver updates via Sparkle (once MeowDisplay hosts its own
-    /// appcast) or the GitHub repo, not the App Store.
+    /// Mac receiver updates via Sparkle or the GitHub repo and an Android
+    /// receiver from Google Play, neither from the App Store
+    /// (`ReceiverUpdatePlatform`).
     private func sendUpdateRequired(kind: String) {
-        let isMac = kind == "Mac"
-        let dict: [String: Any] = [
-            "type": WireMessage.updateRequired,
-            "target": isMac ? "mac" : "ios",
-            // Always present: an older receiver without it falls back to the
-            // App Store link it was built with (upstream's listing).
-            "store": (isMac ? AppStore.projectURL : AppStore.receiverUpdateURL).absoluteString,
-            "message": isMac
-                ? "The MeowDisplay Receiver app on that Mac is too old for this Mac. Update it from the MeowDisplay GitHub page to reconnect."
-                : "This \(kind) app is too old for this Mac. Update MeowDisplay on it to reconnect.",
-        ]
+        let dict = ReceiverUpdatePlatform.updateRequiredMessage(receiverKind: kind)
         if let data = try? JSONSerialization.data(withJSONObject: dict),
            let json = String(data: data, encoding: .utf8) {
             sendJSONFrame(json)
@@ -6217,9 +6836,32 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendJSONObject(_ object: [String: Any], channel: TransportChannel = .control) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object),
-              let json = String(data: data, encoding: .utf8) else { return }
-        sendJSONFrame(json, channel: channel)
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guard data.count >= ControlChunkWire.threshold else {
+            guard let json = String(data: data, encoding: .utf8) else { return }
+            return sendJSONFrame(json, channel: channel)
+        }
+        // Too long for one control frame (PROTOCOL.md 4): every receiver would drop it. Sent in
+        // parts to a receiver that reassembles them (6.14). Only previews, stills and backdrops
+        // get this big, and they are all sent from `queue`, where `lastHello` lives.
+        let type = object["type"] as? String ?? "?"
+        guard lastHello?.supportsControlChunks == true,
+              let parts = ControlChunkWire.split(data, id: nextControlChunkID()) else {
+            Log.info("control: \(type) of \(data.count) bytes not sent (receiver can't take it in parts)")
+            return
+        }
+        for part in parts {
+            guard let partData = try? JSONSerialization.data(withJSONObject: part),
+                  let json = String(data: partData, encoding: .utf8) else { return }
+            sendJSONFrame(json, channel: channel)
+        }
+    }
+
+    /// `queue` only.
+    private var controlChunkID = 0
+    private func nextControlChunkID() -> Int {
+        controlChunkID = controlChunkID >= 1_000_000_000 ? 1 : controlChunkID + 1
+        return controlChunkID
     }
 
     /// CR2 fix: unlike `sendFramed` below (verified — every call site already
@@ -6230,6 +6872,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `queue` itself when needed instead of this method touching
     /// `currentConnection`/`isReady` directly — see its doc comment.
     private func sendJSONFrame(_ json: String, channel: TransportChannel = .control) {
+        #if DEBUG
+        sentControlObserverForTesting?(json)
+        #endif
         let frame = QUICFrameAssembler.frame(Data(json.utf8))
         transportController.sendFromAnyContext(channel: channel, content: frame) { _ in }
     }
@@ -6402,6 +7047,9 @@ extension MacSender: MacSenderTransportDelegate {
     /// relative ordering the pre-Phase-1 code had.
     func transportSessionBecameReady(on connection: NWConnection) {
         activeConnectionGeneration = authenticatedSession.beginTransport()
+        // The owner's Remote Finder approval belonged to the old connection.
+        fileBrowser?.stop()
+        fileBrowser = nil
         // A new connection starts unverified and unadmitted, whichever path
         // replaced the old one (redial, `switchTransport`, or the transport
         // controller's own migration) — see `SenderSessionAuthorization`.
@@ -6433,6 +7081,7 @@ extension MacSender: MacSenderTransportDelegate {
         // the fresh peer — the cursor analogue of forcing a keyframe.
         lastCursorPNGHash = 0
         lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
         lastReceived = Date()  // fresh grace period for the watchdog
         lastSendCompletionAt = Date()   // fresh grace period for the outbound-stall watchdog
         sendStallReported = false
@@ -6472,6 +7121,19 @@ extension MacSender: MacSenderTransportDelegate {
         (transport, peerAddrs)
     }
 
+    /// The receiver is this Mac's gateway (it shares its Personal Hotspot
+    /// with the Mac). QUIC to a hotspot host handshakes and then stops
+    /// delivering data, so Auto moves the session to secure TCP right after
+    /// hello through the ordinary hot transport swap (input cancelled,
+    /// re-authentication, re-admission). Explicit QUIC is left alone.
+    private func moveOffQUICBecauseReceiverHostsNetwork() {
+        guard case .tcp(let endpoint, let tls) = transport,
+              protocolSelector.receiverHostsNetwork(preference: networkPreference, current: .quic) else { return }
+        QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+        Log.info("quic: \(endpointName) hosts this Mac's network (Personal Hotspot) — moving to secure TCP")
+        switchTransport(to: transport)
+    }
+
     func transportCableUpgradeAllowed() -> Bool {
         networkPreference != .quic
     }
@@ -6484,7 +7146,7 @@ extension MacSender: MacSenderTransportDelegate {
     func transportQUICFailed(_ failure: QUICTransportFailure) {
         guard !stopped, case .tcp(let endpoint, let tls) = transport else { return }
         let action = protocolSelector.quicFailed(failure.failureClass, preference: networkPreference,
-                                                 established: failure.established)
+                                                 established: failure.established, liveAge: failure.liveAge)
         Log.info("quic: policy class=\(failure.failureClass.rawValue) established=\(failure.established)"
             + " preference=\(networkPreference.rawValue) action=\(action)")
         switch action {
@@ -6511,3 +7173,278 @@ extension MacSender: MacSenderTransportDelegate {
         }
     }
 }
+
+// MARK: - Window mode (WindowWorkspaceEngine)
+
+/// A composited workspace frame crossing from the engine's queue to ours.
+private struct WorkspaceFrameBox: @unchecked Sendable { let buffer: CVPixelBuffer }
+/// A JSON control message crossing queues (plain property-list values).
+private struct WorkspaceMessageBox: @unchecked Sendable { let value: [String: Any] }
+
+extension MacSender {
+    /// The canvas Window mode composites into: the receiver's panel at this
+    /// Mac's quality setting, inside its decode ceiling, even dimensions.
+    private func windowCanvasSize(for info: PhoneInfo) -> (Int, Int) {
+        let wide = Int(Double(info.pixelsWide) * quality.scale) & ~1
+        let high = Int(Double(info.pixelsHigh) * quality.scale) & ~1
+        let (maxWide, maxHigh) = CodecDecodeCeiling.applicable(
+            codec: .h264, legacyMaxEncodeWide: info.maxEncodeWide, legacyMaxEncodeHigh: info.maxEncodeHigh)
+        let (w, h) = DecodeCeiling.clamp(width: wide, height: high, maxWide: maxWide, maxHigh: maxHigh)
+        return (max(w & ~1, 64), max(h & ~1, 64))
+    }
+
+    /// Window mode start: the workspace engine plus a tiny display stream
+    /// that keeps Mac audio and the capture lifecycle. Works on a headless
+    /// Mac too, as long as macOS has some display (even a virtual one)
+    /// holding the windows; it never creates one.
+    func startWindowWorkspace(info: PhoneInfo, sessionGeneration: UInt64) async throws {
+        let contentClock = ContinuousClock.now
+        let content = try await ShareableContent.content()
+        Self.logStartupStep("windowModeContent", since: contentClock)
+        let main = CGMainDisplayID()
+        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+            await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")
+            throw NSError(domain: "MacSender", code: 21,
+                          userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
+        }
+        let (canvasW, canvasH) = windowCanvasSize(for: info)
+        let hostID = TrustStore.shared.installID() ?? "mac"
+        try await onQueue { sender in
+            let fps = sender.effectiveFPS(width: canvasW, height: canvasH).fps
+            sender.installWorkspaceEngine(hostID: hostID, canvas: CGSize(width: canvasW, height: canvasH), fps: fps)
+        }
+        try await startCapture(display: carrier, pixelsWide: canvasW, pixelsHigh: canvasH,
+                               sessionGeneration: sessionGeneration)
+        Log.info("workspace: Window mode started canvas=\(canvasW)x\(canvasH) carrier=\(carrier.displayID)")
+    }
+
+    /// Capture recovery in Window mode: restart the carrier display stream.
+    func reattachWindowCarrier() async throws {
+        guard let info = lastHello else { throw CancellationError() }
+        let content = try await ShareableContent.content()
+        let main = CGMainDisplayID()
+        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+            throw NSError(domain: "MacSender", code: 21,
+                          userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
+        }
+        let (w, h) = windowCanvasSize(for: info)
+        try await startCapture(display: carrier, pixelsWide: w, pixelsHigh: h)
+    }
+
+    /// `queue` only.
+    private func installWorkspaceEngine(hostID: String, canvas: CGSize, fps: Int) {
+        stopWorkspaceEngine()
+        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser())
+        let selfBox = self.selfBox
+        let queue = self.queue
+        // Only the CURRENT engine may reach this session: a stopped one's late
+        // frames or messages (a thumbnail batch mid-loop) are dropped.
+        engine.deliverFrame = { [weak engine] buffer in
+            let box = WorkspaceFrameBox(buffer: buffer)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine else { return }
+                sender.deliverWorkspaceFrame(box.buffer)
+            }
+        }
+        engine.sendMessage = { [weak engine] message in
+            let box = WorkspaceMessageBox(value: message)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine,
+                      sender.sessionAuthorization.isAdmitted else { return }
+                sender.sendJSONObject(box.value)
+            }
+        }
+        engine.releaseHeldInput = {
+            queue.async { selfBox.currentOnQueue()?.inputInjector?.cancelActiveInput() }
+        }
+        engine.onAudioSources = { [weak engine] sources in
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let engine, sender.workspaceEngine === engine else { return }
+                sender.applyWindowAudio(sources)
+            }
+        }
+        engine.setPointerDriven(lastHello?.inputMode == "trackpad")   // PointerInputMode.trackpad
+        workspaceEngine = engine
+        // Input is mapped per tile to the window under it; the display id is
+        // only the fallback for releases.
+        inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+        inputInjector?.setTargetMapper(engine)
+        engine.start()
+    }
+
+    /// `queue` only. One Remote Finder per connection; its replies pass the admission gate.
+    private func ensureFileBrowser() -> RemoteFileBrowser {
+        if let fileBrowser { return fileBrowser }
+        let browser = RemoteFileBrowser()
+        let selfBox = self.selfBox
+        let queue = self.queue
+        let generation = activeConnectionGeneration
+        browser.sendMessage = { [weak browser] message in
+            let box = WorkspaceMessageBox(value: message)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let browser, sender.fileBrowser === browser,
+                      sender.sessionAuthorization.isAdmitted else { return }
+                sender.sendJSONObject(box.value)
+            }
+        }
+        browser.askConsent = { capabilities in
+            Task { @MainActor in selfBox.resolve()?.onFilesConsentRequest?(generation, capabilities) }
+        }
+        // The device's stored policy, read on every request: an owner's change applies at once.
+        if let peerID = lastHello?.id {
+            browser.livePolicy = { FilesDevicePolicyStore.policy(peerID: peerID) }
+        }
+        fileBrowser = browser
+        return browser
+    }
+
+    /// `queue` only. One browser per session; its messages pass the same admission gate.
+    @discardableResult
+    private func ensureWindowBrowser() -> WindowBrowserService {
+        if let windowBrowser { return windowBrowser }
+        let browser = WindowBrowserService(hostID: TrustStore.shared.installID() ?? "mac")
+        let selfBox = self.selfBox
+        let queue = self.queue
+        browser.sendMessage = { [weak browser] message in
+            let box = WorkspaceMessageBox(value: message)
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), let browser, sender.windowBrowser === browser,
+                      sender.sessionAuthorization.isAdmitted else { return }
+                sender.sendJSONObject(box.value)
+            }
+        }
+        windowBrowser = browser
+        syncWorkspaceSuspension()
+        return browser
+    }
+
+    /// `queue` only. Window streams run only while video is on and the
+    /// display isn't paused or stopping: a Video On request during a pause
+    /// must not restart them.
+    func syncWorkspaceSuspension() {
+        let phase = captureStateSnapshot().phase
+        let paused = phase == .pausing || phase == .paused || phase == .stopped
+        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
+        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
+        // Without Screen Recording there is nothing to keep the display awake for.
+        streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted
+                                  && CGPreflightScreenCaptureAccess())
+    }
+
+
+    /// `queue` only. Stops every window stream this receiver owns.
+    func stopWorkspaceEngine() {
+        guard let engine = workspaceEngine else { return }
+        workspaceEngine = nil
+        windowAudioSources = nil
+        windowAudioGeneration &+= 1
+        inputInjector?.setTargetMapper(nil)
+        engine.stop()
+    }
+
+    /// `queue` only: one composited frame, through the same gates as a
+    /// captured display frame.
+    private func deliverWorkspaceFrame(_ pixelBuffer: CVPixelBuffer) {
+        guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
+              captureStateSnapshot().phase == .running else { return }
+        lastPixelBuffer = pixelBuffer
+        lastCaptureAt = Date()
+        capFrames += 1
+        guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
+        guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
+        if shouldDropFrame(reason: "pending_encode") { return }
+        if shouldDropFrame(reason: "pending_sends") { return }
+        encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()), generation: captureGenerationNow,
+               connectionGeneration: activeConnectionGeneration)
+    }
+
+    /// The receiver rotated or resized: same tiles and windows, a new
+    /// canvas and encoder. No capture restart, no display change.
+    func resizeWindowWorkspace(for info: PhoneInfo) async {
+        let (w, h) = windowCanvasSize(for: info)
+        _ = try? await onQueue { sender in
+            guard sender.mode == .window, let engine = sender.workspaceEngine else { return }
+            sender.invalidateCapturePipeline(discardingLastFrame: true)
+            sender.videoEncoder.invalidate()
+            sender.capturePixelsWide = w
+            sender.capturePixelsHigh = h
+            let fps = sender.effectiveFPS(width: w, height: h).fps
+            do {
+                try sender.setupEncoder(width: w, height: h, fps: fps)
+            } catch {
+                Log.info("workspace: encoder rebuild failed \(error)")
+            }
+            sender.needsKeyframe = true
+            engine.update(canvas: CGSize(width: w, height: h), fps: fps)
+            Log.info("workspace: canvas resized to \(w)x\(h)")
+        }
+    }
+}
+
+#if DEBUG
+// MARK: - Input test harness
+//
+// Lets `MacSenderInputRevocationTests` drive this sender's real control
+// gate, input grant, revocation and connection bookkeeping with no network,
+// ScreenCaptureKit or stores. The test plays the receiver, and the injector
+// posts into the test's sink instead of the HID event tap. Only the hello's
+// identity proof is stood in for; it has its own tests
+// (`SenderSessionAuthorizationTests`).
+extension MacSender {
+    enum InputHarnessError: Error { case helloRejected, notAdmitted }
+
+    /// A new connection, verified for the device in `helloJSON` and admitted,
+    /// with capture running. Returns its generation. As on a real redial,
+    /// whatever the previous connection held is released and its grant is gone.
+    func admitConnectionForTesting(helloJSON: Data, pinnedSPKI: Data,
+                                   eventSink: SyntheticEventSink,
+                                   sent: @escaping @Sendable (String) -> Void) async throws -> UInt64 {
+        try await onQueue { sender in
+            sender.inputEventSink = eventSink
+            sender.sentControlObserverForTesting = sent
+            let generation = sender.authenticatedSession.beginTransport()
+            sender.activeConnectionGeneration = generation
+            sender.connectionAuthorityEnded(dropped: sender.sessionAuthorization.transportBegan(generation: generation))
+            let info = try JSONDecoder().decode(PhoneInfo.self, from: helloJSON)
+            let outcome = sender.sessionAuthorization.acceptHello(
+                generation: generation, intendedPeerID: sender.transport.tls.peerID, claimedPeerID: info.id,
+                authenticatedSPKI: pinnedSPKI, currentPinnedSPKI: pinnedSPKI,
+                receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                needsSenderApproval: false)
+            if case .rejected = outcome { throw InputHarnessError.helloRejected }
+            _ = sender.authenticatedSession.markApplicationReady(generation: generation)
+            sender.lastHello = info
+            sender.sessionAuthorization.receiverResponded(.accepted, generation: generation)
+            guard sender.sessionAuthorization.isAdmitted(generation: generation) else {
+                throw InputHarnessError.notAdmitted
+            }
+            _ = sender.updateCaptureState { $0.captureStarted() }
+            if sender.inputInjector == nil {
+                sender.inputInjector = InputInjector(displayID: CGMainDisplayID(),
+                                                     sessionInputGrant: sender.sessionInputGrant,
+                                                     eventSink: eventSink)
+            }
+            return generation
+        }
+    }
+
+    /// A control message from the receiver on the live connection.
+    func receiveControlForTesting(_ payload: Data) async throws {
+        try await onQueue { $0.handleCurrentConnectionControl(payload) }
+    }
+
+    /// The live connection ended (the receiver's control stream hit EOF).
+    func loseConnectionForTesting() async throws {
+        try await onQueue { $0.invalidateApplicationSession(reason: "controlEOF") }
+    }
+
+    /// Waits for everything already queued on the sender queue.
+    func settleForTesting() async throws {
+        try await onQueue { _ in }
+    }
+
+    var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
+}
+#endif
+
+private struct WindowAudioStreamBox: @unchecked Sendable { let stream: SCStream }

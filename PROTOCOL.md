@@ -74,7 +74,20 @@ over USB (dial a tunneled port), and one code path serves both transports.
 * A receiver serves **one sender at a time**. When a new inbound connection
   arrives while one is active, the receiver MUST adopt the new connection
   and drop the old one (the official receiver cancels the old connection
-  and resets its decoder state).
+  and resets its decoder state), with one exception: **make-before-break
+  for another Mac.** While the current session is admitted (6.9), a
+  connection whose certificate resolves to a *different* pinned peer does
+  not replace it on arrival. The receiver sends it `hello`, reads only its
+  `welcome`, `sessionInvite` and `sessionInviteCancel`, keeps it alive with
+  `ping`, and answers its invitation as usual (`pending` while it asks the
+  user). Only when that invitation is accepted does the new connection
+  replace the session; declined, blocked, withdrawn, silent or unanswered,
+  it is closed and the current session is untouched. If the current session
+  ends first (not by this device's own disconnect), the waiting connection
+  is judged as a new one. A pre-21 sender, which can't be asked, replaces
+  the session only when its automatic invitation would be accepted.
+  Reconnects from the same peer are never held. Senders need no change:
+  they already wait for `accepted` before streaming.
 
 ## 2. Transport bindings
 
@@ -111,7 +124,19 @@ An unpaired pv 11 receiver also advertises `_opendisplay-pair._tcp` on TCP
 port 9002. It conveys discovery, not trust, and carries no secret.
 The Mac sender advertises `_opendisplay-mac-pair._tcp` while running so the
 receiver can present the product's primary "nearby Mac → Pair" flow. Both
-pairing advertisements carry only `id` and `pv` discovery metadata.
+pairing advertisements carry `id` and `pv` discovery metadata (and the
+`pp` pairing-version hint), never a secret.
+
+When several people are logged in to one Mac, each person's sender may opt
+in to four more `_opendisplay-mac-pair._tcp` TXT keys so receivers can list
+one Mac with its login sessions (additive, no `pv` change; see
+[SAME_MAC_SESSIONS.md](SAME_MAC_SESSIONS.md)): `hg` (16 lowercase hex
+digits, the same on every session of one Mac), `hn` (the Mac's name), `sl`
+(the session's chosen label, at most 32 characters) and `ss` (`a` while
+that login session is on the console, `i` while it is switched out). Like
+everything in TXT they are unauthenticated: receivers use them only to
+arrange and label rows, MUST NOT let them affect pairing, pins, admission
+or input, and MUST ignore all four when any is malformed or `id` is absent.
 
 ### 2.2 USB (Apple devices)
 
@@ -134,6 +159,41 @@ manual SAS comparison. There is no separate USB trust record. A USB `hello`
 is held to exactly the same identity rule as any other route (section 6.9,
 "Admission is per connection"): its `id` must be the peer the sender dialed
 and its certificate must present that peer's current pin.
+
+### 2.2a Android receivers
+
+The official Android receiver uses binding 2.1 unchanged: the same Bonjour
+service types and TXT keys (published through the platform's DNS-SD), the
+same pinned mutual-TLS 1.3 media listener on TCP 9001 and pairing listener
+on TCP 9002, and the same `_opendisplay-mac-pair._tcp` browse for its
+"nearby Mac → Pair" flow. Its persistent identity is a P-256 key in the
+Android Keystore; its pin is that key's SubjectPublicKeyInfo DER, compared
+byte-for-byte exactly like every other pin. It sends `hello.device`
+`"Android"`. It has no USB binding yet (section 2.2 is usbmuxd, which only
+reaches Apple devices) and does not list `"quic"` in `transports` until it
+has a QUIC listener, so senders reach it over TCP. A future USB binding
+would tunnel the same pinned-mTLS port (for example `adb reverse`) and change
+nothing above it.
+
+Android also reaches a paired Mac that is not on the local network (Remote
+Access), over TCP only, with the two bindings every receiver uses and nothing
+new on the wire. **Knock:** the receiver opens a pinned mutual-TLS 1.3
+connection to the Mac's `remoteRequestPort` (TCP 9003) at a saved address,
+sends the one `remoteConnectRequest` frame of section 6.9 (`manual` only while
+its user's own Connect is outstanding, `automatic` for its bounded recovery
+after a lost remote session) and closes. The Mac decides, then dials the
+receiver's TCP 9001 listener exactly as for a local request (Bonjour first,
+then its saved hint, then the knock's source address). The receiver pins the
+Mac's key, never the address, and treats a different key at the address as a
+security failure, not a retry. **Pair over Remote:** the receiver dials the
+Mac's remote pairing listener (TCP 9004, open for 180 s after the Mac user
+starts Pair over Remote) and runs the same pairing ceremony as section 2.3 as
+initiator: commit/reveal, six-digit code on both screens, confirmation on both.
+Neither binding grants input, and an address is a hint saved per verified
+peer ID. Android validates the typed address with the same rules as the Mac
+(`fixtures/remote/endpoint-vectors.json`, which both test suites replay) and
+frames the knock byte-for-byte as `fixtures/remote/knock-frame-vectors.json`
+(both sides test it).
 
 ### 2.3 First pairing (pv 11)
 
@@ -210,7 +270,10 @@ After the preface each stream uses the section 3 framing
 the Control stream's reverse direction. Receivers MUST reject (close the
 QUIC connection): a bad magic, version or non-zero flags; an unknown
 channel; a second stream for a channel; more than three streams; any
-unidirectional stream; a payload of the wrong kind for its channel; a
+unidirectional stream (the receiver advertises a bidirectional stream limit
+of four, because Apple's Network.framework uses QUIC stream 0 itself and the
+sender's streams start at stream 4; only streams that actually open count
+toward the three); a payload of the wrong kind for its channel; a
 declared length of 0 or above the channel cap (Control and Audio 1 MiB,
 Video 32 MiB — the raw 4:2:0 size of a 4096×4096 frame plus headroom,
 larger than any legitimate access unit at the receivers' 4096-pixel decode
@@ -249,6 +312,10 @@ removes it.
   otherwise QUIC. Whichever protocol first completes the authenticated
   `hello` is kept for the rest of the logical session — no periodic
   re-challenge, no metric-driven switching.
+* A dial the platform reports as merely *waiting* (Network.framework's
+  `.waiting`, e.g. `ENETDOWN` while a path comes up) is not a failure: it
+  is left to become ready, bounded by the same 8 s application-handshake
+  timeout. Only the platform's *failed* state ends the dial.
 * Only an ordinary **reachability** failure (no answer within 8 s of dialing,
   ICMP-refused, unreachable network/host, DNS) lets Auto fall back to secure
   TCP; it then starts a 10-minute in-memory cooldown for that peer and route
@@ -315,7 +382,8 @@ Consequences that are **normative for senders**:
   starts with anything but `{`, or contains a NUL byte. The largest
   official control message, the base64 cursor sprite (`cursorImg`), caps
   its PNG at 24000 bytes precisely to stay under this limit after base64
-  expansion.
+  expansion. A longer message goes in parts to a receiver that reassembles
+  them (section 6.14), never as one frame.
 * A sender MUST NOT emit a video frame that satisfies the JSON test (this
   cannot happen with well-formed Annex B payloads).
 
@@ -333,7 +401,8 @@ control data to route it to the video path).
 ## 5. Video
 
 The video stream is **H.264 Annex B**, one *access unit* (one encoded
-picture) per wire frame.
+picture) per wire frame. A receiver that advertises it may instead be sent
+**HEVC (H.265) Main 8-bit**, framed the same way (section 5.4).
 
 ### 5.1 Frame layout
 
@@ -382,6 +451,36 @@ resumed from background) requests a keyframe with the `kf` control message
 an IDR (with SPS/PPS, per 5.1). Senders SHOULD also send an IDR unprompted
 whenever a connection is (re)established, including replaying the last
 captured frame if the screen is static and the capturer produces nothing.
+
+### 5.4 HEVC (`hello.codecs`, `streamCodecState`, `pv` 19)
+
+HEVC is optional and additive; H.264 stays the universal baseline.
+
+* **Capability.** A receiver lists the codecs it can decode in hardware as
+  `hello.codecs` (array of strings): always `"h264"`, plus `"hevc"` only when
+  a hardware HEVC decoder exists. The field itself is the capability signal:
+  a receiver that omits it is H.264-only whatever its `pv`, and a sender
+  MUST NOT send it HEVC.
+* **Choice.** The sender alone picks the codec, from its user's preference
+  (Auto, H.264 or HEVC) and both sides' hardware support. Auto uses H.264
+  unless H.264 would have to reduce the requested stream and HEVC is
+  supported on both sides. The decode ceiling (section 6.5) applies to both
+  codecs.
+* **Announcement.** `{"type":"streamCodecState","codec":"h264"|"hevc","reason":<string>}`
+  (sender -> receiver) names the codec of the frames that follow. It is sent
+  whenever the encoder is (re)built and again after every `hello`, only to a
+  receiver that sent `codecs`. It travels on the channel that carries video
+  frames (on QUIC, the Video stream — section 2.4) so it stays ordered with
+  them. `reason` is diagnostic text; receivers MUST NOT branch on it, and
+  MUST ignore a `codec` they do not know.
+* **Framing.** HEVC access units follow 5.1 with HEVC NAL headers: the NAL
+  type is `(byte0 >> 1) & 0x3F`, and every IDR is prefixed with the current
+  VPS, SPS and PPS. On a codec change the receiver drops its parameter sets
+  and decoder state and waits for the new codec's keyframe.
+* **Fallback.** The sender may switch an HEVC stream back to H.264 at any
+  time — when the HEVC encoder cannot be created or produces no frames, or
+  when a later `hello` no longer lists `"hevc"` — announcing it with
+  `streamCodecState` before the first H.264 frame.
 
 ## 5A. Mac system audio (`pv` 12)
 
@@ -508,6 +607,7 @@ Coordinates use the conventions of section 7.
 | `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
 | `smartTouchProbe` | pv 20 | `id` (int), `x`, `y` | Smart Touch (Experimental): ask whether the element at a normalized point is scrollable |
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
+| `keyboardState` | additive (welcome feature `textCaret`) | `open` (bool) | The on-screen keyboard opened or closed, so the sender can follow the text caret (section 6.11) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -527,8 +627,11 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
 * `scale` (number): the device's UI scale factor (2 or 3 on Apple
   hardware). The sender uses it to pick a sensible point-size for the
   virtual display.
-* `device` (string, optional): device kind for UI text, `"iPhone"` or
-  `"iPad"` from the official receiver. Free-form.
+* `device` (string, optional): device kind for UI text: `"iPhone"` or
+  `"iPad"` from the iOS receiver, `"Mac"` from the Mac receiver,
+  `"Android"` from the Android receiver. Free-form; a sender MUST NOT gate
+  security on it. The official sender uses it only for naming, for
+  `updateRequired.target`, and to recognize a Mac receiver (section 6.4).
 * `id` (string, optional): stable per-install UUID. MUST match the Bonjour
   TXT `id`. Senders use it to recognize the same physical device across
   transports and renames.
@@ -588,6 +691,12 @@ official receiver recognizes these gestures:
 * `"previousSpace"`: three-finger swipe right.
 * `"showDesktop"`: four- or five-finger spread.
 * `"launchpad"`: four- or five-finger pinch.
+* `"spotlight"`: three-finger tap.
+* `"controlCenter"`: a one-tap receiver control (no gesture).
+* `"menuBar"`: a one-tap receiver control that reveals and focuses the menu
+  bar (no gesture). Momentary; no visibility state is reported.
+
+The receiver may also send any of these from a one-tap control.
 
 Three-finger gestures require a directional movement rather than a tap; the
 four- and five-finger gestures require a meaningful change in fingertip
@@ -637,6 +746,12 @@ and the stylus would go dead; the fallback keeps it usable.)
   receiver sends MUST be followed by a matching `"up"` (or by disconnect —
   senders MUST release a still-held key on session loss regardless).
   `{"type":"keyboard","action":"down","usage":80,"modifiers":["shift"]}`
+  A `"down"` MAY carry `repeat` (bool, additive, no `pv` bump): `true`
+  marks the receiver's own key repeat for a key it already sent down and
+  has not released. A sender SHOULD post it as an auto-repeat key-down
+  only while that key is held and MUST ignore it otherwise; a sender that
+  doesn't know the field treats it as the duplicate down it already
+  ignores.
 * `"modifierDown"` / `"modifierUp"` (pv 6) — a synthetic modifier's held
   lifecycle: `modifier` is one of `"command"`, `"option"`, `"control"`, or
   `"shift"`. Every down MUST be followed by an up; senders MUST also release
@@ -652,7 +767,13 @@ unrecognized modifier names.
 `usage` values are USB HID Usage Tables keyboard-page (0x07) usage numbers.
 Senders MUST validate `usage` (an integral value in `0...65535`) and MUST
 ignore an out-of-range, non-integral, or unrecognized value rather than
-treat it as fatal. The keys the official apps exchange today:
+treat it as fatal. The official Mac Receiver sends any key of a physical
+keyboard: letters, digits and punctuation (4–56), F1–F12 (58–69) and
+F13–F20 (104–111), Insert/Help (73), Home (74), Page Up (75), End (77),
+Page Down (78), the keypad (83–99, 103, 133), the ISO key (100) and the JIS
+keys (135, 137, 144, 145). The usage names a physical key, so the
+sender's own keyboard layout decides the character. The special keys the
+iPhone and iPad apps send:
 
 | Usage | Key |
 |---|---|
@@ -748,6 +869,7 @@ section 4.
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
 | `sessionInvite` | pv 21 | `id`, `initiator`, `intent`, `mode`, `awaitingSender` (bool) | Ask the receiver to admit this display session (section 6.9) |
 | `sessionInviteCancel` | pv 21 | `id` | The sender withdrew or declined this invitation |
+| `textCaret` | additive (welcome feature `textCaret`) | `v` (1/0), `x`, `y`, `w`, `h`, `s` | The focused text caret's rectangle, normalized to the streamed display or Window canvas (section 6.11) |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -834,7 +956,9 @@ a PNG (kept under 24000 bytes pre-encoding, see section 4); `nw`, `nh` are
 the sprite's width/height **normalized to the display size**, so the
 receiver can scale it without knowing the sender's HiDPI factor; `ax`, `ay`
 are the hotspot **normalized within the sprite** (0..1 of its own size).
-Sent when the sprite changes and re-sent after reconnects.
+Newer Macs add `pw`, `ph`: the sprite's size in Mac points (Window mode
+sizes it with the pane's scale, section 6.10). Sent when the sprite changes
+and re-sent after reconnects.
 
 ### 6.3 Cursor side channel (UDP) — removed
 
@@ -890,16 +1014,27 @@ still supports). Sent in response to every `hello`. A receiver whose own
 `pv` policy is not met by the sender (`welcome.pv < ` its minimum) is the
 only party that can detect an outdated sender and SHOULD tell its user to
 update the sender. A receiver that never gets a `welcome` at all is talking
-to a pre-pv-2 sender and MUST assume sender `pv` 1.
+to a pre-pv-2 sender and MUST assume sender `pv` 1. An optional boolean
+`privacyShield` says whether the Mac covers its own screens while this
+receiver is connected (on by default for remote connections, off for local
+ones); receivers show it briefly after each connection and ignore it when
+absent. An optional string `user` (at most 64 characters) is the
+full name of the person signed in on the Mac, so receivers can tell
+same-named Macs apart; the Mac's owner can turn it off. It is only ever
+sent here, inside the authenticated session, never in discovery. Receivers
+keep it for that paired Mac and drop it when a `welcome` arrives without it.
 
 **`updateRequired`**: the sender declares the pairing unsupported until the
 receiver updates. `target` names the end that must act (`"ios"` for the
-iPhone/iPad app, `"mac"` for the Mac receiver), `store` is a
+iPhone/iPad app, `"mac"` for the Mac receiver, `"android"` for the Android
+receiver, chosen from `hello.device`), `store` is a
 platform-appropriate update URL, `message` is user-facing prose. The sender
 always includes `store`, because older receivers fall back to a built-in
 App Store link without it: for `"ios"` it is MeowDisplay's own App Store
 listing once one is configured (`AppStore.iOSAppID`), otherwise the project
-page; for `"mac"` it is the project page. A receiver opens `store` only if
+page; for `"android"` it is the Google Play listing once one is configured
+(`AppStore.androidPlayPackage`), otherwise the project page; for `"mac"` it
+is the project page. A receiver opens `store` only if
 it is an `https` link or its own configured listing, and otherwise
 substitutes its own update link (`AppStore.resolveReceiverUpdateURL`), so
 another app's listing is never opened. Receivers SHOULD surface it prominently and stop expecting video —
@@ -1077,7 +1212,10 @@ remains the only way to turn it on.
   control channel: `{"type":"remoteConnectRequest","intent":"manual"}` or
   `"automatic"`. A receiver sends `manual` only while its user's explicit
   request for that sender is outstanding; its own automatic recovery sends
-  `automatic`. A knock with no frame (older receivers), a malformed frame
+  `automatic`. The sender answers a knock on the route it came in on: one
+  that arrived over a tunnel (Tailscale or another VPN) is dialed back at its
+  source address first, ahead of a possibly stale Bonjour result (routing
+  only; the dial-back is authenticated like any other). A knock with no frame (older receivers), a malformed frame
   or an unknown value is `automatic`, and an `automatic` knock is judged as
   a background attempt: it never raises a prompt on the sender. A desired
   mode travels as `hello.requestedMode` (`mirror` or `extend`, optional), sent
@@ -1171,6 +1309,479 @@ such receivers as before. A receiver facing a pre-21 sender (known from
 `welcome.pv`) admits it only if it would accept an `automatic` invitation
 from that peer; otherwise it closes the connection, so an older sender
 can never bypass the receiver's approval preference.
+
+### 6.10 Window workspaces (`hello.ws`, `welcome.features`)
+
+Additive and capability-gated: no `pv` bump. A receiver that can arrange
+Mac windows sends `hello.ws` (its workspace version, currently `1`). A Mac
+that offers it lists `"window"` in `welcome.features` (array of strings;
+the Mac's user can turn it off in Displays settings). Neither side sends
+any message below unless both are present; an older peer never sees them.
+Every message here needs an admitted session (`SenderControlAuthority`):
+window titles and stills are screen content.
+
+**Mode.** `displayModeRequest` with `mode: "window"` asks for Window mode
+for this device only; the Mac confirms with `displayModeState`
+`mode: "window"`, sent only to receivers that sent `hello.ws`. Window is
+never sent as `hello.requestedMode` (older Macs read only `mirror` /
+`extend` there). A Mac in Window mode for a receiver without `ws` streams
+Mirror instead. The video stream is unchanged: one H.264/HEVC stream whose
+canvas is the receiver's panel (`hello.pixelsWide`/`pixelsHigh`); the Mac
+composites the chosen windows into it. No virtual display is created and no
+Mac window is moved, resized or put on another Space.
+
+**Catalog.** `windowCatalogRequest` (optional `installed: true`) is answered
+with `windowCatalog`:
+
+* `host` — the Mac's install id;
+* `windows` — at most 120 of `{id, gen, bundle, app, title, w, h, state, active, strip?}`;
+  `state` is `visible` or `offscreen` (minimized, hidden or on another
+  Space: such a window has no frames until it is back); `gen` is the
+  window's identity generation in this session (a window id reused by
+  another process is a new `gen`); `strip: true` — the window sits in
+  Stage Manager's side strip: macOS pauses its capture there and only
+  shows a tilted thumbnail, so it has no current picture until it is on
+  the stage again (`w`/`h` are still the real window's);
+* `apps` — running regular apps `{bundle, name, windows}`;
+* `installed` — only when asked: apps the receiver may ask to open
+  `{bundle, name}`.
+
+MeowDisplay's own windows, system UI (Dock, menu bar, Stage Manager strip,
+password and authentication prompts) and windows that opted out of capture
+are never listed. `error` present: the Mac can't list windows now.
+
+`windowThumbnailRequest {ids, max, icons}` (at most 24 ids, `max` 64–320
+pixels wide, at most 32 bundle ids) is answered with one
+`windowThumbnail {id, gen, jpeg}` per window and one `appIcon {bundle, png}`
+per app. `stale: true` marks an older real picture (the window can't be
+captured now); `unavailable: true` with `reason` (`offscreen`, `stageStrip`,
+`failed`) means there is none. A window in Stage Manager's strip is never
+answered with a screenshot of its strip thumbnail. Receivers bound
+both before decoding (96 KiB base64; refuse images declaring more than 16
+megapixels). Stills are requested only while the receiver's picker is open.
+
+**Browsing in every mode.** `windowCatalogRequest`, `windowThumbnailRequest`,
+`appCatalogRequest` and `appLaunch` are answered in Mirror, Extend and Window
+mode alike (admitted session, `hello.ws`, Window mode allowed on the Mac), so a
+receiver's switcher and search open over the desktop without changing the
+mode. One identity ledger serves every mode: a window keeps its `gen` when the
+receiver later switches to Window mode with it. `windowCatalog` also carries
+`displays` `[{id, name, w, h, main, virtual}]`. Stills are queued in the order
+asked (the latest request first; nothing is dropped while a batch runs) and a
+fresh still is answered from the Mac's cache; a still that can't be taken now
+is answered with the last real one and `stale: true`, or `unavailable: true`
+with `reason` `offscreen` (minimized, hidden) or `failed`. `ids` may hold 48,
+`max` is 64–640, `icons` 48, and optional `displays` (display ids) are
+answered with `displayThumbnail {id, jpeg}` (MeowDisplay's own windows are
+never in a display still). Receivers bound stills at 256 KiB base64.
+`appCatalogRequest {rev?}` is answered with `appCatalog {rev, apps}` — every
+launchable app the Mac finds (Spotlight's index of the app folders, a folder
+scan when Spotlight is off), one per bundle id, Finder first, at most 900:
+`{bundle, name, running?, windows?, used?}` (`used`: last-used time, seconds
+since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
+`appLaunch {bundle}` needs the input grant, opens only an app the Mac listed,
+never activates it (no focus change on the Mac), and is answered with
+`appLaunchResult {bundle, ok}`. `windowAction` also takes
+`minimize {window, gen}` (input grant; the real Mac window; never activates).
+
+**Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
+workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
+normalized `x y w h` in the canvas (non-overlapping, inside it, at least
+64×48 canvas pixels), `window` and `gen` from this session's catalog,
+`follow` (`window`, or `app` to follow that app's frontmost window),
+`rotation` (0/90/180/270, clockwise, presentation only) and `fit` (`fit`
+letterboxes, `fill` crops evenly; never stretched). At most 9 tiles. Tiles
+naming another `host` are ignored (they belong to that Mac's connection).
+The Mac accepts a tile only for a window it listed to this session with
+the same `gen`; anything else is rejected, never retargeted.
+
+`workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit,
+stageManager?, stageManagerControl?}`
+reports what the Mac shows: per tile `{id, window, gen, state, app, bundle,
+title, follow, rotation, fit}` with `state` one of `live`, `waiting`,
+`offscreen`, `closed`, `failed`, `limit` (paused by the Mac's capture
+budget; the tile is kept). `active` is the tile keyboard input goes to;
+`hostFocus` is `deliver`, `noActiveTile`, `hostFocusElsewhere` (another
+app is frontmost on the Mac) or `otherWindowFocused`; keys are not
+delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
+`limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`. `stageManager` is true while Stage Manager is on; `stageManagerControl` is
+`ready` (the Mac can switch it: the owner made its two shortcuts), `setup`
+(not yet: the device explains where to set it up instead of offering Turn
+Off) or `failed` (macOS didn't apply the last change, for a few seconds).
+
+`workspaceFocus {tile}` makes a tile active (the Mac raises its window when
+input is granted). `windowAction {action}` needs this session's input
+grant: `activate {window, gen}`, `launch {bundle}` (only an app the Mac
+listed) and `close {window, gen}` (closes the real Mac window; receivers
+send it only from its own explicit, confirmed action — removing a tile is
+just a smaller `workspaceRequest`).
+
+**Close Window from Stage Peek** (welcome feature `windowClose`, any
+display mode): `windowClose {window, gen, req}` presses that listed
+window's own close button through Accessibility — never Quit, never
+activating the app or moving the window. Only for a window listed to this
+session with the same `gen`. The Mac answers `windowCloseResult {window,
+req, result}`: `closed`, `saveDialog` (the app asked about unsaved changes;
+the owner answers on the Mac), `stillOpen`, `stale` (not that window any
+more), `control` (no input grant: View Only cannot close), `accessibility`
+(the Mac lacks the permission), `noButton` or `ambiguous` (more than one
+window matched; nothing was pressed). A fresh `windowCatalog` follows.
+
+**Input.** Unchanged messages, canvas coordinates. The Mac maps a point to
+the tile under it, through that tile's fit and rotation, to the window. A
+press binds to its tile until release (a drag never crosses into another
+window). Hover moves the Mac pointer only over the active tile; elsewhere
+the receiver's own pointer moves alone. Scroll goes to the window under the
+pointer when that window is frontmost there. A press, scroll or hover where
+another window covers the target sends nothing. A press on a tile that
+isn't active activates its window first, then delivers that same press
+once. Keyboard input goes only to the active tile, and only while the Mac
+really has that window's app in front (`hostFocus`). Changing a tile's
+window releases held buttons and keys. `cursor` positions are in canvas
+coordinates (hidden when the Mac pointer is over no tile's window). A
+visible Window-mode `cursor` also carries the pane under it: `kx`, `ky`
+(one Mac point there, normalized to the canvas width and height — the
+pane's Fit/Fill and zoom) and `r` (the pane's rotation in degrees). The
+canvas isn't the Mac display's shape, so a receiver sizes the sprite as
+`cursorImg.pw × kx` by `cursorImg.ph × ky` of the picture and turns it by
+`r` about its hotspot, instead of using `nw`/`nh` (which would stretch it).
+Receivers may bound the drawn size so it stays visible; its shape is kept.
+
+### 6.11 Text caret (`keyboardState` / `textCaret`)
+
+Optional and additive: no `pv` bump. It lets a receiver keep the line being
+typed into above its on-screen keyboard (Zoom While Typing) wherever the
+display is focused.
+
+* **Capability.** A sender that can follow the focused text caret lists
+  `"textCaret"` in `welcome.features` (next to `"window"`, 6.10). A receiver
+  sends `keyboardState` only to a sender that did, and a peer that does not
+  know either type ignores it.
+* **`keyboardState`** (receiver to sender): `{"type":"keyboardState","open":true}`.
+  `open` is whether the receiver's on-screen keyboard is up. The sender reads
+  the caret only while it is `true`, only for a session that has input granted
+  (6.1 `allowInputState`), and stops when the keyboard closes, the grant is
+  revoked or the connection ends. A receiver sends the closing `false`
+  whenever it sent the opening `true`.
+* **`textCaret`** (sender to receiver):
+  `{"type":"textCaret","v":1,"x":0.4123,"y":0.5,"w":0.002,"h":0.018,"s":12}`.
+  `x`, `y`, `w`, `h` are the caret's rectangle normalized to what this
+  receiver is shown, top-left origin, the same space as `touch.x/y` (section
+  7): the streamed display, or in Window mode the workspace canvas through
+  the tile being typed into. `v` `0` (with no `x`/`y`) means no caret is
+  known: no Accessibility permission, no focused text field, a password field,
+  an app that exposes none, or a caret on another display or in another
+  window. `s` is a sequence number; a receiver drops a frame that is not newer
+  than the last, like `cursor`, and resets at every connection. The sender
+  rate-limits to ten a second at most and sends only on change.
+* **Privacy.** Only a rectangle crosses the wire: never the text, its length,
+  the field's name or its position within it.
+* **Receiver behavior.** With the keyboard up, a usable caret (finite, on the
+  display) replaces the last touch as the typing focus, on both axes; none
+  falls back to the touch. The picture moves only when the caret leaves a
+  comfortable inner region of the keyboard-free area, and the receiver forgets
+  the caret when the keyboard closes. The shared test vectors are in
+  `fixtures/viewport/caret-vectors.json`.
+
+### 6.12 Remote Finder (`filesRequest` / `files`)
+
+Optional and additive: no `pv` bump. A receiver browses, previews, downloads
+and — only when the Mac owner allows it — uploads and changes files on the
+Mac, on its own screen.
+
+* **Capability.** A sender that can answer lists `"files"` in
+  `welcome.features`. A receiver sends `filesRequest` only to such a sender;
+  a peer that doesn't know the types ignores them.
+* **Grants (sender).** Answered only for an admitted, unpaused session, with
+  the Mac's Files switch on (off by default). Each paired device (by its
+  authenticated install id, never its name or address) has a policy: *ask*
+  (default), *always* or *block*; a *scope*: the folders the owner approved
+  (in the home folder, never `~/Library`, or on a mounted volume) or *all
+  accessible* files (the home folder and mounted volumes, only what macOS
+  lets the Mac app read; never other users, `~/Library` or credential
+  dot-folders); and *capabilities*: `browse` (list, search, thumbnails,
+  in-app previews), `download` (save or share a copy), `upload` (files,
+  folders, new folders), `modify` (rename, move, copy, duplicate, compress,
+  expand, put back) and `delete` (move to the Trash). With *ask*, the first
+  `state` request of a connection shows the owner's prompt (Not Now, Allow
+  This Session, Always Allow Approved Folders, All Files…); every other op
+  before the answer gets `asking`. A prompt grants `browse` + `download`.
+  More is asked for with `requestAccess`. Every request is checked again
+  against the switch and the live policy: *block* refuses at once, turning
+  *always* off makes the session ask again (`revoked`), and the owner's
+  Revoke ends the grant and every transfer. The policy is never widened
+  while any device controls the Mac; Forget removes it. Files access and
+  control are independent.
+* **Paths.** A request names a `root` (an opaque id from `state`) and a
+  `path` (array of names below it). The sender rejects `.`, `..`,
+  separators, `:` and hidden names (unless the policy shows hidden files),
+  resolves symlinks and answers only if the result stays inside that root
+  and outside protected locations. Destinations of uploads, copies and
+  moves are checked the same way.
+* **`filesRequest`** (receiver to sender): `{"type":"filesRequest","op":…,"req":7,…}`.
+  `req` is echoed in the reply. Ops (capability needed):
+  * `state`: whether browsing is possible, the roots and the grant.
+  * `list` (`root`, `path`), `search` (`root`, `path`, `q` ≤ 100 chars),
+    `preview` (`root`, `path`, optional `max` side ≤ 1600), `thumbs`
+    (`root`, `path`, `names` ≤ 48, optional `max` ≤ 256), `info` (`root`,
+    `path`), `openWithApps` (`root`, `path`): browse.
+  * `open` (`root`, `path`, optional `with` bundle id): browse, and the input
+    grant (6.1 `allowInputState`), else error `control`.
+  * `requestAccess` (`caps: [..]`): asks the owner for more capabilities.
+  * `download` (`root`, `path`, `purpose`: `view` or `save`): opens a file
+    for reading — `view` (shown inside the receiver app) needs browse, `save`
+    (saved, shared or copied out) needs download. Then `read` (`x`, `o`
+    offset, `n` ≤ 1 MiB) for each range, paced by the receiver, and `close`
+    (`x`). At most 6 open; idle ones close after 120 s. The capability is
+    checked on every `read`.
+  * `uploadBegin` (`root`, `path` folder, `name`, `size`, `conflict`:
+    `ask` | `rename` | `replace` | `skip`, optional `sha` hex prefix ≥ 16 of
+    the file's SHA-256, `mod`): upload; `replace` also needs delete. Then
+    `uploadData` (`x`, `o`, `d` base64 of ≤ 22000 bytes so each message
+    stays under the control limit; the Mac refuses parts over 96 KiB; in
+    order, a window of acknowledged parts) and
+    `uploadEnd` (`x`, optional `sha`, checked like the one at the start), or
+    `uploadCancel` (`x`). At most 4 at once.
+  * `mkdir` (`root`, `path`, `name`, `conflict`; `skip` uses an existing
+    folder): upload.
+  * `rename` (`root`, `path`, `name`), `copy` / `move` (`root`, `path`,
+    `toRoot`, `toPath` folder, `conflict`), `duplicate` (`root`, `path`),
+    `zip` (`root`, `path` folder, `names`), `unzip` (`root`, `path`),
+    `putBack` (`token`): modify; `replace` also needs delete.
+  * `trash` (`root`, `path`): delete.
+* **`files`** (sender to receiver): `{"type":"files","op":…,"req":7,"ok":true,…}`.
+  * `state`: `state` is `off`, `asking`, `denied`, `noFolders`, `ready` or
+    `revoked`; `ready` carries `roots: [{id, name}]` and `grant: {duration:
+    session|always, scope, caps, hidden}`. Sent again when the owner answers.
+  * `list`: `root`, `path`, `entries`, optional `truncated`. An entry is
+    `{name, dir, kind, size?, mod?, made?, hidden?, ro?}`: `kind` is
+    `folder`, `app`, `image`, `video`, `audio`, `pdf`, `archive`, `text`,
+    `document` or `file`; `size` in bytes for files; dates in Unix seconds;
+    `ro` when the Mac can't write it.
+  * `search`: `root`, `q`, `entries` (each with `in`, the folder path below
+    the root), `complete`.
+  * `preview`: `root`, `path`, then `text` (+ `truncated`) or `jpeg` (base64)
+    with `w`, `h` (in parts, 6.14, when long).
+  * `thumb`: `root`, `path`, `name`, then `jpeg`, `w`, `h` or `ok:false`.
+  * `download`: `x`, `size`, `name`, `mod`, `uti`, `mime`. Each `read` is
+    answered by `data` messages (`x`, `o`, `d` base64 of ≤ 22000 bytes, each
+    under the control limit) and then `read` (`x`, `o`, `n`, `sha`: the
+    first 16 hex digits of the range's SHA-256). A file that changes while
+    open (size, date or inode) fails with `changed`.
+  * `uploadBegin`: `x` and the `name` it will get, or `skipped`; error
+    `exists` carries `suggest`. `uploadAck` (`x`, `o` bytes written) answers
+    each `uploadData`. `uploadEnd`: the final `name`. The file is written to
+    a hidden temporary file in the destination folder and moved into place
+    only when its size (and digest, if given) match; another item that
+    appeared meanwhile is kept (the upload gets a new name). A replaced item
+    goes to the Trash.
+  * `mkdir`, `rename`, `copy`, `move`, `duplicate`, `zip`, `unzip`,
+    `putBack`: the resulting `name` (or `skipped`). `trash`: a `token` for
+    `putBack` (this session only). `info`: `info {name, kind, size, items?,
+    made, mod, used, perm, owner, writable, locked, cloud?}`.
+    `openWithApps`: `apps [{bundle, name, default}]`. `requestAccess`: `ok`.
+  * Errors: `ok:false` with `error` `off`, `asking`, `denied`, `revoked`,
+    `notAllowed` (with `need`, the missing capability), `notFound`,
+    `permission` (macOS refused this app), `control`, `badQuery`,
+    `noPreview`, `exists`, `noSpace`, `tooLarge`, `busy`, `changed`,
+    `digest`, `short`, `badRange`, `intoItself`, `readOnly`, `failed` or
+    `unsupported`.
+* **Never.** No Finder windows on the Mac, no change of display mode or
+  focus, nothing deleted outright (only the Trash), nothing overwritten
+  without an explicit `replace`, no network file server.
+
+### 6.13 Pane menus (`menuRequest` / `menu` / `menuPress` / `menuResult`)
+
+Optional and additive: no `pv` bump. In Window mode a receiver can show the menus of the app a
+pane shows (File, Edit, …) and press their items, since the Mac's own menu bar only shows the
+frontmost app.
+
+* **Capability.** A sender that can answer lists `"menus"` in `welcome.features` (with
+  `"window"`, 6.10).
+* **Gates (sender).** Window mode only, and only for a session with the input grant (6.1
+  `allowInputState`): both reading and pressing are control features (an Open Recent submenu
+  lists file names). Without it the reply is the error `control`. Never the Apple menu (index 0
+  of the menu bar): its items are the system's.
+* **`menuRequest`** (receiver to sender): `{"type":"menuRequest","tile":"w1","path":[],"req":3}`.
+  `path` `[]` asks for the menu bar's titles; `[i]` for the items of the menu at index `i`;
+  `[i, j]` for the submenu of item `j`; at most 3 steps. Indices are the Accessibility children
+  indices the sender sent, separators included.
+* **`menu`** (sender to receiver): `{"type":"menu","ok":true,"tile":"w1","path":[2],"app":"Zed","req":3,"items":[…]}`.
+  An item is `{"i":0,"t":"New File","key":"⌘N"}`, with `on:false` when disabled, `mark:true` when
+  checked, `sub:true` when it opens a submenu, or `{"i":1,"sep":true}`. At most 24 titles and 120
+  items a level. Errors (`ok:false`, `error`): `control`, `accessibility` (the Mac app lacks the
+  permission), `notFound` (no such pane or a desktop pane), `unavailable` (the app exposes no
+  menus).
+* **`menuPress`** (receiver to sender): `{"type":"menuPress","tile":"w1","path":[2,0],"titles":["File","New File"],"req":4}`.
+  `titles` repeats the title at every step; the sender presses only if each still matches, so a
+  menu that changed meanwhile is never pressed. Like a click in that pane, the pane's window
+  comes to the front first, then the item gets the Accessibility press action.
+* **`menuResult`** (sender to receiver): `{"type":"menuResult","ok":true,"req":4}`, or
+  `ok:false` with `error` `control`, `notFound` or `changed`.
+
+### 6.14 Large control messages (`hello.chunks`, `chunk`)
+
+Section 4 caps every control frame below 32768 bytes, and receivers drop a
+longer one. Some Mac answers are longer: a Remote Finder preview (6.12), a
+window or display still and a pane's whole-source still (6.10). A receiver
+that reassembles parts says so in its hello:
+
+```json
+{ "type": "hello", "chunks": 1, ... }
+```
+
+To such a receiver the Mac sends a control message of 32000 bytes or more
+(its UTF-8 JSON) as ordered parts on the same channel; to any other receiver
+it doesn't send it at all (it would be dropped). Each part is an ordinary
+control message well under the limit:
+
+```json
+{ "type": "chunk", "id": 17, "i": 0, "n": 24, "len": 520113, "sha": "3f0c…16 hex", "d": "<base64 of ≤ 22000 bytes>" }
+{ "type": "chunk", "id": 17, "i": 1, "n": 24, "d": "…" }
+```
+
+* `id` names one message (the Mac's counter); `i` counts from 0 to `n - 1`.
+  Only part 0 carries `len` (the whole message's byte length) and `sha`
+  (the first 16 hex digits of its SHA-256).
+* The concatenated `d` bytes are the original JSON message, which the
+  receiver handles exactly as if it had arrived in one frame. A reassembled
+  message is never itself a `chunk`.
+* Other control messages may come between the parts of one message, and
+  parts of up to 4 messages may interleave; the parts of one message arrive
+  in order.
+
+The receiver bounds what it holds and abandons a message, silently, on: a
+missing or repeated part, `len` above 4 MiB, more bytes than `len`, a
+digest mismatch, a part 0 that isn't valid, or no part for 15 seconds. A
+fifth message in progress evicts the oldest. An abandoned message is simply
+lost: every feature that asks for one of these answers already times out
+and can ask again. Vectors: `fixtures/receiver-protocol/control-chunks.json`.
+
+### 6.15 Unified Clipboard (`clip`)
+
+Optional and additive: no `pv` bump. Copy on the Mac and paste on a
+connected iPhone, iPad or Android device, and the other way round. The Mac is
+the hub: devices talk only to the Mac, and the Mac relays between them.
+
+* **Capability.** A sender that takes part lists `"clipboard"` in
+  `welcome.features`. Every message is `{"type":"clip","op":…}`; a peer that
+  doesn't know the type ignores it.
+* **Off by default, on both sides.** The Mac's Clipboard switch is off until
+  the owner turns it on, and each device sends `join` with `on: true` only
+  after the person turns it on there. Demo sessions never join.
+* **Grants (sender).** Per paired device, by its authenticated install id
+  (never its name or address): *ask* (default), *always* or *block*, plus a
+  direction (both, Mac to device, device to Mac) that can only narrow what
+  the device asked for. With *ask*, a device's first `join` shows the owner's
+  prompt (Not Now, Allow This Session, Always Allow). Clipboard grants are
+  separate from input control and from Remote Finder (6.12): neither implies
+  the other. Pause stops every copy at once; Revoke and Block end the grant
+  and every transfer for that device.
+
+#### Messages
+
+```json
+{ "type": "clip", "op": "join", "on": true, "dir": "both", "types": "all", "files": true, "max": 10000000, "seen": { "<origin>": 4 } }
+{ "type": "clip", "op": "leave" }
+{ "type": "clip", "op": "state", "state": "ready", "toDevice": true, "toMac": true, "types": "all", "files": true, "max": 10000000, "duration": "session", "macRead": "default", "seen": { "<origin>": 9 } }
+```
+
+* `join` (device → Mac): what the person chose here (`dir` both / toDevice /
+  toMac; `types` text / all; `files`; `max`, the automatic-transfer limit in
+  bytes, one of 1, 10, 50 or 200 MB) and `seen`, the newest sequence number it
+  has seen from each origin. Sent again whenever a setting changes.
+* `state` (Mac → device): `off` (switch off on the Mac), `idle` (off on the
+  device), `asking`, `denied`, `paused`, `revoked` or `ready`. Only `ready`
+  carries the effective `toDevice` / `toMac` / `types` / `files` / `max`,
+  `duration` (`session` or `always`), `macRead` (whether macOS lets
+  MeowDisplay read the Mac's pasteboard: `default`, `ask`, `allowed`,
+  `denied`) and the Mac's `seen`.
+
+#### Events and ordering
+
+Each genuine copy is one `event`, named by its origin (the device's
+authenticated install id, or the Mac's) and that origin's own sequence number
+`s`, which only increases:
+
+```json
+{ "type": "clip", "op": "event", "o": "<origin>", "s": 12, "lc": 40, "vv": { "<other origin>": 7 }, "ch": "<16 hex>", "at": 1793000000,
+  "items": [ { "reps": [ { "t": "text", "n": 11, "h": "<16 hex>", "d": "<base64>" }, { "t": "png", "n": 812345, "h": "<16 hex>", "b": 0 } ] } ],
+  "files": [ { "p": ["Folder"], "n": 0, "dir": true }, { "p": ["Folder", "a.pdf"], "n": 20480, "b": 1 } ] }
+```
+
+* `lc` is a Lamport counter and `vv` the causal context: the newest event the
+  origin had seen from every other origin when it copied. `ch` hashes the
+  content, so copying what is already the shared clipboard makes no event.
+  `at` is informational and never used for ordering.
+* `items` are the copied items, each with up to 6 representations: `t` one of
+  `text`, `url`, `html`, `rtf`, `png`, `jpeg` (unknown kinds are skipped),
+  `n` its size, `h` the first 16 hex digits of its SHA-256, and either the
+  bytes inline in `d` (at most 16 000 raw bytes across one event, so every
+  frame stays under the 32 KB control limit) or a blob number `b` to fetch.
+  `files` lists copied files and folders by relative path (`p`, every name
+  validated: no separators, `.` or `..`), never a local path.
+* **Ordering, the same on every platform** (vectors in
+  `fixtures/clipboard/vectors.json`): an event whose context includes the
+  current one is newer and wins; one the current already includes is older
+  and is dropped; two that never saw each other are concurrent, and the
+  higher `lc` wins (ties: the larger origin), with the loser kept as an
+  alternative the person can choose. Applying a remote event never creates an
+  event, nothing goes back to its origin, and `join`'s `seen` only marks
+  events as seen, so a reconnect is never a copy.
+* **The Mac's checks.** A device may send only events whose origin is its own
+  install id; context claims about other origins are clamped to what the Mac
+  has seen; a `join`'s `seen` is trusted only for the device's own origin.
+  Declared sizes are capped at parse (200 MB per representation, 1 TiB per
+  file). Events from a device without `toMac`, or while paused, are dropped.
+  An event is relayed to every other ready device that allows it, never back
+  to its origin and never to a device that isn't paired, joined and granted.
+
+#### Fetching larger data
+
+```json
+{ "type": "clip", "op": "read", "req": 3, "o": "<origin>", "s": 12, "b": 0, "off": 0, "n": 262144 }
+{ "type": "clip", "op": "data", "req": 3, "off": 0, "d": "<base64 of ≤ 22000 bytes>" }
+{ "type": "clip", "op": "readEnd", "req": 3, "off": 0, "n": 262144, "sha": "<16 hex of this range>" }
+{ "type": "clip", "op": "readEnd", "req": 3, "error": "gone" }
+```
+
+Either side asks the side that announced the event for a blob range (at most
+256 KiB per `read`), receives it in ordered `data` parts and a `readEnd` with
+the range's digest, and asks for the next range. The asker accepts no more
+bytes than it asked for, checks every range digest and the whole
+representation's `h`, and applies the event only if it is still the shared
+clipboard when the fetch completes. Errors: `gone` (replaced or no longer
+served), `denied`, `changed` (a file changed on the Mac since it was
+copied), `badRange`, `permission`. Representations are fetched automatically
+up to the smaller of the two sides' `max`; copied files are listed at once
+but fetched only when the person asks (Save or Share on a device; Get Files
+on the Mac), keeping their folder structure.
+
+#### Platform rules
+
+* **Mac.** MeowDisplay watches the pasteboard's change count (no content
+  read) only while a device is ready, and reads the content only after a
+  change. On macOS 15.4 and later, macOS may ask the owner before
+  MeowDisplay reads the pasteboard (`macRead`). Items marked concealed,
+  transient or auto-generated (the nspasteboard.org markers, which many
+  password managers set) are never sent. Writes are for this Mac only
+  (`currentHostOnly`, so they don't continue to Universal Clipboard) and
+  carry MeowDisplay's own marker, so they're never sent back as new copies.
+  Received files are staged with the quarantine attribute and removed when
+  replaced, revoked or the app quits.
+* **iOS and iPadOS.** The clipboard is read only while MeowDisplay is in
+  front: through the system Paste button (which never asks), or
+  automatically when the app returns to the front if the person turned on
+  Send Copies Automatically (iOS asks before each read unless they chose
+  Allow in Settings). Writes are local-only (no Universal Clipboard).
+* **Android.** Android lets an app read the clipboard only while it has
+  focus, and shows a notice when it does. Copies whose description has
+  `EXTRA_IS_SENSITIVE` are never read for sending. Writes carry
+  `EXTRA_IS_REMOTE_DEVICE` and MeowDisplay's marker; images are shared as
+  read-only content URIs from the app's own cache.
+* Detection of passwords and other private items depends on the app that
+  copied them marking them; it is never guaranteed. No platform keeps a
+  history: content is held only until it is replaced, and is never logged.
 
 ## 7. Coordinate spaces and units
 
@@ -1283,7 +1894,9 @@ Rules already stated elsewhere, gathered:
   (6.9).
 * First frame after (re)connect is an IDR (5.3).
 * Rotation is a re-`hello` on the live connection, not a reconnect (6.1).
-* A new inbound connection replaces the current one (section 1).
+* A new inbound connection replaces the current one, except another peer's
+  while the session is admitted, which waits for its invitation to be
+  accepted (section 1).
 * Silence over ~5 s is death (8.2); `sleeping`/`closing` are best-effort
   courtesies, absence of them means nothing (6.1).
 
@@ -1325,10 +1938,16 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 12 | Mac system audio: typed `0x01` media-frame marker (section 5A), AAC-LC config/packet frames, `audioRequest` / `audioState` |
 | 13 | Mac-authoritative Mirror capture-source selection: `mirrorDisplayRequest` / `mirrorDisplayState` |
 | 14 | Mac-authoritative Extend display shape: `extendShapeRequest` / `extendShapeState` (section 6.7) |
+| 15 | Encoder-safe FPS ceiling and receiver-enforced maximum FPS: `maxFPSRequest` / `maxFPSState` (section 6.8) |
+| 16 | Streaming priority: `streamingPriorityRequest` / `streamingPriorityState` |
 | 17 | `mirrorUnavailable`: headless-Mirror offer to switch to Extend via the existing `displayModeRequest` |
+| 18 | Session-scoped input consent: `allowInputState.state` |
+| 19 | Optional HEVC video (section 5.4): `hello.codecs`, `streamCodecState`; codec capability comes from the field, never from `pv` |
 | 20 | Smart Touch (Experimental): `smartTouchProbe` / `smartTouchProbeResult` |
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
+| 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
+| 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 
 ---
 
@@ -1421,4 +2040,61 @@ This file is versioned by git; the authoritative change log is
 | 2026-09-18 | `pv` 14: Mac-authoritative Extend display shape (`extendShapeRequest` / `extendShapeState`, section 6.7); additive `hello.maxEncodeWide`/`maxEncodeHigh` now advertised by the official iOS receiver |
 | 2026-09-18 | `pv` 15: encoder-safe FPS ceiling and receiver-enforced maximum FPS (`maxFPSRequest` / `maxFPSState`, section 6.8) |
 | 2026-09-27 | `pv` 22: optional reliable-stream QUIC transport (section 2.4) with authenticated `transports`/`qv` capability |
+| 2026-09-30 | Documented optional HEVC video (section 5.4, `pv` 19) and the `pv` 15/16/18 rows; no wire change. The sender now also falls back to H.264 when an HEVC encoder produces no frames or a new `hello` drops `"hevc"` |
 | 2026-09-26 | Hardening, no `pv` change: session admission and input grants are per connection (section 6.9); the same `hello` identity/current-pin check on USB (section 2.2); the Remote Access knock declares its intent |
+| 2026-10-25 | Additive, no `pv` change: `keyboard` `"down"` may carry `repeat`; the Mac Receiver sends the full physical-keyboard usage range |
+| 2026-10-27 | No wire change: Android receivers (section 2.2a); `hello.device` `"Android"` and `updateRequired.target` `"android"`. Cross-platform test vectors in `fixtures/receiver-protocol/` |
+| 2026-10-27 | Additive, no `pv` change: opt-in same-Mac login-session TXT keys `hg`/`hn`/`sl`/`ss` on `_opendisplay-mac-pair._tcp` (section 2.1) |
+| 2026-10-29 | Additive, no `pv` change: text caret (section 6.11), `welcome.features` `textCaret`, `keyboardState`, `textCaret` |
+| 2026-10-29 | No wire change: Android supports the Remote Access knock (port 9003) and Pair over Remote (port 9004) over TCP (section 2.2a); shared endpoint and knock-frame vectors in `fixtures/remote/` |
+| 2026-10-29 | Additive, no `pv` change: Remote Finder (section 6.12), `welcome.features` `files`, `filesRequest`, `files` |
+| 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
+| 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
+| 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
+### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
+
+Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
+
+- Receiver → Mac: `{"type":"lockMac","req":N}`.
+- Mac → receiver: `{"type":"lockMacResult","req":N,"result":R}` with R one of
+  `locked` (macOS shows its lock screen), `control` (this device doesn't have control),
+  `accessibility` (MeowDisplay may not post keys on this Mac) or `failed` (the Lock Screen
+  shortcut was posted but macOS didn't lock within 3 s).
+
+Needs control (the same grant as remote input) and an admitted session. The Mac posts its own
+Lock Screen shortcut (Control-Command-Q) with public API and reads the session's lock state to
+answer; it never reports `locked` without seeing it. Unlocking needs the Mac's login password.
+Receivers ask before sending and show the answer; with no answer in 8 s they show it as failed.
+The Mac also locks its screen before quitting while the Privacy Shield covers it (not when
+macOS is logging out, restarting or shutting down).
+
+#### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
+
+`{"type":"windowAction","action":"addToStage","window":ID,"gen":G}` (needs control, Window mode):
+the Mac finds the one item in Stage Manager's side strip whose `AXWindowsIDs` holds that window
+and performs that item's own `AXAddToStage` accessibility action (never a click by position),
+then checks the window left the strip within 2 s. The whole strip item joins the stage. The
+answer rides in `workspaceState` for 8 s: `"stageAdd":{"window":ID,"result":R}`, R one of
+`added`, `notInStrip`, `ambiguous`, `accessibility`, `failed`. A pane whose window was added
+gets a fresh stream through the usual back-from-the-strip recovery (no reconnect).
+The Mac offers it only with `"stageAddAvailable":true` in `workspaceState`; receivers hide it
+otherwise. macOS 27 acknowledges AXAddToStage without the window joining the stage, so the Mac
+currently never sends it (research: RESEARCH-2026-10-30-add-to-stage.md in the integration folder).
+
+#### 6.10 addendum: Mission Control (`workspaceState` `missionControl`, `windowAction` `missionControl`)
+
+While Mission Control is open on the Mac, macOS pauses every window capture. In Window mode the
+Mac then adds `"missionControl":"open"` to `workspaceState` and holds paused panes as `paused`
+without restarting them (no reconnect loop); without the field it is closed. Receivers say
+"Mission Control is open on your Mac. Video is paused." on every paused, waiting or retrying
+pane, and one pane (the selected one if paused, else the first paused one) offers Exit Mission
+Control, or inline Request Control without control. When it closes, macOS resumes the captures;
+a pane still paused after the usual 2 s gets one fresh stream.
+
+`{"type":"windowAction","action":"missionControl","exit":true}` (needs control): the Mac checks
+that Mission Control is open right now and only then posts Escape; otherwise nothing is sent.
+
+Detection (macOS 27, no public API says so): a window owned by WindowManager or the Dock covering
+a whole display (CGWindowList) gates an Accessibility check for WindowManager's `mc.display`
+group or the Dock's `mc` group. Polled twice a second only while a Window-mode session is live.
+Older Macs never send the field; older receivers ignore it and see paused panes as before.

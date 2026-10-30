@@ -17,7 +17,7 @@ struct IncomingSessionPolicyPicker: View {
         self.title = title
         self.peerID = peerID
         self.receiver = receiver
-        _policy = State(initialValue: IncomingSessionPolicyStore.policy(peerID: peerID))
+        _policy = State(initialValue: IncomingSessionPolicyStore.policy(peerID: peerID, role: .receiverRole))
     }
 
     var body: some View {
@@ -34,9 +34,17 @@ struct IncomingSessionPolicyPicker: View {
     }
 }
 
-/// The global incoming-invitation preference, with its explanation.
+/// The receiver role's global incoming-invitation preference, with its
+/// explanation. Bound to the same role-scoped key and default that
+/// `StreamReceiver` decides with, never the Mac sender's.
 struct AutomaticallyAllowConnectionsToggle: View {
-    @AppStorage(IncomingSessionPolicyStore.automaticallyAllowKey) private var automaticallyAllow = true
+    @AppStorage private var automaticallyAllow: Bool
+
+    init() {
+        _automaticallyAllow = AppStorage(
+            wrappedValue: IncomingSessionPolicyStore.automaticallyAllowDefault(.receiverRole),
+            IncomingSessionPolicyStore.automaticallyAllowKey(.receiverRole))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -57,6 +65,7 @@ struct SessionInvitationWaitingCard: View {
     var body: some View {
         HStack(spacing: 12) {
             ProgressView()
+                .accessibilityHidden(true)
             Text("Waiting for \(peerName) to accept…")
                 .font(.callout)
             Spacer(minLength: 8)
@@ -66,6 +75,7 @@ struct SessionInvitationWaitingCard: View {
         .padding(.vertical, 12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .padding()
+        .accessibilityElement(children: .contain)
     }
 }
 

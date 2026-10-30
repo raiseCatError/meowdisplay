@@ -142,6 +142,24 @@ final class MacSenderPipelineStateTests: XCTestCase {
         XCTAssertFalse(shouldAttempt)
     }
 
+    func testRearmGivesAReplacementEncoderItsOwnStreakAndRecovery() {
+        let state = MacSenderPipelineState(maxPendingEncodes: 2, encodeFailureStreakLimit: 2)
+        _ = state.recordEncodeOutputFailure(-1, at: 0, generation: 1)
+        XCTAssertTrue(state.recordEncodeOutputFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        state.rearmEncodeFailureRecovery(generation: 1)
+        // The streak restarts: one failure is not yet a streak.
+        XCTAssertFalse(state.recordEncodeOutputFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        XCTAssertTrue(state.recordEncodeOutputFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        XCTAssertFalse(state.recordEncodeOutputFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+    }
+
+    func testRearmForAnotherGenerationLeavesTheCurrentStreakAlone() {
+        let state = MacSenderPipelineState(maxPendingEncodes: 2, encodeFailureStreakLimit: 2)
+        _ = state.recordEncodeOutputFailure(-1, at: 0, generation: 2)
+        state.rearmEncodeFailureRecovery(generation: 1)
+        XCTAssertTrue(state.recordEncodeOutputFailure(-1, at: 0, generation: 2).shouldAttemptRecovery)
+    }
+
     // MARK: - Encoder submit-failure bookkeeping
 
     func testRecordEncodeSubmitFailureDecrementsPendingEncodes() {
@@ -155,5 +173,24 @@ final class MacSenderPipelineStateTests: XCTestCase {
         state.incrementPendingEncodes()
         state.incrementPendingEncodes()
         XCTAssertTrue(state.isBackedUp())
+    }
+
+    func testSubmitFailuresCountTowardTheGenerationsStreak() {
+        let state = MacSenderPipelineState(maxPendingEncodes: 5, encodeFailureStreakLimit: 3)
+        XCTAssertFalse(state.recordEncodeSubmitFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        XCTAssertFalse(state.recordEncodeOutputFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        XCTAssertTrue(state.recordEncodeSubmitFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+        XCTAssertFalse(state.recordEncodeSubmitFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
+    }
+
+    func testSubmitFailureWithoutAGenerationNeverTriggersRecovery() {
+        let state = MacSenderPipelineState(maxPendingEncodes: 5, encodeFailureStreakLimit: 1)
+        XCTAssertFalse(state.recordEncodeSubmitFailure(-1, at: 0).shouldAttemptRecovery)
+    }
+
+    func testSubmitFailuresAfterASuccessfulFrameNeverTriggerRecovery() {
+        let state = MacSenderPipelineState(maxPendingEncodes: 5, encodeFailureStreakLimit: 1)
+        state.recordEncodeSuccess(generation: 1)
+        XCTAssertFalse(state.recordEncodeSubmitFailure(-1, at: 0, generation: 1).shouldAttemptRecovery)
     }
 }

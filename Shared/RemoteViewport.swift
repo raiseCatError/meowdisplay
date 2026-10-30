@@ -182,6 +182,13 @@ enum RemoteViewportCalculator {
     /// a comfort margin when panning to reveal the anchor.
     static let comfortMarginFraction: CGFloat = 0.12
 
+    /// While following a text caret, the fraction of the keyboard-free
+    /// viewport kept clear on every side as the inner region: the view
+    /// stays put while the caret is inside it, and re-centers on the caret
+    /// (on the axis that left) once it crosses out. Wider than
+    /// `comfortMarginFraction` so ordinary typing never pans per character.
+    static let caretInnerMarginFraction: CGFloat = 0.25
+
     /// The ordinary, keyboard-hidden presentation: the whole remote display
     /// aspect-fit into `viewBounds`.
     static func normal(viewBounds: CGRect, remoteAspectSize: CGSize) -> RemoteViewportTransform {
@@ -201,14 +208,28 @@ enum RemoteViewportCalculator {
     ///     Only its `y` is ever used (vertical-only movement — see the type
     ///     doc); `nil`, or an anchor with no usable `y`, defaults to the
     ///     remote display's vertical center, which is ordinary behavior,
-    ///     not a degraded fallback.
+    ///     not a degraded fallback. Used only when there is no usable
+    ///     `caret`.
     ///   - zoomEnabled: the "Zoom While Typing" preference.
+    ///   - caret: the Mac's text caret, a normalized remote-space rect (the
+    ///     `textCaret` wire message), when the Mac knows one. A usable caret
+    ///     replaces `anchor`: both its x and y steer the view (see
+    ///     `caretTransform`), at the same scale the touch anchor would use.
+    ///     `nil`, or one off the display or not finite, changes nothing — the
+    ///     touch anchor above applies exactly as before.
+    ///   - previous: the `displayedRect` this function returned for the
+    ///     caret last time, so the view only moves once the caret leaves
+    ///     the comfortable inner region of `visibleRect` rather than on
+    ///     every character. Ignored without a `caret`, and when it was for a
+    ///     different scale.
     static func keyboardOpen(viewBounds: CGRect,
                              remoteAspectSize: CGSize,
                              visibleRect: CGRect,
                              anchor: CGPoint?,
                              zoomEnabled: Bool,
-                             maxZoom: CGFloat = defaultMaxZoom) -> RemoteViewportTransform {
+                             maxZoom: CGFloat = defaultMaxZoom,
+                             caret: CGRect? = nil,
+                             previous: CGRect? = nil) -> RemoteViewportTransform {
         guard viewBounds.width > 0, viewBounds.height > 0,
               remoteAspectSize.width > 0, remoteAspectSize.height > 0,
               visibleRect.width > 0, visibleRect.height > 0 else {
@@ -219,8 +240,11 @@ enum RemoteViewportCalculator {
         guard visibleRect.height >= minimumUsableViewportHeight else {
             return fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
         }
+        let caretPoint = usableCaretPoint(caret)
         let anchorY: CGFloat
-        if let anchor, anchor.y.isFinite, (0...1).contains(anchor.y) {
+        if let caretPoint {
+            anchorY = caretPoint.y
+        } else if let anchor, anchor.y.isFinite, (0...1).contains(anchor.y) {
             anchorY = anchor.y
         } else {
             // No usable recent interaction: default to vertical center.
@@ -245,6 +269,11 @@ enum RemoteViewportCalculator {
         let scaleFactor = zoomEnabled
             ? requiredScale * magnification(viewBounds: viewBounds, visibleRect: visibleRect, maxZoom: maxZoom)
             : requiredScale
+        if let caretPoint {
+            return caretTransform(base: base.displayedRect, visibleRect: visibleRect, caret: caretPoint,
+                                  scaleFactor: scaleFactor, previous: previous)
+                ?? fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
+        }
         return verticalTransform(base: base.displayedRect, visibleRect: visibleRect,
                                  anchorY: anchorY, scaleFactor: scaleFactor)
             ?? fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
@@ -384,6 +413,77 @@ enum RemoteViewportCalculator {
         return min(max(pan, lowerBound), upperBound)
     }
 
+    /// The centre of a normalized caret rect when it is a usable steering
+    /// point: finite and on the display. Everything else answers `nil` so the
+    /// caller falls back to the touch anchor.
+    private static func usableCaretPoint(_ caret: CGRect?) -> CGPoint? {
+        guard let caret, !caret.isNull, !caret.isInfinite else { return nil }
+        let x = caret.midX, y = caret.midY
+        guard x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y) else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    /// The caret-following presentation: `base` scaled by `scaleFactor`
+    /// around its own center (the same size `verticalTransform` would use),
+    /// then panned on both axes so the caret sits in the keyboard-free
+    /// area. Unlike the touch anchor it moves horizontally too, but only
+    /// when the scaled picture is wider than the visible area — an
+    /// unmagnified picture already fits across, so its horizontal center
+    /// never moves.
+    ///
+    /// Each axis keeps `previous`'s pan while the caret stays inside the
+    /// inner region (`caretInnerMarginFraction`), and re-centers on the
+    /// caret once it leaves — a pan of a few points per character would read
+    /// as the picture shaking. Both are clamped so no blank space opens up
+    /// beyond the picture's own edges.
+    private static func caretTransform(base: CGRect, visibleRect: CGRect, caret: CGPoint,
+                                       scaleFactor: CGFloat, previous: CGRect?) -> RemoteViewportTransform? {
+        guard scaleFactor.isFinite, scaleFactor > 0 else { return nil }
+        let width = base.width * scaleFactor
+        let height = base.height * scaleFactor
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+        let unpanned = CGRect(x: base.midX - width / 2, y: base.midY - height / 2, width: width, height: height)
+        // The previous pan counts only for the same size: a changed scale
+        // (keyboard resized, rotation) starts over from the caret.
+        var previousPan: CGPoint?
+        if let previous, abs(previous.width - width) < 0.5, abs(previous.height - height) < 0.5 {
+            previousPan = CGPoint(x: previous.minX - unpanned.minX, y: previous.minY - unpanned.minY)
+        }
+        let panX = caretPan(point: unpanned.minX + caret.x * width, contentMin: unpanned.minX, contentMax: unpanned.maxX,
+                            visibleMin: visibleRect.minX, visibleMax: visibleRect.maxX,
+                            previous: previousPan?.x, pansOnlyWhenWider: true)
+        let panY = caretPan(point: unpanned.minY + caret.y * height, contentMin: unpanned.minY, contentMax: unpanned.maxY,
+                            visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY,
+                            previous: previousPan?.y, pansOnlyWhenWider: false)
+        let rect = unpanned.offsetBy(dx: panX, dy: panY)
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        return RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: rect)
+    }
+
+    /// One axis of `caretTransform`. The valid range is the one
+    /// `clampedPan` uses (content edges against visible edges); inside it,
+    /// `previous` stands while the caret stays in the inner region, and
+    /// otherwise the caret is centered in the visible span.
+    private static func caretPan(point: CGFloat, contentMin: CGFloat, contentMax: CGFloat,
+                                 visibleMin: CGFloat, visibleMax: CGFloat,
+                                 previous: CGFloat?, pansOnlyWhenWider: Bool) -> CGFloat {
+        let visibleSize = visibleMax - visibleMin
+        guard visibleSize > 0 else { return 0 }
+        if pansOnlyWhenWider, contentMax - contentMin <= visibleSize + 0.5 { return 0 }
+        let alignNear = visibleMin - contentMin
+        let alignFar = visibleMax - contentMax
+        let lowerBound = min(alignNear, alignFar)
+        let upperBound = max(alignNear, alignFar)
+        func clamped(_ pan: CGFloat) -> CGFloat { min(max(pan, lowerBound), upperBound) }
+        if let previous {
+            let kept = clamped(previous)
+            let inner = visibleSize * caretInnerMarginFraction
+            let at = point + kept
+            if at >= visibleMin + inner, at <= visibleMax - inner { return kept }
+        }
+        return clamped(visibleMin + visibleSize / 2 - point)
+    }
+
     // MARK: - Shared geometry primitives
 
     /// The whole unit square, aspect-fit into `bounds` — the "show
@@ -434,9 +534,15 @@ struct ManualViewportState: Equatable {
     /// Manual zoom can never go below 1x (no such thing as "zoomed out"
     /// of the normal fit) — see `clamped(against:)`.
     static let minScale: CGFloat = 1
-    /// Initial cap on manual magnification (PRODUCT RULE: "approximately
-    /// 3x unless architecture suggests a better bound" — nothing here does).
-    static let maxScale: CGFloat = 3
+    /// Cap on manual magnification. Zoom is a transform on the content layer
+    /// (see `VideoView.applyContentGeometry`): the stream resolution, the
+    /// decoded frame and the Metal drawable are the same at any scale, so
+    /// zooming adds no network, decode or render-pass work. How iOS
+    /// composites a scaled or rotated video layer is up to the system and
+    /// can only be measured on hardware (ux-review/ios-control-surface-
+    /// performance.md). Unrelated to Zoom While Typing's
+    /// `RemoteViewportCalculator.defaultMaxZoom`.
+    static let maxScale: CGFloat = 8
 
     var scale: CGFloat = minScale
     /// Pan offset, in the host view's local points, applied to the scaled
@@ -450,44 +556,90 @@ struct ManualViewportState: Equatable {
     var isIdentity: Bool { self == .identity }
 
     /// Clamps `scale` to `[minScale, maxScale]` and `pan{X,Y}` so that
-    /// `base`, scaled by the result, can never reveal blank space beyond
-    /// `base`'s own footprint — i.e. the scaled rect always fully contains
-    /// `base` (PRODUCT RULE: "cannot drag the remote display completely
-    /// away and reveal arbitrary blank space"). At `minScale`, pan is
-    /// forced to zero so returning to 1x always lands at exactly the
-    /// normal, unpanned presentation. The single source of truth for this
-    /// math — both `applyManualZoom` and the live pinch/pan policy
-    /// (`pinching(from:...)`) funnel through this rather than duplicating
-    /// clamp arithmetic, which also makes it the one place that re-derives
-    /// valid pan bounds whenever `base` changes (rotation, keyboard
-    /// open/close) — see the type's use from `VideoView.layoutSubviews`.
+    /// translation is independent of zoom (100% can pan too), but any edge
+    /// of the remote display may travel at most to the viewport's center,
+    /// never past it — so the Mac can be brought within reach from any
+    /// direction yet never flung off screen. The rule holds in the
+    /// picture's own (rotated) frame: the viewport's center always stays on
+    /// the picture. Clamping each screen axis to the rotated bounding box
+    /// instead let a tilted, diagonally panned picture leave the screen
+    /// entirely, and that gap grows with zoom. At 0°, 90° and 180° the two
+    /// are identical. The
+    /// viewport's center is `base`'s center: the normal presentation is
+    /// centered in the surface, and the keyboard-open one in the area above
+    /// the keyboard. The single source of truth for this math — both
+    /// `applyManualZoom` and the live pinch/pan policy (`pinching(from:...)`)
+    /// funnel through this rather than duplicating clamp arithmetic, which
+    /// also makes it the one place that re-derives valid pan bounds whenever
+    /// `base` changes (rotation, keyboard open/close, a Strip rail) — see
+    /// the type's use from `VideoView.layoutSubviews`.
     func clamped(against base: CGRect) -> ManualViewportState {
         var copy = self
         copy.scale = scale.isFinite ? min(max(scale, Self.minScale), Self.maxScale) : Self.minScale
         copy.rotationRadians = rotationRadians.isFinite ? Self.normalizedAngle(rotationRadians) : 0
-        guard base.width > 0, base.height > 0,
-              copy.scale > Self.minScale || abs(copy.rotationRadians) > 0.0001 else {
+        guard copy.panLimits(against: base) != nil else {
             copy.panX = 0
             copy.panY = 0
             copy.rotationRadians = 0
             return copy
         }
-        let width = base.width * copy.scale
-        let height = base.height * copy.scale
-        guard width.isFinite, height.isFinite, width > 0, height > 0 else {
-            copy.panX = 0
-            copy.panY = 0
-            return copy
+        let halfWidth = base.width * copy.scale / 2
+        let halfHeight = base.height * copy.scale / 2
+        let c = cos(copy.rotationRadians)
+        let s = sin(copy.rotationRadians)
+        let x = panX.isFinite ? panX : 0
+        let y = panY.isFinite ? panY : 0
+        // The viewport's center relative to the picture's center, in the
+        // picture's unrotated frame...
+        func local(_ x: CGFloat, _ y: CGFloat) -> (x: CGFloat, y: CGFloat) {
+            (-(x * c + y * s), -(-x * s + y * c))
         }
-        let c = abs(cos(copy.rotationRadians))
-        let s = abs(sin(copy.rotationRadians))
-        let extentWidth = width * c + height * s
-        let extentHeight = width * s + height * c
-        let maxPanX = max(0, (extentWidth - base.width) / 2)
-        let maxPanY = max(0, (extentHeight - base.height) / 2)
-        copy.panX = panX.isFinite ? min(max(panX, -maxPanX), maxPanX) : 0
-        copy.panY = panY.isFinite ? min(max(panY, -maxPanY), maxPanY) : 0
+        // ...with a millionth of a point of slack: a pan this clamp itself
+        // put on the edge maps back a rounding error outside it.
+        func isOnPicture(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            let point = local(x, y)
+            return abs(point.x) <= halfWidth + 1e-6 && abs(point.y) <= halfHeight + 1e-6
+        }
+        var resultX = x
+        var resultY = y
+        // Already on the picture: the pan is kept exactly, so re-clamping
+        // (restore, relayout) never nudges it by rounding. Otherwise the
+        // nearest point of the picture, turned back into a screen-space pan.
+        if !isOnPicture(x, y) {
+            let unclamped = local(x, y)
+            let localX = min(max(unclamped.x, -halfWidth), halfWidth)
+            let localY = min(max(unclamped.y, -halfHeight), halfHeight)
+            resultX = -(localX * c - localY * s)
+            resultY = -(localX * s + localY * c)
+        }
+        // Floating-point dust from a pinch that ended back at rest must not
+        // leave a technically-non-identity state behind — unless, tilted,
+        // dropping it would step the center off the picture's edge.
+        let snappedX = abs(resultX) < 0.01 ? 0 : resultX
+        let snappedY = abs(resultY) < 0.01 ? 0 : resultY
+        if isOnPicture(snappedX, snappedY) {
+            resultX = snappedX
+            resultY = snappedY
+        }
+        copy.panX = resultX
+        copy.panY = resultY
         return copy
+    }
+
+    /// The largest |panX|/|panY| for this scale and rotation: half the
+    /// displayed content's axis-aligned extent, which is exactly how far
+    /// its center can move before one of its (rotated) edges would cross
+    /// the viewport's center. `nil` for unusable geometry.
+    func panLimits(against base: CGRect) -> (x: CGFloat, y: CGFloat)? {
+        guard base.width > 0, base.height > 0, base.width.isFinite, base.height.isFinite else { return nil }
+        let scale = self.scale.isFinite ? min(max(self.scale, Self.minScale), Self.maxScale) : Self.minScale
+        let rotation = rotationRadians.isFinite ? rotationRadians : 0
+        let width = base.width * scale
+        let height = base.height * scale
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+        let c = abs(cos(rotation))
+        let s = abs(sin(rotation))
+        return ((width * c + height * s) / 2, (width * s + height * c) / 2)
     }
 
     /// Pure pinch/pan policy for a live two-finger gesture: given the
@@ -681,10 +833,11 @@ extension RemoteViewportCalculator {
     /// `base.displayedRect`; `viewPoint`/`remotePoint` need no changes to
     /// stay each other's exact inverse under it.
     ///
-    /// At `state.scale <= 1` (identity), returns `base` completely
+    /// At identity (1x, no pan, no rotation) returns `base` completely
     /// unchanged — not merely numerically equal — so resetting manual zoom
     /// always lands at exactly the normal/keyboard-adjusted presentation,
-    /// with no accumulated floating-point drift.
+    /// with no accumulated floating-point drift. A 1x state that is only
+    /// panned is a plain translation of `base`.
     static func applyManualZoom(to base: RemoteViewportTransform,
                                 state: ManualViewportState) -> RemoteViewportTransform {
         guard base.isValid else { return base }
@@ -699,5 +852,138 @@ extension RemoteViewportCalculator {
                             width: width, height: height)
         return RemoteViewportTransform(remoteCrop: base.remoteCrop, displayedRect: scaled,
                                        rotationRadians: clamped.rotationRadians)
+    }
+}
+
+/// Move View: while active, the receiver surface navigates the local
+/// viewport instead of controlling the Mac. One finger pans; two fingers
+/// pan plus pinch-zoom (when `allowsZoom`) and rotate (when
+/// `allowsRotation`). Every change in the number of fingers re-baselines
+/// from the current state, so lifting or adding a finger never jumps.
+/// Reuses `ManualViewportState.pinching` — the same anchored math and clamp
+/// as an ordinary viewport pinch — rather than a second viewport model.
+struct ViewportNavigationSession {
+    private var start = ManualViewportState.identity
+    private var base = CGRect.zero
+    private var initialCentroid = CGPoint.zero
+    private var initialDistance: CGFloat = 0
+    private var initialAngle: CGFloat = 0
+    private(set) var touchCount = 0
+
+    /// Feeds the current finger positions (surface coordinates). Returns
+    /// the viewport state to show; `current` unchanged when there is
+    /// nothing to do (no fingers, a re-baseline, or unusable geometry).
+    mutating func update(points: [CGPoint], current: ManualViewportState, base: CGRect,
+                         allowsZoom: Bool, allowsRotation: Bool) -> ManualViewportState {
+        let fingers = Array(points.prefix(2))
+        guard !fingers.isEmpty, base.width > 0, base.height > 0 else {
+            touchCount = 0
+            return current
+        }
+        let centroid = Self.centroid(fingers)
+        if fingers.count != touchCount || base != self.base {
+            touchCount = fingers.count
+            start = current
+            self.base = base
+            initialCentroid = centroid
+            initialDistance = fingers.count == 2 ? Self.distance(fingers) : 0
+            initialAngle = fingers.count == 2 ? Self.angle(fingers) : 0
+            return current
+        }
+        var scaleRatio: CGFloat = 1
+        var rotationDelta: CGFloat = 0
+        if fingers.count == 2 {
+            if allowsZoom, initialDistance > 0 { scaleRatio = Self.distance(fingers) / initialDistance }
+            if allowsRotation {
+                rotationDelta = ManualViewportState.normalizedAngle(Self.angle(fingers) - initialAngle)
+            }
+        }
+        return ManualViewportState.pinching(from: start, initialBase: base,
+                                            initialMidpoint: initialCentroid, currentMidpoint: centroid,
+                                            scaleRatio: scaleRatio, rotationDelta: rotationDelta)
+    }
+
+    mutating func end() {
+        touchCount = 0
+    }
+
+    private static func centroid(_ points: [CGPoint]) -> CGPoint {
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+    }
+
+    private static func distance(_ points: [CGPoint]) -> CGFloat {
+        hypot(points[1].x - points[0].x, points[1].y - points[0].y)
+    }
+
+    private static func angle(_ points: [CGPoint]) -> CGFloat {
+        atan2(points[1].y - points[0].y, points[1].x - points[0].x)
+    }
+}
+
+/// Local View Navigation vs. Allow Input: two separate permissions. Allow
+/// Input gates everything that reaches the Mac (pointer, keyboard, remote
+/// scroll, gesture commands); Local View Navigation gates only the
+/// receiver-local view (pan, zoom, rotation, Move View, reset), which never
+/// sends anything. With input off and navigation on, the Mac can be
+/// inspected but not controlled; with both off, the view is locked.
+enum LocalViewNavigationPolicy {
+    /// Whether the receiver surface should receive touches at all.
+    static func surfaceAcceptsTouches(remoteInputAllowed: Bool, localNavigationAllowed: Bool,
+                                      videoEnabled: Bool) -> Bool {
+        remoteInputAllowed || allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                    videoEnabled: videoEnabled)
+    }
+
+    /// Manual viewport changes only apply to live video.
+    static func allowsViewportChanges(localNavigationAllowed: Bool, videoEnabled: Bool) -> Bool {
+        localNavigationAllowed && videoEnabled
+    }
+
+    /// The Move View control shows only when it's wanted and would work.
+    static func showsMoveView(controlVisible: Bool, localNavigationAllowed: Bool, videoEnabled: Bool) -> Bool {
+        controlVisible && allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                videoEnabled: videoEnabled)
+    }
+}
+
+/// What a committed two-finger gesture may do.
+enum TwoFingerRoute: Equatable, Hashable {
+    /// Remote Mac scrolling.
+    case remoteScroll
+    /// Local viewport pan/zoom/rotate.
+    case viewport
+    /// App Gesture Commands (keyboard chords sent to the Mac).
+    case appCommands
+}
+
+enum TwoFingerRoutingPolicy {
+    /// Routes for a committed intent. Anything that reaches the Mac requires
+    /// `remoteInputAllowed`; the local viewport requires Local View
+    /// Navigation. The effective targets already fold in video-off routing.
+    static func routes(intent: TwoFingerGestureIntent,
+                       remoteInputAllowed: Bool,
+                       localNavigationAllowed: Bool,
+                       videoEnabled: Bool,
+                       pinchTarget: ReceiverGestureTarget,
+                       rotateTarget: ReceiverGestureTarget) -> Set<TwoFingerRoute> {
+        switch intent {
+        case .undecided:
+            return []
+        case .scroll:
+            return remoteInputAllowed ? [.remoteScroll] : []
+        case .viewportZoomPan:
+            var routes: Set<TwoFingerRoute> = []
+            if LocalViewNavigationPolicy.allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                                               videoEnabled: videoEnabled) {
+                routes.insert(.viewport)
+            }
+            let pinch = VideoInteractionPolicy.effectiveTarget(stored: pinchTarget, videoEnabled: videoEnabled)
+            let rotate = VideoInteractionPolicy.effectiveTarget(stored: rotateTarget, videoEnabled: videoEnabled)
+            if remoteInputAllowed, pinch == .app || rotate == .app {
+                routes.insert(.appCommands)
+            }
+            return routes
+        }
     }
 }

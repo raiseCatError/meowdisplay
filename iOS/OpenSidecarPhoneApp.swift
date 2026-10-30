@@ -9,7 +9,7 @@ import Combine
 /// Repository — hosts the Mac app download and explains the two-app setup.
 /// MeowDisplay does not yet have its own landing-page domain, so this points
 /// at the GitHub repo rather than a hosted site.
-let macAppURL = URL(string: "https://github.com/raiseCatError/MeowDisplay")!
+let macAppURL = ProjectLinks.gitHub
 
 @main
 struct OpenSidecarPhoneApp: App {
@@ -53,7 +53,14 @@ struct ReceiverScreen: View {
     // single-sided physical notch (see that type's doc).
     @State private var physicalNotchSide: LandscapeTraySide?
     @State private var occupiedControlFrames: [CGRect] = []
+    /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
+    /// `nil` means the whole screen.
+    @State private var padCanvas: CGRect?
+    /// The on-surface Request Control affordance — see `ReceiverInputPrompt`.
+    @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     // First-run onboarding (issue #49): explain the Mac app is required.
@@ -62,11 +69,25 @@ struct ReceiverScreen: View {
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     // M4: the native keyboard responder is focused only while this is true.
     @State private var keyboardActive = false
+    /// "Switch to Window view?" answered (either way) for this launch.
+    @State private var windowPromptAnswered = false
+    /// Mirror or Extend, whichever showed last: where "View Full Screen" returns from Window mode.
+    @State private var lastDesktopMode: ReceiverDisplayMode = .mirror
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenAwake = ScreenAwakePolicy.defaultEnabled
+    // Demo Mode (see DemoMode.swift): a sample session with its own
+    // control store. Both are nil outside the demo.
+    @State private var demo: DemoSession?
+    @State private var demoControlStore: ReceiverControlStore?
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
+    }
+
+    /// Banners slide in from an edge; with Reduce Motion they only fade.
+    private func slideTransition(from edge: Edge) -> AnyTransition {
+        reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
 
     // Streaming = connected and the video format is known.
@@ -83,12 +104,64 @@ struct ReceiverScreen: View {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
 
+    private var route: ReceiverPresentationRoute {
+        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface)
+    }
+
+    /// Auto-Lock is held off only while the Mac's picture is watched (ScreenAwakePolicy).
+    private var screenAwakeInputs: ScreenAwakePolicy.Inputs {
+        .init(enabled: keepScreenAwake, foreground: scenePhase == .active,
+              watching: route == .receiver && !showSettings, streaming: isStreaming)
+    }
+
+    /// Full-screen chrome rules apply to the demo surface as well.
+    private var fullScreenSurface: Bool { route != .idle }
+
+    private func enterDemo() {
+        // A real session always wins (see `route`); never start a demo behind it.
+        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface) else { return }
+        demoControlStore = DemoControlStoreFactory.make()
+        demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
+        Log.info("demo mode entered")
+    }
+
+    private func exitDemo() {
+        guard demo != nil else { return }
+        showSettings = false
+        keyboardActive = false
+        demo = nil
+        demoControlStore = nil
+        DemoControlStoreFactory.discard()
+        Log.info("demo mode exited")
+    }
+
     /// Input may only leave this device while the session is genuinely live.
     /// Folded into the existing master Allow Input gate rather than added as a
     /// second one, so the established OFF-transition cleanup in `VideoView`
     /// (`clearInputStateForPause`) also runs on every session interruption.
     private var inputReachesMac: Bool {
-        model.receiver.session.allowsLiveInput && controlStore.preferences.allowInput
+        BlockedInputAttemptPolicy.inputReachesMac(sessionLive: model.receiver.session.allowsLiveInput,
+                                                  localAllow: controlStore.preferences.allowInput,
+                                                  macPV: model.receiver.macProtocolVersion,
+                                                  macState: controlStore.sessionInputState)
+    }
+
+    /// Screen edges whose system gestures wait for a second swipe — see
+    /// `ReceiverScreenEdgePolicy`.
+    private var deferredSystemGestureEdges: Edge.Set {
+        ReceiverScreenEdgePolicy.defersScreenEdges(
+            surfaceShown: showsReceiverSurface,
+            inputAllowed: inputReachesMac,
+            preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
+            voiceOverRunning: voiceOverEnabled) ? .all : []
+    }
+
+    /// The Mac canvas in screen coordinates: the iPad Strip's remaining
+    /// area, or the whole screen.
+    private func canvas(in size: CGSize) -> CGRect {
+        let full = CGRect(origin: .zero, size: size)
+        guard controlStore.isPad, let padCanvas, padCanvas.width > 0, padCanvas.height > 0 else { return full }
+        return padCanvas.intersection(full)
     }
 
     /// Everything outside AVKit that decides whether Picture in Picture may
@@ -110,6 +183,73 @@ struct ReceiverScreen: View {
     // Mac silently drops the input instead.)
     private var keyboardAvailable: Bool {
         isStreaming && model.receiver.session.allowsLiveInput && model.receiver.macSupportsKeyboardWire
+    }
+
+    // MARK: Software keyboard + chord
+
+    /// Typed text goes to the Mac as text — unless an on-screen chord is
+    /// held or latched, when each typed key is sent as that chord (⌘ then C
+    /// → ⌘C). The chord itself stays in the overlay's interaction state.
+    private func commitKeyboardText(_ text: String) {
+        let chord = controlStore.activeChordModifiers
+        guard !chord.isEmpty else {
+            model.receiver.sendKeyboardText(text)
+            return
+        }
+        var plain = ""
+        for character in text {
+            if let press = SoftwareKeyboardChordPolicy.press(for: String(character), modifiers: chord) {
+                if !plain.isEmpty { model.receiver.sendKeyboardText(plain); plain = "" }
+                model.receiver.sendKeyboardPress(usage: press.usage, modifiers: press.modifiers)
+            } else {
+                plain.append(character)
+            }
+        }
+        if !plain.isEmpty { model.receiver.sendKeyboardText(plain) }
+    }
+
+    // MARK: Request Control
+
+    /// Relative UI timing only (the prompt's fade); a wall clock is plenty.
+    private var uptime: TimeInterval { Date().timeIntervalSinceReferenceDate }
+
+    /// A touch meant for the Mac was dropped: show (or refresh) the prompt.
+    /// It never changes any input preference. Only a Mac explicitly set to
+    /// Request Control Automatically (Paired Macs) gets the normal request
+    /// sent by itself — the connection Always Allow policy doesn't count —
+    /// and the Mac still decides.
+    private func noteBlockedInputAttempt() {
+        let autoRequest = InputAutoRequestPolicy.shouldAutoRequest(
+            peerOptedIn: InputAutoRequestStore.isEnabled(peerID: model.receiver.authenticatedPeerID))
+        withAnimation(.easeOut(duration: 0.2)) {
+            performPromptEffects(inputPrompt.blockedAttempt(now: uptime, userTurnedOff: controlStore.userTurnedOffInput,
+                                                            autoRequest: autoRequest))
+        }
+    }
+
+    private func requestInputFromPrompt() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            performPromptEffects(inputPrompt.requestTapped(now: uptime))
+        }
+    }
+
+    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) {
+        guard effects.contains(.sendRequest) else { return }
+        controlStore.noteInputTurnedOffByUser(false)
+        model.receiver.requestAllowInput(true)
+    }
+
+    @ViewBuilder
+    private var settingsView: some View {
+        if let demo, let demoControlStore {
+            SettingsView(receiver: model.receiver, controlStore: demoControlStore,
+                         pictureInPicture: model.pictureInPicture,
+                         haptics: ReceiverHaptics { demoControlStore.preferences.hapticsEnabled }, demo: demo)
+        } else {
+            SettingsView(receiver: model.receiver, controlStore: controlStore,
+                         pictureInPicture: model.pictureInPicture, haptics: haptics, clipboard: model.workspace.clipboard)
+            .environment(\.lockMacClient, model.workspace)
+        }
     }
 
     // Below the force floor → present the blocking gate (issue #135). The
@@ -137,6 +277,7 @@ struct ReceiverScreen: View {
             // Re-read from the proxy on every pass: a fold or resize yields a
             // complete new snapshot, never an update to the previous one.
             let reservedRegions = ControlReservedRegion.active(in: geo)
+            let canvas = canvas(in: geo.size)
             ZStack {
                 if showsReceiverSurface {
                     ReceiverSafeAreaProbe { insets, notchSide in
@@ -155,6 +296,7 @@ struct ReceiverScreen: View {
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
                                    smartTouchEnabled: controlStore.preferences.smartTouchEnabled
                                        && model.receiver.macSupportsSmartTouch,
+                                   touchStyle: controlStore.preferences.touchStyle,
                                    allowInput: inputReachesMac,
                                    videoEnabled: model.receiver.videoEnabled,
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
@@ -163,7 +305,11 @@ struct ReceiverScreen: View {
                                    snapRotation: controlStore.preferences.snapRotation,
                                    appGestureCommands: controlStore.preferences.appGestureCommands,
                                    safeInsets: effectiveSafeInsets,
-                                   occupiedControlFrames: occupiedControlFrames,
+                                   // Controls report screen coordinates; the
+                                   // surface may sit beside a Strip rail.
+                                   occupiedControlFrames: occupiedControlFrames.map {
+                                       $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                                   },
                                    reservedDivisions: ControlReservedRegion.frames(of: .division,
                                                                                    in: reservedRegions),
                                    onRotationSnap: { haptics.play(.selection) },
@@ -172,19 +318,49 @@ struct ReceiverScreen: View {
                                        smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
                                    onActivityBegan: { controlStore.beginAutoHideActivity() },
-                                   onActivityEnded: { controlStore.scheduleAutoHide() })
+                                   onActivityEnded: { controlStore.scheduleAutoHide() },
+                                   preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
+                                   moveViewActive: controlStore.moveViewActive,
+                                   viewportResetGeneration: controlStore.viewportResetGeneration,
+                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
+                                   // Window mode: the picture is every tile at once, so pinch and pan go to
+                                   // the tile under the fingers instead of zooming the whole picture.
+                                   onWorkspacePinch: model.workspace.windowMode
+                                       ? { began, ended, pinch, initial, current, scale, turn, snap in
+                                           model.workspace.pinch(began: began, ended: ended, isPinch: pinch,
+                                                                 initial: WorkspacePoint(x: initial.x, y: initial.y),
+                                                                 current: WorkspacePoint(x: current.x, y: current.y),
+                                                                 scale: Double(scale), turn: Double(turn), snapTurn: snap) }
+                                       : nil,
+                                   onWorkspaceTouch: model.workspace.windowMode
+                                       ? { p in
+                                           model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
+                                           return model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
+                                       } : nil,
+                                   workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
+                                   onWorkspaceViewReset: model.workspace.windowMode
+                                       ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                                   invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
+                                   invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
+                                   onBlockedInputAttempt: { noteBlockedInputAttempt() },
+                                   threeFingerHoldEnabled: model.workspace.available,
+                                   onThreeFingerHold: { model.workspace.openOverview() },
+                                   onHardwarePointer: { model.workspace.hover(at: $0) })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
+                        .frame(width: canvas.width, height: canvas.height)
+                        .position(x: canvas.midX, y: canvas.midY)
                         .ignoresSafeArea()
-                        // Allow Input OFF disables ALL touch/gesture
-                        // delivery to the video layer in one place — no
-                        // touch reaches `VideoView` or any of its gesture
-                        // recognizers to begin with, covering direct touch,
-                        // trackpad, clicks, drag, scroll, pinch and system
-                        // gestures together (SETTINGS / ALLOW INPUT
-                        // INVARIANTS). The Settings gear lives in
-                        // `ReceiverControlOverlay`, a sibling view outside
-                        // this hit-testing gate, so it stays reachable.
-                        .allowsHitTesting(inputReachesMac)
+                        // Allow Input OFF: touches still arrive (for Local
+                        // View Navigation and the Request Control prompt), but
+                        // `VideoView` routes nothing to the Mac: pointer/
+                        // touch/Pencil routing stops at `routeTouches`, the
+                        // remote-only recognizers are parked by
+                        // `ReceiverMultiFingerGestureGate`, two-finger routes
+                        // follow `TwoFingerRoutingPolicy`, and hover is
+                        // dropped (SETTINGS / ALLOW INPUT INVARIANTS).
+                        // The surface always takes touches so a blocked one
+                        // can offer Request Control; what they may do is
+                        // decided inside `VideoView`.
                     if model.pictureInPicture.isShowingWindow {
                         ReceiverPictureInPicturePlaceholder()
                     }
@@ -206,19 +382,40 @@ struct ReceiverScreen: View {
                     }
                     RemoteKeyboardInputView(
                         isActive: $keyboardActive,
-                        onCommitText: { model.receiver.sendKeyboardText($0) },
-                        onSpecialPress: { model.receiver.sendKeyboardPress(usage: $0) },
+                        onCommitText: { commitKeyboardText($0) },
+                        onSpecialPress: { usage in
+                            model.receiver.sendKeyboardPress(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                [], chord: controlStore.activeChordModifiers))
+                        },
                         onHardwareKeyDown: { usage, modifiers in
-                            model.receiver.sendKeyboardDown(usage: usage, modifiers: modifiers)
+                            model.receiver.sendKeyboardDown(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                modifiers, chord: controlStore.activeChordModifiers))
                         },
                         onHardwareKeyUp: { usage, modifiers in
-                            model.receiver.sendKeyboardUp(usage: usage, modifiers: modifiers)
+                            model.receiver.sendKeyboardUp(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
+                                modifiers, chord: controlStore.activeChordModifiers))
                         },
-                        onRequestDismiss: { keyboardActive = false }
+                        onRequestDismiss: { keyboardActive = false },
+                        typingTarget: model.workspace.hostName
                     )
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    // Window mode: tile chrome and the window rail over the picture,
+                    // under the MeowDisplay controls (which stay on top).
+                    let picture = RemoteViewportCalculator.normal(
+                        viewBounds: CGRect(origin: .zero, size: canvas.size),
+                        remoteAspectSize: model.receiver.videoSize).displayedRect
+                        .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                    WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
+                                        divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
+                                        safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                        onSettings: { showSettings = true },
+                                        onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
+                    if controlStore.preferences.windowSwitcher == .rail {
+                        WindowRailView(model: model.workspace)
+                            .padding(effectiveSafeInsets.edgeInsets)
+                    }
                     ReceiverControlOverlay(
                         store: controlStore,
                         receiver: model.receiver,
@@ -231,9 +428,81 @@ struct ReceiverScreen: View {
                         notchSide: physicalNotchSide,
                         reservedRegions: reservedRegions,
                         haptics: haptics,
-                        onOccupiedFramesChange: { occupiedControlFrames = $0 })
+                        onOccupiedFramesChange: { occupiedControlFrames = $0 },
+                        onCanvasChange: { padCanvas = $0 },
+                        surfaceOrigin: canvas.origin)
+                    if let kind = inputPrompt.kind {
+                        // Window mode: inside the selected pane, near its bottom, so it's clear which
+                        // window needs control; the pane, its tabs, zoom and pan stay as they are.
+                        let paneAnchor = model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
+                            let pic = RemoteViewportCalculator.normal(viewBounds: CGRect(origin: .zero, size: canvas.size),
+                                                                      remoteAspectSize: model.receiver.videoSize).displayedRect
+                                .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                            return CGPoint(x: pic.minX + r.midX * pic.width,
+                                           y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
+                        } : nil
+                        InputPromptButton(kind: kind) { requestInputFromPrompt() }
+                            .position(x: paneAnchor?.x ?? canvas.midX,
+                                      y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76)
+                            .transition(slideTransition(from: .bottom))
+                    }
+                    if inputReachesMac, controlStore.preferences.inputMode == .direct,
+                       controlStore.preferences.touchStyle == .natural,
+                       !controlStore.preferences.naturalTouchHintShown, !showSettings {
+                        NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: 460)
+                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
+                            .transition(.opacity)
+                    }
+                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                        // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
+                        // Opening, browsing, searching and expanding never change the mode; only
+                        // tapping a window switches (to Window mode, with that window).
+                        let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
+                                                width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
+                                                height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
+                        StagePeekOverlay(
+                            model: model.workspace,
+                            edge: controlStore.preferences.stagePeekEdge,
+                            frame: canvas,
+                            safe: screenSafe.intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY),
+                            avoiding: (occupiedControlFrames
+                                       + ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                            hapticsEnabled: controlStore.preferences.hapticsEnabled,
+                            naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                            dock: controlStore.preferences.stagePeekDock,
+                            inputAllowed: inputReachesMac,
+                            onDisplay: { _ in
+                                // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts
+                                // the desktop in a pane; "View Full Screen" is in a desktop pane's menu.)
+                            })
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
+                    }
+                    if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
+                       !showSettings, !model.workspace.overviewOpen {
+                        // Full-desktop view: offer Window mode once per launch, never forced.
+                        WindowModePrompt(
+                            onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
+                            onNo: { windowPromptAnswered = true })
+                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
+                            .transition(slideTransition(from: .top))
+                    }
+                    WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
+                                       inputAllowed: inputReachesMac,
+                                       onMirror: { model.receiver.requestDisplayMode(.mirror) },
+                                       onExtend: { model.receiver.requestDisplayMode(.extend) },
+                                       safeInsets: effectiveSafeInsets.edgeInsets)
+                } else if route == .demo, let demo, let demoControlStore {
+                    DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
+                                       keyboardActive: $keyboardActive,
+                                       haptics: ReceiverHaptics { demoControlStore.preferences.hapticsEnabled },
+                                       onExit: { exitDemo() })
                 } else {
-                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings)
+                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
+                             onExploreDemo: { enterDemo() })
                 }
             }
             .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
@@ -244,12 +513,31 @@ struct ReceiverScreen: View {
                 OnboardingView { onboardingDismissed = true }
             }
         }
-        .ignoresSafeArea(edges: showsReceiverSurface ? .all : [])
-        .statusBarHidden(showsReceiverSurface)
-        .persistentSystemOverlays(showsReceiverSurface ? .hidden : .automatic)
-        .sheet(isPresented: $showSettings) {
-            SettingsView(receiver: model.receiver, controlStore: controlStore,
-                         pictureInPicture: model.pictureInPicture, haptics: haptics)
+        .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
+        .statusBarHidden(fullScreenSurface)
+        .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
+        .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
+            showSettings = false
+            model.workspace.openOverview()
+        }
+        // A real session always wins: a Mac connecting ends the demo.
+        .onChange(of: showsReceiverSurface) { shown in
+            if shown { exitDemo() }
+        }
+        // SwiftUI forwards this to the hosting controller's
+        // `preferredScreenEdgesDeferringSystemGestures` and invalidates it
+        // (`setNeedsUpdateOfScreenEdgesDeferringSystemGestures`) whenever the
+        // value changes. Deferral only makes the FIRST edge swipe reach the
+        // remote Mac; a second swipe still opens Control Center, the Home
+        // indicator etc. Never while input is off or outside the surface.
+        .defersSystemGestures(on: deferredSystemGestureEdges)
+        // iPhone: a sheet. iPad: full screen, so the split view has the
+        // width for its sidebar (a form sheet would collapse it).
+        .sheet(isPresented: controlStore.isPad ? .constant(false) : $showSettings) {
+            settingsView
+        }
+        .fullScreenCover(isPresented: controlStore.isPad ? $showSettings : .constant(false)) {
+            settingsView
         }
         // One sheet for the whole secure pairing ceremony on every transport
         // (LAN, USB, Remote): SAS → waiting for the other device. The Remote
@@ -265,19 +553,48 @@ struct ReceiverScreen: View {
             PairingConfirmationSheet(prompt: model.receiver.pairingPrompt)
         }
         .sessionInvitationPrompt(receiver: model.receiver)
-        .onChange(of: model.receiver.pairingSuccessCount) { _ in
+        .onChange(of: model.receiver.pairingSuccessCount) { count in
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            withAnimation { showPairedToast = true }
+            UIAccessibility.post(notification: .announcement,
+                                 argument: String(localized: "Paired successfully. You can now connect to this Mac."))
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { showPairedToast = true }
             Task {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                withAnimation { showPairedToast = false }
+                try? await Task.sleep(nanoseconds: 2_800_000_000)
+                // A newer success restarts the clock instead of being cut short.
+                guard count == model.receiver.pairingSuccessCount else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { showPairedToast = false }
             }
         }
         .overlay(alignment: .top) {
-            if showPairedToast { PairedToast().padding(.top, 12).transition(.move(edge: .top).combined(with: .opacity)) }
+            ClipboardBanner(clipboard: model.workspace.clipboard)
+                .padding(.top, 8)
+                .padding(.horizontal, 16)
+        }
+        .overlay(alignment: .top) {
+            if let on = model.workspace.privacyShieldNotice {
+                Label(on ? "Privacy Shield is on: the Mac's screen is covered" : "Privacy Shield is off: the Mac's screen shows this session",
+                      systemImage: on ? "eye.slash.fill" : "eye")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 52)
+                    .transition(slideTransition(from: .top))
+                    .accessibilityAddTraits(.isStaticText)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
+        .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .overlay(alignment: .top) {
+            if showPairedToast {
+                PairedToast()
+                    .padding(.top, 12)
+                    .padding(.horizontal, 16)
+                    .transition(slideTransition(from: .top))
+            }
         }
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
+            if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
         }
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
@@ -300,7 +617,7 @@ struct ReceiverScreen: View {
         // the only place the choice can be made. "Use Extend" sends the
         // EXISTING `displayModeRequest`; the Mac remains authoritative for
         // the actual mode change.
-        .alert("Mirror isn’t available",
+        .alert("Mirror isn't available",
                isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
             Button("Cancel", role: .cancel) {
                 model.receiver.declineMirrorUnavailableOffer()
@@ -316,7 +633,7 @@ struct ReceiverScreen: View {
         // already using Extend, so there is nothing to offer, only to
         // explain. Purely informational (one dismiss button, no wire
         // reply) — the Mac already stayed on Extend on its own.
-        .alert("Mirror isn’t available",
+        .alert("Mirror isn't available",
                isPresented: Binding(get: { model.receiver.mirrorRejectedWhileExtending }, set: { _ in })) {
             Button("OK") { model.receiver.dismissMirrorRejection() }
         } message: {
@@ -332,7 +649,10 @@ struct ReceiverScreen: View {
         .onChange(of: scenePhase) { phase in
             Log.info("scenePhase -> \(String(describing: phase))")
             switch phase {
-            case .active: model.sceneDidActivate()
+            case .active:
+                model.sceneDidActivate()
+                // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
+                model.workspace.clipboard.checkLocal(automatic: true)
             case .background: model.sceneDidBackground()
             default: break
             }
@@ -351,6 +671,12 @@ struct ReceiverScreen: View {
         .onChange(of: keyboardAvailable) { available in
             if !available { keyboardActive = false }
         }
+        // Caret-following Zoom While Typing: the Mac reads the focused text
+        // caret only while the keyboard is up (a Mac that predates it never
+        // gets this message).
+        .onChange(of: keyboardVisibleRect != nil) { open in
+            model.receiver.sendKeyboardState(open: open)
+        }
         // Allow Input OFF must close the keyboard responder too — it's the
         // one interactive element the video-layer hit-testing gate above
         // doesn't cover (it's activated programmatically, not by a touch
@@ -362,6 +688,30 @@ struct ReceiverScreen: View {
                      + "displayState=\(model.receiver.displayState)")
             #endif
             if !allowed { keyboardActive = false }
+        }
+        .onAppear {
+            inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput)
+            // Actions the Mac carries out (Stage Manager, Lock Mac) follow its confirmed decision.
+            model.workspace.controlState = { [weak controlStore] in controlStore?.sessionInputState ?? .off }
+            model.workspace.requestControl = { requestInputFromPrompt() }
+        }
+        .onChange(of: model.receiver.session.allowsLiveInput) { live in
+            withAnimation { inputPrompt.setSessionLive(live) }
+        }
+        .onChange(of: controlStore.sessionInputState) { state in
+            withAnimation { inputPrompt.inputStateChanged(state, now: uptime) }
+        }
+        // Fades the prompt once its time is up; each new attempt moves the
+        // deadline and restarts this.
+        .task(id: inputPrompt.visibleUntil) {
+            let delay = inputPrompt.visibleUntil - uptime
+            guard inputPrompt.kind != nil else { return }
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64((delay + 0.05) * 1_000_000_000)) }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.35)) { inputPrompt.tick(now: uptime) }
+        }
+        .onChange(of: controlStore.preferences.allowLocalViewNavigation) { allowed in
+            if !allowed { controlStore.setMoveViewActive(false) }
         }
         #if DEBUG
         .onAppear {
@@ -396,10 +746,16 @@ struct ReceiverScreen: View {
             if isConnected {
                 hasConnectedBefore = true
                 showOnboarding = false
+                // The picture appears without any action here: say so.
+                let host = model.workspace.hostName
+                UIAccessibility.post(notification: .announcement,
+                                     argument: host.isEmpty ? String(localized: "Connected")
+                                                            : String(localized: "Connected to \(host)"))
             }
         }
+        .onChange(of: screenAwakeInputs) { ScreenAwakeController.shared.update($0) }
         .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
+            ScreenAwakeController.shared.update(screenAwakeInputs)
             model.receiver.onReceiverUIPreferences = { update in
                 controlStore.applyRemote(update)
             }
@@ -543,6 +899,10 @@ struct ReceiverInterruptionOverlay: View {
     let onReconnect: () -> Void
     let onBackToHome: () -> Void
 
+    private func announce() {
+        UIAccessibility.post(notification: .announcement, argument: "\(interruption.title). \(interruption.message)")
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             if interruption == .reconnecting {
@@ -581,6 +941,10 @@ struct ReceiverInterruptionOverlay: View {
         // receiver surface below might still want.
         .allowsHitTesting(interruption.offersManualReconnect || interruption.offersBackToHome)
         .animation(.snappy(duration: 0.2), value: interruption)
+        .accessibilityElement(children: .contain)
+        // Connection lost / reconnecting appears on its own: say it once per change.
+        .onAppear { announce() }
+        .onChange(of: interruption) { _ in announce() }
     }
 }
 
@@ -686,28 +1050,58 @@ struct OverflowMarqueeText: View {
 
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
+/// The home screen. Three things, top to bottom: who this is and one short
+/// status line; one card listing Macs (paired, then nearby ones to pair);
+/// and a quiet row of links with Settings & Help beneath it. Everything else
+/// (how to connect, this device's name, Remote Access, Forget) sits one tap
+/// away in a sheet or a menu, so nothing is lost and nothing shouts.
 struct IdleView: View {
     @ObservedObject var receiver: StreamReceiver
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
+    let onExploreDemo: () -> Void
     @State private var showRemoteAccessSetup = false
     @State private var showRemotePairing = false
-    /// Persisted expand/collapse state of the Connection Instructions section.
-    @AppStorage("home.connectionInstructionsExpanded") private var instructionsExpanded = true
+    @State private var homeSheet: HomeSheet?
     @State private var remoteEditPeerID: String?
     /// Bumped when remote details change so the (non-observable) store is re-read.
     @State private var remoteRefresh = 0
+    @State private var forgetConfirmation = PeerForgetPrompt()
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
     // going through `CatMode.resolveEnabled` — this value is only ever
     // written by SettingsView's already-gated toggle, so it can't be true
     // while locked.
     @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabled = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// Paired Macs, read from the trust store's in-memory pin snapshot (no
+    /// Keychain or network I/O). Re-read whenever pairing can have changed.
+    @State private var pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
+
+    /// The two sheets the footer links open.
+    private enum HomeSheet: String, Identifiable {
+        case howToConnect, thisDevice
+        var id: String { rawValue }
+    }
+
+    private var demoPresentation: ExploreDemoPresentation {
+        .resolve(pairedMacCount: pairedMacCount)
+    }
+
+    /// With no Mac paired the demo is offered inside the Macs card, where the
+    /// empty state is; once one is paired it is just a footer link.
+    private var demoLivesInCard: Bool { demoPresentation.leadsConnectionSetup }
+
+    private func refreshPairedMacCount() {
+        pairedMacCount = TrustStore.shared.allPinnedPeerSPKIs().count
+    }
 
     var body: some View {
         GeometryReader { proxy in
             Group {
-                if proxy.size.width > proxy.size.height {
+                if horizontalSizeClass == .regular {
+                    regularLayout(size: proxy.size)
+                } else if proxy.size.width > proxy.size.height {
                     landscapeLayout
                 } else {
                     portraitLayout(minHeight: proxy.size.height)
@@ -715,7 +1109,7 @@ struct IdleView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(.systemBackground))
+        .background(horizontalSizeClass == .regular ? Color(.systemGroupedBackground) : Color(.systemBackground))
         .sheet(isPresented: Binding(
             get: { showRemotePairing && receiver.pairingPrompt.pending == nil },
             set: { presented in
@@ -744,82 +1138,140 @@ struct IdleView: View {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
             }
         }
+        .sheet(item: $homeSheet) { sheet in
+            switch sheet {
+            case .howToConnect: HowToConnectSheet()
+            case .thisDevice: ThisDeviceSheet(receiver: receiver)
+            }
+        }
+        .alert("Forget \u{201C}\(forgetConfirmation.candidate?.name ?? "This Mac")\u{201D}?",
+               isPresented: Binding(get: { forgetConfirmation.isPresented },
+                                    set: { if !$0 { forgetConfirmation.cancel() } })) {
+            Button("Forget", role: .destructive) {
+                forgetConfirmation.confirm { peerID in
+                    receiver.forgetPeer(peerID)
+                    receiver.pairingPrompt.cancel()
+                    remoteRefresh += 1
+                }
+            }
+            Button("Cancel", role: .cancel) { forgetConfirmation.cancel() }
+        } message: {
+            Text("You'll need to pair with this Mac again before connecting.")
+        }
+        // Pairing can change through a pairing ceremony, Forget (here, in
+        // Settings or Remote Access) or a reset in Settings; re-read after each.
+        .onAppear(perform: refreshPairedMacCount)
+        .onChange(of: receiver.pairingSuccessCount) { _ in refreshPairedMacCount() }
+        .onChange(of: receiver.lastForgottenPeerID) { _ in refreshPairedMacCount() }
+        .onChange(of: remoteRefresh) { _ in refreshPairedMacCount() }
+        .onChange(of: showSettings) { shown in if !shown { refreshPairedMacCount() } }
     }
 
+    // MARK: Layouts
+
     /// Scrolls only when the content is taller than the screen; when it fits,
-    /// `minHeight` keeps the Spacers distributing exactly as before.
+    /// `minHeight` lets the Spacers centre the header and card and keep the
+    /// links and Settings & Help at the bottom.
     private func portraitLayout(minHeight: CGFloat) -> some View {
         ScrollView(showsIndicators: false) {
-            portraitContent
-                .frame(minHeight: minHeight)
+            VStack(spacing: 24) {
+                Spacer(minLength: 0)
+                homeHeader(titleFont: .largeTitle.bold())
+                macsCard.frame(maxWidth: 420)
+                Spacer(minLength: 8)
+                homeFooter
+            }
+            .padding()
+            .frame(minHeight: minHeight)
         }
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private var portraitContent: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            logo(width: 132)
-            titleAndStatus
-            autoReconnectToggle
-            instructionsSection
-            deviceSections
-            Spacer()
-            settingsButton
-            tip.padding(.bottom, 8)
-        }
-        .padding()
-    }
-
-    /// Two fixed columns for landscape. Neither column scrolls as a whole;
-    /// only the device sections scroll if they outgrow the space.
+    /// Two columns for landscape: who this is and the links on the left, the
+    /// Macs card on the right. Each column scrolls on its own when its
+    /// content is taller than the screen (small phones, large text).
     private var landscapeLayout: some View {
         HStack(alignment: .top, spacing: 24) {
-            // Left: brand + setup, vertically centered in the available height.
-            VStack(spacing: 12) {
+            scrollingColumn {
                 Spacer(minLength: 0)
-                if instructionsExpanded {
-                    HStack(spacing: 14) {
-                        logo(width: 76)
-                        VStack(alignment: .leading, spacing: 4) {
-                            brandTitle(font: .title.bold())
-                            statusLine
-                        }
-                        Spacer(minLength: 0)
-                    }
-                } else {
-                    // Freed space: larger, centered branding like portrait.
-                    VStack(spacing: 8) {
-                        logo(width: 104)
-                        titleAndStatus(font: .title.bold())
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                autoReconnectToggle
-                instructionsSection
+                homeHeader(titleFont: .title.bold())
+                Spacer(minLength: 8)
+                homeFooter
+            }
+            scrollingColumn {
+                Spacer(minLength: 0)
+                macsCard
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Right: devices fill the top, Settings & tip sit at the bottom.
-            VStack(spacing: 12) {
-                ScrollView { deviceSections.padding(.top, 12) }
-                    .scrollBounceBehavior(.basedOnSize)
-                settingsButton
-                tip
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(.horizontal, 16)
         .padding(.top, 20)
         .padding(.bottom, 12)
     }
 
-    private func logo(width: CGFloat) -> some View {
+    private func scrollingColumn<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        let stack = VStack(spacing: 16) { content() }
+        return GeometryReader { column in
+            ScrollView(showsIndicators: false) {
+                stack.frame(maxWidth: .infinity, minHeight: column.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    /// iPad: the same page as the phone's, as one centred column on the
+    /// grouped background instead of a phone column stretched across the screen.
+    private func regularLayout(size: CGSize) -> some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                Spacer(minLength: 0)
+                homeHeader(titleFont: .largeTitle.bold())
+                macsCard
+                Spacer(minLength: 8)
+                homeFooter
+            }
+            .frame(maxWidth: 560)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 40)
+            .frame(maxWidth: .infinity, minHeight: size.height)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    // MARK: Header
+
+    private static let logoWidth: CGFloat = 72
+
+    /// The icon, laid out by its visible edge (the artwork's squircle spans
+    /// ~89% of the PNG; a transparent margin and soft glow surround it).
+    private func visibleLogo(width: CGFloat) -> some View {
         Image("MeowLogo")
             .resizable()
             .scaledToFit()
+            .frame(width: width * Self.logoArtworkScale, height: width * Self.logoArtworkScale)
             .frame(width: width, height: width)
+            .accessibilityHidden(true)
+    }
+
+    private static let logoArtworkScale: CGFloat = 1254.0 / 1118.0
+
+    /// Icon, name and one short status line, centred.
+    private func homeHeader(titleFont: Font) -> some View {
+        VStack(spacing: 8) {
+            visibleLogo(width: Self.logoWidth)
+                .padding(.bottom, 4)
+            brandTitle(font: titleFont)
+                .accessibilityAddTraits(.isHeader)
+            statusLine
+            if let pairingStatus = receiver.pairingPrompt.status {
+                Text(pairingStatus)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func brandTitle(font: Font) -> some View {
@@ -834,81 +1286,471 @@ struct IdleView: View {
         }
     }
 
+    /// One short line. The how-to guidance that used to live in the status
+    /// text is in How to Connect.
+    private var statusText: String {
+        switch receiver.session.phase {
+        case .disconnected:
+            switch receiver.session.lossReason {
+            case .transportLost, .listenerFailed: return String(localized: "Connection lost")
+            default: return String(localized: "Ready to connect")
+            }
+        case .connecting: return String(localized: "Connecting…")
+        case .connected: return String(localized: "Connected")
+        case .paused: return String(localized: "Paused")
+        case .reconnecting: return String(localized: "Reconnecting…")
+        case .reconnectFailed: return String(localized: "Connection lost")
+        case .unrecoverable: return String(localized: "Can't connect")
+        case .peerDisconnected: return String(localized: "Mac disconnected")
+        }
+    }
+
+    private var statusIsHealthy: Bool {
+        switch receiver.session.phase {
+        case .connected: return true
+        case .disconnected:
+            switch receiver.session.lossReason {
+            case .transportLost, .listenerFailed: return false
+            default: return true
+            }
+        default: return false
+        }
+    }
+
     private var statusLine: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(receiver.connected ? Color.green : Color.orange)
+                .fill(statusIsHealthy ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
-            Text(receiver.status)
+                .accessibilityHidden(true)
+            Text(statusText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
     }
 
-    private var titleAndStatus: some View { titleAndStatus(font: .largeTitle.bold()) }
+    // MARK: Macs card
 
-    private func titleAndStatus(font: Font) -> some View {
-        VStack(spacing: 6) {
-            brandTitle(font: font)
-            statusLine
-            if let pairingStatus = receiver.pairingPrompt.status {
-                Text(pairingStatus)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
+    /// One row of the Macs card: a paired Mac (it may be nearby, reachable
+    /// over Remote, or neither) or a nearby Mac that isn't paired yet.
+    private struct HomeMac: Identifiable {
+        let id: String
+        let name: String
+        /// The pin's peer ID; nil for a Mac that is not paired yet.
+        let peerID: String?
+        /// The Bonjour result while the Mac is visible on this network.
+        let nearby: NWBrowser.Result?
+        /// Logged in on the Mac but not in front: it can't share.
+        let switchedOut: Bool
+        let hasRemote: Bool
+        /// The Mac says macOS blocks it from connecting to devices (Local Network privacy).
+        var localNetworkBlocked = false
+        var isPaired: Bool { peerID != nil }
     }
 
-    private var autoReconnectToggle: some View {
-        Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
-            .toggleStyle(.switch)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: 420)
-            .background(Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var instructionsSection: some View {
-        VStack(spacing: 8) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) { instructionsExpanded.toggle() }
-            } label: {
-                HStack {
-                    Text("Connection Instructions")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Image(systemName: instructionsExpanded ? "chevron.up" : "chevron.down")
-                        .font(.footnote.weight(.semibold))
+    /// Paired Macs first (by name), then nearby ones to pair. One row per
+    /// Mac: a paired Mac that is also nearby or has Remote details is one row.
+    private func homeMacs() -> [HomeMac] {
+        _ = remoteRefresh
+        let remoteIDs = Set(RemoteEndpointStore.allPeerIDs(role: .receiverRole))
+        var nearbyPaired: [String: (result: NWBrowser.Result, switchedOut: Bool, title: String, blocked: Bool)] = [:]
+        var toPair: [HomeMac] = []
+        for group in receiver.nearbyMacGroups {
+            for session in group.sessions {
+                guard let result = receiver.discoveredMac(session) else { continue }
+                // Several people's sessions on one Mac (opt-in) read "Mac — Alex".
+                let title = group.isMultiSession
+                    ? SenderSessionAdvertisement.displayName(hostName: group.title, sessionLabel: session.rowTitle)
+                    : group.title
+                let switchedOut = session.availability == .switchedOut
+                if receiver.pairingMacIsPaired(result), let id = receiver.pairingMacPeerID(result) {
+                    if nearbyPaired[id] == nil { nearbyPaired[id] = (result, switchedOut, title, session.localNetworkBlocked) }
+                } else {
+                    toPair.append(HomeMac(id: "nearby-" + session.id, name: title, peerID: nil, nearby: result,
+                                          switchedOut: switchedOut, hasRemote: false))
                 }
-                .foregroundStyle(instructionsExpanded ? HierarchicalShapeStyle.primary : .secondary)
-                .padding(.horizontal, 4)
-                .frame(minHeight: 36)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityValue(instructionsExpanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Double-tap to \(instructionsExpanded ? "collapse" : "expand")")
-
-            if instructionsExpanded {
-                instructionsCard
-                    .transition(.opacity)
             }
         }
-        .frame(maxWidth: 420)
+        var paired: [HomeMac] = TrustStore.shared.pinnedPeers().map { peer in
+            let near = nearbyPaired[peer.peerID]
+            return HomeMac(id: "paired-" + peer.peerID, name: peer.displayName, peerID: peer.peerID,
+                           nearby: near?.result, switchedOut: near?.switchedOut ?? false,
+                           hasRemote: remoteIDs.contains(peer.peerID), localNetworkBlocked: near?.blocked ?? false)
+        }
+        // A paired Mac that is visible always gets a row, even if the pin
+        // list and the discovery record briefly disagree.
+        let listed = Set(paired.compactMap(\.peerID))
+        for (id, near) in nearbyPaired where !listed.contains(id) {
+            paired.append(HomeMac(id: "paired-" + id, name: near.title, peerID: id, nearby: near.result,
+                                  switchedOut: near.switchedOut, hasRemote: remoteIDs.contains(id),
+                                  localNetworkBlocked: near.blocked))
+        }
+        paired.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return paired + toPair
     }
 
-    private var instructionsCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            instructionRow("cable.connector", "Plug in the USB cable and start the Mac app")
-            instructionRow("wifi", "Or choose this \(deviceKind) under WiFi in the Mac app")
-            instructionRow("play.circle", "Keep this app open — streaming starts automatically")
+    private var macsCard: some View {
+        let macs = homeMacs()
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Macs")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 8)
+            if macs.isEmpty {
+                Divider()
+                lookingForMacsRow
+            } else {
+                ForEach(macs) { mac in
+                    Divider()
+                    macRow(mac)
+                }
+            }
+            if demoLivesInCard {
+                Divider()
+                Button(action: onExploreDemo) {
+                    Label("Try the Demo", systemImage: "play.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(.vertical, 12)
+                .accessibilityIdentifier("exploreDemo")
+                .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+            }
+            Divider()
+            remoteMenu(hasRemoteMacs: macs.contains { $0.hasRemote })
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(horizontalSizeClass == .regular ? Color(.secondarySystemGroupedBackground)
+                                                    : Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var lookingForMacsRow: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Looking for Macs on this Wi-Fi…")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Pair over Remote and Remote Access setup: the card's last row.
+    private func remoteMenu(hasRemoteMacs: Bool) -> some View {
+        Menu {
+            Button {
+                showRemotePairing = true
+            } label: {
+                Label("Pair over Remote", systemImage: "network")
+            }
+            Button {
+                presentRemoteSettings(peerID: nil)
+            } label: {
+                Label(hasRemoteMacs ? "Remote Access Settings…" : "Set Up Remote Access", systemImage: "gearshape")
+            }
+        } label: {
+            HStack {
+                Label("Remote Access", systemImage: "network")
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func presentRemoteSettings(peerID: String?) {
+        remoteEditPeerID = peerID
+        showRemoteAccessSetup = true
+    }
+
+    // MARK: Mac rows
+
+    /// Name and subtitle beside the buttons; when the name doesn't fit on
+    /// one line next to them (long names, large text), the buttons go
+    /// under it instead of squeezing it.
+    private func macRow(_ mac: HomeMac) -> some View {
+        // A paired Mac's short ID ("Nearby · ID 4F2A") tells same-named Macs apart.
+        let shortID = mac.peerID.flatMap { TrustStore.shared.shortID(peerID: $0) }
+        let user = PairedMacUserName.name(peerID: mac.peerID)
+        let subtitle = [macSubtitle(mac), user, shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
+            .joined(separator: " · ").nilIfEmpty
+        func label(lines: Int?) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: mac.name)
+                    .font(.body)
+                    .lineLimit(lines)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let subtitle {
+                    Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+        func controls() -> some View {
+            HStack(spacing: 4) {
+                macPrimaryControl(mac)
+                if mac.isPaired { macMenu(mac) }
+            }
+        }
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                label(lines: 1).frame(maxWidth: .infinity, alignment: .leading)
+                controls()
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                label(lines: nil).frame(maxWidth: .infinity, alignment: .leading)
+                controls()
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// One word on where the Mac is, or the state of the current attempt.
+    private func macSubtitle(_ mac: HomeMac) -> String? {
+        guard let peerID = mac.peerID else {
+            return mac.switchedOut ? String(localized: "Switched Out") : String(localized: "Not paired")
+        }
+        if receiver.connected { return String(localized: "Connected") }
+        // The Mac can see this iPhone but macOS won't let it connect back: say where to fix it.
+        if mac.localNetworkBlocked {
+            return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
+        }
+        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
+        if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
+        if mac.switchedOut { return String(localized: "Switched Out") }
+        if mac.nearby != nil { return String(localized: "Nearby") }
+        if mac.hasRemote { return String(localized: "Remote") }
+        return String(localized: "Not found")
+    }
+
+    @ViewBuilder
+    private func macPrimaryControl(_ mac: HomeMac) -> some View {
+        if let peerID = mac.peerID {
+            if receiver.connected || mac.switchedOut {
+                // Connected: nothing to do. Switched out: it can't share, so
+                // there is nothing to connect to until it is in front.
+                EmptyView()
+            } else if wakeConnect.isRunning(forPeerID: peerID) {
+                ProgressView().controlSize(.small)
+                Button("Cancel") { wakeConnect.cancel() }
+                    .font(.subheadline)
+                    .buttonStyle(.borderless)
+                    .frame(minHeight: 44)
+            } else {
+                connectButton(for: mac, peerID: peerID)
+            }
+        } else if let result = mac.nearby, !mac.switchedOut {
+            Button("Pair") { receiver.pairWithMac(result) }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel(Text("Pair with \(mac.name)"))
+                .accessibilityInputLabels([Text("Pair with \(mac.name)"), Text("Pair")])
+        }
+    }
+
+    /// One-tap Wake & Connect when this specific paired Mac has a usable
+    /// saved LAN wake hint (see `WakeConnectCoordinator`), or when it isn't
+    /// visible on this network (the Mac is asked, and woken if it can be).
+    /// A Mac visible right now without a wake hint keeps the plain Connect
+    /// with Mirror/Extend on a long press — it asks the Mac, which is always
+    /// the dialer, to start a session (`requestConnect`).
+    @ViewBuilder
+    private func connectButton(for mac: HomeMac, peerID: String) -> some View {
+        let hasWakeHint = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole)?.broadcastAddress != nil
+        if hasWakeHint || mac.nearby == nil {
+            let failed = wakeConnect.failed(forPeerID: peerID)
+            Button {
+                wakeConnect.begin(peerID: peerID)
+            } label: {
+                // Full label, never truncated: the row stacks the buttons
+                // under the name when they don't fit beside it.
+                Text(failed ? "Try Again" : (hasWakeHint ? "Wake & Connect" : "Connect"))
+                    .lineLimit(1)
+                    .frame(minWidth: 72)
+            }
+            .buttonStyle(.borderedProminent)
+            .fixedSize()   // its own width, so the row stacks instead of squeezing it
+            .accessibilityLabel(failed ? Text("Try again with \(mac.name)")
+                                       : hasWakeHint ? Text("Wake and connect to \(mac.name)")
+                                                     : Text("Connect to \(mac.name)"))
+            // Voice Control: the visible words work too ("Tap Wake & Connect").
+            .accessibilityInputLabels(failed ? [Text("Try again with \(mac.name)"), Text("Try Again")]
+                                      : hasWakeHint ? [Text("Wake and connect to \(mac.name)"), Text("Wake & Connect"),
+                                                       Text("Wake and Connect")]
+                                                    : [Text("Connect to \(mac.name)"), Text("Connect")])
+        } else {
+            Menu {
+                Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
+                Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
+            } label: {
+                Text("Connect").lineLimit(1).frame(minWidth: 72)
+            } primaryAction: {
+                receiver.requestConnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .fixedSize()
+            .accessibilityLabel(Text("Connect to \(mac.name)"))
+            .accessibilityInputLabels([Text("Connect to \(mac.name)"), Text("Connect")])
+            // The long-press menu isn't reachable by every assistive technology: offer its choices as actions.
+            .accessibilityAction(named: Text("Connect with Mirror")) { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
+            .accessibilityAction(named: Text("Connect with Extend")) { receiver.connectPrimary(peerID: peerID, mode: .extend) }
+        }
+    }
+
+    /// Everything else you can do with a paired Mac.
+    private func macMenu(_ mac: HomeMac) -> some View {
+        Menu {
+            if let peerID = mac.peerID {
+                if mac.hasRemote {
+                    Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Remove Remote Details", role: .destructive) {
+                        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
+                        remoteRefresh += 1
+                    }
+                } else {
+                    Button("Set Up Remote Access…") { presentRemoteSettings(peerID: peerID) }
+                }
+                Button("Forget…", role: .destructive) {
+                    forgetConfirmation.request(peerID: peerID, name: mac.name)
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.title3)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)   // a plain icon, not a filled bubble
+        .fixedSize()
+        .accessibilityLabel(Text("More for \(mac.name)"))
+        .accessibilityInputLabels([Text("More for \(mac.name)"), Text("More")])
+    }
+
+    private func remoteStatusText(peerID: String) -> String {
+        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
+            switch reason {
+            case "timedOut": return String(localized: "Connection timed out")
+            case "cancelled": return String(localized: "Cancelled")
+            case "protocolIncompatible": return String(localized: "Mac requires app update")
+            case "peerForgotten": return String(localized: "Mac pairing removed")
+            default: return String(localized: "Connection failed")
+            }
+        }
+        return String(localized: "Not connected")
+    }
+
+    // MARK: Footer
+
+    private var homeFooter: some View {
+        VStack(spacing: 8) {
+            footerLinks
+            settingsButton
+        }
+    }
+
+    /// How to Connect · Try the Demo · This Device. Wraps to a column when
+    /// the three don't fit on one line (small screens, large text).
+    private var footerLinks: some View {
+        let demoInFooter = !demoLivesInCard
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 2) {
+                howToConnectLink
+                if demoInFooter { footerDot; demoLink }
+                footerDot
+                thisDeviceLink
+            }
+            VStack(spacing: 0) {
+                howToConnectLink
+                if demoInFooter { demoLink }
+                thisDeviceLink
+            }
         }
         .font(.footnote)
-        .padding(20)
-        .frame(maxWidth: 420, alignment: .leading)
-        .background(Color(.secondarySystemBackground),
-                    in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var footerDot: some View {
+        Text(verbatim: "·")
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
+    }
+
+    private func footerLink(_ title: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.tint)
+                .padding(.horizontal, 6)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var howToConnectLink: some View {
+        footerLink("How to Connect") { homeSheet = .howToConnect }
+    }
+
+    private var demoLink: some View {
+        footerLink("Try the Demo", action: onExploreDemo)
+            .accessibilityIdentifier("exploreDemo")
+            .accessibilityHint(Text("Opens a sample session. Nothing connects to another device."))
+    }
+
+    private var thisDeviceLink: some View {
+        footerLink("This Device") { homeSheet = .thisDevice }
+    }
+
+    private var settingsButton: some View {
+        Button {
+            showSettings = true
+        } label: {
+            Label("Settings & Help", systemImage: "gearshape")
+        }
+        .buttonStyle(.bordered)
+    }
+}
+
+/// The steps for getting connected, one tap from the home screen's links.
+private struct HowToConnectSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
+                    instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
+                    instructionRow("hand.tap", "Or tap Connect next to a paired Mac")
+                    instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("How to Connect")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     /// Fixed-width icon column so every row's text starts at the same x.
@@ -923,230 +1765,35 @@ struct IdleView: View {
         }
         .accessibilityElement(children: .combine)
     }
+}
 
-    // MARK: Device sections (shared by portrait and landscape)
+/// This device's name, as Macs list it, one tap from the home screen's links.
+private struct ThisDeviceSheet: View {
+    let receiver: StreamReceiver
+    @Environment(\.dismiss) private var dismiss
 
-    private var deviceSections: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            nearbyDevices
-            Button {
-                showRemotePairing = true
-            } label: {
-                Label("Pair over Remote", systemImage: "network")
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    // The same field Settings uses; it owns its focus and does
+                    // not observe the receiver, so it can't lose it mid-edit.
+                    DeviceNameField { receiver.setServiceName($0) }
+                } header: {
+                    Text("Name")
+                } footer: {
+                    Text("Shown in the Mac app's Wi-Fi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
+                }
             }
-            .buttonStyle(.bordered)
-            .padding(.horizontal, 16)
-            remoteAccess
-        }
-        .frame(maxWidth: 420)
-    }
-
-    private var nearbyDevices: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Nearby Devices").font(.headline)
-            if receiver.discoveredMacs.isEmpty {
-                Text("No devices nearby")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(receiver.discoveredMacs, id: \.endpoint) { result in
-                    let isPaired = receiver.pairingMacIsPaired(result)
-                    HStack {
-                        Text(receiver.pairingMacName(result)).lineLimit(1)
-                        Spacer()
-                        if isPaired {
-                            if receiver.connected {
-                                Text("Connected").foregroundStyle(.secondary)
-                            } else {
-                                // Trust and connectivity are different: a
-                                // paired-but-not-currently-connected Mac
-                                // that is visible right now must offer a
-                                // way back in rather than a dead-end
-                                // "Paired" label. A disconnected Mac is
-                                // never dialing out on its own, so this
-                                // can't just rearm our own listener
-                                // (reconnectNow) — it asks the Mac,
-                                // which is always the dialer, to
-                                // actually start a session for us.
-                                connectControl(for: result)
-                            }
-                        } else {
-                            Button("Pair") { receiver.pairWithMac(result) }
-                                .buttonStyle(.borderedProminent)
-                        }
-                    }
+            .navigationTitle("This Device")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
                 }
             }
         }
-        .padding(.horizontal, 16)
-    }
-
-    /// Paired Macs that have a saved Remote endpoint, with display names.
-    private var remoteMacs: [(peerID: String, displayName: String)] {
-        _ = remoteRefresh
-        let configured = Set(RemoteEndpointStore.allPeerIDs())
-        return TrustStore.shared.pinnedPeers().filter { configured.contains($0.peerID) }
-    }
-
-    private var remoteAccess: some View {
-        let macs = remoteMacs
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Remote Access").font(.headline)
-                Spacer()
-                if !macs.isEmpty {
-                    // Section-level actions only; per-remote actions live on
-                    // each row's own menu.
-                    Menu {
-                        Button("Remote Access Settings…") { presentRemoteSettings(peerID: nil) }
-                    } label: {
-                        Image(systemName: "ellipsis.circle").font(.title3)
-                    }
-                    .accessibilityLabel("Remote Access options")
-                }
-            }
-            if macs.isEmpty {
-                Button {
-                    presentRemoteSettings(peerID: nil)
-                } label: {
-                    Label("Set Up Remote Access", systemImage: "network")
-                }
-                .buttonStyle(.bordered)
-            } else {
-                ForEach(macs, id: \.peerID) { mac in
-                    remoteRow(peerID: mac.peerID, name: mac.displayName)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-    }
-
-    private func presentRemoteSettings(peerID: String?) {
-        remoteEditPeerID = peerID
-        showRemoteAccessSetup = true
-    }
-
-    /// One configured remote: name, its Wake & Connect action, and its own
-    /// menu, all on the same row. Label follows P6: "Wake & Connect" only
-    /// when a local LAN wake hint exists (never claims remote WoL);
-    /// otherwise plain "Connect", which — via `connectPrimary(peerID:)` —
-    /// rearms the local listener/Bonjour `cr` and knocks this one Mac only.
-    @ViewBuilder
-    private func remoteRow(peerID: String, name: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 10) {
-            Text(name)
-                .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 8)
-            if receiver.connected {
-                Text("Connected").foregroundStyle(.secondary)
-            } else if wakeConnect.isRunning(forPeerID: peerID) {
-                ProgressView().controlSize(.small)
-                Button("Cancel") { wakeConnect.cancel() }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else {
-                Button {
-                    wakeConnect.begin(peerID: peerID)
-                } label: {
-                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Connect")
-                        .frame(minWidth: 88)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            Menu {
-                Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
-                Button("Remove Remote Details", role: .destructive) {
-                    RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
-                    remoteRefresh += 1
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle").font(.title3)
-            }
-            .accessibilityLabel("Options for \(name)")
-        }
-        if !receiver.connected {
-            Text(wakeConnect.isRunning(forPeerID: peerID) ? wakeConnect.statusLabel : remoteStatusText(peerID: peerID))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        }
-    }
-
-    private var settingsButton: some View {
-        Button {
-            showSettings = true
-        } label: {
-            Label("Settings & Help", systemImage: "gearshape")
-        }
-        .buttonStyle(.bordered)
-    }
-
-    private var tip: some View {
-        Text("Tip: shake the \(deviceKind) to open settings anytime")
-            .font(.footnote)
-            .foregroundStyle(.tertiary)
-            .multilineTextAlignment(.center)
-    }
-
-    private func remoteStatusText(peerID: String) -> String {
-        if let reason = wakeConnect.failureReason(forPeerID: peerID) {
-            switch reason {
-            case "timedOut": return String(localized: "Connection timed out")
-            case "cancelled": return String(localized: "Cancelled")
-            case "protocolIncompatible": return String(localized: "Mac requires app update")
-            case "peerForgotten": return String(localized: "Mac pairing removed")
-            default: return String(localized: "Connection failed")
-            }
-        }
-        switch receiver.session.phase {
-        case .connecting, .reconnecting: return String(localized: "Connecting…")
-        case .connected: return String(localized: "Connected")
-        case .reconnectFailed, .disconnected: return String(localized: "Not connected")
-        default: return String(localized: "Remote endpoint unavailable")
-        }
-    }
-
-    /// One-tap Wake & Connect when this specific paired Mac has a usable
-    /// saved LAN wake hint (see `WakeConnectCoordinator`); a plain Connect
-    /// otherwise, unchanged.
-    @ViewBuilder
-    private func connectControl(for result: NWBrowser.Result) -> some View {
-        if let peerID = receiver.pairingMacPeerID(result) {
-            if wakeConnect.isRunning(forPeerID: peerID) {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(wakeConnect.statusLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Cancel") { wakeConnect.cancel() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                }
-            } else if WakeMetadataStore.metadata(forPeerID: peerID)?.broadcastAddress != nil {
-                Button {
-                    wakeConnect.begin(peerID: peerID)
-                } label: {
-                    OverflowMarqueeText(wakeConnect.failed(forPeerID: peerID) ? "Try Again" : "Wake & Connect")
-                        .frame(minWidth: 88)
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Menu {
-                    Button("Connect with Mirror") { receiver.connectPrimary(peerID: peerID, mode: .mirror) }
-                    Button("Connect with Extend") { receiver.connectPrimary(peerID: peerID, mode: .extend) }
-                } label: {
-                    Text("Connect")
-                } primaryAction: {
-                    receiver.requestConnect()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        } else {
-            Button("Connect") { receiver.requestConnect() }
-                .buttonStyle(.borderedProminent)
-        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -1166,12 +1813,14 @@ struct OnboardingView: View {
                         .font(.system(size: 56, weight: .light))
                         .foregroundStyle(.tint)
                         .padding(.top, 24)
+                        .accessibilityHidden(true)
 
                     VStack(spacing: 10) {
                         Text("One more app to go")
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
-                        Text("MeowDisplay turns this \(deviceKind) into a second screen for your Mac — but it needs the **MeowDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
+                            .accessibilityAddTraits(.isHeader)
+                        Text("You also need the **MeowDisplay Mac app**, open on your Mac.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -1180,7 +1829,7 @@ struct OnboardingView: View {
 
                     VStack(alignment: .leading, spacing: 14) {
                         Label("Install the MeowDisplay Mac app on your Mac", systemImage: "1.circle.fill")
-                        Label("Connect the \(deviceKind) by USB, or join the same WiFi", systemImage: "2.circle.fill")
+                        Label("Connect the \(deviceKind) by USB, or join the same Wi-Fi", systemImage: "2.circle.fill")
                         Label("Keep this app open — streaming starts on its own", systemImage: "3.circle.fill")
                     }
                     .font(.subheadline)
@@ -1218,894 +1867,6 @@ struct OnboardingView: View {
     }
 }
 
-// MARK: - Settings / help sheet
-
-struct SettingsView: View {
-    @ObservedObject var receiver: StreamReceiver
-    @ObservedObject var controlStore: ReceiverControlStore
-    @ObservedObject var pictureInPicture: ReceiverPictureInPictureController
-    let haptics: ReceiverHaptics
-    @Environment(\.dismiss) private var dismiss
-    @AppStorage("showAnalytics") private var showAnalytics = false
-    @AppStorage("metalRenderer") private var metalRenderer = false
-    @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
-    #if DEBUG
-    @AppStorage("notchDebugOverlay") private var notchDebugOverlayEnabled = false
-    // Developer / Audio Diagnostics (receiver-side AAC investigation): a
-    // physical iPhone's sandboxed UserDefaults can't receive a Mac
-    // terminal's `defaults write` the way a Simulator or a Mac-native app
-    // can, so these need an in-app control to be usable during a real
-    // on-device retest — see `StreamReceiver`'s matching keys, all read
-    // fresh (never latched) so a toggle here takes effect immediately.
-    @AppStorage("audioPlaybackPath") private var audioPlaybackPath = "pcmEngine"
-    @AppStorage("audioPCMSchedulingMode") private var audioPCMSchedulingMode = "continuous"
-    @AppStorage("audioReceiverLocalDecode") private var audioReceiverLocalDecode = false
-    @AppStorage("audioReceiverDumpEnabled") private var audioReceiverDumpEnabled = false
-    @AppStorage("audioAACIntegrityLogging") private var audioAACIntegrityLogging = false
-    #endif
-    @State private var confirmingReset = false
-    @State private var confirmingFunctionTrayReset = false
-    @State private var trustRefresh = 0
-    @State private var forgetConfirmation = PeerForgetPrompt()
-
-    // Cat Mode (hidden easter egg — nine taps on the About/version row
-    // below). Local-only presentation state: never synced, never on the
-    // wire. `catModeTapCount` intentionally isn't persisted — a relaunch
-    // mid-tapping just resets the count, it's not meant to be a puzzle
-    // across sessions.
-    @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
-    @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
-    @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
-    @State private var showCatModeUnlockedAlert = false
-
-    private var catModeEnabled: Bool {
-        CatMode.resolveEnabled(requestedEnabled: catModeEnabledStorage, unlocked: catModeUnlocked)
-    }
-
-    private var catModeToggleBinding: Binding<Bool> {
-        Binding(
-            get: { catModeEnabled },
-            set: { catModeEnabledStorage = CatMode.resolveEnabled(requestedEnabled: $0, unlocked: catModeUnlocked) }
-        )
-    }
-
-    private func registerCatModeTap() {
-        let result = CatMode.registerTap(tapCount: catModeTapCount, alreadyUnlocked: catModeUnlocked)
-        catModeTapCount = result.tapCount
-        if result.justUnlocked {
-            catModeUnlocked = true
-            showCatModeUnlockedAlert = true
-        }
-    }
-
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    let peers = TrustStore.shared.pinnedPeers()
-                    if peers.isEmpty {
-                        Text("No paired Macs").foregroundStyle(.secondary)
-                    } else {
-                        AutomaticallyAllowConnectionsToggle()
-                        ForEach(peers, id: \.peerID) { peer in
-                            HStack {
-                                Text(peer.displayName)
-                                Spacer()
-                                Button("Forget", role: .destructive) {
-                                    forgetConfirmation.request(peerID: peer.peerID, name: peer.displayName)
-                                }
-                            }
-                            IncomingSessionPolicyPicker(peerID: peer.peerID, receiver: receiver)
-                                .font(.subheadline)
-                        }
-                    }
-                } header: {
-                    Text("Paired Macs")
-                } footer: {
-                    Text("Connection Requests: Default follows Automatically Allow Connections. Blocking keeps the Mac paired.")
-                }
-                .id(trustRefresh)
-                .alert("Forget \u{201C}\(forgetConfirmation.candidate?.name ?? "This Mac")\u{201D}?",
-                       isPresented: Binding(get: { forgetConfirmation.isPresented },
-                                            set: { if !$0 { forgetConfirmation.cancel() } })) {
-                    Button("Forget", role: .destructive) {
-                        forgetConfirmation.confirm { peerID in
-                            receiver.forgetPeer(peerID)
-                            receiver.pairingPrompt.cancel()
-                            trustRefresh &+= 1
-                        }
-                    }
-                    Button("Cancel", role: .cancel) { forgetConfirmation.cancel() }
-                } message: {
-                    Text("You'll need to pair with this Mac again before connecting.")
-                }
-                Section {
-                    NavigationLink("Remote Access") {
-                        RemoteAccessSettingsView(receiver: receiver)
-                    }
-                    .disabled(TrustStore.shared.pinnedPeers().isEmpty)
-                }
-                .id(trustRefresh)
-                Section("Status") {
-                    LabeledContent("Connection",
-                                   value: receiver.connected ? receiver.status : receiver.canonicalPhaseTitle)
-                    if receiver.videoSize != .zero {
-                        LabeledContent("Stream",
-                                       value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
-                    }
-                    if receiver.connected {
-                        Button("Disconnect", role: .destructive) {
-                            receiver.disconnect()
-                        }
-                    }
-                }
-
-                Section {
-                    Toggle("Auto-Reconnect", isOn: $receiver.autoReconnectEnabled)
-                } header: {
-                    Text("Connection")
-                } footer: {
-                    Text("Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected. Also shown on the Home screen.")
-                }
-
-                Section("Display") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Video", isOn: Binding(
-                            get: { receiver.videoEnabled },
-                            set: { receiver.requestVideoEnabled($0) }))
-                            .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
-                        Text("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Picture in Picture", isOn: preferenceBinding(\.pictureInPictureEnabled))
-                        Text("Leaving MeowDisplay during a session keeps your Mac visible in a floating window. It’s view-only — control stays in MeowDisplay.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        if let note = pictureInPictureNote {
-                            Text(note)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if pictureInPicture.isShowingWindow {
-                        Button("Stop Picture in Picture") { pictureInPicture.stop() }
-                    } else if pictureInPicture.availability == .available {
-                        Button {
-                            // Started from the tap itself: AVKit only honors a
-                            // manual start made in response to user action.
-                            pictureInPicture.start()
-                            dismiss()
-                        } label: {
-                            Label("Start Picture in Picture", systemImage: "pip.enter")
-                        }
-                    }
-                    Toggle("Show Surface Grid", isOn: preferenceBinding(\.showSurfaceGrid))
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Avoid Notch", isOn: preferenceBinding(\.avoidNotch))
-                        Text("Keeps controls clear of the iPhone’s notch or Dynamic Island in landscape.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Text("Experimental")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    if let confirmedMode = receiver.confirmedDisplayMode {
-                        Picker("Display Mode", selection: Binding(
-                            get: { receiver.pendingDisplayMode ?? confirmedMode },
-                            set: { receiver.requestDisplayMode($0) })) {
-                            ForEach(ReceiverDisplayMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                                    .disabled(!receiver.videoEnabled && mode == .extend)
-                            }
-                        }
-                        .disabled(!receiver.connected
-                                  || receiver.macProtocolVersion < WireProtocol.displayModeWireVersion
-                                  || receiver.pendingDisplayMode != nil)
-                        if let pendingMode = receiver.pendingDisplayMode {
-                            LabeledContent("Switching to \(pendingMode.title)") {
-                                ProgressView()
-                            }
-                        }
-                        if confirmedMode == .mirror,
-                           receiver.macProtocolVersion >= WireProtocol.mirrorDisplayWireVersion {
-                            mirrorDisplaySourcePicker
-                        }
-                        if confirmedMode == .extend,
-                           receiver.macProtocolVersion >= WireProtocol.extendShapeWireVersion {
-                            extendShapePicker
-                        }
-                    } else {
-                        LabeledContent("Display Mode",
-                                       value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
-                    }
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Audio", isOn: Binding(
-                            get: { controlStore.preferences.audioPreferred },
-                            set: { value in
-                                controlStore.update { $0.audioPreferred = value }
-                                receiver.requestAudioEnabled(value)
-                            }))
-                            .disabled(!receiver.connected || !receiver.macSupportsAudio)
-                        Text("Plays a copy of what the Mac is playing. It keeps playing there too — this never changes the Mac's output device.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("A/V Sync")
-                            Spacer()
-                            Text(avSyncOffsetLabel(controlStore.preferences.avSyncOffsetMs))
-                                .foregroundStyle(.secondary)
-                            if controlStore.preferences.avSyncOffsetMs != 0 {
-                                Button("Reset") {
-                                    controlStore.update { $0.avSyncOffsetMs = 0 }
-                                }
-                                .font(.footnote)
-                            }
-                        }
-                        Slider(value: Binding(
-                            get: { Double(controlStore.preferences.avSyncOffsetMs) },
-                            set: { value in
-                                let stepped = Int((value / Double(AVSyncOffset.stepMs)).rounded()) * AVSyncOffset.stepMs
-                                controlStore.update { $0.avSyncOffsetMs = AVSyncOffset.clamped(stepped) }
-                            }),
-                            in: Double(AVSyncOffset.range.lowerBound)...Double(AVSyncOffset.range.upperBound),
-                            step: Double(AVSyncOffset.stepMs))
-                        Text("Adjust if sound plays slightly before or after the picture.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Button("Resync") {
-                            receiver.resync()
-                        }
-                        .font(.footnote)
-                        .disabled(!receiver.connected || !receiver.audioEnabled)
-                        Text("If audio drifts or stutters, Resync re-establishes timing without reconnecting. It doesn't change your A/V Sync adjustment above.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .disabled(!controlStore.preferences.audioPreferred)
-                } header: {
-                    Text("Audio")
-                }
-
-                Section {
-                    // Isolated from the receiver: the Status section above
-                    // re-renders on every stream update, and a TextField that
-                    // rebuilds mid-tap loses focus (the "tap twice to edit"
-                    // bug). This subview owns its focus and doesn't observe
-                    // the receiver, so it survives those rebuilds.
-                    DeviceNameField { receiver.setServiceName($0) }
-                } header: {
-                    Text("Name")
-                } footer: {
-                    Text("Shown in the Mac app's WiFi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
-                }
-
-                Section {
-                    Toggle("Zoom While Typing", isOn: $zoomWhileTyping)
-                } header: {
-                    Text("Keyboard")
-                } footer: {
-                    Text("Enlarge the area you're typing in when the keyboard is open.")
-                }
-
-                Section {
-                    // Never optimistic: this only ever reflects the Mac's
-                    // last CONFIRMED decision (`ReceiverControlStore.
-                    // sessionInputState`) — tapping Request Control does not
-                    // flip this label until the Mac actually replies.
-                    LabeledContent("Control", value: controlStore.sessionInputState.receiverDisplayText)
-                    switch controlStore.sessionInputState {
-                    case .off, .notAllowed:
-                        Button("Request Control") { receiver.requestAllowInput(true) }
-                    case .requesting:
-                        EmptyView()
-                    case .allowed:
-                        Button("Turn Off", role: .destructive) { receiver.requestAllowInput(false) }
-                    case .requestsDisabled:
-                        Text("This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    Picker("Input Mode", selection: preferenceBinding(\.inputMode)) {
-                        ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Text(controlStore.preferences.inputMode.explanation)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if controlStore.preferences.inputMode == .direct {
-                        Toggle(isOn: preferenceBinding(\.smartTouchEnabled)) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(verbatim: "Smart Touch")
-                                    Text("Experimental")
-                                        .font(.caption2.weight(.semibold))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
-                                        .foregroundStyle(.orange)
-                                }
-                                Text("Scroll with one finger in any direction. Hold a title bar, then drag, to move its window. Elsewhere, touch and hold for normal Direct Touch. Falls back to Direct Touch when the Mac can't identify the area.")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        if controlStore.preferences.smartTouchEnabled {
-                            Toggle(isOn: preferenceBinding(\.smartTouchLongPressHapticEnabled)) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Smart Touch Haptics", comment: "Toggle label. \"Smart Touch\" is the feature's brand name and must stay untranslated; only \"Haptics\" is translatable.")
-                                    Text(controlStore.preferences.hapticsEnabled
-                                         ? "Builds while you hold a title bar, then ticks when the window can move. Also confirms switching to Direct Touch."
-                                         : "Off while Haptics is turned off.")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .disabled(!controlStore.preferences.hapticsEnabled)
-                        }
-                    }
-                    HStack {
-                        Text("Trackpad Sensitivity")
-                        Spacer()
-                        if controlStore.preferences.trackpadSensitivity != PointerGestureConfig.defaultTrackpadSensitivity {
-                            Button("Reset") {
-                                controlStore.update { $0.trackpadSensitivity = PointerGestureConfig.defaultTrackpadSensitivity }
-                            }
-                            .font(.footnote)
-                        }
-                    }
-                    Slider(value: preferenceBinding(\.trackpadSensitivity),
-                           in: PointerGestureConfig.trackpadSensitivityRange, step: 0.1) {
-                        Text("Trackpad Sensitivity")
-                    } minimumValueLabel: {
-                        Text("Slow")
-                    } maximumValueLabel: {
-                        Text("Fast")
-                    }
-                    .font(.footnote)
-                } header: {
-                    Text("Input")
-                } footer: {
-                    Text("Settings always stays reachable, even with input turned off. Sensitivity only affects Trackpad mode's one-finger pointer movement.")
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Pinch / Zoom")
-                        Picker("Pinch / Zoom", selection: preferenceBinding(\.pinchTarget)) {
-                            ForEach(ReceiverGestureTarget.allCases) { Text($0.title).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        if controlStore.preferences.pinchTarget == .app {
-                            Text("Experimental app command mode")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Rotation")
-                        Picker("Rotation", selection: preferenceBinding(\.rotateTarget)) {
-                            ForEach(ReceiverGestureTarget.allCases) { Text($0.title).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        if controlStore.preferences.rotateTarget == .app {
-                            Text("Experimental app command mode")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Toggle("Snap Rotation", isOn: preferenceBinding(\.snapRotation))
-                    if controlStore.preferences.pinchTarget == .app || controlStore.preferences.rotateTarget == .app {
-                        NavigationLink("App Gesture Commands") {
-                            AppGestureCommandsView(store: controlStore)
-                        }
-                    }
-                } header: {
-                    Text("Gestures")
-                } footer: {
-                    Text("Video Off temporarily routes pinch and rotate to App without changing these saved choices. App mode is experimental: instead of injecting native gestures into the foreground app, it sends the keyboard commands configured in App Gesture Commands.")
-                }
-
-                Section("Receiver Controls") {
-                    Toggle("Show Control Tray", isOn: preferenceBinding(\.trayEnabled))
-                        .disabled(!controlStore.preferences.allowInput)
-                    Toggle("Show Keyboard Button", isOn: preferenceBinding(\.keyboardButtonEnabled))
-                    Toggle("Haptics", isOn: preferenceBinding(\.hapticsEnabled))
-                    Toggle("Collapse Control Tray", isOn: preferenceBinding(\.trayCollapsed))
-                    Toggle("Auto-hide Control Trays", isOn: preferenceBinding(\.autoHideEnabled))
-                    landscapeTraySidePicker
-                    Picker("Active Profile", selection: Binding(
-                        get: { controlStore.preferences.activeControlProfile },
-                        set: { profile in
-                            controlStore.update { $0.activeControlProfile = profile }
-                            haptics.play(.profileChange)
-                        })) {
-                        ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
-                    }
-                    NavigationLink("Edit Current Profile") {
-                        ControlProfileEditor(store: controlStore, haptics: haptics)
-                    }
-                    Button("Reset Profile to Default", role: .destructive) {
-                        confirmingReset = true
-                    }
-                }
-
-                streamingProfileSection
-                maxFPSSection
-
-                Section {
-                    Toggle("Show Function Tray", isOn: preferenceBinding(\.functionTrayEnabled))
-                        .disabled(!controlStore.preferences.allowInput)
-                    Picker("Function Tray Position",
-                           selection: preferenceBinding(\.functionTrayPosition)) {
-                        ForEach(FunctionTrayPosition.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Picker("Function Profile", selection: Binding(
-                        get: { controlStore.preferences.activeFunctionTrayProfile },
-                        set: { profile in
-                            controlStore.update { $0.activeFunctionTrayProfile = profile }
-                            haptics.play(.profileChange)
-                        })) {
-                        ForEach(ControlProfileSlot.allCases) { Text($0.title).tag($0) }
-                    }
-                    NavigationLink("Edit Function Tray") {
-                        FunctionTrayProfileEditor(store: controlStore)
-                    }
-                    Button("Reset Function Tray to Default", role: .destructive) {
-                        confirmingFunctionTrayReset = true
-                    }
-                } header: {
-                    Text("Function Tray")
-                } footer: {
-                    Text("A second, independent tray of one-tap shortcuts (Undo, Redo, …), separate from the Main Tray above. \"Same Side\" groups it with the Main Tray; \"Opposite Side\" puts it on the other edge of the screen.")
-                }
-
-                Section {
-                    Toggle("Performance overlay", isOn: $showAnalytics)
-                    Toggle("Metal renderer (experimental)", isOn: $metalRenderer)
-                } header: {
-                    Text("Analytics")
-                } footer: {
-                    Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging.")
-                }
-
-                Section {
-                    Button("Open iOS Settings for MeowDisplay") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    }
-                } header: {
-                    Text("Permissions")
-                } footer: {
-                    Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → MeowDisplay. USB mode works without it.")
-                }
-
-                Section {
-                    NavigationLink {
-                        DiagnosticsLogView()
-                    } label: {
-                        Label("Connection log", systemImage: "doc.text.magnifyingglass")
-                    }
-                } header: {
-                    Text("Diagnostics")
-                } footer: {
-                    Text("What this \(deviceKind) saw while connecting: sessions, restarts, decoder trouble. No screen content and nothing leaves the \(deviceKind) unless you share it. Attach it to a GitHub issue if a connection won't come up.")
-                }
-
-                #if DEBUG
-                Section {
-                    Toggle("Notch Debug Overlay", isOn: $notchDebugOverlayEnabled)
-                } header: {
-                    Text("Developer")
-                } footer: {
-                    Text("Draws the computed unsafe/obstacle regions (red) and the raw vs. Avoid-Notch-adjusted Main Tray frame (yellow/green) directly over the stream.")
-                }
-                Section {
-                    LabeledContent("Production Codec", value: "AAC")
-                    Picker("Playback Path", selection: $audioPlaybackPath) {
-                        Text("PCM Engine").tag("pcmEngine")
-                        Text("Legacy SampleBuffer Renderer").tag("legacyRenderer")
-                    }
-                    .onChange(of: audioPlaybackPath) { path in
-                        Log.info("audioTrace: playbackPath=\(path)")
-                    }
-                    Picker("PCM Scheduling", selection: $audioPCMSchedulingMode) {
-                        Text("Continuous").tag("continuous")
-                        Text("Precise Scheduled").tag("preciseScheduled")
-                    }
-                    .onChange(of: audioPCMSchedulingMode) { mode in
-                        Log.info("audioTrace: audioPCMSchedulingMode=\(mode)")
-                    }
-                    Toggle("Receiver Local AAC Decode", isOn: $audioReceiverLocalDecode)
-                        .onChange(of: audioReceiverLocalDecode) { enabled in
-                            Log.info("audioTrace: audioReceiverLocalDecode=\(enabled)")
-                        }
-                    Toggle("AAC Integrity Logging", isOn: $audioAACIntegrityLogging)
-                        .onChange(of: audioAACIntegrityLogging) { enabled in
-                            Log.info("audioTrace: audioAACIntegrityLogging=\(enabled)")
-                        }
-                    Toggle("Audio Comparison Dump", isOn: $audioReceiverDumpEnabled)
-                        .onChange(of: audioReceiverDumpEnabled) { enabled in
-                            Log.info("audioTrace: audioReceiverDumpEnabled=\(enabled)")
-                        }
-                    Button("Reset Audio Diagnostics", role: .destructive) {
-                        audioPlaybackPath = "pcmEngine"
-                        audioPCMSchedulingMode = "continuous"
-                        audioReceiverLocalDecode = false
-                        audioAACIntegrityLogging = false
-                        audioReceiverDumpEnabled = false
-                        Log.info("audioTrace: audio diagnostics reset to defaults")
-                    }
-                } header: {
-                    Text("Developer — Audio Diagnostics")
-                } footer: {
-                    Text("PCM Engine is the default production audio path: AAC is still the only thing sent over the network, decoded on this \(deviceKind) and played through AVAudioEngine. Legacy SampleBuffer Renderer is the older AVSampleBufferAudioRenderer path, kept as a fallback/reference. PCM Scheduling controls how PCM Engine schedules buffers: Continuous (default) chains them on the player's own timeline after one startup anchor; Precise Scheduled independently re-targets every buffer from its own capture timestamp — this reintroduces electrical/robotic noise and exists only for A/B comparison. Receiver Local AAC Decode independently decodes received AAC and logs decode anomalies (clipping, discontinuities, NaN/Inf). AAC Integrity Logging adds a periodic checksum you can compare against the Mac's own log for the same packet. Audio Comparison Dump writes ~5s of the locally-decoded audio to a file in this app's Documents folder (Files app → On My \(deviceKind) → MeowDisplay) once Local AAC Decode is also on. All diagnostics off by default; a fresh Audio Off→On or reconnect applies a change.")
-                }
-                #endif
-
-                #if DEBUG
-                Section {
-                    WakeTestingView()
-                } header: {
-                    Text("Developer — Wake Testing")
-                } footer: {
-                    Text("Sends a standard Wake-on-LAN magic packet to an already-paired Mac's last-learned local network address. Same-LAN only — this never uses Remote/Tailscale.")
-                }
-                Section {
-                    PromoteInteractiveWakeView(receiver: receiver)
-                } header: {
-                    Text("Developer — Promote Interactive Wake")
-                } footer: {
-                    Text("Manual diagnostic, not automated: asks the connected Mac to declare remote user activity, to test whether that promotes a dark/network wake into a full interactive wake.")
-                }
-                Section {
-                    Button("Reset Cat Mode", role: .destructive) {
-                        catModeUnlocked = false
-                        catModeEnabledStorage = false
-                        catModeTapCount = 0
-                    }
-                } header: {
-                    Text("Developer — Cat Mode")
-                } footer: {
-                    Text("Re-locks the About/version row's nine-tap easter egg for retesting the unlock flow.")
-                }
-                #endif
-
-                Section {
-                    Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
-                          systemImage: "cable.connector")
-                    Label("WiFi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
-                          systemImage: "wifi")
-                    Label("Rotate the \(deviceKind) for a vertical second monitor.",
-                          systemImage: "rectangle.portrait.rotate")
-                    Label("Touch: tap to click, drag to drag, two-finger pan to scroll.",
-                          systemImage: "hand.tap")
-                } header: {
-                    Text("How to connect")
-                }
-
-                Section {
-                    Link(destination: macAppURL) {
-                        Label("Get the Mac app", systemImage: "arrow.down.circle")
-                    }
-                } footer: {
-                    Text("MeowDisplay needs the Mac app running on a Mac on the same cable or WiFi network. Download it here if you haven't yet.")
-                }
-
-                Section {
-                    LabeledContent("Version", value: version)
-                        // Hidden unlock gesture: nine taps here (a cat's
-                        // nine lives) reveals Cat Mode below. No visible
-                        // affordance before unlock — this reads like an
-                        // ordinary, non-interactive detail row.
-                        .contentShape(Rectangle())
-                        .onTapGesture { registerCatModeTap() }
-                    Link(destination: macAppURL) {
-                        Label("GitHub — raiseCatError/MeowDisplay", systemImage: "link")
-                    }
-                    if catModeUnlocked {
-                        Toggle(isOn: catModeToggleBinding) {
-                            Label("Cat Mode", systemImage: "pawprint.fill")
-                        }
-                    }
-                } header: {
-                    HStack(spacing: 4) {
-                        Text("About")
-                        if catModeEnabled {
-                            Image(systemName: "pawprint.fill")
-                                .accessibilityHidden(true)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("MeowDisplay")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .alert("Cat Mode unlocked 🐾", isPresented: $showCatModeUnlockedAlert) {
-                Button("Nice", role: .cancel) {}
-            }
-        }
-        .confirmationDialog("Reset \(controlStore.preferences.activeControlProfile.title)?",
-                            isPresented: $confirmingReset, titleVisibility: .visible) {
-            Button("Reset Profile", role: .destructive) {
-                controlStore.update { $0.resetProfile($0.activeControlProfile) }
-                haptics.play(.reset)
-            }
-        } message: {
-            Text("This restores its tray layout and shortcut palettes. Other receiver settings stay unchanged.")
-        }
-        .confirmationDialog("Reset \(controlStore.preferences.activeFunctionTrayProfile.title)?",
-                            isPresented: $confirmingFunctionTrayReset, titleVisibility: .visible) {
-            Button("Reset Function Tray", role: .destructive) {
-                controlStore.update { $0.resetFunctionTrayProfile($0.activeFunctionTrayProfile) }
-                haptics.play(.reset)
-            }
-        } message: {
-            Text("This restores its default Undo/Redo layout. Other receiver settings stay unchanged.")
-        }
-    }
-
-    /// Remote control for the Mac's own canonical Mirror capture source
-    /// (`SenderController.mirrorDisplayUUID`) — never an independent
-    /// iOS-only preference. `nil` selection means Auto, mirroring the Mac's
-    /// own nil-means-automatic semantic exactly (see
-    /// `Mac/MirrorDisplaySelection.swift`).
-    @ViewBuilder
-    private var mirrorDisplaySourcePicker: some View {
-        let state = receiver.mirrorDisplayState
-        Picker("Mirror Display", selection: Binding(
-            get: { state?.selectedUUID == nil ? "auto" : "manual" },
-            set: { newValue in
-                if newValue == "auto" {
-                    receiver.requestMirrorDisplaySelection(nil)
-                } else if let uuid = state?.selectedUUID ?? state?.displays.first?.uuid {
-                    receiver.requestMirrorDisplaySelection(uuid)
-                }
-            })) {
-            Text("Auto").tag("auto")
-            Text("Manual").tag("manual")
-        }
-        .disabled(!receiver.connected || state == nil)
-        if let state, state.selectedUUID != nil {
-            if state.displays.isEmpty {
-                Text("No displays reported.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(state.displays, id: \.uuid) { display in
-                    Button {
-                        receiver.requestMirrorDisplaySelection(display.uuid)
-                    } label: {
-                        HStack {
-                            Text(display.isMain ? String(localized: "\(display.name) (Main)", comment: "A display name, marked as the Mac's main display.") : display.name)
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            if state.selectedUUID == display.uuid {
-                                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
-                            }
-                        }
-                    }
-                }
-                if let selected = state.selectedUUID, !state.displays.contains(where: { $0.uuid == selected }) {
-                    Text("Selected display unavailable")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
-            }
-        }
-    }
-
-    /// Requests an Extend virtual-display shape change (PROTOCOL.md 6.7).
-    /// The Mac remains authoritative — this only requests; the shown value
-    /// always tracks `confirmedExtendShape`/`pendingExtendShape`, the same
-    /// request/confirm contract as `requestDisplayMode` above.
-    @ViewBuilder
-    private var extendShapePicker: some View {
-        if let confirmed = receiver.confirmedExtendShape {
-            let current = receiver.pendingExtendShape ?? confirmed
-            Picker("Extend Shape", selection: Binding(
-                get: { current.shape },
-                set: { shape in
-                    var preference = current
-                    preference.shape = shape
-                    receiver.requestExtendShape(preference)
-                })) {
-                ForEach(ExtendDisplayShape.allCases) { shape in
-                    Text(shape.title).tag(shape)
-                }
-            }
-            .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
-            if current.shape == .automatic {
-                Toggle("Use Full Display", isOn: Binding(
-                    get: { current.useFullDisplay },
-                    set: { value in
-                        var preference = current
-                        preference.useFullDisplay = value
-                        receiver.requestExtendShape(preference)
-                    }))
-                .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
-            }
-            if receiver.pendingExtendShape != nil {
-                LabeledContent("Updating Extend shape…") { ProgressView() }
-            }
-            if let text = fpsLimitationText {
-                Text(text)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        } else {
-            LabeledContent("Extend Shape", value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
-        }
-    }
-
-    /// PART 5/6 exact user-facing text, re-sent by the Mac on every capture
-    /// (re)start — including right after an Extend shape change — so this
-    /// updates with the picker rather than needing a manual refresh.
-    /// Derived entirely from `receiver.lastMaxFPSState` (the Mac's own
-    /// `EncoderCapability`/`StreamingFPSPolicy` result for the CURRENT final
-    /// encode size), never guessed from the shape/ratio alone. Nil (no text)
-    /// when nothing is actually limiting the request below what was asked.
-    private var fpsLimitationText: String? {
-        guard let state = receiver.lastMaxFPSState else { return nil }
-        if state.encoderSafeFPS >= state.requestedFPS {
-            return nil
-        }
-        return String(localized: "\(receiver.streamingProfile.label) requests \(state.requestedFPS) FPS. Limited to \(state.encoderSafeFPS) FPS at this display size.",
-                      comment: "The first value is a streaming profile name, such as Performance.")
-    }
-
-    @ViewBuilder
-    private var streamingProfileSection: some View {
-        Section("Streaming") {
-            let profileBinding = Binding<StreamingProfile>(
-                get: { receiver.streamingProfile },
-                set: { receiver.requestStreamingProfile($0, customFrameRate: receiver.customFrameRate) })
-            Picker("Streaming Profile", selection: profileBinding) {
-                ForEach(StreamingProfile.allCases) { profile in
-                    Text(profile.label).tag(profile)
-                }
-            }
-            Text(receiver.streamingProfile.explanation)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            if receiver.streamingProfile == .custom {
-                let frameRateBinding = Binding<CustomFrameRateSelection>(
-                    get: { receiver.customFrameRate },
-                    set: { receiver.requestStreamingProfile(.custom, customFrameRate: $0) })
-                Picker("Frame Rate", selection: frameRateBinding) {
-                    ForEach(CustomFrameRateSelection.allCases) { frameRate in
-                        Text(frameRate.label).tag(frameRate)
-                    }
-                }
-            }
-            let priorityBinding = Binding<StreamingPriority>(
-                get: { receiver.streamingPriority },
-                set: { receiver.requestStreamingPriority($0) })
-            Picker("Streaming Priority", selection: priorityBinding) {
-                ForEach(StreamingPriority.allCases) { priority in
-                    Text(priority.label).tag(priority)
-                }
-            }
-            Text(receiver.streamingPriority.explanation)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    /// PART 2/3/4/6: receiver-enforced max-FPS control, request/confirm-aware
-    /// same as `extendShapePicker` above — disabled while a request is in
-    /// flight, and the picker only offers tiers `receiver.lastMaxFPSState`
-    /// (the Mac's own capability/encoder calculation) says are actually
-    /// reachable right now.
-    @ViewBuilder
-    private var maxFPSSection: some View {
-        if receiver.macProtocolVersion >= WireProtocol.maxFPSWireVersion {
-            Section {
-                if let confirmed = receiver.confirmedMaxFPS {
-                    let current = receiver.pendingMaxFPS ?? confirmed
-                    Toggle("Enforce Maximum FPS", isOn: Binding(
-                        get: { current.enabled },
-                        set: { enabled in
-                            var preference = current
-                            preference.enabled = enabled
-                            receiver.requestMaxFPS(preference)
-                        }))
-                        .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
-                    if current.enabled {
-                        let tiers = MaxFPSPicker.tiers(reported: receiver.lastMaxFPSState?.availableTiers)
-                        Picker("Maximum FPS", selection: Binding(
-                            get: { MaxFPSPicker.selection(current, among: tiers) },
-                            set: { fps in
-                                var preference = current
-                                preference.maxFPS = fps
-                                receiver.requestMaxFPS(preference)
-                            })) {
-                            ForEach(tiers, id: \.self) { fps in
-                                Text("\(fps)").tag(fps)
-                            }
-                        }
-                        .disabled(!receiver.connected || receiver.pendingMaxFPS != nil)
-                    }
-                    if receiver.pendingMaxFPS != nil {
-                        LabeledContent("Updating Maximum FPS…") { ProgressView() }
-                    }
-                } else {
-                    LabeledContent("Maximum FPS", value: receiver.connected ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
-                }
-            } footer: {
-                Text("Caps how fast this Mac streams to this device, on top of its normal profile/display limits.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var landscapeTraySidePicker: some View {
-        Picker("Landscape Tray Side", selection: preferenceBinding(\.preferredLandscapeSide)) {
-            ForEach(LandscapeTraySide.allCases) { side in
-                Text(side.title).tag(side)
-            }
-        }
-        .pickerStyle(.segmented)
-    }
-
-    /// Why Picture in Picture can't run even though it's turned on, when
-    /// that reason is something other than simply waiting for live video.
-    private var pictureInPictureNote: String? {
-        switch pictureInPicture.availability {
-        case .unsupported:
-            return String(localized: "Picture in Picture isn’t supported on this device.")
-        case .requiresSystemVideoLayer:
-            return String(localized: "Unavailable while the experimental Metal renderer is on.")
-        case .available, .turnedOff, .waitingForVideo:
-            return nil
-        }
-    }
-
-    private func preferenceBinding<Value>(_ keyPath: WritableKeyPath<ReceiverControlPreferences, Value>) -> Binding<Value> {
-        Binding(get: { controlStore.preferences[keyPath: keyPath] },
-                set: { value in controlStore.update { $0[keyPath: keyPath] = value } })
-    }
-
-    private func avSyncOffsetLabel(_ ms: Int) -> String {
-        ms == 0 ? "0 ms" : (ms > 0 ? "+\(ms) ms" : "\(ms) ms")
-    }
-}
-
-/// The device-name editor, deliberately kept out of any high-frequency
-/// @ObservedObject so streaming updates can't rebuild it and steal focus.
-private struct DeviceNameField: View {
-    @AppStorage("deviceName") private var deviceName = UIDevice.current.name
-    @FocusState private var focused: Bool
-    let onChange: (String) -> Void
-
-    var body: some View {
-        TextField("Device name", text: $deviceName)
-            .textInputAutocapitalization(.words)
-            .autocorrectionDisabled()
-            .focused($focused)
-            .onChange(of: deviceName) { name in onChange(name) }
-    }
-}
-
 /// The receiver decode ceiling this build advertises via
 /// `hello.maxEncodeWide/High` (PROTOCOL.md 6.5). iOS has no public API that
 /// reports the VideoToolbox H.264 hardware decoder's actual pixel ceiling,
@@ -2127,6 +1888,8 @@ enum iOSDecodeCeiling {
 @MainActor
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
+    /// Window mode: this device's arrangement of Mac windows (PROTOCOL.md 6.10).
+    let workspace = WorkspaceModel()
     let wakeConnect: WakeConnectCoordinator
     let pictureInPicture: ReceiverPictureInPictureController
     private var started = false
@@ -2141,14 +1904,14 @@ final class ReceiverModel: ObservableObject {
                                   fallbackServiceName: UIDevice.current.name,
                                   maxEncodeWide: iOSDecodeCeiling.maxEncodeWide,
                                   maxEncodeHigh: iOSDecodeCeiling.maxEncodeHigh,
-                                  maxFPS: UIScreen.main.maximumFramesPerSecond)
+                                  maxFPS: ActiveScene.screen.maximumFramesPerSecond)
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
         // Announce the native panel size to the Mac.
-        let native = UIScreen.main.nativeBounds.size   // portrait pixels
+        let native = ActiveScene.screen.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
                                 short: Int(min(native.width, native.height)),
-                                scale: Double(UIScreen.main.nativeScale))
+                                scale: Double(ActiveScene.screen.nativeScale))
         let savedName = UserDefaults.standard.string(forKey: "deviceName")
         receiver.serviceName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
         receiver.objectWillChange
@@ -2156,6 +1919,27 @@ final class ReceiverModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         pictureInPicture.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        let workspace = self.workspace
+        receiver.workspaceEvents.set { [weak receiver] event in
+            workspace.apply(event)
+            receiver?.noteWorkspaceEvent(event)
+        }
+        workspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
+        workspace.clipboard.platform = IOSClipboardPlatform.shared
+        workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
+        workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        receiver.$connected
+            .removeDuplicates()
+            .filter { !$0 }
+            .sink { [weak receiver] _ in
+                workspace.apply(.disconnected)
+                receiver?.noteWorkspaceEvent(.disconnected)
+            }
+            .store(in: &cancellables)
+        workspace.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -2328,6 +2112,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// Smart Touch (Experimental), already ANDed with the Mac's support for
     /// it — see `PointerGestureEngine.smartTouchEnabled`.
     let smartTouchEnabled: Bool
+    /// Direct Touch style — see `DirectTouchStyle`.
+    let touchStyle: DirectTouchStyle
     /// Master remote-input gate (SETTINGS / ALLOW INPUT INVARIANTS). Belt-
     /// and-suspenders alongside the `.allowsHitTesting` gate `ReceiverScreen`
     /// applies to this whole view: that gate stops new touches from ever
@@ -2355,18 +2141,55 @@ struct VideoLayerView: UIViewRepresentable {
     /// reveal from any receiver-surface interaction, not only a tray touch.
     let onActivityBegan: () -> Void
     let onActivityEnded: () -> Void
+    /// Prefer MeowDisplay Gestures — see `ReceiverEditingInteractionPolicy`.
+    var preferMeowDisplayGestures = true
+    /// Move View: the surface navigates the local viewport instead of
+    /// controlling the Mac — see `ViewportNavigationSession`.
+    var moveViewActive = false
+    /// Bumped to reset the local viewport (Move View's Reset).
+    var viewportResetGeneration = 0
+    /// Local View Navigation — see `LocalViewNavigationPolicy`.
+    var allowLocalViewNavigation = true
+    /// Window mode's per-tile pinch/pan: (began, ended, isPinch, initial, current, scale) with
+    /// points normalized to the picture; returns whether a tile took the gesture.
+    var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
+    /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
+    /// Window mode: a touch landed here; true when it only selected another pane.
+    var onWorkspaceTouch: ((CGPoint) -> Bool)?
+    /// Window mode: the instant local zoom of the pane under the fingers, read after each pinch step.
+    var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
+    /// Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture).
+    var onWorkspaceViewReset: ((CGPoint) -> Void)?
+    var invertVerticalScroll = true
+    var invertHorizontalScroll = true
+    /// See `VideoView.onBlockedInputAttempt`.
+    var onBlockedInputAttempt: @MainActor () -> Void = {}
+    /// Window mode: three fingers held still open the window overview.
+    var threeFingerHoldEnabled = false
+    var onThreeFingerHold: () -> Void = {}
+    /// The hardware pointer over the picture (normalized), for tile hover.
+    var onHardwarePointer: (CGPoint?) -> Void = { _ in }
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.threeFingerHoldEnabled = threeFingerHoldEnabled
+        view.onThreeFingerHold = onThreeFingerHold
+        view.onHardwarePointer = onHardwarePointer
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
         view.setInputMode(inputMode)
         view.setTrackpadSensitivity(trackpadSensitivity)
         view.setSmartTouchEnabled(smartTouchEnabled)
+        view.setTouchStyle(touchStyle)
         view.setAllowInput(allowInput)
+        view.setLocalNavigationAllowed(allowLocalViewNavigation)
+        view.setWorkspacePinch(onWorkspacePinch)
+        view.workspaceTouch = onWorkspaceTouch
+        view.workspaceZoomPreview = workspaceZoomPreview
+        view.workspaceViewReset = onWorkspaceViewReset
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -2377,6 +2200,10 @@ struct VideoLayerView: UIViewRepresentable {
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
+        view.preferMeowDisplayGestures = preferMeowDisplayGestures
+        view.onBlockedInputAttempt = onBlockedInputAttempt
+        view.setScrollDirection(invertVertical: invertVerticalScroll, invertHorizontal: invertHorizontalScroll)
+        view.setViewportResetGeneration(viewportResetGeneration)
         receiver.onSmartTouchProbeResult = { [weak view] id, target in
             view?.resolveSmartTouchProbe(id: id, target: target)
         }
@@ -2403,6 +2230,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         view.inputEngine.normalize = { [weak view] point in view?.normalized(point) }
         view.inputEngine.onPencil = { [weak receiver, weak view] phase, x, y, pressure, azimuth, altitude in
+            guard view?.remoteInputAllowed == true else { return }
             // M4 typing-focus anchor: a real pencil touch-down counts as a
             // meaningful primary interaction; hover does not (PRODUCT RULE).
             if phase == "down" { view?.noteAnchorFromNormalized(x: x, y: y) }
@@ -2410,7 +2238,8 @@ struct VideoLayerView: UIViewRepresentable {
                                  pressure: pressure, azimuth: azimuth,
                                  altitude: altitude)
         }
-        view.inputEngine.onProximity = { [weak receiver] entering, x, y in
+        view.inputEngine.onProximity = { [weak receiver, weak view] entering, x, y in
+            guard view?.remoteInputAllowed == true else { return }
             receiver?.sendProximity(entering: entering, x: x, y: y)
         }
         view.inputEngine.install(on: view)
@@ -2462,6 +2291,8 @@ struct VideoLayerView: UIViewRepresentable {
         viewportDoubleTap.delegate = view
         view.viewportDoubleTapRecognizer = viewportDoubleTap
         view.addGestureRecognizer(viewportDoubleTap)
+        view.applyMultiFingerGate()
+        view.setMoveViewActive(moveViewActive)
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -2471,12 +2302,22 @@ struct VideoLayerView: UIViewRepresentable {
         receiver.onCursorImage = { [weak view] image, anchor, normSize in
             view?.setCursorSprite(image, anchor: anchor, normSize: normSize)
         }
+        receiver.onCursorPaneSize = { [weak view] size in
+            view?.setCursorPaneSize(size)
+        }
+        // The Mac's focused text caret steers Zoom While Typing while the
+        // keyboard is open. Not replayed: a new view starts with the
+        // keyboard closed, and the Mac sends the caret as it opens.
+        receiver.onTextCaret = { [weak view] caret in
+            view?.setTextCaret(caret)
+        }
         // Replay the sprite/position that arrived before this view existed
         // (first frames land after the connect-time sprite) or that the
         // previous view held (metal-renderer toggle rebuilds the view tree).
         if let sprite = receiver.cursorSprite {
             view.setCursorSprite(sprite.image, anchor: sprite.anchor, normSize: sprite.normSize)
         }
+        view.setCursorPaneSize(receiver.cursorPaneSize)
         let state = receiver.cursorState
         view.moveCursor(x: state.x, y: state.y, visible: state.visible)
         return view
@@ -2488,7 +2329,13 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
         uiView.setSmartTouchEnabled(smartTouchEnabled)
+        uiView.setTouchStyle(touchStyle)
         uiView.setAllowInput(allowInput)
+        uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
+        uiView.setWorkspacePinch(onWorkspacePinch)
+        uiView.workspaceTouch = onWorkspaceTouch
+        uiView.workspaceZoomPreview = workspaceZoomPreview
+        uiView.workspaceViewReset = onWorkspaceViewReset
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -2499,6 +2346,14 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
+        uiView.preferMeowDisplayGestures = preferMeowDisplayGestures
+        uiView.onBlockedInputAttempt = onBlockedInputAttempt
+        uiView.setScrollDirection(invertVertical: invertVerticalScroll, invertHorizontal: invertHorizontalScroll)
+        uiView.threeFingerHoldEnabled = threeFingerHoldEnabled
+        uiView.onThreeFingerHold = onThreeFingerHold
+        uiView.onHardwarePointer = onHardwarePointer
+        uiView.setMoveViewActive(moveViewActive)
+        uiView.setViewportResetGeneration(viewportResetGeneration)
         // videoSize arrives after the format description — re-fit the layers.
         uiView.setNeedsLayout()
     }
@@ -2518,6 +2373,105 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+
+        // MARK: Window mode and hardware pointer/keyboard (HID-B)
+
+        /// Window mode: a stationary three-finger hold opens the window overview.
+        var onThreeFingerHold: (() -> Void)?
+        /// The hardware pointer, normalized to the picture (nil outside it): the workspace's hover.
+        var onHardwarePointer: ((CGPoint?) -> Void)?
+        var threeFingerHoldEnabled = false {
+            didSet { threeFingerHoldRecognizer.isEnabled = threeFingerHoldEnabled && !UIAccessibility.isVoiceOverRunning }
+        }
+        private lazy var threeFingerHoldRecognizer: UILongPressGestureRecognizer = {
+            let r = UILongPressGestureRecognizer(target: self, action: #selector(threeFingerHeld(_:)))
+            r.numberOfTouchesRequired = 3
+            r.minimumPressDuration = 0.5
+            r.allowableMovement = 12
+            // The held touches are cancelled, so they never become a Mac gesture.
+            r.cancelsTouchesInView = true
+            r.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            r.isEnabled = false
+            return r
+        }()
+        private lazy var pointerHoverRecognizer: UIHoverGestureRecognizer = {
+            let r = UIHoverGestureRecognizer(target: self, action: #selector(pointerHovered(_:)))
+            r.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+            return r
+        }()
+        private lazy var pointerScrollRecognizer: UIPanGestureRecognizer = {
+            let r = UIPanGestureRecognizer(target: self, action: #selector(pointerScrolled(_:)))
+            r.allowedScrollTypesMask = .all
+            r.allowedTouchTypes = []   // wheel and trackpad scrolls only, never touches
+            return r
+        }()
+        private var heldPointerButtons: [ObjectIdentifier: PointerButton] = [:]
+        private var lastPointerScroll = CGPoint.zero
+        let hardwareKeyboard = HardwareKeyboardForwarder()
+
+        private func normalizedPicturePoint(_ p: CGPoint) -> CGPoint? {
+            guard let n = currentTransform.remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
+            return n
+        }
+
+        @objc private func threeFingerHeld(_ r: UILongPressGestureRecognizer) {
+            guard r.state == .began else { return }
+            clearInputStateForPause()
+            onThreeFingerHold?()
+        }
+
+        @objc private func pointerHovered(_ r: UIHoverGestureRecognizer) {
+            let n = (r.state == .ended || r.state == .cancelled) ? nil : normalizedPicturePoint(r.location(in: self))
+            onHardwarePointer?(n)
+            guard allowsInput, let n else { return }
+            receiver?.sendPointerMove(x: n.x, y: n.y)
+        }
+
+        @objc private func pointerScrolled(_ r: UIPanGestureRecognizer) {
+            guard allowsInput, let video = receiver?.videoSize, let scale = pointsPerRemotePixel(video: video), scale > 0 else { return }
+            if r.state == .began {
+                lastPointerScroll = .zero
+                if let n = normalizedPicturePoint(r.location(in: self)) { receiver?.sendPointerMove(x: n.x, y: n.y) }
+            }
+            let t = r.translation(in: self)
+            let d = CGPoint(x: t.x - lastPointerScroll.x, y: t.y - lastPointerScroll.y)
+            lastPointerScroll = t
+            if d != .zero { sendRemoteScroll(dx: d.x / scale, dy: d.y / scale) }
+        }
+
+        /// Mouse/trackpad clicks (UIApplicationSupportsIndirectInputEvents): real
+        /// pointer presses at the pointer, right button from the button mask,
+        /// the platform's click count; a drag stays a drag. Never the touch pipeline.
+        private func handlePointerTouches(_ touches: Set<UITouch>, _ event: UIEvent?) {
+            guard let receiver else { return }
+            for t in touches {
+                let key = ObjectIdentifier(t)
+                let location = t.location(in: self)
+                switch t.phase {
+                case .began:
+                    let n = normalizedPicturePoint(location)
+                    onHardwarePointer?(n)
+                    guard allowsInput, let n else { continue }
+                    let button: PointerButton = event?.buttonMask.contains(.secondary) == true ? .right : .left
+                    receiver.sendPointerMove(x: n.x, y: n.y)
+                    receiver.sendPointerDown(button: button, clickCount: max(t.tapCount, 1))
+                    heldPointerButtons[key] = button
+                case .moved:
+                    guard heldPointerButtons[key] != nil, let n = currentTransform.remotePoint(forView: location) else { continue }
+                    receiver.sendPointerMove(x: min(max(n.x, 0), 1), y: min(max(n.y, 0), 1))
+                default:
+                    if let button = heldPointerButtons.removeValue(forKey: key) {
+                        receiver.sendPointerUp(button: button, clickCount: max(t.tapCount, 1))
+                    }
+                }
+            }
+        }
+
+        private func releaseHardwareInput() {
+            for button in heldPointerButtons.values { receiver?.sendPointerUp(button: button, clickCount: 1) }
+            heldPointerButtons.removeAll()
+            hardwareKeyboard.releaseAll()
+        }
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
         fileprivate var twoFingerRecognizer: TwoFingerViewportGestureRecognizer?
@@ -2569,6 +2523,8 @@ struct VideoLayerView: UIViewRepresentable {
             return layer
         }()
         private var cursorNormSize = CGSize.zero
+        /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
+        private var cursorPaneSize: CursorPaneSize?
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
 
@@ -2591,7 +2547,16 @@ struct VideoLayerView: UIViewRepresentable {
         // Non-nil sub-rect of `bounds`, above the keyboard (including its
         // accessory view), while our keyboard is open and docked at the
         // bottom; nil whenever the keyboard is closed or not ours.
-        private var keyboardVisibleRect: CGRect?
+        private var keyboardVisibleRect: CGRect? {
+            didSet {
+                // A closed keyboard forgets the caret: the next session starts
+                // from the Mac's first reading, not a stale one.
+                if keyboardVisibleRect == nil {
+                    textCaret = nil
+                    lastCaretBase = nil
+                }
+            }
+        }
         var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
         /// Fired on every new touch beginning on the receiver surface —
         /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
@@ -2611,6 +2576,13 @@ struct VideoLayerView: UIViewRepresentable {
         // keyboard button, or a touch outside the rendered video (those
         // simply never call the note*Anchor* methods below).
         private var lastAnchor: CGPoint?
+        // The Mac's focused text caret, normalized to the remote display
+        // (`textCaret` wire message). While known it replaces the touch anchor
+        // as the typing focus, on both axes; `lastCaretBase` is the picture
+        // placement it produced, so it only moves once the caret leaves the
+        // comfortable inner region (`RemoteViewportCalculator.keyboardOpen`).
+        private var textCaret: CGRect?
+        private var lastCaretBase: CGRect?
         // True only while layoutSubviews is running inside the UIView.animate
         // block a keyboard-frame change (or a live preference toggle) drives
         // — lets the content layer's geometry inherit that animation instead
@@ -2656,9 +2628,18 @@ struct VideoLayerView: UIViewRepresentable {
             NotificationCenter.default.addObserver(
                 self, selector: #selector(keyboardWillChangeFrame(_:)),
                 name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(voiceOverStatusDidChange(_:)),
+                name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
             // The zoomed/panned content layer can extend beyond `bounds` —
             // clip it so it never bleeds into sibling SwiftUI content.
             clipsToBounds = true
+            // VoiceOver: the picture is one element. It takes no touches while
+            // VoiceOver runs unless the user turns on Direct Touch from its
+            // actions — see `ScreenReaderPictureTouch`.
+            isAccessibilityElement = true
+            accessibilityLabel = String(localized: "Mac screen")
+            refreshPictureAccessibility()
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
@@ -2670,6 +2651,15 @@ struct VideoLayerView: UIViewRepresentable {
             surfaceGridLayer.isHidden = true
             layer.insertSublayer(surfaceLayer, at: 0)
             layer.insertSublayer(surfaceGridLayer, above: surfaceLayer)
+            addGestureRecognizer(threeFingerHoldRecognizer)
+            addGestureRecognizer(pointerHoverRecognizer)
+            addGestureRecognizer(pointerScrollRecognizer)
+            hardwareKeyboard.receiver = { [weak self] in self?.receiver }
+            hardwareKeyboard.isActive = { [weak self] in
+                guard let self else { return false }
+                return self.allowsInput && !self.keyboardRequested && self.window != nil
+                    && UIApplication.shared.applicationState == .active
+            }
         }
 
         @available(*, unavailable)
@@ -2679,11 +2669,482 @@ struct VideoLayerView: UIViewRepresentable {
             NotificationCenter.default.removeObserver(self)
         }
 
+        /// The remote surface is not text: opt it out of the iPadOS
+        /// three-finger undo/redo/copy/paste editing gestures (and their
+        /// HUD), which otherwise compete with the three-finger Mac-system
+        /// recognizers below. Scoped to this view only, never app-wide.
+        ///
+        /// Only while Prefer MeowDisplay Gestures is on; off restores UIKit's
+        /// default behavior.
+        override var editingInteractionConfiguration: UIEditingInteractionConfiguration {
+            ReceiverEditingInteractionPolicy.suppressesEditingInteractions(
+                preferMeowDisplayGestures: preferMeowDisplayGestures) ? .none : super.editingInteractionConfiguration
+        }
+
+        var preferMeowDisplayGestures = true
+
+        // MARK: - Move View
+
+        private var moveViewActive = false
+        private var navigationSession = ViewportNavigationSession()
+        private var navigationTouches: [ObjectIdentifier: UITouch] = [:]
+        private var lastViewportResetGeneration: Int?
+
+        /// Entering Move View cancels whatever input was in flight — the
+        /// surface is about to stop talking to the Mac — and parks every
+        /// multi-finger recognizer (see `ReceiverMultiFingerGestureGate`).
+        func setMoveViewActive(_ active: Bool) {
+            guard active != moveViewActive else { return }
+            moveViewActive = active
+            navigationTouches.removeAll()
+            navigationSession.end()
+            if active { clearInputStateForPause() }
+            if multiFingerGate.update(viewportNavigationActive: active) { applyMultiFingerGate() }
+        }
+
+        /// Move View's Reset: back to exactly the normal presentation,
+        /// remembering the moved view for a two-finger double-tap restore.
+        func setViewportResetGeneration(_ generation: Int) {
+            defer { lastViewportResetGeneration = generation }
+            guard let last = lastViewportResetGeneration, last != generation, !manualZoom.isIdentity else { return }
+            manualZoomMemory = manualZoom
+            manualZoom = .identity
+            navigationSession.end()
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        /// While Move View is on, every touch drives the local viewport and
+        /// nothing reaches the Mac.
+        private func routeNavigationTouches(_ touches: Set<UITouch>, ended: Bool) {
+            for touch in touches {
+                let id = ObjectIdentifier(touch)
+                if ended { navigationTouches.removeValue(forKey: id) } else { navigationTouches[id] = touch }
+            }
+            guard videoEnabled, localNavigationAllowed, !navigationTouches.isEmpty else {
+                navigationSession.end()
+                return
+            }
+            let points = navigationTouches.values
+                .sorted { ObjectIdentifier($0).hashValue < ObjectIdentifier($1).hashValue }
+                .map { $0.location(in: self) }
+            let base = unzoomedBaseTransform().displayedRect
+            var next = navigationSession.update(points: points, current: manualZoom, base: base,
+                                                allowsZoom: true,
+                                                allowsRotation: rotateTarget == .viewport)
+            if rotateTarget == .viewport {
+                next.rotationRadians = ViewportRotationSnap.snappedAngle(next.rotationRadians,
+                                                                        enabled: snapRotation).angle
+            }
+            guard next != manualZoom else { return }
+            manualZoom = next
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+
+        // MARK: - Blocked input attempts
+
+        /// A touch sequence that was meant for the Mac but couldn't be sent
+        /// (input not allowed) — see `BlockedInputAttemptPolicy`. Local
+        /// two-finger navigation never counts.
+        var onBlockedInputAttempt: (@MainActor () -> Void)?
+        private var blockedSequenceMaxTouches = 0
+        private var blockedSequenceTouchIDs = Set<ObjectIdentifier>()
+
+        private func trackBlockedSequence(_ touches: Set<UITouch>, began: Bool, ended: Bool) {
+            guard !allowsInput else {
+                blockedSequenceTouchIDs.removeAll()
+                blockedSequenceMaxTouches = 0
+                blockedSequenceSelectedPane = false
+                return
+            }
+            let fingers = touches.filter { $0.type == .direct || $0.type == .pencil }
+            if began {
+                blockedSequenceTouchIDs.formUnion(fingers.map(ObjectIdentifier.init))
+                blockedSequenceMaxTouches = max(blockedSequenceMaxTouches, blockedSequenceTouchIDs.count)
+            }
+            guard ended else { return }
+            for touch in fingers { blockedSequenceTouchIDs.remove(ObjectIdentifier(touch)) }
+            guard blockedSequenceTouchIDs.isEmpty else { return }
+            if BlockedInputAttemptPolicy.isRemoteIntent(maximumTouchCount: blockedSequenceMaxTouches,
+                                                        moveViewActive: moveViewActive,
+                                                        selectedPane: blockedSequenceSelectedPane) {
+                onBlockedInputAttempt?()
+            }
+            blockedSequenceMaxTouches = 0
+            blockedSequenceSelectedPane = false
+        }
+
+        // MARK: - Scroll direction
+
+        private var invertVerticalScroll = true
+        private var invertHorizontalScroll = true
+
+        func setScrollDirection(invertVertical: Bool, invertHorizontal: Bool) {
+            invertVerticalScroll = invertVertical
+            invertHorizontalScroll = invertHorizontal
+        }
+
+        /// Every remote scroll (two-finger, momentum, Smart Touch/Trackpad)
+        /// goes through here, so the per-axis direction applies everywhere
+        /// and local viewport panning never does.
+        private func sendRemoteScroll(dx: CGFloat, dy: CGFloat) {
+            let directed = ScrollDirectionPolicy.apply(dx: Double(dx), dy: Double(dy),
+                                                       invertVertical: invertVerticalScroll,
+                                                       invertHorizontal: invertHorizontalScroll)
+            receiver?.sendScroll(dx: directed.dx, dy: directed.dy)
+        }
+
+        // MARK: - Local View Navigation
+
+        /// Pan/zoom/rotate/reset of the local view — independent of
+        /// `allowsInput`, which gates only what reaches the Mac. See
+        /// `LocalViewNavigationPolicy`.
+        private var localNavigationAllowed = true
+
+        fileprivate var remoteInputAllowed: Bool { allowsInput }
+
+        private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
+        var workspaceTouch: ((CGPoint) -> Bool)?
+        /// This touch sequence selected a pane: not an attempt at the Mac (no Request Control).
+        private var blockedSequenceSelectedPane = false
+        var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
+        var workspaceViewReset: ((CGPoint) -> Void)?
+        /// The current two-finger gesture belongs to a tile (decided when it begins).
+        private var workspaceGestureOwned = false
+        /// Hybrid zoom: a still of the picture, clipped to the pane and scaled by the fingers,
+        /// shown until the Mac's sharp frame has arrived.
+        private var zoomPreviewClip: UIView?
+        private var zoomPreviewStill: UIView?
+        private var zoomPreviewBackdrop: UIImageView?
+        private var zoomPreviewFade: DispatchWorkItem?
+        /// Window mode: a two-finger tap's right-click waits this long, so a two-finger
+        /// double-tap resets the pane instead of right-clicking the Mac twice.
+        private static let workspaceRightTapHold: TimeInterval = 0.25
+        private var heldRightTaps: [PointerCommand] = []
+        private var heldRightTapWork: DispatchWorkItem?
+        private var suppressRightTapsUntil: CFTimeInterval = 0
+
+        func setWorkspacePinch(_ handler: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?) {
+            let entering = workspacePinch == nil && handler != nil
+            workspacePinch = handler
+            if handler == nil {
+                workspaceGestureOwned = false
+                removeZoomPreview(animated: false)
+                flushHeldRightTaps()
+            }
+            if multiFingerGate.update(workspacePanes: handler != nil) { applyMultiFingerGate() }
+            // Entering Window mode: drop any whole-picture zoom so the picture lines up with its tiles.
+            if entering, !manualZoom.isIdentity {
+                manualZoom = .identity
+                navigationSession.end()
+                animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+            }
+        }
+
+        /// Window mode: a pinch (or a two-finger pan over a zoomed tile) goes to that tile.
+        /// Returns true when the tile owns this gesture and nothing else may act on it.
+        private func routeWorkspaceGesture(_ recognizer: TwoFingerViewportGestureRecognizer) -> Bool {
+            guard let workspacePinch, videoEnabled else { return false }
+            let base = unzoomedBaseTransform().displayedRect
+            guard base.width > 0, base.height > 0 else { return false }
+            func norm(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height) }
+            let pinch = recognizer.intent == .viewportZoomPan
+            // A twist turns the pane freely (degrees, clockwise), unless rotating is turned off.
+            let turn = pinch && rotateTarget != .disabled ? recognizer.rotationDelta * 180 / .pi : 0
+            switch recognizer.state {
+            case .began:
+                // A plain two-finger drag scrolls the Mac while this device controls it, even over a
+                // zoomed or filled pane (owner report 2026-10-31: it only panned). It moves the pane
+                // only in View Only (pan stays local), with Move View on, or as part of a pinch.
+                if WorkspaceTwoFingerPolicy.scrollsMac(isPinch: pinch, inputReachesMac: allowsInput, moveViewActive: moveViewActive) {
+                    workspaceGestureOwned = false
+                    return false
+                }
+                workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                                       pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
+                if workspaceGestureOwned { updateZoomPreview(base: base, began: true, ended: false) }
+                return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
+            case .changed:
+                guard workspaceGestureOwned else { return pinch }
+                _ = workspacePinch(false, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                   pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
+                updateZoomPreview(base: base, began: false, ended: false)
+                return true
+            default:
+                guard workspaceGestureOwned else { return pinch }
+                workspaceGestureOwned = false
+                _ = workspacePinch(false, true, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                                   pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
+                updateZoomPreview(base: base, began: false, ended: true)
+                return true
+            }
+        }
+
+        /// Instant zoom: the pane follows the fingers at once. The picture it showed when the gesture
+        /// began moves with them; where that picture doesn't reach (zooming out, panning past it) the
+        /// pane's whole-source still from the Mac shows instead of black. The live video takes over
+        /// once the Mac says a frame with this view is out.
+        private func updateZoomPreview(base: CGRect, began: Bool, ended: Bool) {
+            zoomPreviewFade?.cancel()
+            zoomPreviewFade = nil
+            if began { removeZoomPreview(animated: false) }
+            guard let live = workspaceZoomPreview?() else {
+                if ended { removeZoomPreview(animated: true) }
+                return
+            }
+            let p = live.preview
+            func view(_ r: WorkspaceRect) -> CGRect {
+                CGRect(x: base.minX + r.x * base.width, y: base.minY + r.y * base.height, width: r.width * base.width, height: r.height * base.height)
+            }
+            let pane = view(p.pane)
+            if zoomPreviewClip == nil {
+                // The still is taken before the Mac has had time to change the picture, and holds
+                // only this pane's source (zooming back out never shows a neighbour's picture).
+                guard let snapshot = snapshotView(afterScreenUpdates: false) else { return }
+                let clip = UIView(frame: pane)
+                clip.clipsToBounds = true
+                clip.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.08, alpha: 1)   // the Mac's pane background
+                clip.isUserInteractionEnabled = false
+                let backdrop = UIImageView()
+                backdrop.isUserInteractionEnabled = false
+                backdrop.contentMode = .scaleToFill
+                clip.addSubview(backdrop)
+                let still = UIView()
+                still.clipsToBounds = true
+                still.isUserInteractionEnabled = false
+                still.layer.anchorPoint = .zero
+                still.bounds = CGRect(origin: .zero, size: pane.size)
+                snapshot.frame = CGRect(origin: CGPoint(x: -pane.minX, y: -pane.minY), size: bounds.size)
+                // Only the part that showed the window: letterbox bars, and a turned picture's empty
+                // corners, never cover the still below.
+                if let quad = p.fromQuad, quad.count == 4 {
+                    let mask = CAShapeLayer()
+                    let path = UIBezierPath()
+                    for (i, q) in quad.enumerated() {
+                        let v = CGPoint(x: base.minX + q.x * base.width - pane.minX, y: base.minY + q.y * base.height - pane.minY)
+                        if i == 0 { path.move(to: v) } else { path.addLine(to: v) }
+                    }
+                    path.close()
+                    mask.path = path.cgPath
+                    mask.fillColor = UIColor.black.cgColor
+                    mask.frame = CGRect(origin: .zero, size: pane.size)
+                    still.layer.mask = mask
+                } else {
+                    let shown = view(p.from).intersection(pane).offsetBy(dx: -pane.minX, dy: -pane.minY)
+                    let mask = CALayer()
+                    mask.backgroundColor = UIColor.black.cgColor
+                    mask.frame = shown.isNull ? .zero : shown
+                    still.layer.mask = mask
+                }
+                still.addSubview(snapshot)
+                clip.addSubview(still)
+                addSubview(clip)
+                zoomPreviewClip = clip
+                zoomPreviewStill = still
+                zoomPreviewBackdrop = backdrop
+            }
+            guard let clip = zoomPreviewClip, let still = zoomPreviewStill else { return }
+            // In view points the picture moves by P' = L·P + m (a turn included); the still's (0,0) is
+            // the pane's corner. The picture's own axes differ in length, so the shear terms are rescaled.
+            let la = CGFloat(p.scaleX), ld = CGFloat(p.scaleY)
+            let lb = CGFloat(p.shearB) * base.height / base.width, lc = CGFloat(p.shearC) * base.width / base.height
+            let mx = base.minX + CGFloat(p.offsetX) * base.width - (la * base.minX + lc * base.minY)
+            let my = base.minY + CGFloat(p.offsetY) * base.height - (lb * base.minX + ld * base.minY)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            clip.alpha = 1
+            clip.frame = pane
+            if let backdrop = zoomPreviewBackdrop {
+                if let image = live.backdrop {
+                    if backdrop.image?.cgImage !== image { backdrop.image = UIImage(cgImage: image) }
+                    // The whole source where it is drawn now, turned like the pane.
+                    let target = view(p.source).offsetBy(dx: -pane.minX, dy: -pane.minY)
+                    let turned = p.rotation.isQuarterTurn
+                    backdrop.transform = .identity
+                    if let d = p.drawnSource {
+                        backdrop.bounds = CGRect(x: 0, y: 0, width: d.width * base.width, height: d.height * base.height)
+                    } else {
+                        backdrop.bounds = CGRect(x: 0, y: 0, width: turned ? target.height : target.width, height: turned ? target.width : target.height)
+                    }
+                    backdrop.center = CGPoint(x: target.midX, y: target.midY)
+                    backdrop.transform = CGAffineTransform(rotationAngle: CGFloat(p.rotation.rawValue) * .pi / 180)
+                    backdrop.isHidden = false
+                } else {
+                    backdrop.isHidden = true
+                }
+            }
+            still.transform = CGAffineTransform(a: la, b: lb, c: lc, d: ld, tx: 0, ty: 0)
+            still.layer.position = CGPoint(x: la * pane.minX + lc * pane.minY + mx - pane.minX,
+                                           y: lb * pane.minX + ld * pane.minY + my - pane.minY)
+            CATransaction.commit()
+            if ended { awaitComposedFrame(base: base, deadline: CACurrentMediaTime() + 1.5) }
+        }
+
+        /// After the fingers lift: keep the preview until the Mac's frame with the final view is out
+        /// (plus a frame or two for it to arrive and decode), then fade to the live video. Bounded.
+        private func awaitComposedFrame(base: CGRect, deadline: CFTimeInterval) {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.zoomPreviewClip != nil else { return }
+                let live = self.workspaceZoomPreview?()
+                if live?.composed ?? true || CACurrentMediaTime() > deadline {
+                    // Sharp catch-up after the fingers lift (the gesture itself is drawn locally at once).
+                    let waited = Int((CACurrentMediaTime() - (deadline - 1.5)) * 1000)
+                    Log.info("workspace: zoom sharp after \(waited) ms\(live?.composed ?? true ? "" : " (timed out)") backdrop=\(live?.backdrop != nil)")
+                    let settle = DispatchWorkItem { [weak self] in self?.removeZoomPreview(animated: true) }
+                    self.zoomPreviewFade = settle
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.07, execute: settle)
+                } else {
+                    // A late still still fills in while waiting.
+                    if live?.backdrop != nil, self.zoomPreviewBackdrop?.isHidden == true { self.updateZoomPreview(base: base, began: false, ended: false) }
+                    self.awaitComposedFrame(base: base, deadline: deadline)
+                }
+            }
+            zoomPreviewFade = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.033, execute: work)
+        }
+
+        private func removeZoomPreview(animated: Bool) {
+            zoomPreviewFade?.cancel()
+            zoomPreviewFade = nil
+            guard let clip = zoomPreviewClip else { return }
+            zoomPreviewClip = nil
+            zoomPreviewStill = nil
+            zoomPreviewBackdrop = nil
+            guard animated, !UIAccessibility.isReduceMotionEnabled else { clip.removeFromSuperview(); return }
+            UIView.animate(withDuration: 0.12, animations: { clip.alpha = 0 }, completion: { _ in clip.removeFromSuperview() })
+        }
+
+        func setLocalNavigationAllowed(_ allowed: Bool) {
+            guard allowed != localNavigationAllowed else { return }
+            localNavigationAllowed = allowed
+            if !allowed {
+                navigationTouches.removeAll()
+                navigationSession.end()
+                if !manualZoom.isIdentity {
+                    manualZoom = .identity
+                    animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+                }
+            }
+            updateInputGate()
+        }
+
+        private func updateInputGate() {
+            if multiFingerGate.update(remoteInputAllowed: allowsInput, localNavigationAllowed: localNavigationAllowed) {
+                applyMultiFingerGate()
+            }
+        }
+
+        // VoiceOver gate for every multi-finger recognizer — see
+        // `ReceiverMultiFingerGestureGate`.
+        private var multiFingerGate = ReceiverMultiFingerGestureGate(voiceOverRunning: false)
+
+        private func recognizer(for kind: ReceiverMultiFingerRecognizer) -> UIGestureRecognizer? {
+            switch kind {
+            case .twoFingerViewport: return twoFingerRecognizer
+            case .viewportDoubleTap: return viewportDoubleTapRecognizer
+            case .threeFingerSwipe: return threeFingerPanRecognizer
+            case .threeFingerTap: return threeFingerTapRecognizer
+            case .pinchSpread: return pinchSpreadGestureRecognizer
+            }
+        }
+
+        /// Called once the multi-finger recognizers are attached, and again
+        /// whenever VoiceOver starts or stops. Disabling a recognizer
+        /// mid-gesture cancels it, which its action already handles.
+        func applyMultiFingerGate() {
+            _ = multiFingerGate.update(voiceOverRunning: UIAccessibility.isVoiceOverRunning)
+            for kind in ReceiverMultiFingerRecognizer.allCases {
+                recognizer(for: kind)?.isEnabled = multiFingerGate.isEnabled(kind)
+            }
+        }
+
+        /// Forces `kind`'s recognizer to `.cancelled` (UIKit's `isEnabled`
+        /// toggle) and leaves it enabled only if the VoiceOver gate allows.
+        private func cancelRecognizer(_ kind: ReceiverMultiFingerRecognizer) {
+            guard let target = recognizer(for: kind) else { return }
+            target.isEnabled = false
+            target.isEnabled = multiFingerGate.isEnabled(kind)
+        }
+
+        @objc private func voiceOverStatusDidChange(_ note: Notification) {
+            if pictureTouch.update(screenReaderRunning: UIAccessibility.isVoiceOverRunning) {
+                if !pictureTouch.picturePassesTouches { clearInputStateForPause() }
+                refreshPictureAccessibility()
+            }
+            guard multiFingerGate.update(voiceOverRunning: UIAccessibility.isVoiceOverRunning) else { return }
+            applyMultiFingerGate()
+        }
+
+        // MARK: - Screen reader and the picture
+
+        private var pictureTouch = ScreenReaderPictureTouch(screenReaderRunning: UIAccessibility.isVoiceOverRunning)
+
+        /// While VoiceOver runs without Direct Touch, touches pass through
+        /// this view (nothing here sees them, so nothing reaches the Mac).
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            guard pictureTouch.picturePassesTouches else { return nil }
+            return super.hitTest(point, with: event)
+        }
+
+        /// A VoiceOver double tap must never become a tap at the picture's
+        /// centre (UIKit's fallback when this returns false).
+        override func accessibilityActivate() -> Bool {
+            UIAccessibility.post(notification: .announcement, argument: pictureTouch.directTouch
+                ? String(localized: "Direct Touch is on. Touch the picture to control the Mac.")
+                : String(localized: "To control the Mac by touch, choose Turn On Direct Touch from the actions. The keyboard and controls work without it."))
+            return true
+        }
+
+        private func setPictureDirectTouch(_ on: Bool) -> Bool {
+            guard pictureTouch.setDirectTouch(on) else { return false }
+            if !on { clearInputStateForPause() }
+            refreshPictureAccessibility()
+            UIAccessibility.post(notification: .announcement, argument: on
+                ? String(localized: "Direct Touch on. Touches on the picture go to the Mac. To stop, find Mac screen again and choose Turn Off Direct Touch.")
+                : String(localized: "Direct Touch off."))
+            return true
+        }
+
+        private func refreshPictureAccessibility() {
+            accessibilityTraits = pictureTouch.allowsDirectInteraction ? [.allowsDirectInteraction] : []
+            var value: [String] = []
+            if !allowsInput { value.append(String(localized: "Viewing only. Control is off.")) }
+            if pictureTouch.allowsDirectInteraction { value.append(String(localized: "Direct Touch on")) }
+            accessibilityValue = value.isEmpty ? nil : value.joined(separator: ". ")
+            accessibilityHint = pictureTouch.screenReaderRunning && !pictureTouch.directTouch
+                ? String(localized: "Touches here don't reach the Mac. Use the actions to turn on Direct Touch.")
+                : nil
+            if let turnsOn = pictureTouch.directTouchActionTurnsOn {
+                let name = turnsOn ? String(localized: "Turn On Direct Touch") : String(localized: "Turn Off Direct Touch")
+                accessibilityCustomActions = [UIAccessibilityCustomAction(name: name) { [weak self] _ in
+                    self?.setPictureDirectTouch(turnsOn) ?? false
+                }]
+            } else {
+                accessibilityCustomActions = nil
+            }
+        }
+
         func installVideoLayer(_ layer: CALayer) {
             videoLayer?.removeFromSuperlayer()
             videoLayer = layer
             videoContentView.layer.addSublayer(layer)
             setNeedsLayout()
+        }
+
+        /// The Mac's text caret changed (nil: none known). Re-targets the
+        /// open keyboard's viewport with the same short ease as an anchor change.
+        func setTextCaret(_ caret: CGRect?) {
+            guard caret != textCaret else { return }
+            guard keyboardVisibleRect != nil else {
+                textCaret = caret
+                return
+            }
+            // Most caret moves stay inside the comfortable region and leave
+            // the picture where it is: only animate a real change.
+            let before = unzoomedBaseTransform().displayedRect
+            textCaret = caret
+            guard unzoomedBaseTransform().displayedRect != before else { return }
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
         func setZoomWhileTyping(_ enabled: Bool) {
@@ -2728,6 +3189,14 @@ struct VideoLayerView: UIViewRepresentable {
             pointerEngine.smartTouchEnabled = enabled
         }
 
+        /// Natural Touch or Classic. Like `setInputMode`, cancels only the
+        /// gesture in flight (any held button is released); the session,
+        /// capture, input grant and workspace are untouched.
+        func setTouchStyle(_ style: DirectTouchStyle) {
+            guard style != pointerEngine.touchStyle else { return }
+            dispatchPointerCommands(pointerEngine.setTouchStyle(style))
+        }
+
         /// Plays Smart Touch hold feedback; the owner sets `isEnabled`.
         let smartTouchHaptics = SmartTouchHaptics()
 
@@ -2746,6 +3215,8 @@ struct VideoLayerView: UIViewRepresentable {
         func setAllowInput(_ allowed: Bool) {
             guard allowed != allowsInput else { return }
             allowsInput = allowed
+            refreshPictureAccessibility()
+            updateInputGate()
             guard !allowed else { return }
             clearInputStateForPause()
         }
@@ -2856,6 +3327,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         func clearInputStateForPause() {
+            releaseHardwareInput()
             twoFingerActive = false
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
@@ -2871,8 +3343,7 @@ struct VideoLayerView: UIViewRepresentable {
             // mid-deciding or already committed to — toggling `isEnabled`
             // is UIKit's standard way to force a recognizer to `.cancelled`
             // (same trick used elsewhere for gesture-ownership hand-off).
-            twoFingerRecognizer?.isEnabled = false
-            twoFingerRecognizer?.isEnabled = true
+            cancelRecognizer(.twoFingerViewport)
         }
 
         /// Releases any pointer-engine-held mouse button and forgets every
@@ -3002,11 +3473,15 @@ struct VideoLayerView: UIViewRepresentable {
                     displayedRect: rect)
             }
             if let keyboardVisibleRect {
-                return RemoteViewportCalculator.keyboardOpen(
+                let base = RemoteViewportCalculator.keyboardOpen(
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
-                    zoomEnabled: zoomWhileTypingEnabled)
+                    zoomEnabled: zoomWhileTypingEnabled,
+                    caret: textCaret, previous: lastCaretBase)
+                lastCaretBase = textCaret == nil ? nil : base.displayedRect
+                return base
             }
+            lastCaretBase = nil
             return RemoteViewportCalculator.normal(viewBounds: bounds, remoteAspectSize: video)
         }
 
@@ -3096,16 +3571,36 @@ struct VideoLayerView: UIViewRepresentable {
         /// (correctly) landing outside the clipped view when the Mac
         /// cursor itself is currently outside the visible crop.
         private func updateCursorLayout() {
-            guard currentTransform.isValid, cursorNormSize != .zero else { return }
+            guard currentTransform.isValid else { return }
             let displayedRect = currentTransform.displayedRect
             let crop = currentTransform.remoteCrop
             let scaleX = displayedRect.width / crop.width
             let scaleY = displayedRect.height / crop.height
-            cursorLayer.bounds = CGRect(x: 0, y: 0,
-                                        width: cursorNormSize.width * scaleX,
-                                        height: cursorNormSize.height * scaleY)
+            var size: CGSize
+            var paneTurn: CGFloat = 0
+            if let pane = cursorPaneSize {
+                // Window mode: sized by the pane under it (its Fit/Fill and zoom), so it keeps its
+                // shape in a pane of any shape; bounded so it stays visible in a small pane and
+                // doesn't swamp a zoomed one. Turned with the pane.
+                size = CGSize(width: pane.normSize.width * scaleX, height: pane.normSize.height * scaleY)
+                size = PaneCursorSizing.bounded(size)
+                paneTurn = CGFloat(pane.rotation) * .pi / 180
+            } else {
+                guard cursorNormSize != .zero else { return }
+                size = CGSize(width: cursorNormSize.width * scaleX, height: cursorNormSize.height * scaleY)
+            }
+            cursorLayer.bounds = CGRect(origin: .zero, size: size)
             cursorLayer.position = currentTransform.viewPoint(forRemote: cursorNorm)
-            cursorLayer.setAffineTransform(CGAffineTransform(rotationAngle: currentTransform.rotationRadians))
+            cursorLayer.setAffineTransform(CGAffineTransform(rotationAngle: currentTransform.rotationRadians + paneTurn))
+        }
+
+        func setCursorPaneSize(_ size: CursorPaneSize?) {
+            guard size != cursorPaneSize else { return }
+            cursorPaneSize = size
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updateCursorLayout()
+            CATransaction.commit()
         }
 
         // Maps a view-local point into normalized remote-display space
@@ -3224,6 +3719,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func takeGestureOwnershipAndSend(_ gesture: ReceiverGesture) {
+            guard allowsInput else { return }
             twoFingerActive = false
             cancelTouchForGestureOwnership()
             receiver?.sendGesture(name: gesture.rawValue)
@@ -3250,25 +3746,32 @@ struct VideoLayerView: UIViewRepresentable {
                      + "systemGestureSequenceOwned=\(systemGestureSequenceOwned)")
             #endif
             guard !systemGestureSequenceOwned else { return }
+            if routeWorkspaceGesture(recognizer) { return }
+            // Remote scroll and App Gesture Commands need Allow Input; the
+            // local viewport needs Local View Navigation.
+            let routes = TwoFingerRoutingPolicy.routes(
+                intent: recognizer.intent, remoteInputAllowed: allowsInput,
+                localNavigationAllowed: localNavigationAllowed, videoEnabled: videoEnabled,
+                pinchTarget: pinchTarget, rotateTarget: rotateTarget)
             switch recognizer.state {
             case .began:
                 switch recognizer.intent {
                 case .scroll:
-                    beginScroll(at: recognizer.midpoint)
+                    if routes.contains(.remoteScroll) { beginScroll(at: recognizer.midpoint) }
                 case .viewportZoomPan:
                     beginViewportManipulation()
-                    applyViewportPinchUpdate(recognizer)
-                    beginAppGesturesIfNeeded(recognizer)
+                    if routes.contains(.viewport) { applyViewportPinchUpdate(recognizer) }
+                    if routes.contains(.appCommands) { beginAppGesturesIfNeeded(recognizer) }
                 case .undecided:
                     break   // never begins while undecided — see the recognizer.
                 }
             case .changed:
                 switch recognizer.intent {
                 case .scroll:
-                    continueScroll(recognizer)
+                    if routes.contains(.remoteScroll) { continueScroll(recognizer) }
                 case .viewportZoomPan:
-                    applyViewportPinchUpdate(recognizer)
-                    updateAppGestures(recognizer)
+                    if routes.contains(.viewport) { applyViewportPinchUpdate(recognizer) }
+                    if routes.contains(.appCommands) { updateAppGestures(recognizer) }
                 case .undecided:
                     break
                 }
@@ -3434,7 +3937,7 @@ struct VideoLayerView: UIViewRepresentable {
             // Deltas in video pixels, natural-scrolling direction.
             let stepX = t.x - lastPan.x
             let stepY = t.y - lastPan.y
-            receiver?.sendScroll(dx: stepX / scale, dy: stepY / scale)
+            sendRemoteScroll(dx: stepX / scale, dy: stepY / scale)
             // Recorded in view points (pre-scale), matching the domain
             // `cancelScrollMomentum`/`beginScrollMomentum` convert from —
             // see `tickScrollMomentum`.
@@ -3465,7 +3968,7 @@ struct VideoLayerView: UIViewRepresentable {
             }
             let (delta, alive) = session.tick(now: CACurrentMediaTime())
             if delta.dx != 0 || delta.dy != 0 {
-                receiver?.sendScroll(dx: delta.dx / scale, dy: delta.dy / scale)
+                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale)
             }
             if !alive { cancelScrollMomentum() }
         }
@@ -3492,7 +3995,22 @@ struct VideoLayerView: UIViewRepresentable {
             // recognizer stays attached to a system gesture's leftover
             // touches too.
             guard !systemGestureSequenceOwned else { return }
-            guard recognizer.state == .ended, videoEnabled else { return }
+            if workspacePinch != nil {
+                // Window mode: reset the pane under the fingers; never a click on the Mac.
+                guard recognizer.state == .ended, videoEnabled, let workspaceViewReset else { return }
+                let base = unzoomedBaseTransform().displayedRect
+                guard base.width > 0, base.height > 0 else { return }
+                heldRightTapWork?.cancel()
+                heldRightTapWork = nil
+                heldRightTaps.removeAll()
+                // The engine may still be holding the second tap's right-click for its chain window.
+                suppressRightTapsUntil = CACurrentMediaTime() + PointerGestureConfig.tapChainWindow + 0.15
+                removeZoomPreview(animated: false)
+                let p = recognizer.location(in: self)
+                workspaceViewReset(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height))
+                return
+            }
+            guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
             let base = unzoomedBaseTransform().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
                 current: manualZoom, memory: manualZoomMemory, base: base) else { return }
@@ -3522,7 +4040,7 @@ struct VideoLayerView: UIViewRepresentable {
         private var pointerEngineOwnsAnchor: Bool {
             switch pointerEngine.mode {
             case .absolutePointer, .relativePointerSession, .leftDragHeld, .chordPending, .rightDragHeld,
-                 .smartScroll:
+                 .smartScroll, .touchConsumed:
                 return true
             case .twoFingerPending:
                 return pointerEngine.isChordContinuation
@@ -3803,6 +4321,9 @@ struct VideoLayerView: UIViewRepresentable {
                 }
                 let sample = PointerTouchSample(id: AnyHashable(ObjectIdentifier(touch)), phase: enginePhase,
                                                 viewPoint: viewPoint, normalized: norm, time: touch.timestamp)
+                // Natural Touch scrolls without a Smart Touch probe, so its
+                // velocity history starts clean at each fresh touch-down.
+                if sample.phase == .began, pointerEngine.mode == .idle { scrollVelocityTracker.reset() }
                 let commands = pointerEngine.handle(sample)
                 dispatchPointerCommands(commands)
                 // The single-finger primary press is the M4 typing-focus
@@ -3815,7 +4336,37 @@ struct VideoLayerView: UIViewRepresentable {
             schedulePointerPoll()
         }
 
-        private func dispatchPointerCommands(_ commands: [PointerCommand]) {
+        private func flushHeldRightTaps() {
+            heldRightTapWork?.cancel()
+            heldRightTapWork = nil
+            guard !heldRightTaps.isEmpty else { return }
+            let held = heldRightTaps
+            heldRightTaps.removeAll()
+            dispatchPointerCommands(held, holdingRightTaps: false)
+        }
+
+        /// A whole right-click (down and up), as a two-finger tap produces it.
+        private static func isRightTap(_ commands: [PointerCommand]) -> Bool {
+            guard let down = commands.firstIndex(where: {
+                if case .mouseDown(button: .right, clickCount: _) = $0 { return true } else { return false }
+            }) else { return false }
+            return commands[down...].contains {
+                if case .mouseUp(button: .right, clickCount: _) = $0 { return true } else { return false }
+            }
+        }
+
+        private func dispatchPointerCommands(_ commands: [PointerCommand], holdingRightTaps: Bool = true) {
+            if holdingRightTaps, workspacePinch != nil, Self.isRightTap(commands) {
+                guard CACurrentMediaTime() >= suppressRightTapsUntil else { return }
+                heldRightTaps += commands
+                heldRightTapWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.flushHeldRightTaps() }
+                heldRightTapWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.workspaceRightTapHold, execute: work)
+                return
+            }
+            // Anything else keeps its order after a right-click still waiting.
+            if holdingRightTaps, !commands.isEmpty, !heldRightTaps.isEmpty { flushHeldRightTaps() }
             #if DEBUG
             // Checkpoint D — remove once root-caused.
             if !commands.isEmpty {
@@ -3842,8 +4393,7 @@ struct VideoLayerView: UIViewRepresentable {
                         // Preempt the legacy scroll/pinch recognizer from
                         // also claiming these same two touches — see
                         // `PointerGestureEngine.isChordContinuation`'s doc.
-                        twoFingerRecognizer?.isEnabled = false
-                        twoFingerRecognizer?.isEnabled = true
+                        cancelRecognizer(.twoFingerViewport)
                     }
                 case .mouseUp(let button, let clickCount):
                     receiver.sendPointerUp(button: button, clickCount: clickCount)
@@ -3856,7 +4406,7 @@ struct VideoLayerView: UIViewRepresentable {
                     // Same units, direction, and momentum sampling as the
                     // two-finger scroll path (`continueScroll`).
                     guard let scale = pointsPerRemotePixel(video: video) else { continue }
-                    receiver.sendScroll(dx: dx / scale, dy: dy / scale)
+                    sendRemoteScroll(dx: CGFloat(dx) / scale, dy: CGFloat(dy) / scale)
                     scrollVelocityTracker.record(dx: CGFloat(dx), dy: CGFloat(dy), at: CACurrentMediaTime())
                 case .scrollEnded(let momentum):
                     if momentum {
@@ -3914,6 +4464,11 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func routeTouches(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?, ended: Bool) {
+            // With Allow Input off the surface may still receive touches for
+            // Local View Navigation (the two-finger and double-tap
+            // recognizers see them independently), but nothing from here
+            // on — pointer, touch, Pencil — may reach the Mac.
+            guard allowsInput else { return }
             #if DEBUG
             // TEMP diagnostic for the "all input dead" regression report —
             // remove once root-caused. Checkpoint A/B: confirms touches are
@@ -3980,10 +4535,8 @@ struct VideoLayerView: UIViewRepresentable {
                 }
                 if recognizerResetPending, activeFingerTouchIDs.isEmpty {
                     recognizerResetPending = false
-                    twoFingerRecognizer?.isEnabled = false
-                    twoFingerRecognizer?.isEnabled = true
-                    viewportDoubleTapRecognizer?.isEnabled = false
-                    viewportDoubleTapRecognizer?.isEnabled = true
+                    cancelRecognizer(.twoFingerViewport)
+                    cancelRecognizer(.viewportDoubleTap)
                 }
                 for touch in touches { surfaceAdmission.end(ObjectIdentifier(touch)) }
             }
@@ -3999,6 +4552,25 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
+            if let workspaceTouch, let first = touches.first {
+                let base = unzoomedBaseTransform().displayedRect
+                if base.width > 0, base.height > 0 {
+                    let p = first.location(in: self)
+                    if workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)) {
+                        blockedSequenceSelectedPane = true
+                    }
+                }
+            }
+            trackBlockedSequence(touches, began: true, ended: false)
+            if moveViewActive {
+                onActivityBegan?()
+                routeNavigationTouches(touches, ended: false)
+                return
+            }
             // Any new touch beginning — pointer, chord, pinch, system
             // gesture, or a fresh scroll's own first samples — cancels a
             // still-coasting momentum phase immediately (PRODUCT RULE:
@@ -4012,9 +4584,27 @@ struct VideoLayerView: UIViewRepresentable {
             routeTouches("began", touches, event, ended: false)
         }
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
+            if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
+                routeNavigationTouches(touches, ended: false)
+                return
+            }
             routeTouches("moved", touches, event, ended: false)
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
+            trackBlockedSequence(touches, began: false, ended: true)
+            if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
+                routeNavigationTouches(touches, ended: true)
+                if navigationTouches.isEmpty { onActivityEnded?() }
+                return
+            }
             routeTouches("ended", touches, event, ended: true)
             // Only once every finger has actually lifted — not per-touch in
             // a multi-finger gesture — is it safe to restart Auto-hide's
@@ -4022,6 +4612,16 @@ struct VideoLayerView: UIViewRepresentable {
             if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            let pointer = touches.filter { $0.type == .indirectPointer }
+            if !pointer.isEmpty { handlePointerTouches(pointer, event) }
+            let touches = touches.subtracting(pointer)
+            guard !touches.isEmpty else { return }
+            trackBlockedSequence(touches, began: false, ended: true)
+            if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
+                routeNavigationTouches(touches, ended: true)
+                if navigationTouches.isEmpty { onActivityEnded?() }
+                return
+            }
             routeTouches("cancelled", touches, event, ended: true)
             if activeFingerTouchIDs.isEmpty { onActivityEnded?() }
         }
@@ -4457,4 +5057,161 @@ final class InputCaptureEngine: NSObject {
                             pressure: Double, azimuth: Double, altitude: Double) {
         onPencil?(phase, x, y, pressure, azimuth, altitude)
     }
+}
+
+/// The small Request Control affordance on the receiver
+/// surface — see `ReceiverInputPrompt`.
+/// The screen this app's scene is on (foldables, external displays, Stage
+/// Manager) rather than `UIScreen.main`, which only names the built-in panel.
+@MainActor
+enum ActiveScene {
+    static var windowScene: UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    }
+
+    /// Falls back to the main screen only before any scene has connected.
+    static var screen: UIScreen { windowScene?.screen ?? UIScreen.main }
+}
+
+/// Full-desktop view: a small yes/no offer to switch to Window view.
+private struct WindowModePrompt: View {
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    let onYes: () -> Void
+    let onNo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.split.2x1")
+                .accessibilityHidden(true)
+            Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+            Button("Yes", action: onYes)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .accessibilityIdentifier("windowModePromptYes")
+                .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
+            Button("No", action: onNo)
+                .font(.subheadline)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .tint(.white)
+                .accessibilityIdentifier("windowModePromptNo")
+        }
+        .foregroundStyle(.white)
+        .padding(.leading, 16).padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+        .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+        // It sits over the Mac's menu bar: unanswered, it leaves by itself (as No).
+        // Not while VoiceOver is running: reading it and finding the buttons takes longer than 8 seconds.
+        .task {
+            guard !voiceOverEnabled else { return }
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            if !Task.isCancelled { onNo() }
+        }
+    }
+}
+
+private struct InputPromptButton: View {
+    let kind: ReceiverInputPrompt.Kind
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if kind == .requesting {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: symbol)
+                }
+                // The longest title ("This Mac isn't accepting control requests")
+                // fits one line from a 375 pt phone; on a narrower screen it wraps.
+                Text(title).font(.subheadline.weight(.semibold)).multilineTextAlignment(.center)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .disabled(!isActionable)
+        .accessibilityHint(isActionable ? Text("Asks your Mac to let this device control it.") : Text(""))
+        // Control granted or refused arrives without any action on this device: say it.
+        .onChange(of: kind) { new in
+            if new == .enabled || new == .unavailable {
+                UIAccessibility.post(notification: .announcement, argument: title)
+            }
+        }
+    }
+
+    private var isActionable: Bool { kind == .requestInput || kind == .enableInput }
+
+    private var title: String {
+        switch kind {
+        case .enableInput: return String(localized: "Request Control")
+        case .requestInput: return String(localized: "Request Control")
+        case .requesting: return String(localized: "Requesting Control…")
+        case .enabled: return String(localized: "Control Allowed")
+        case .unavailable: return String(localized: "This Mac isn't accepting control requests")
+        }
+    }
+
+    private var symbol: String {
+        switch kind {
+        case .enableInput, .requestInput: return "hand.tap"
+        case .requesting: return "hourglass"
+        case .enabled: return "checkmark.circle.fill"
+        case .unavailable: return "hand.raised.slash"
+        }
+    }
+}
+
+
+/// One-time note after Natural Touch became the default: what changed and
+/// where Classic is. Shown once; dismissed by the button or after a while.
+struct NaturalTouchHint: View {
+    let onDone: () -> Void
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "hand.tap")
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Natural Touch is on")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("Swipe to scroll, press then move to drag, touch and hold to right-click. To use Classic, go to Settings → Input.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("OK", action: onDone)
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("naturalTouchHintOK")
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("naturalTouchHint")
+        .task {
+            // With VoiceOver the note stays until OK is activated; it takes longer to read.
+            guard !voiceOverEnabled else { return }
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            onDone()
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

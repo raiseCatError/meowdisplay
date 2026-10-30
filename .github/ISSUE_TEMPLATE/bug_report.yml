@@ -100,4 +100,4 @@ body:
     id: logs
     attributes:
       label: Logs and screenshots
-      description: Mac Logs or the iOS Connection log help a lot. Remove private endpoints, identifiers, device names and personal content first.
+      description: Mac Logs or the iOS Connection Log help a lot. Remove private endpoints, identifiers, device names and personal content first.

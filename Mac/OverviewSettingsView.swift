@@ -9,6 +9,7 @@ struct OverviewSettingsView: View {
     let onOpenDisplays: () -> Void
     let onOpenDevices: () -> Void
     let onOpenSystem: () -> Void
+    let onOpenDisplayRole: () -> Void
 
     var body: some View {
         Form {
@@ -103,6 +104,7 @@ struct OverviewSettingsView: View {
                     }
                 }
             }
+            DisplayRoleSection(controller: controller, onOpenSettings: onOpenDisplayRole)
         }
         .formStyle(.grouped)
     }

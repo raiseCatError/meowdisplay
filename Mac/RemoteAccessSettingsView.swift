@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Release-visible Remote Access settings: lets someone connect to an
@@ -36,6 +37,10 @@ struct RemoteAccessSettingsView: View {
                 RemoteEndpointEditorView(controller: controller)
             }
 
+            Section("Tailscale") {
+                TailscaleThisMacView()
+            }
+
             #if DEBUG
             Section("Manual Endpoint (DEBUG)") {
                 RemoteEndpointDebugView(controller: controller)
@@ -67,7 +72,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
-        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
     }
 
     private var statusText: String? {
@@ -118,6 +123,11 @@ struct RemoteEndpointEditorView: View {
                     Text(statusText).font(.caption).foregroundStyle(.secondary)
                 }
 
+                TailscaleSuggestionsView(deviceName: pairedPeers.first { $0.peerID == peerID }?.displayName ?? "") { suggested in
+                    host = suggested
+                    port = String(WireCrypto.remoteRequestPort)
+                }
+
                 HStack {
                     Button("Save") { save() }
                         .disabled(peerID.isEmpty)
@@ -134,7 +144,7 @@ struct RemoteEndpointEditorView: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) else {
             host = ""
             port = String(WireCrypto.remoteRequestPort)
             return
@@ -146,11 +156,11 @@ struct RemoteEndpointEditorView: View {
     private func save() {
         switch RemoteEndpointValidation.validate(host: host, port: port) {
         case .success(let value):
-            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
+            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .sender)
             // Read back from the canonical store rather than trusting the
             // local write — if persistence actually failed, show that
             // instead of claiming success.
-            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
+            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender),
                   readBack.host == value.host, readBack.port == value.port else {
                 errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
@@ -170,7 +180,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private func remove() {
-        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .sender)
         host = ""
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil
@@ -179,5 +189,102 @@ struct RemoteEndpointEditorView: View {
 
     private func connect() {
         controller.connect(to: .remote(peerID: peerID), userInitiated: true)
+    }
+}
+
+
+/// This Mac's own Tailscale name and address, to enter on an iPhone, iPad or
+/// Android device as its Remote address. Read only when asked.
+private struct TailscaleThisMacView: View {
+    @State private var outcome: TailscaleCLI.Outcome?
+    @State private var checking = false
+
+    var body: some View {
+        Text("If this Mac and your device both use Tailscale, enter this Mac's Tailscale name on the device (Remote Access → Add Remote Mac). MeowDisplay reads Tailscale's status only when you check, and never changes Tailscale.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        switch outcome {
+        case .status(let status):
+            if let node = status.selfNode {
+                if let dns = node.dnsName { copyRow("MagicDNS name", dns) }
+                if let ipv4 = node.ipv4 { copyRow("Tailscale IPv4", ipv4) }
+            } else {
+                Text("Tailscale is running but didn't report this Mac.").font(.caption).foregroundStyle(.secondary)
+            }
+        case .notInstalled:
+            Text("Tailscale isn't installed on this Mac. You can still enter any private-network address by hand.").font(.caption).foregroundStyle(.secondary)
+        case .unavailable:
+            Text("Tailscale isn't running or is signed out. Start it, then check again.").font(.caption).foregroundStyle(.secondary)
+        case nil:
+            EmptyView()
+        }
+        Button(checking ? "Checking…" : "Check Tailscale") {
+            checking = true
+            Task { outcome = await TailscaleCLI.status(); checking = false }
+        }
+        .disabled(checking)
+        .controlSize(.small)
+    }
+
+    private func copyRow(_ title: String, _ value: String) -> some View {
+        LabeledContent(title) {
+            HStack {
+                Text(value).textSelection(.enabled).font(.body.monospaced())
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(value, forType: .string)
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+}
+
+/// Tailnet peers that could be the selected paired device, to fill its Remote
+/// host. Choosing one only fills the field: nothing is saved until Save, and
+/// the address never replaces the pairing that authenticates every session.
+private struct TailscaleSuggestionsView: View {
+    let deviceName: String
+    let onUse: (String) -> Void
+    @State private var outcome: TailscaleCLI.Outcome?
+    @State private var checking = false
+
+    var body: some View {
+        HStack {
+            Button(checking ? "Looking…" : "Find on Tailscale") {
+                checking = true
+                Task { outcome = await TailscaleCLI.status(); checking = false }
+            }
+            .disabled(checking)
+            .controlSize(.small)
+            Spacer()
+        }
+        switch outcome {
+        case .status(let status):
+            let candidates = Array(status.candidates(forDeviceNamed: deviceName).prefix(6))
+            if candidates.isEmpty {
+                Text("No phone, tablet or Mac on your tailnet. Install Tailscale on the device and sign in to the same tailnet.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(candidates) { node in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(node.hostName == "localhost" ? (node.dnsName?.components(separatedBy: ".").first ?? node.hostName) : node.hostName)
+                        Text([node.preferredHost, node.os, node.online ? String(localized: "online") : String(localized: "offline")]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let host = node.preferredHost {
+                        Button("Use") { onUse(host) }.controlSize(.small)
+                    }
+                }
+            }
+        case .notInstalled:
+            Text("Tailscale isn't installed on this Mac.").font(.caption).foregroundStyle(.secondary)
+        case .unavailable:
+            Text("Tailscale isn't running or is signed out.").font(.caption).foregroundStyle(.secondary)
+        case nil:
+            EmptyView()
+        }
     }
 }

@@ -362,6 +362,9 @@ final class TLSListenerState: @unchecked Sendable {
     /// tears down the secure TCP listener reaches QUIC through the same
     /// owner — the two can never follow different lifecycles.
     let quic = QUICReceiverContext()
+    /// The receiver ports whose bind failed, shared by the TLS and pairing
+    /// listeners for the same reason `quic` lives here.
+    let ports = ReceiverPortHealth()
 
     func hasCurrent() -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -373,9 +376,29 @@ final class TLSListenerState: @unchecked Sendable {
         return current
     }
 
-    func install(_ listener: NWListener) {
+    /// Set once by `StreamReceiver.stop()`: this receiver is finished, so
+    /// a retry scheduled before the stop (after a failed bind, for example)
+    /// must never open a listener again.
+    private var retired = false
+
+    func retire() {
         lock.lock(); defer { lock.unlock() }
+        retired = true
+    }
+
+    func isRetired() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    /// Installs `listener` as current, or refuses (and returns `false`) once
+    /// retired; the caller then drops the listener without starting it.
+    @discardableResult
+    func install(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return false }
         current = listener
+        return true
     }
 
     /// Exact `===` identity check — no generation token, matching the
@@ -406,6 +429,53 @@ final class TLSListenerState: @unchecked Sendable {
     }
 }
 
+/// A receiver port whose listener couldn't bind, as the bind reported it.
+struct ReceiverPortFailure: Equatable, Sendable {
+    let port: UInt16
+    /// Something else holds the port (another user's receiver, another app).
+    let addressInUse: Bool
+}
+
+/// Which receiver ports are failing to bind right now — the final word when
+/// something the Mac receiver's ownership lock can't see (a receiver in
+/// another login session, an unrelated app) holds 9001 or 9002. The TLS and
+/// pairing listeners record a failure and clear it once ready; their
+/// existing retries are unchanged and end when the receiver is retired.
+/// Same lock idiom as `TLSListenerState`; `observer` runs outside the lock.
+final class ReceiverPortHealth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: [UInt16: ReceiverPortFailure] = [:]
+    private var observer: (@Sendable ([ReceiverPortFailure]) -> Void)?
+
+    func setObserver(_ observer: @escaping @Sendable ([ReceiverPortFailure]) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        self.observer = observer
+    }
+
+    func record(port: UInt16, error: NWError) {
+        var addressInUse = false
+        if case .posix(let code) = error, code == .EADDRINUSE { addressInUse = true }
+        update(port, ReceiverPortFailure(port: port, addressInUse: addressInUse))
+    }
+
+    func clear(port: UInt16) { update(port, nil) }
+
+    func current() -> [ReceiverPortFailure] {
+        lock.lock(); defer { lock.unlock() }
+        return failures.values.sorted { $0.port < $1.port }
+    }
+
+    private func update(_ port: UInt16, _ failure: ReceiverPortFailure?) {
+        lock.lock()
+        guard failures[port] != failure else { lock.unlock(); return }
+        failures[port] = failure
+        let snapshot = failures.values.sorted { $0.port < $1.port }
+        let observer = self.observer
+        lock.unlock()
+        observer?(snapshot)
+    }
+}
+
 /// Lock-protected sole authoritative owner of the currently installed
 /// pairing listener's identity — nothing more. Same shape as
 /// `TLSListenerState` above (a plain reference swap under the lock, `===`
@@ -422,9 +492,29 @@ final class PairingListenerState: @unchecked Sendable {
         return current != nil
     }
 
-    func install(_ listener: NWListener) {
+    /// Set once by `StreamReceiver.stop()`: this receiver is finished, so
+    /// a retry scheduled before the stop (after a failed bind, for example)
+    /// must never open a listener again.
+    private var retired = false
+
+    func retire() {
         lock.lock(); defer { lock.unlock() }
+        retired = true
+    }
+
+    func isRetired() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    /// Installs `listener` as current, or refuses (and returns `false`) once
+    /// retired; the caller then drops the listener without starting it.
+    @discardableResult
+    func install(_ listener: NWListener) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return false }
         current = listener
+        return true
     }
 
     /// Exact `===` identity check — matches the original
@@ -437,6 +527,17 @@ final class PairingListenerState: @unchecked Sendable {
     func currentListener() -> NWListener? {
         lock.lock(); defer { lock.unlock() }
         return current
+    }
+
+    /// Clears the stored reference only if it is still exactly `listener`,
+    /// as `TLSListenerState.clearIfCurrent`.
+    @discardableResult
+    func clearIfCurrent(_ listener: NWListener) -> Bool {
+        lock.lock()
+        let matched = current === listener
+        if matched { current = nil }
+        lock.unlock()
+        return matched
     }
 
     func cancelCurrent() {
@@ -665,6 +766,8 @@ final class StreamReceiver: ObservableObject {
     /// frame) arrives.
     @MainActor @Published private(set) var activeStreamCodec: StreamCodec = .h264
     @MainActor @Published var connected = false
+    /// The paired Mac of the current session (nil when not connected).
+    @MainActor var connectedMacPeerID: String? { connected ? reconnectContext.current().authenticatedPeerIDHint : nil }
     @MainActor @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @MainActor @Published private(set) var displayState = DisplayState.running
     @MainActor @Published private(set) var videoEnabled = true
@@ -768,12 +871,15 @@ final class StreamReceiver: ObservableObject {
     /// Wake & Connect on top of them — always bypass it. iOS's Home screen
     /// and Settings both bind this same published property, so the two stay
     /// in sync with no separate storage.
-    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: "autoReconnectEnabled") == nil
-        || UserDefaults.standard.bool(forKey: "autoReconnectEnabled") {
+    static let autoReconnectKey = ReceiverRoleConfiguration.defaultsKey("autoReconnectEnabled")
+    // The unified Mac app's sender role owns the plain key (its own
+    // Auto-Reconnect), so the receiver role's is scoped there.
+    @Published var autoReconnectEnabled = UserDefaults.standard.object(forKey: StreamReceiver.autoReconnectKey) == nil
+        || UserDefaults.standard.bool(forKey: StreamReceiver.autoReconnectKey) {
         didSet {
             guard autoReconnectEnabled != oldValue else { return }
             reconnectContext.update { $0.autoReconnectPreferenceEnabled = autoReconnectEnabled }
-            UserDefaults.standard.set(autoReconnectEnabled, forKey: "autoReconnectEnabled")
+            UserDefaults.standard.set(autoReconnectEnabled, forKey: Self.autoReconnectKey)
             Log.info("reconnectPolicy: autoReconnect enabled=\(autoReconnectEnabled)")
             if autoReconnectEnabled {
                 Log.info("reconnectPolicy: reenabled reevaluatingAvailability")
@@ -801,6 +907,26 @@ final class StreamReceiver: ObservableObject {
     /// instead of capturing `self` — see `ReceiverUISink`'s file header.
     /// `target` is wired weakly in `init` below.
     private let uiSink = ReceiverUISink()
+    /// Window workspaces (PROTOCOL.md 6.10): parsed here, delivered on the main actor.
+    let workspaceEvents = WorkspaceEventSink()
+    /// The connected Mac offers Window mode / has confirmed it for this device.
+    @MainActor @Published private(set) var macOffersWindows = false
+    @MainActor @Published private(set) var windowModeActive = false
+    /// The connected Mac advertised `textCaret` in its welcome features: it
+    /// follows the focused text caret for Zoom While Typing (PROTOCOL.md 6.11).
+    @MainActor private(set) var macSupportsTextCaret = false
+
+    @MainActor
+    func noteWorkspaceEvent(_ event: WorkspaceEvent) {
+        switch event {
+        case .features(let features):
+            macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
+            macSupportsTextCaret = features.contains(TextCaretWire.welcomeFeature)
+        case .mode(let window): windowModeActive = window
+        case .disconnected: macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
+        default: break
+        }
+    }
 
     /// UI-layer seam keeps this shared receiver free of UIKit/SwiftUI.
     var onReceiverUIPreferences: ((ReceiverUIPreferenceUpdate) -> Void)?
@@ -1072,6 +1198,9 @@ final class StreamReceiver: ObservableObject {
     private var pairingObservation: AnyCancellable?
     private let pairingSuppressionState = PairingSuppressionState()
     @MainActor @Published private(set) var discoveredMacs: [NWBrowser.Result] = []
+    /// Receiver ports that are failing to bind (`ReceiverPortHealth`), so
+    /// the UI can say a port is taken instead of only "Waiting for a Mac…".
+    @MainActor @Published private(set) var portFailures: [ReceiverPortFailure] = []
     private var macPairingBrowser: NWBrowser?
     /// Bumped only after a pairing (any transport) truly finalized: both
     /// confirmations, commit exchange and the TrustStore pin. Drives the
@@ -1102,6 +1231,7 @@ final class StreamReceiver: ObservableObject {
     // must not.
     private var advertisesAddresses: Bool { deviceKind == "Mac" }
     private var lastCursorSeq: UInt64 = 0
+    private var lastTextCaretSeq: UInt64 = 0
     #if DEBUG
     private var lastCursorPositionTraceAt = Date.distantPast
     /// Throttled to once every 2s — cursor position updates can arrive at
@@ -1216,6 +1346,10 @@ final class StreamReceiver: ObservableObject {
     // and normalized coordinates use a TOP-LEFT origin (video space).
     var onCursor: ((_ x: Double, _ y: Double, _ visible: Bool) -> Void)?
     var onCursorImage: ((_ image: CGImage, _ anchor: CGPoint, _ normSize: CGSize) -> Void)?
+    /// Window mode: the cursor sprite's size in the pane under it (normalized to the picture) and
+    /// that pane's rotation; nil in Mirror/Extend, where the sprite's own `normSize` applies.
+    var onCursorPaneSize: ((CursorPaneSize?) -> Void)?
+    private(set) var cursorPaneSize: CursorPaneSize?
     var onDisplayStateChange: ((DisplayState) -> Void)?
     // The video view attaches only once frames are on screen — usually AFTER
     // the connect-time sprite already arrived (the sender re-sends it only
@@ -1224,6 +1358,11 @@ final class StreamReceiver: ObservableObject {
     // them. Main-thread, like the callbacks.
     @MainActor private(set) var cursorState: (x: Double, y: Double, visible: Bool) = (0.5, 0.5, false)
     @MainActor private(set) var cursorSprite: (image: CGImage, anchor: CGPoint, normSize: CGSize)?
+    /// The Mac's focused text caret, normalized to the streamed display
+    /// (`nil` = unknown). Main-thread like the cursor; a late-attaching view
+    /// replays `textCaret`.
+    var onTextCaret: ((_ caret: CGRect?) -> Void)?
+    @MainActor private(set) var textCaret: CGRect?
 
     // Metal renderer path (experimental, "metalRenderer" setting): we decode
     // explicitly and hand BGRA buffers out; called on the receiver queue.
@@ -1463,7 +1602,7 @@ final class StreamReceiver: ObservableObject {
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
          maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil, maxFPS: Int? = nil,
-         isPeerPinned: @escaping @Sendable (String) -> Bool = { TrustStore.shared.hasPin(peerID: $0) }) {
+         isPeerPinned: @escaping @Sendable (String) -> Bool = { TrustStore.receiverRole.hasPin(peerID: $0) }) {
         self.displayLayer = displayLayer
         self.deviceKind = deviceKind
         self.fallbackServiceName = fallbackServiceName
@@ -1494,9 +1633,13 @@ final class StreamReceiver: ObservableObject {
         selfBox.install(self)
         let helloState = self.helloState
         tlsListenerState.quic.setAvailabilityObserver { helloState.setQUICAvailable($0) }
+        let uiSink = self.uiSink
+        tlsListenerState.ports.setObserver { failures in
+            DispatchQueue.main.async { uiSink.publishPortFailures(failures) }
+        }
         uiSink.target = self
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
-        pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
+        pairingPrompt.trustPinLookup = { TrustStore.receiverRole.pin(peerID: $0) }
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1516,7 +1659,7 @@ final class StreamReceiver: ObservableObject {
         let advertisedProtocolVersion = self.advertisedProtocolVersion
         let selfBox = self.selfBox
         queue.async {
-            TrustStore.shared.refreshSnapshot()
+            TrustStore.receiverRole.refreshSnapshot()
             Self.startTLSListener(
                 queue: queue, tlsListenerState: tlsListenerState,
                 pairingSuppressionState: pairingSuppressionState,
@@ -1534,6 +1677,12 @@ final class StreamReceiver: ObservableObject {
     /// app calls this when the user leaves receiver mode or quits; the
     /// instance is discarded afterwards (start() re-arms if it isn't).
     func stop(completion: (@Sendable () -> Void)? = nil) {
+        // Final: no listener of this receiver may open again, even from a
+        // retry already scheduled. The close below still cancels the open
+        // ones after "closing" has gone out.
+        tlsListenerState.retire()
+        tlsListenerState.quic.retire()
+        pairingListenerState.retire()
         let pipeline = self.pipeline
         Task { await pipeline.teardownForStop() }
         let selfBox = self.selfBox
@@ -1546,11 +1695,20 @@ final class StreamReceiver: ObservableObject {
     }
 
     func forgetPeer(_ peerID: String) {
-        TrustStore.shared.forget(peerID: peerID)
-        IncomingSessionPolicyStore.removePolicy(peerID: peerID)
+        Self.removeStoredTrust(peerID: peerID)
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishLastForgottenPeerID(peerID) }
         revokeSessionAuthority(peerID: peerID, trustRemoved: true)
+    }
+
+    /// What Forget removes from storage: the receiver role's pin for the
+    /// peer and its per-peer preferences. `forgetPeer` also revokes live
+    /// authority; with no receiver running (the unified Mac app's display
+    /// role turned off) there is none, and this alone is a complete Forget.
+    static func removeStoredTrust(peerID: String) {
+        TrustStore.receiverRole.forget(peerID: peerID)
+        IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
+        InputAutoRequestStore.remove(peerID: peerID)
     }
 
     /// The per-Mac Connection Requests override (`IncomingSessionPolicyPicker`).
@@ -1560,7 +1718,7 @@ final class StreamReceiver: ObservableObject {
     /// acceptance, or this device's own pending request can no longer admit
     /// that Mac.
     func setIncomingSessionPolicy(_ policy: IncomingSessionPeerPolicy?, peerID: String) {
-        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID)
+        IncomingSessionPolicyStore.setPolicy(policy, peerID: peerID, role: .receiverRole)
         guard policy == .blocked else { return }
         Log.info("sessionInvite: blocked peer=\(peerID)")
         revokeSessionAuthority(peerID: peerID, trustRemoved: false)
@@ -1580,6 +1738,7 @@ final class StreamReceiver: ObservableObject {
         let selfBox = self.selfBox
         queue.async {
             if let receiver = selfBox.currentOnQueue() {
+                if receiver.preApprovedInvitation?.peerID == peerID { receiver.preApprovedInvitation = nil }
                 receiver.revokeSessionNegotiation(peerID: peerID, answering: trustRemoved ? .declined : .blocked)
                 receiver.withdrawOutgoingSessionRequest(covering: peerID, requestWithdrawn: withdrawnRequestID != nil)
             }
@@ -1624,7 +1783,8 @@ final class StreamReceiver: ObservableObject {
                 let paired = try await PairingNetwork.runInitiator(
                     connection: connection, localID: Self.installID,
                     localName: serviceName, prompt: pairingPrompt,
-                    expectedPeerID: expectedPeerID, allowIdentityChange: false)
+                    expectedPeerID: expectedPeerID, allowIdentityChange: false,
+                    store: .receiverRole)
                 pairingPrompt.finish(String(localized: "Paired with \(paired.peerName)"))
                 notePairingSucceeded()
                 finishExplicitPairing(success: true)
@@ -1676,6 +1836,7 @@ final class StreamReceiver: ObservableObject {
                     localName: serviceName, prompt: pairingPrompt,
                     allowIdentityChange: false, isCurrent: { validity.isValid },
                     remoteHost: endpoint.host, attemptToken: token,
+                    store: .receiverRole,
                     onHandshakeReached: { handshakeReached.set() })
                 Log.info("remotePairing: attempt generation=\(generation) completed peer=\(paired.peerID)")
                 scheduleTLSListenerRefresh()
@@ -1782,9 +1943,35 @@ final class StreamReceiver: ObservableObject {
         return "Mac"
     }
 
+    /// The Nearby list arranged by Mac: several login sessions of one Mac
+    /// that opted in are grouped under it (`NearbyMacDirectory`). Grouping
+    /// and labels come from unauthenticated TXT hints and never affect
+    /// trust; every row still pairs and connects as its own sender.
+    @MainActor var nearbyMacGroups: [NearbyMacGroup] {
+        NearbyMacDirectory.groups(from: discoveredMacs.compactMap { result in
+            guard case .service(let name, _, _, _) = result.endpoint else { return nil }
+            guard case .bonjour(let txt) = result.metadata else { return .init(serviceName: name, txt: [:]) }
+            return .init(serviceName: name, txt: txt.dictionary)
+        })
+    }
+
+    /// The discovery result a `NearbyMacSession` row stands for.
+    @MainActor func discoveredMac(_ session: NearbyMacSession) -> NWBrowser.Result? {
+        discoveredMacs.first { pairingMacName($0) == session.serviceName }
+    }
+
+    /// One result's row title ("Mac — Alex" for an opted-in session) and
+    /// whether that login session is switched out, for flat lists.
+    @MainActor func nearbyMacSummary(_ result: NWBrowser.Result) -> (title: String, availability: MacLoginSessionAvailability) {
+        let txt: [String: String]
+        if case .bonjour(let record) = result.metadata { txt = record.dictionary } else { txt = [:] }
+        let group = NearbyMacDirectory.groups(from: [.init(serviceName: pairingMacName(result), txt: txt)]).first
+        return (group?.title ?? pairingMacName(result), group?.sessions.first?.availability ?? .available)
+    }
+
     func pairingMacIsPaired(_ result: NWBrowser.Result) -> Bool {
         guard case .bonjour(let txt) = result.metadata, let id = txt["id"] else { return false }
-        return TrustStore.shared.hasPin(peerID: id)
+        return TrustStore.receiverRole.hasPin(peerID: id)
     }
 
     /// The peer install ID a discovered Mac's Bonjour TXT record advertises —
@@ -2085,10 +2272,10 @@ final class StreamReceiver: ObservableObject {
     /// the `pipeline` actor reference, `queue`, and plain wire-identity
     /// values, so its `newConnectionHandler`/`stateUpdateHandler`/retry
     /// closures below carry the same zero-`StreamReceiver` capture graph.
-    /// Trust material stays live and self-free via `TrustStore.shared`/
+    /// Trust material stays live and self-free via `TrustStore.receiverRole`/
     /// `TLSConfigurator` (both already self-free singletons/statics) — in
     /// particular `pinnedSPKIs` stays a live closure calling
-    /// `TrustStore.shared.allPinnedPeerSPKIs()` at handshake time, never a
+    /// `TrustStore.receiverRole.allPinnedPeerSPKIs()` at handshake time, never a
     /// snapshotted array, so a pin added mid-session is honored without a
     /// listener rebuild. The `guard !hasCurrent()` and `install(_:)` below
     /// happen synchronously with no `await`/`Task`/queue hop between them,
@@ -2100,16 +2287,16 @@ final class StreamReceiver: ObservableObject {
     ) {
         // The QUIC sibling first: it keeps its own "already listening" guard,
         // so this also re-arms QUIC whenever the TLS listener is re-armed.
-        if let identity = TrustStore.shared.ownIdentity() {
+        if let identity = TrustStore.receiverRole.ownIdentity() {
             QUICReceiverListener.startIfNeeded(
                 context: tlsListenerState.quic, identity: identity, queue: queue,
                 pairingSuppressionState: pairingSuppressionState, advertisementState: advertisementState,
                 pipeline: pipeline, installID: installID, advertisedProtocolVersion: advertisedProtocolVersion)
         }
-        guard !tlsListenerState.hasCurrent(), let identity = TrustStore.shared.ownIdentity(),
+        guard !tlsListenerState.hasCurrent(), let identity = TrustStore.receiverRole.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
-                pinnedSPKIs: { TrustStore.shared.allPinnedPeerSPKIs() },
+                pinnedSPKIs: { TrustStore.receiverRole.allPinnedPeerSPKIs() },
                 isListener: true, queue: queue) else {
             Log.info("secure listener unavailable — refusing network media")
             return
@@ -2122,7 +2309,7 @@ final class StreamReceiver: ObservableObject {
             params.serviceClass = .interactiveVideo
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.tlsPort)!)
-            tlsListenerState.install(listener)
+            guard tlsListenerState.install(listener) else { return }
             listener.service = advertisementState.mediaService(
                 installID: installID, protocolVersion: advertisedProtocolVersion)
             listener.newConnectionHandler = { [weak listener] connection in
@@ -2150,9 +2337,11 @@ final class StreamReceiver: ObservableObject {
                 switch state {
                 case .ready:
                     Log.info("reconnectDebug: listenerReady TLS port=\(WireCrypto.tlsPort)")
+                    tlsListenerState.ports.clear(port: WireCrypto.tlsPort)
                 case .failed(let error):
                     Log.info("secure listener failed: \(error)")
                     guard let listener, tlsListenerState.clearIfCurrent(listener) else { return }
+                    tlsListenerState.ports.record(port: WireCrypto.tlsPort, error: error)
                     // Fixed short backoff: mirrors the plaintext listener's
                     // retry cadence and avoids a busy loop if the port stays
                     // unavailable for a moment (e.g. right after a sleep/wake
@@ -2233,7 +2422,7 @@ final class StreamReceiver: ObservableObject {
             params.allowLocalEndpointReuse = true
             let listener = try NWListener(using: params,
                 on: NWEndpoint.Port(rawValue: WireCrypto.pairingPort)!)
-            pairingListenerState.install(listener)
+            guard pairingListenerState.install(listener) else { return }
             listener.service = advertisedPairingService
             #if DEBUG
             Log.info("pairing listener starting: type=_opendisplay-pair._tcp port=\(WireCrypto.pairingPort) id=\(Self.installID) peerToPeer=true")
@@ -2246,7 +2435,8 @@ final class StreamReceiver: ObservableObject {
                     do {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: installID,
-                            localName: localName, prompt: prompt, allowIdentityChange: false)
+                            localName: localName, prompt: prompt, allowIdentityChange: false,
+                            store: .receiverRole)
                         await prompt.finish(String(localized: "Paired with \(paired.peerName)"))
                         await uiSink.publishPairingSucceeded()
                         Self.finishExplicitPairing(
@@ -2267,16 +2457,30 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             }
-            listener.stateUpdateHandler = { state in
-                #if DEBUG
+            let selfBox = self.selfBox
+            listener.stateUpdateHandler = { [weak listener] state in
                 switch state {
-                case .ready: Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
-                case .failed(let error): Log.info("pairing listener failed: \(error)")
+                case .failed(let error):
+                    Log.info("pairing listener failed: \(error)")
+                    // Same recovery as the TLS listener: a port that was
+                    // busy (another receiver, a sleep/wake rebind) is tried
+                    // again, so pairing comes back with the media listener.
+                    guard let listener, pairingListenerState.clearIfCurrent(listener) else { return }
+                    tlsListenerState.ports.record(port: WireCrypto.pairingPort, error: error)
+                    queue.asyncAfter(deadline: .now() + 1) {
+                        selfBox.currentOnQueue()?.startPairingListener()
+                    }
+                case .ready:
+                    tlsListenerState.ports.clear(port: WireCrypto.pairingPort)
+                    #if DEBUG
+                    Log.info("pairing listener ready: port=\(WireCrypto.pairingPort) type=_opendisplay-pair._tcp")
+                    #endif
+                #if DEBUG
                 case .waiting(let error): Log.info("pairing listener waiting: \(error)")
                 case .cancelled: Log.info("pairing listener cancelled")
+                #endif
                 default: break
                 }
-                #endif
             }
             listener.start(queue: queue)
         } catch {
@@ -2329,15 +2533,32 @@ final class StreamReceiver: ObservableObject {
     /// adopt`, not from here — see `ReceiverFramePipeline`'s file header.
     private func beginAdoptionHostWork(_ conn: NWConnection, generation: Int) {
         resetSessionNegotiation()
+        if let pre = preApprovedInvitation, pre.conn !== conn { preApprovedInvitation = nil }
+        // F2: a Mac still waiting for its answer keeps its prompt across another
+        // connection's adoption; once it is the session itself, its replayed
+        // invitation is judged on the normal path.
+        if let held = heldNewcomerApproval {
+            if held.conn === conn {
+                heldNewcomerApproval = nil
+            } else {
+                _ = incomingSessionApprovals.begin(held.approval)
+                publishSessionNegotiation(awaitingSenderName: nil)
+            }
+        }
         mediaAdmissionGate.begin(generation: generation)
         resetStreamState()
         receivedVideoEnabled = true
         lastCursorSeq = 0   // the sender restarts its cursor sequence per session
+        lastTextCaretSeq = 0
+        cursorPointSize = nil; cursorPaneScale = nil; publishedCursorPaneSize = nil
         // Hide the previous sender's cursor: replayed into a fresh video view
         // it would ghost over a new sender that never sends one (mirror mode
         // hides no local cursor and streams no sprite).
         let uiSink = self.uiSink
-        DispatchQueue.main.async { uiSink.publishCursorReset() }
+        DispatchQueue.main.async {
+            uiSink.publishCursorReset()
+            uiSink.publishTextCaret(nil)
+        }
     }
 
     /// The host-only half of the former `onReady` closure: everything except
@@ -2439,7 +2660,7 @@ final class StreamReceiver: ObservableObject {
         // TLS metadata for TCP, QUIC metadata for a QUIC Control stream —
         // the same pinned SPKI either way (`TLSConfigurator`).
         guard let spki = TLSConfigurator.authenticatedPeerSPKI(of: connection) else { return nil }
-        return TrustStore.shared.peerID(forSPKI: spki)
+        return TrustStore.receiverRole.peerID(forSPKI: spki)
     }
 
     // MARK: - Liveness (ping + watchdog)
@@ -2450,6 +2671,9 @@ final class StreamReceiver: ObservableObject {
     // above; ping and the watchdog need nothing else from the host.
 
     /// JSON on the video channel (pong, ping liveness) — payloads starting '{'.
+    /// `queue` only: large control messages arriving in parts (PROTOCOL.md 6.14).
+    private var chunkAssembler = ControlChunkAssembler()
+
     private func handleVideoChannelJSON(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
@@ -2463,6 +2687,17 @@ final class StreamReceiver: ObservableObject {
         // Sendable pipeline actor directly rather than through `self.pipeline`.
         let pipeline = self.pipeline
         switch type {
+        case ControlChunkWire.type:
+            // A message too long for one control frame, in parts (PROTOCOL.md 6.14).
+            switch chunkAssembler.add(obj, now: CACurrentMediaTime()) {
+            case .pending: break
+            case .complete(let whole):
+                // Never a chunk inside a chunk.
+                guard (try? JSONSerialization.jsonObject(with: whole) as? [String: Any])?["type"] as? String != ControlChunkWire.type else { return }
+                handleVideoChannelJSON(whole)
+            case .dropped(let why):
+                Log.info("control chunk dropped: \(why)")
+            }
         case "pong":
             guard let t1 = obj["t"] as? Double, let mt = obj["mt"] as? Double else { return }
             let t2 = nowMs
@@ -2492,6 +2727,8 @@ final class StreamReceiver: ObservableObject {
             macCapFps = obj["capFps"] as? Int ?? macCapFps
         case "cursor":
             applyCursor(obj)
+        case WireMessage.textCaret:
+            applyTextCaret(obj)
         case "cursorImg":
             guard let b64 = obj["png"] as? String,
                   let png = Data(base64Encoded: b64),
@@ -2505,6 +2742,12 @@ final class StreamReceiver: ObservableObject {
             }
             let anchor = CGPoint(x: obj["ax"] as? Double ?? 0, y: obj["ay"] as? Double ?? 0)
             let normSize = CGSize(width: nw, height: nh)
+            if let pw = obj["pw"] as? Double, let ph = obj["ph"] as? Double, pw > 0, ph > 0, pw < 1024, ph < 1024 {
+                cursorPointSize = CGSize(width: pw, height: ph)
+            } else {
+                cursorPointSize = nil
+            }
+            publishCursorPaneSizeIfChanged()
             #if DEBUG
             Log.info("cursorTrace: cursorImg received bytes=\(png.count) nw=\(nw) nh=\(nh) anchor=\(anchor)")
             #endif
@@ -2523,6 +2766,7 @@ final class StreamReceiver: ObservableObject {
             if state == .paused { resetAudioPlayback() }
             publishDisplayState(state)
         case WireMessage.displayModeState:
+            if let raw = obj["mode"] as? String { workspaceEvents.emit(.mode(window: raw == WindowWorkspaceWire.mode)) }
             guard let rawMode = obj["mode"] as? String,
                   let mode = ReceiverDisplayMode(rawValue: rawMode) else { return }
             DispatchQueue.main.async { uiSink.publishConfirmedDisplayMode(mode) }
@@ -2554,6 +2798,10 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
+            workspaceEvents.emit(.features(Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })))
+            if let shield = obj["privacyShield"] as? Bool { workspaceEvents.emit(.privacyShield(shield)) }
+            // Who uses this Mac, for the peer that completed mutual TLS only (absent: hidden on the Mac).
+            PairedMacUserName.record(obj["user"] as? String, peerID: reconnectContext.current().authenticatedPeerIDHint)
             if macPV < WireProtocol.sessionInvitationWireVersion {
                 admitLegacySenderOrClose()
             }
@@ -2602,7 +2850,7 @@ final class StreamReceiver: ObservableObject {
                                         subnetMask: obj["subnet"] as? String,
                                         broadcastAddress: obj["broadcast"] as? String,
                                         updatedAt: Date())
-            WakeMetadataStore.setMetadata(metadata, forPeerID: peerID)
+            WakeMetadataStore.setMetadata(metadata, forPeerID: peerID, role: .receiverRole)
         case WireMessage.promoteInteractiveWakeResult:
             let text: String
             if obj["success"] as? Bool == true {
@@ -2670,7 +2918,7 @@ final class StreamReceiver: ObservableObject {
             Log.info("effective codec: \(update.codec.wireValue) reason: \(update.reason)")
             DispatchQueue.main.async { uiSink.publishActiveStreamCodec(update.codec) }
         default:
-            break
+            if let event = WorkspaceEvent.parse(type: type, obj) { workspaceEvents.emit(event) }
         }
     }
 
@@ -2680,6 +2928,23 @@ final class StreamReceiver: ObservableObject {
     /// channel switch a TCP frame queued behind video would otherwise land
     /// after (and override) a newer UDP position. Old senders put no `s` on
     /// TCP frames; those apply unconditionally, as before.
+    /// `queue` only. Window mode sizes the cursor sprite from its size in Mac points and the
+    /// scale of the pane under it, never from the Mac display's shape (the canvas has another).
+    private var cursorPointSize: CGSize?
+    private var cursorPaneScale: (kx: Double, ky: Double, rotation: Int)?
+    private var publishedCursorPaneSize: CursorPaneSize?
+
+    private func publishCursorPaneSizeIfChanged() {
+        var next: CursorPaneSize?
+        if let s = cursorPaneScale, let p = cursorPointSize {
+            next = CursorPaneSize(normSize: CGSize(width: p.width * s.kx, height: p.height * s.ky), rotation: s.rotation)
+        }
+        guard next != publishedCursorPaneSize else { return }
+        publishedCursorPaneSize = next
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishCursorPaneSize(next) }
+    }
+
     private func applyCursor(_ obj: [String: Any]) {
         if let seq = (obj["s"] as? NSNumber)?.uint64Value {
             guard seq > lastCursorSeq else { return }
@@ -2688,12 +2953,35 @@ final class StreamReceiver: ObservableObject {
         let visible = (obj["v"] as? Int ?? 0) == 1
         let x = obj["x"] as? Double ?? 0
         let y = obj["y"] as? Double ?? 0
+        if visible {
+            // Window mode: the pane's scale and rotation under the cursor (absent in Mirror/Extend).
+            if let kx = obj["kx"] as? Double, let ky = obj["ky"] as? Double, kx > 0, ky > 0, kx < 1, ky < 1 {
+                cursorPaneScale = (kx, ky, (obj["r"] as? Int).map { (($0 % 360) + 360) % 360 } ?? 0)
+            } else {
+                cursorPaneScale = nil
+            }
+            publishCursorPaneSizeIfChanged()
+        }
         cursorUpdatesThisWindow += 1
         #if DEBUG
         logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
         #endif
         let uiSink = self.uiSink
         DispatchQueue.main.async { uiSink.publishCursorPosition(x: x, y: y, visible: visible) }
+    }
+
+    /// The Mac's focused text caret (PROTOCOL.md 6.11). Malformed frames and
+    /// reordered ones (sequence not newer) are dropped; the main actor gets
+    /// the rectangle, or nil for "no caret".
+    private func applyTextCaret(_ obj: [String: Any]) {
+        guard let update = TextCaretWire.parse(obj) else { return }
+        if let seq = update.sequence {
+            guard seq > lastTextCaretSeq else { return }
+            lastTextCaretSeq = seq
+        }
+        let uiSink = self.uiSink
+        let rect = update.rect
+        DispatchQueue.main.async { uiSink.publishTextCaret(rect) }
     }
 
     private func resetStreamState() {
@@ -2775,6 +3063,10 @@ final class StreamReceiver: ObservableObject {
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
+            // This receiver can arrange Mac windows (PROTOCOL.md 6.10); older Macs ignore it.
+            WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
+            // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
+            ControlChunkWire.helloField: ControlChunkWire.version,
         ]
         // Sent only inside the authenticated session, never in Bonjour TXT:
         // the mode this device asked for with its own Connect (pv 21). The
@@ -2992,6 +3284,15 @@ final class StreamReceiver: ObservableObject {
     @MainActor func sendKeyboardText(_ text: String) {
         guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
         sendUIControl(["type": "keyboard", "action": "text", "text": text])
+    }
+
+    /// Tells the Mac whether the on-screen keyboard is open so it can follow
+    /// the focused text caret for Zoom While Typing (PROTOCOL.md 6.11). Sent
+    /// only to a Mac that advertised `textCaret`; a close is sent whenever
+    /// connected, so the Mac never keeps reading for a keyboard that is gone.
+    @MainActor func sendKeyboardState(open: Bool) {
+        guard macSupportsTextCaret, open ? displayState == .running : connected else { return }
+        sendUIControl(TextCaretWire.keyboardStateMessage(open: open))
     }
 
     /// An atomic special key from the software keyboard (e.g. Return,
@@ -3323,9 +3624,19 @@ final class StreamReceiver: ObservableObject {
     /// A hardware key going down, for keys the Mac must hold (arrows,
     /// modified shortcuts). `modifiers` are named protocol modifiers, not
     /// raw UIKit flags.
+    ///
+    /// `isRepeat`: the receiving Mac's own key repeat for a key already sent
+    /// down (additive `repeat` field; an older Mac ignores the duplicate
+    /// down, as it always did).
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String]) {
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: false)
+    }
+
+    @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendUIControl(["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers])
+        var message: [String: Any] = ["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers]
+        if isRepeat { message["repeat"] = true }
+        sendUIControl(message)
     }
 
     /// The matching release for `sendKeyboardDown`.
@@ -3374,6 +3685,26 @@ final class StreamReceiver: ObservableObject {
     /// input/request surface (touch, pointer, keyboard, modifiers, gestures,
     /// and the `request*` preference methods). Reads `sendTargetBox`
     /// synchronously — always instantaneously current, no publication lag.
+    /// A window-workspace message on the current connection (the Mac acts only for an admitted session).
+    @MainActor
+    @discardableResult
+    func sendWorkspace(_ message: [String: Any]) -> Bool {
+        guard connected else { return false }
+        sendUIControl(message)
+        return true
+    }
+
+    /// Ask the Mac for Window mode for this device only; it confirms with displayModeState "window".
+    @MainActor
+    @discardableResult
+    func requestWindowMode() -> Bool {
+        guard connected, macProtocolVersion >= WireProtocol.displayModeWireVersion else { return false }
+        controlResetGeneration &+= 1
+        sendCancelActiveInput()
+        sendUIControl(["type": WireMessage.displayModeRequest, "mode": WindowWorkspaceWire.mode])
+        return true
+    }
+
     @MainActor
     private func sendUIControl(_ message: [String: Any]) {
         sendControl(message, on: sendTargetBox.current()?.connection)
@@ -4179,6 +4510,99 @@ final class StreamReceiver: ObservableObject {
 
     // MARK: - Session invitations (pv 21)
 
+    /// F2: the prompt for another Mac that waits while this session is
+    /// admitted (`ReceiverPipelineActor.heldNewcomer`); answered on that
+    /// Mac's own connection.
+    private var heldNewcomerApproval: (conn: NWConnection, approval: PendingSessionApproval)?
+    /// An invitation this device already accepted while its Mac waited: when
+    /// that Mac's connection replaces the session, its replayed invitation is
+    /// admitted without asking again. Bound to that one connection and short
+    /// lived: any other adoption, a drop or the deadline clears it.
+    private var preApprovedInvitation: (id: String, peerID: String, conn: NWConnection, until: Date)?
+
+    /// The waiting Mac's invitation, by the same rules as one on the session
+    /// itself (minus continuation: it is another Mac). Only `accept` lets it
+    /// replace the session.
+    private func judgeHeldNewcomer(_ conn: NWConnection, peerID: String, payload: Data) {
+        let pipeline = self.pipeline
+        guard let object = ControlFrameScan.object(payload), let invitation = SessionInvitation(message: object),
+              isPeerPinned(peerID) else {
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            return
+        }
+        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent, role: .receiverRole)
+        let decision: IncomingSessionDecision
+        if policy == .block {
+            decision = .block
+        } else if invitation.initiator == .receiver, invitation.intent == .manual,
+                  let request = outgoingSessionRequest, Date() < request.until, request.peerID == peerID {
+            decision = .accept   // this device asked this Mac (left for the replay to consume)
+        } else {
+            decision = policy
+        }
+        Log.info("sessionInvite: waiting Mac id=\(invitation.id) peer=\(peerID) decision=\(decision)")
+        switch decision {
+        case .accept:
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: true) }
+        case .askUser:
+            let approval = PendingSessionApproval(
+                id: invitation.id, peerID: peerID, peerName: peerName(peerID),
+                localRole: .receiver, mode: invitation.mode, createdAt: Date())
+            heldNewcomerApproval = (conn, approval)
+            if incomingSessionApprovals.begin(approval).started {
+                let selfBox = self.selfBox
+                queue.asyncAfter(deadline: .now() + PendingSessionApprovals.timeout) {
+                    selfBox.currentOnQueue()?.resolveSessionApproval(id: approval.id, decision: .rejectForSession)
+                }
+            }
+            sendControl(SessionInvitationResponse(id: invitation.id, result: .pending).message, on: conn)
+            publishSessionNegotiation(awaitingSenderName: nil)
+        case .decline, .block:
+            let result: SessionInvitationResult = decision == .block ? .blocked : .declined
+            sendControl(SessionInvitationResponse(id: invitation.id, result: result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+        }
+    }
+
+    /// The waiting Mac went away undecided: its prompt goes with it.
+    private func heldNewcomerDropped(_ conn: NWConnection) {
+        if let pre = preApprovedInvitation, pre.conn === conn { preApprovedInvitation = nil }
+        guard let held = heldNewcomerApproval, held.conn === conn else { return }
+        heldNewcomerApproval = nil
+        if incomingSessionApprovals.resolve(id: held.approval.id) != nil { publishSessionNegotiation(awaitingSenderName: nil) }
+    }
+
+    /// The prompt for the waiting Mac was answered (or timed out).
+    private func resolveHeldNewcomerApproval(_ approval: PendingSessionApproval, conn: NWConnection,
+                                              decision: ReceiverApprovalDecision) {
+        let pipeline = self.pipeline
+        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .receiverRole)
+        guard PendingApprovalRevalidation.isStillAuthorized(
+            isPinned: isPeerPinned(approval.peerID), currentPolicy: currentPolicy) else {
+            let result: SessionInvitationResult = currentPolicy == .blocked ? .blocked : .declined
+            sendControl(SessionInvitationResponse(id: approval.id, result: result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+            publishSessionNegotiation(awaitingSenderName: nil)
+            return
+        }
+        let plan = SessionApprovalPlan.plan(for: decision)
+        if let policy = plan.persistPolicy {
+            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID, role: .receiverRole)
+        }
+        if plan.accept {
+            // Answered on that Mac's connection once it is the session (the replayed invitation).
+            preApprovedInvitation = (approval.id, approval.peerID, conn, Date().addingTimeInterval(10))
+            Task { await pipeline.resolveHeldNewcomer(conn, accept: true) }
+        } else {
+            sendControl(SessionInvitationResponse(id: approval.id, result: plan.result).message, on: conn) {
+                Task { await pipeline.resolveHeldNewcomer(conn, accept: false) }
+            }
+        }
+        publishSessionNegotiation(awaitingSenderName: nil)
+    }
+
     /// This device's answer to a Mac's invitation, by its own incoming
     /// policy. Every path answers the Mac exactly once per invitation
     /// packet; a manual prompt answers `pending` first.
@@ -4193,13 +4617,17 @@ final class StreamReceiver: ObservableObject {
             sendControl(SessionInvitationResponse(id: invitation.id, result: .declined).message)
             return
         }
-        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent)
+        let policy = IncomingSessionPolicyStore.decision(peerID: peerID, intent: invitation.intent, role: .receiverRole)
         let decision: IncomingSessionDecision
         if policy == .block {
             decision = .block
         } else if sessionAdmission.isContinuation(of: invitation, peerID: peerID) {
             // Same session after a reconnect or pipeline rebuild.
             decision = .accept
+        } else if let pre = preApprovedInvitation, pre.id == invitation.id, pre.peerID == peerID, Date() < pre.until {
+            // Accepted while this Mac waited for the session it replaced (F2).
+            decision = .accept
+            preApprovedInvitation = nil
         } else if invitation.initiator == .receiver, invitation.intent == .manual,
                   let request = outgoingSessionRequest,
                   Date() < request.until, request.peerID == nil || request.peerID == peerID {
@@ -4247,11 +4675,16 @@ final class StreamReceiver: ObservableObject {
         // Stale (answered, withdrawn, timed out, or from a connection that
         // has since been replaced): never acts.
         guard let approval = incomingSessionApprovals.resolve(id: id) else { return }
+        if let held = heldNewcomerApproval, held.approval.id == id, held.approval.peerID == approval.peerID {
+            heldNewcomerApproval = nil
+            resolveHeldNewcomerApproval(approval, conn: held.conn, decision: decision)
+            return
+        }
         // The prompt captured authority when it was raised. Forget or Block
         // since then withdrew it (normally by removing the prompt, but the
         // pin or policy change can land first): the answer is inert — no
         // policy persisted, nothing admitted.
-        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID)
+        let currentPolicy = IncomingSessionPolicyStore.policy(peerID: approval.peerID, role: .receiverRole)
         guard PendingApprovalRevalidation.isStillAuthorized(
             isPinned: isPeerPinned(approval.peerID), currentPolicy: currentPolicy) else {
             Log.info("sessionInvite: id=\(approval.id) answer ignored reason=revoked")
@@ -4263,7 +4696,7 @@ final class StreamReceiver: ObservableObject {
         let plan = SessionApprovalPlan.plan(for: decision)
         if let policy = plan.persistPolicy {
             // Connection policy only; never a display mode or input.
-            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID)
+            IncomingSessionPolicyStore.setPolicy(policy, peerID: approval.peerID, role: .receiverRole)
         }
         if plan.accept {
             admitSession(invitationID: approval.id, peerID: approval.peerID)
@@ -4312,6 +4745,7 @@ final class StreamReceiver: ObservableObject {
         mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         guard !wasAdmitted else { return }
         sendControl(["type": "kf"])
+        workspaceEvents.emit(.connected(peerID: peerID))
         // This device's own request, if it covered this Mac, is answered by
         // the session now admitted: its "asked for exactly this" window and
         // requested mode must not outlive it into a later reconnect.
@@ -4382,7 +4816,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func peerName(_ peerID: String?) -> String {
-        peerID.flatMap { id in TrustStore.shared.pinnedPeers().first { $0.peerID == id }?.displayName }
+        peerID.flatMap { id in TrustStore.receiverRole.pinnedPeers().first { $0.peerID == id }?.displayName }
             ?? String(localized: "Your Mac")
     }
 
@@ -4543,10 +4977,10 @@ final class StreamReceiver: ObservableObject {
     // needs no `self` capture, matching the "static helper + stable owner"
     // idiom used by `startTLSListener` above.
     private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue) {
-        guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID),
+        guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID, role: .receiverRole),
               let port = NWEndpoint.Port(rawValue: hint.port),
-              let pin = TrustStore.shared.pin(peerID: peerID),
-              let identity = TrustStore.shared.ownIdentity(),
+              let pin = TrustStore.receiverRole.pin(peerID: peerID),
+              let identity = TrustStore.receiverRole.ownIdentity(),
               let tls = TLSConfigurator.mutualTLSOptions(
                 identity: identity,
                 pinnedSPKIs: { [pin] },
@@ -5166,6 +5600,15 @@ final class StreamReceiver: ObservableObject {
                         maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
                         advertisesAddresses: advertises)
                 }
+            },
+            sessionAdmitted: { [mediaAdmissionGate] generation in
+                mediaAdmissionGate.isAdmitted(generation: generation)
+            },
+            judgeNewcomer: { conn, peerID, payload in
+                queue.async { selfBox.currentOnQueue()?.judgeHeldNewcomer(conn, peerID: peerID, payload: payload) }
+            },
+            newcomerDropped: { conn in
+                queue.async { selfBox.currentOnQueue()?.heldNewcomerDropped(conn) }
             })
     }
 
@@ -5312,8 +5755,23 @@ final class StreamReceiver: ObservableObject {
     /// publishDiscoveredMacs`, its sole caller. Same single-assignment,
     /// `private(set)`-admitting shape as `applyAuthenticatedPeerIDUpdate`
     /// above.
+    /// `ReceiverUISink.publishPortFailures`, its sole caller.
+    @MainActor func applyPortFailures(_ failures: [ReceiverPortFailure]) {
+        portFailures = failures
+    }
+
     @MainActor func applyDiscoveredMacsUpdate(_ results: [NWBrowser.Result]) {
-        discoveredMacs = results
+        discoveredMacs = SameAppPeerFilter.excludingSameApp(results, ownIDs: Self.sameAppSenderIDs) { result in
+            if case .bonjour(let txt) = result.metadata { return txt["id"] }
+            return nil
+        }
+    }
+
+    /// In the unified Mac app, this Mac's own sender role — never a Mac to
+    /// pair with. Empty in a receiver-only app. Read on every update, not
+    /// once: the sender's identity may not exist yet the first time.
+    private static var sameAppSenderIDs: Set<String> {
+        ReceiverRoleConfiguration.separateTrust ? Set([TrustStore.shared.installID()].compactMap { $0 }) : []
     }
 
     /// `pairingSuccessCount`'s external-boundary mutator for the pairing
@@ -5383,12 +5841,25 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorReset() {
         cursorState = (0.5, 0.5, false)
         cursorSprite = nil
+        cursorPaneSize = nil
+        onCursorPaneSize?(nil)
         onCursor?(0.5, 0.5, false)
     }
 
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
         cursorState = (x, y, visible)
         onCursor?(x, y, visible)
+    }
+
+    @MainActor func applyTextCaretUpdate(_ rect: CGRect?) {
+        guard rect != textCaret else { return }
+        textCaret = rect
+        onTextCaret?(rect)
+    }
+
+    @MainActor func applyCursorPaneSizeUpdate(_ size: CursorPaneSize?) {
+        cursorPaneSize = size
+        onCursorPaneSize?(size)
     }
 
     @MainActor func applyCursorSpriteUpdate(image: CGImage, anchor: CGPoint, normSize: CGSize) {

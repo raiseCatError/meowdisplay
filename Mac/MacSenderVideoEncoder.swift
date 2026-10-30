@@ -217,3 +217,28 @@ final class MacSenderVideoEncoder: @unchecked Sendable {
         codec(ifCurrent: token)
     }
 }
+
+/// The first video encoder a process makes takes about a second (VideoToolbox loads the hardware
+/// encoder; 3 s measured during a first Window-mode start), later ones take milliseconds, and one
+/// HEVC session warms H.264 too. So a tiny one is made and dropped in the background at launch,
+/// and the first connection doesn't wait for it.
+enum EncoderWarmUp {
+    static func start(after delay: TimeInterval = 2) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            let start = ProcessInfo.processInfo.systemUptime
+            let spec = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary
+            var session: VTCompressionSession?
+            var status = VTCompressionSessionCreate(allocator: nil, width: 64, height: 64, codecType: kCMVideoCodecType_HEVC,
+                                                    encoderSpecification: spec, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                    outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+            if session == nil {
+                // Macs whose encoder has no low-latency mode (#133).
+                status = VTCompressionSessionCreate(allocator: nil, width: 64, height: 64, codecType: kCMVideoCodecType_HEVC,
+                                                    encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                    outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+            }
+            if let session { VTCompressionSessionInvalidate(session) }
+            Log.info("encoder warm-up: status=\(status) ms=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
+        }
+    }
+}

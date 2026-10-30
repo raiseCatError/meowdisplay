@@ -48,10 +48,12 @@ enum SmartTouchTargetClassifier {
         kAXDrawerRole as String,
     ]
 
-    /// Ancestor depth cap. Real scroll containers sit within a handful of
-    /// levels of the hit element; the cap bounds the AX IPC cost of an
-    /// unusually deep or cyclic tree.
-    static let maxAncestorDepth = 12
+    /// Ancestor depth cap: bounds the AX IPC cost of an unusually deep or
+    /// cyclic tree. Web pages nest deeply: in Chrome the text under a finger
+    /// sat 13+ AXGroups below its AXWebArea, so a cap of 12 answered
+    /// "depthLimit" and one-finger scrolling never scrolled (owner report
+    /// 2026-10-31, iPad). One walk per touch-down; 48 levels stay cheap.
+    static let maxAncestorDepth = 48
 
     /// Pure classification over the hit element's role chain, leaf first.
     static func classify(roles: [String]) -> Decision {

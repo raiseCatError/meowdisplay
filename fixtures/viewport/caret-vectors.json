@@ -1,0 +1,534 @@
+{
+  "_comment": "Zoom While Typing caret-follow vectors for RemoteViewportCalculator.keyboardOpen. Generated from Shared/RemoteViewport.swift; checked by MacTests/RemoteViewportCaretTests.swift and AndroidReceiver core RemoteViewportCaretVectorsTest. view/visible/displayed/caret/previous are [x, y, width, height]; remote is [width, height]; anchor is [x, y].",
+  "cases": [
+    {
+      "anchor": null,
+      "caret": [
+        0.5,
+        0.5,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -98.085,
+        54.178125,
+        585,
+        329.0625
+      ],
+      "name": "portrait zoom on, caret mid screen",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.9,
+        0.85,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        0,
+        33.3375,
+        390,
+        219.375
+      ],
+      "name": "portrait zoom off, caret low right",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": false
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.92,
+        0.88,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -195,
+        0,
+        585,
+        329.0625
+      ],
+      "name": "portrait zoom on, caret low right pans both axes",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.04,
+        0.06,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        0,
+        114.9375,
+        585,
+        329.0625
+      ],
+      "name": "portrait zoom on, caret top left",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.3,
+        0.93,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        0.15459,
+        -179.505312,
+        389.69082,
+        623.505312
+      ],
+      "name": "tall remote zoom on, caret bottom",
+      "previous": null,
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.3,
+        0.93,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        65.10306,
+        0,
+        259.79388,
+        415.670208
+      ],
+      "name": "tall remote zoom off, caret bottom",
+      "previous": null,
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": false
+    },
+    {
+      "anchor": [
+        0.2,
+        0.9
+      ],
+      "caret": null,
+      "displayed": [
+        -97.5,
+        -451.68,
+        585,
+        936
+      ],
+      "name": "no caret falls back to the touch anchor",
+      "previous": null,
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": [
+        0.2,
+        0.9
+      ],
+      "caret": [
+        1.4,
+        0.5,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -97.5,
+        -451.68,
+        585,
+        936
+      ],
+      "name": "caret off the display falls back to the touch anchor",
+      "previous": null,
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": [
+        0.2,
+        0.1
+      ],
+      "caret": [
+        0.8,
+        0.9,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -195,
+        -492,
+        585,
+        936
+      ],
+      "name": "caret wins over the touch anchor",
+      "previous": null,
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.6,
+        0.8,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -196,
+        -393.85,
+        1040,
+        585
+      ],
+      "name": "landscape zoom on, caret low",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        844,
+        390
+      ],
+      "visible": [
+        0,
+        0,
+        844,
+        160
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.6,
+        0.8,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        75.333333,
+        -230,
+        693.333333,
+        390
+      ],
+      "name": "landscape zoom off, caret low",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        844,
+        390
+      ],
+      "visible": [
+        0,
+        0,
+        844,
+        160
+      ],
+      "zoom": false
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.5,
+        0.5,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        159.444444,
+        0,
+        71.111111,
+        40
+      ],
+      "name": "keyboard too short to use",
+      "previous": null,
+      "remote": [
+        1920,
+        1080
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        40
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.41,
+        0.51,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -39.585,
+        -255.36,
+        585,
+        936
+      ],
+      "name": "small caret move keeps the previous pan",
+      "previous": [
+        -39.585,
+        -255.36,
+        585,
+        936
+      ],
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.9,
+        0.9,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -195,
+        -492,
+        585,
+        936
+      ],
+      "name": "caret leaving the inner region re-centers",
+      "previous": [
+        -39.585,
+        -255.36,
+        585,
+        936
+      ],
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    },
+    {
+      "anchor": null,
+      "caret": [
+        0.41,
+        0.51,
+        0.002,
+        0.02
+      ],
+      "displayed": [
+        -45.435,
+        -264.72,
+        585,
+        936
+      ],
+      "name": "previous of another size is ignored",
+      "previous": [
+        0,
+        0,
+        100,
+        100
+      ],
+      "remote": [
+        1000,
+        1600
+      ],
+      "view": [
+        0,
+        0,
+        390,
+        844
+      ],
+      "visible": [
+        0,
+        0,
+        390,
+        444
+      ],
+      "zoom": true
+    }
+  ]
+}

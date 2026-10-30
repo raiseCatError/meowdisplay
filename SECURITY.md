@@ -121,6 +121,51 @@ other end. It does not by itself admit a session:
   and IDs) is never used to put a trusted-looking prompt on screen before
   the connection is authenticated.
 
+## Unified Clipboard
+
+Copying on the Mac and pasting on a connected device (and back) is off until
+the Mac owner turns it on in Settings ▸ Clipboard **and** the person turns it
+on in the device's own Settings ▸ Clipboard. Details: PROTOCOL.md 6.15.
+
+- **Per-device permission.** Each paired device (by its authenticated install
+  id, never its name, IP or Tailscale address) is *Ask* (the default: the Mac
+  shows Not Now / Allow This Session / Always Allow), *Always Allow* or
+  *Block*, with a direction (both ways, Mac to device, device to Mac).
+  Clipboard permission is independent of remote input and of Remote Finder
+  file access: none of them implies another.
+- **Never broadcast.** A copy goes only to devices that are paired, connected,
+  admitted, turned on and allowed in that direction; it never goes back to
+  the device it came from. A device can only send copies in its own name.
+- **Pause and revoke.** Pause stops every copy at once. Revoke, Block or
+  Forget ends that device's grant and cancels its transfers at once. Clear in
+  Settings ▸ Clipboard drops transfers in progress and files waiting there.
+- **What is kept.** No clipboard history, on any platform. A copy from
+  another device is held only until something replaces it; files received on
+  the Mac are staged in a private temporary folder (with the quarantine
+  attribute, so Gatekeeper checks them) and deleted when replaced, on Clear,
+  and when the app quits or starts. Devices keep copies of the Mac's files
+  only while you save or share them (a shared copy stays a short while so the
+  receiving app can read it). Clipboard content is never logged or shown in
+  notifications; the status shows only a summary such as "Text" or
+  "2 files, 3 MB".
+- **Private items.** The Mac skips items the copying app marks as concealed,
+  transient or auto-generated (the nspasteboard.org markers that many
+  password managers set); Android skips copies marked sensitive. This
+  depends on the copying app: **passwords are not guaranteed to be
+  recognized**. Turn the clipboard on only for devices and Macs you trust, and
+  pause it when copying secrets.
+- **Operating-system limits are respected, not bypassed.** macOS 15.4 and
+  later may ask before MeowDisplay reads the pasteboard. iOS and Android let
+  an app read the clipboard only while it is in front (iOS may ask each time;
+  Android shows a notice), so copies made on a device reach the Mac when you
+  return to MeowDisplay, not in the background. Writes stay on the device
+  (not passed on to Universal Clipboard). No private APIs or background
+  polling are used.
+- **Files are validated on the Mac.** Names that could escape their folder
+  are refused, sizes are capped at parse, every range is checked against its
+  digest, and files copied on the Mac are read only when a device asks for
+  them, through the same checks as when they were copied.
+
 ## Network paths and what leaves the local network
 
 - **USB**: local only, over macOS's `usbmuxd`. Nothing leaves the device
@@ -135,6 +180,25 @@ other end. It does not by itself admit a session:
   an identity or a trust mechanism** — the same pinned mutual-TLS session
   described above still authenticates the connection regardless of which
   route carried it.
+  On Android the saved address is stored per verified Mac, never trusted,
+  and never replaces a pin: a different key at the address ends the attempt
+  as "different Mac" and is not retried, and the same goes for a Mac that
+  does not accept this device. Retries are bounded, run only while the app
+  is in front, and never follow a security failure. The knock is a single
+  frame inside the pinned connection and changes nothing on the Mac that a
+  local request would not. The app creates no VPN and opens no relay or
+  port mapping; "Remote · Tailscale" on screen is a label drawn from the
+  phone's own network facts, not a security claim. Logs name only the kind of
+  address (IPv4, IPv6, DNS or Tailscale range). The Mac reads Tailscale's
+  status (its bundled or Homebrew CLI, `tailscale status --json`, bounded to
+  3 s) only when you press Check Tailscale or Find on Tailscale in Settings →
+  Remote Access: it shows the Mac's own name and suggests tailnet peers for a
+  paired device's address. A suggestion only fills the field; nothing is
+  saved, trusted or changed in Tailscale without you. Android's Add Remote Mac
+  says whether a tailnet VPN looks connected, from the phone's own network
+  facts. Android 17 asks for a Local
+  Network permission only from apps that target API 37; MeowDisplay targets
+  36 today and must declare the permission when it moves.
 - **MeowDisplay does not operate its own relay, cloud service, or account
   system.** Media (video/audio/input) travels directly between your two
   devices over whichever route is active; MeowDisplay itself never sees or
@@ -142,6 +206,51 @@ other end. It does not by itself admit a session:
   Remote Access, your traffic does traverse whatever private network you've
   chosen (e.g. Tailscale's infrastructure, per Tailscale's own security
   model) — that's a property of the network you picked, not of MeowDisplay.
+- **Update checks (Mac apps only)**: Sparkle fetches
+  `https://meowdisplay.app/appcast.xml` (the Receiver fetches
+  `appcast-receiver.xml`). That URL redirects to the feed on the project's
+  GitHub Releases page. Checks happen only after the user allows automatic
+  checks (Sparkle asks), or when the user chooses **Check for Updates…**.
+  No system profile is sent. Both the feed and the downloaded update must
+  carry a valid signature from MeowDisplay's EdDSA key, and macOS code
+  signing still applies to the updated app. The iOS app makes no
+  update-check request.
+
+## Privacy Shield
+
+While a device is connected, the Mac can cover its own screens in black so
+people near it don't see the session. It's on by default for remote
+connections (Tailscale and other routed addresses) and off by default for
+local ones (Wi-Fi, peer-to-peer, USB, hotspot); the owner sets each in
+Settings ▸ System. Each connected device is told whether it's on.
+
+- The cover is left out of MeowDisplay's own captures, so the device's
+  picture and control are unchanged. MeowDisplay's virtual displays aren't
+  covered (nobody can look at them).
+- It covers every physical display, including ones attached while it's up,
+  at the highest window level apps may use. Some system UI (the login
+  window, some alerts) can appear above it, and macOS gives no guarantee
+  beyond that.
+- Clicks and keys pass through it, so someone at the Mac can still type or
+  click without seeing. It's a viewing shield, not an input lock.
+- Removing the cover needs a click from the Mac's own mouse or trackpad
+  (clicks injected for a device are ignored) and the Mac's login password,
+  asked by macOS; MeowDisplay never sees the password. While macOS asks, no
+  remote input reaches the Mac (MeowDisplay drops it), so the password can
+  only come from the Mac's own keyboard, and devices don't see the prompt.
+  The cover stays above every app window meanwhile; if the prompt can't be
+  seen above it, the Mac stays covered (it fails closed). It covers again
+  after the chosen time (5 minutes by default) without physical input at the
+  Mac; remote and synthetic input don't count. Only timestamps are kept,
+  never what was typed.
+- Devices never see the cover: its windows (and the Mac-side notice) exist
+  and are left out of MeowDisplay's captures before they appear. If a
+  capture doesn't confirm within 3 seconds, the Mac is covered anyway and
+  that's logged.
+- A device that connects after a reveal brings the cover back, so what each
+  device is told on connecting is true.
+- Turning either setting off asks for confirmation, and for the login
+  password (typed on the Mac) while the cover is up.
 
 ## What this doesn't claim
 

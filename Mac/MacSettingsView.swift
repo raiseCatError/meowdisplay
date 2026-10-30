@@ -437,7 +437,8 @@ struct MacSettingsDetailView: View {
                         permissions: permissions,
                         onOpenDisplays: { navigationModel.navigateTo(.displays) },
                         onOpenDevices: { navigationModel.navigateTo(.devices) },
-                        onOpenSystem: { navigationModel.navigateTo(.system) }
+                        onOpenSystem: { navigationModel.navigateTo(.system) },
+                        onOpenDisplayRole: { navigationModel.navigateTo(.displayRole) }
                     )
                 case .displays:
                     DisplaysSettingsView(controller: controller)
@@ -447,8 +448,12 @@ struct MacSettingsDetailView: View {
                     InputSettingsView(controller: controller, permissions: permissions)
                 case .devices:
                     DevicesSettingsView(controller: controller)
+                case .clipboard:
+                    ClipboardSettingsView(controller: controller)
                 case .remoteAccess:
                     RemoteAccessSettingsView(controller: controller)
+                case .displayRole:
+                    DisplayRoleSettingsView(controller: controller)
                 case .system:
                     SystemSettingsView(controller: controller, permissions: permissions, updater: updater)
                 #if DEBUG
@@ -465,6 +470,10 @@ struct MacSettingsDetailView: View {
         .id(SettingsDetailIdentity(category: navigationModel.current, rootGeneration: navigationModel.rootGeneration))
         .frame(minWidth: 500, minHeight: 450)
         .background(DetailNavigationKeyboardShortcuts(navigationModel: navigationModel))
+        // "Use This Mac as a Display": the sending Mac is headless and Mirror
+        // was asked for. Shown on whichever page is open (onNeedsAttention
+        // brings this window up), as the standalone receiver does.
+        .modifier(MirrorUnavailableOfferAlert(controller: ReceiverController.shared))
     }
 }
 

@@ -7,9 +7,6 @@
     "%@ (Main)" : {
       "comment" : "A display name, marked as the Mac's main display."
     },
-    "%@ Mbit/s" : {
-
-    },
     "%@ backing" : {
       "comment" : "Display size in pixels, such as 5120×2880."
     },
@@ -27,6 +24,9 @@
     },
     "%@ logical" : {
       "comment" : "Display size in points, such as 2560×1440."
+    },
+    "%@ Mbit/s" : {
+
     },
     "%@ requests %lld FPS. Limited to %lld FPS at this display size." : {
       "comment" : "The first value is a streaming profile name, such as Performance.",
@@ -75,9 +75,6 @@
     "A/V Sync is set on the receiver — this Mac can only display it." : {
 
     },
-    "AWDL" : {
-
-    },
     "About" : {
 
     },
@@ -85,6 +82,9 @@
 
     },
     "Active Display" : {
+
+    },
+    "Control Profile" : {
 
     },
     "Allow" : {
@@ -96,16 +96,19 @@
     "Allow & Mirror" : {
 
     },
+    "Allow for This Session" : {
+
+    },
     "Allow Input" : {
+
+    },
+    "Allow Local View Navigation" : {
 
     },
     "Allow Permanently" : {
 
     },
-    "Allow for This Session" : {
-
-    },
-    "Allowed for this session" : {
+    "Control Allowed" : {
 
     },
     "Always Allow" : {
@@ -135,6 +138,9 @@
     "Approve MeowDisplay in System Settings → General → Login Items to finish enabling Start at Login." : {
 
     },
+    "Arc" : {
+      "comment" : "Chord palette shape."
+    },
     "Arrange Displays" : {
 
     },
@@ -156,6 +162,9 @@
     "Audio & Sync" : {
 
     },
+    "Audio Diagnostics" : {
+
+    },
     "Audio Streaming" : {
 
     },
@@ -166,6 +175,12 @@
 
     },
     "Auto" : {
+
+    },
+    "Auto uses QUIC when this device supports it and uses TCP if QUIC can't reach it. Both use the same pairing and encryption. USB is unaffected." : {
+
+    },
+    "Auto-hide Control Trays" : {
 
     },
     "Auto-Reconnect" : {
@@ -201,13 +216,16 @@
     "Block" : {
       "comment" : "Per-device connection policy option: refuse session requests from this device."
     },
+    "Bottom" : {
+
+    },
     "Bottom Left" : {
 
     },
     "Bottom Right" : {
 
     },
-    "Broadcast" : {
+    "caffeinate -i" : {
 
     },
     "Can't Connect" : {
@@ -231,19 +249,22 @@
     "Codec" : {
 
     },
+    "Codes did not match" : {
+
+    },
     "Codes Match" : {
 
     },
-    "Codes did not match" : {
-
+    "Column" : {
+      "comment" : "Chord palette shape."
     },
     "Command" : {
       "comment" : "Keyboard modifier key."
     },
-    "Confirm that you want to trust this device in MEOW." : {
+    "Confirm that you want to trust “%@” in MEOW." : {
 
     },
-    "Confirm that you want to trust “%@” in MEOW." : {
+    "Confirm that you want to trust this device in MEOW." : {
 
     },
     "Confirm that you want to update the remote address for “%@” in MEOW." : {
@@ -253,9 +274,6 @@
 
     },
     "Connect" : {
-
-    },
-    "Connect to the Mac first." : {
 
     },
     "Connect to this paired Mac through a reachable private-network address, such as its Tailscale address or MagicDNS name. This address is only used to reach the device — it does not grant trust; every connection still requires the existing secure pairing." : {
@@ -270,16 +288,19 @@
     "Connected" : {
 
     },
-    "Connected via Remote" : {
+    "Connected · Remote" : {
 
     },
-    "Connected · Remote" : {
+    "Connected via Remote" : {
 
     },
     "Connecting…" : {
 
     },
     "Connection" : {
+
+    },
+    "Connection Log" : {
 
     },
     "Connection Lost" : {
@@ -294,13 +315,25 @@
     "Control" : {
       "comment" : "Keyboard modifier key."
     },
+    "Control allowed" : {
+
+    },
+    "Control Center" : {
+
+    },
+    "Control Layout" : {
+
+    },
     "Control Request" : {
+
+    },
+    "Control Size" : {
 
     },
     "Control Tray" : {
 
     },
-    "Control allowed" : {
+    "Controls" : {
 
     },
     "Copy Command" : {
@@ -318,7 +351,16 @@
     "Current Stream" : {
 
     },
+    "Currently" : {
+
+    },
     "Custom" : {
+      "comment" : "iPad control layout: a user-built layout."
+    },
+    "Custom Layout %lld" : {
+
+    },
+    "Custom Layouts" : {
 
     },
     "Default" : {
@@ -330,19 +372,19 @@
     "Developer" : {
 
     },
-    "Device Diagnostics" : {
-
-    },
-    "Device Settings…" : {
-
-    },
     "Device identity changed" : {
 
     },
     "Device owner authentication failed" : {
 
     },
+    "Device Settings…" : {
+
+    },
     "Devices" : {
+
+    },
+    "Diagnostics" : {
 
     },
     "Direct" : {
@@ -360,6 +402,12 @@
     "Disconnect All" : {
 
     },
+    "Display" : {
+
+    },
+    "Display layout" : {
+
+    },
     "Display Mode" : {
 
     },
@@ -367,9 +415,6 @@
 
     },
     "Display Request" : {
-
-    },
-    "Display layout" : {
 
     },
     "Displays" : {
@@ -385,9 +430,6 @@
 
     },
     "Efficiency" : {
-
-    },
-    "Enable All Routes" : {
 
     },
     "Enabled" : {
@@ -432,12 +474,6 @@
     "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
 
     },
-    "Force Remote Only" : {
-
-    },
-    "Forget" : {
-
-    },
     "Forget %@?" : {
       "comment" : "Confirmation alert title; request.name is the paired device's name."
     },
@@ -462,13 +498,19 @@
     "Future requests from this device connect automatically. Change anytime in Settings." : {
 
     },
-    "Granted" : {
+    "General" : {
+
+    },
+    "Gestures" : {
 
     },
     "Grant…" : {
 
     },
-    "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi." : {
+    "Granted" : {
+
+    },
+    "Half resolution — lowest latency and bandwidth, visibly softer. Good for Wi-Fi." : {
 
     },
     "Haptics" : {
@@ -477,10 +519,10 @@
     "Host (Tailscale IP or MagicDNS name)" : {
 
     },
-    "IPv4" : {
+    "Idle" : {
 
     },
-    "Idle" : {
+    "Imported Layout" : {
 
     },
     "Input" : {
@@ -495,10 +537,10 @@
     "Input Requests" : {
 
     },
-    "Interface" : {
+    "Invalid pairing message" : {
 
     },
-    "Invalid pairing message" : {
+    "Natural Vertical Scrolling" : {
 
     },
     "It can move the pointer, type, and use touch/scroll input until you turn this off." : {
@@ -525,10 +567,13 @@
     "Keyboard Button" : {
 
     },
+    "Keys" : {
+
+    },
     "Known Devices" : {
 
     },
-    "LAN" : {
+    "Landscape Tray Side" : {
 
     },
     "Left" : {
@@ -543,25 +588,16 @@
     "Lower power/bandwidth, up to 60 FPS." : {
 
     },
-    "MAC address" : {
-
-    },
-    "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices." : {
-
-    },
-    "MEOW needs Screen Recording and Accessibility permissions to work fully." : {
-
-    },
-    "Mac" : {
-
-    },
     "Mac Disconnected" : {
 
     },
-    "Make sure the address is correct and Pair Over Remote is turned on on the Mac." : {
+    "macOS didn't allow the sleep-prevention request, so this Mac may still sleep." : {
 
     },
-    "Manual Endpoint (DEBUG)" : {
+    "Main Controls" : {
+
+    },
+    "Make sure the address is correct and Pair Over Remote is turned on on the Mac." : {
 
     },
     "Manual streaming controls." : {
@@ -573,17 +609,29 @@
     "Master switch for remote control. While off, no connected device can control this Mac, no matter what it was previously granted." : {
 
     },
-    "Maximum FPS" : {
+    "Maximum for this display size: %lld FPS." : {
 
     },
-    "Maximum for this display size: %lld FPS." : {
+    "Maximum FPS" : {
 
     },
     "Menu Bar" : {
 
     },
+    "MEOW automatically chooses the best connection, codec, quality, frame rate and streaming behavior for your devices." : {
+
+    },
+    "MEOW needs Screen Recording and Accessibility permissions to work fully." : {
+
+    },
+    "MeowDisplay on GitHub" : {
+
+    },
     "MeowDisplay Settings" : {
       "comment" : "Settings window title. \"MeowDisplay\" is the product name and must stay untranslated; only \"Settings\" is translatable."
+    },
+    "Metal Renderer" : {
+
     },
     "Mirror" : {
       "comment" : "Display mode: duplicate the Mac's screen onto the device."
@@ -606,22 +654,25 @@
     "Move the pointer relative to your finger." : {
 
     },
+    "Move View" : {
+
+    },
+    "Name" : {
+
+    },
     "Nearby" : {
+
+    },
+    "Network" : {
+
+    },
+    "Network Transport" : {
 
     },
     "Never Allow Requests" : {
 
     },
     "Nice" : {
-
-    },
-    "No LAN wake info learned yet for this Mac — connect to it at least once first." : {
-
-    },
-    "No Results" : {
-
-    },
-    "No active LAN interface found" : {
 
     },
     "No active display" : {
@@ -633,19 +684,22 @@
     "No device is currently connected over Remote." : {
 
     },
-    "No devices found — plug one in via USB, or open the MeowDisplay app on a device on this WiFi network." : {
+    "No devices found — plug one in via USB, or open the MeowDisplay app on a device on this Wi-Fi network." : {
 
     },
     "No known devices" : {
 
     },
-    "No paired Macs" : {
-
-    },
     "No paired devices yet." : {
 
     },
+    "No Results" : {
+
+    },
     "No settings found for “%@”" : {
+
+    },
+    "Control Declined" : {
 
     },
     "Not Granted" : {
@@ -654,7 +708,7 @@
     "Not Now" : {
 
     },
-    "Not allowed" : {
+    "Notch Debug Overlay" : {
 
     },
     "Off" : {
@@ -676,6 +730,9 @@
 
     },
     "Open Displays…" : {
+
+    },
+    "Open iOS Settings for MeowDisplay" : {
 
     },
     "Open Pair over Remote" : {
@@ -702,6 +759,9 @@
     "Output" : {
 
     },
+    "Overlay" : {
+      "comment" : "iPad control layout: controls float over the Mac display."
+    },
     "Overview" : {
 
     },
@@ -720,19 +780,19 @@
     "Pair with %@?" : {
 
     },
-    "Paired device" : {
-
-    },
-    "Paired with %@" : {
-
-    },
     "Paired · Nearby" : {
 
     },
     "Paired · Offline" : {
 
     },
-    "Pairing Request" : {
+    "Paired device" : {
+
+    },
+    "Paired Macs" : {
+
+    },
+    "Paired with %@" : {
 
     },
     "Pairing could not be verified" : {
@@ -742,6 +802,9 @@
 
     },
     "Pairing in progress…" : {
+
+    },
+    "Pairing Request" : {
 
     },
     "Pairing timed out" : {
@@ -756,6 +819,9 @@
     "Pairing was rejected" : {
 
     },
+    "Palette Style" : {
+
+    },
     "Pause" : {
 
     },
@@ -768,7 +834,16 @@
     "Performance" : {
 
     },
+    "Performance Overlay" : {
+
+    },
     "Permissions" : {
+
+    },
+    "Picture in Picture" : {
+
+    },
+    "Pinch / Zoom" : {
 
     },
     "Pinch Gesture" : {
@@ -780,13 +855,16 @@
     "Port" : {
 
     },
-    "Power lifecycle (sleep/wake/screen) events are logged continuously to the app log — see System → Reveal Log Files." : {
+    "possibly virtual" : {
 
     },
     "Prefer FPS" : {
 
     },
     "Prefer Latency" : {
+
+    },
+    "Prefer MeowDisplay Gestures" : {
 
     },
     "Prefer Terminal?" : {
@@ -807,16 +885,13 @@
     "Profile 2" : {
 
     },
-    "Promote Mac to Interactive Wake" : {
-
-    },
-    "Promote to Interactive Wake" : {
-
-    },
     "Quality" : {
 
     },
     "Quality & Bitrate" : {
+
+    },
+    "QUIC isn't available for this device yet, so Auto uses TCP. It becomes available after a connection with a MeowDisplay version that supports it." : {
 
     },
     "Quit" : {
@@ -828,9 +903,6 @@
     "Quit MeowDisplay entirely — equivalent to ⌘Q. Closing just this window keeps MEOW and any active stream running." : {
 
     },
-    "Re-locks the About/version row's nine-tap easter egg for retesting the unlock flow." : {
-
-    },
     "Re-pair" : {
 
     },
@@ -840,10 +912,10 @@
     "Ready to connect" : {
 
     },
-    "Receiver Controls" : {
+    "Receiver controls" : {
 
     },
-    "Receiver controls" : {
+    "Receiver Controls" : {
 
     },
     "Recheck" : {
@@ -855,13 +927,10 @@
     "Reconnecting…" : {
 
     },
-    "Reject Permanently" : {
-
-    },
     "Reject for This Session" : {
 
     },
-    "Remote" : {
+    "Reject Permanently" : {
 
     },
     "Remote Access" : {
@@ -870,31 +939,31 @@
     "Remote Endpoint" : {
 
     },
-    "Remote Pairing" : {
+    "Remote input stays off until you allow it." : {
 
     },
-    "Remote input stays off until you allow it." : {
+    "Remote Pairing" : {
 
     },
     "Remove Remote Endpoint" : {
 
     },
-    "Requesting…" : {
+    "Requesting Control…" : {
 
     },
-    "Requests disabled by Mac" : {
-
-    },
-    "Required for WiFi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there." : {
+    "Control Not Available" : {
 
     },
     "Required for touch input from the device." : {
 
     },
+    "Required for Wi-Fi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there." : {
+
+    },
     "Required to capture the display." : {
 
     },
-    "Reset Cat Mode" : {
+    "Reset View" : {
 
     },
     "Resolution" : {
@@ -921,6 +990,9 @@
     "Right" : {
 
     },
+    "Ring" : {
+      "comment" : "Chord palette shape."
+    },
     "Rotate Gesture" : {
 
     },
@@ -930,11 +1002,14 @@
     "Rotate Right" : {
 
     },
+    "Rotation" : {
+
+    },
     "Route" : {
 
     },
-    "Route Overrides" : {
-
+    "Row" : {
+      "comment" : "Chord palette shape."
     },
     "Same Side" : {
 
@@ -948,13 +1023,10 @@
     "Screen Recording" : {
 
     },
-    "Selected display isn't currently available — using Automatic until it reconnects." : {
-
-    },
     "Select…" : {
 
     },
-    "Send LAN Wake Packet" : {
+    "Selected display isn't currently available — using Automatic until it reconnects." : {
 
     },
     "Sensitivity: %.1f×" : {
@@ -969,19 +1041,31 @@
     "Shift" : {
       "comment" : "Keyboard modifier key."
     },
+    "Show app in" : {
+
+    },
+    "Show Control Hints" : {
+
+    },
     "Show Control Tray" : {
+
+    },
+    "Show Desktop" : {
+
+    },
+    "Show Function Tray" : {
 
     },
     "Show Keyboard Button" : {
 
     },
-    "Show app in" : {
+    "Show Surface Grid" : {
 
     },
     "Skips this prompt for future requests from this device. Change anytime in Settings." : {
 
     },
-    "Sleep This Mac for WoL Test" : {
+    "Smart Touch Haptics" : {
 
     },
     "Snap Rotation" : {
@@ -991,6 +1075,9 @@
 
     },
     "Some Mac apps use different shortcuts for zooming and rotating. Customize the commands sent to this device when App mode is selected." : {
+
+    },
+    "Standard Controls" : {
 
     },
     "Start at Login" : {
@@ -1006,9 +1093,6 @@
 
     },
     "Starting video…" : {
-
-    },
-    "State" : {
 
     },
     "Status" : {
@@ -1035,10 +1119,13 @@
     "Streaming Profile" : {
 
     },
-    "Subnet mask" : {
-
+    "Strip" : {
+      "comment" : "iPad control layout: an edge rail beside the Mac display."
     },
     "Support" : {
+
+    },
+    "Support MeowDisplay" : {
 
     },
     "System" : {
@@ -1047,16 +1134,10 @@
     "Tab" : {
 
     },
-    "Tailscale host or IP" : {
-
-    },
     "Terminates the application, ending any active connection." : {
 
     },
     "That doesn't look like a valid host or IP address." : {
-
-    },
-    "The Mac ended this session." : {
 
     },
     "The device is requesting to pair again." : {
@@ -1065,7 +1146,7 @@
     "The display can still turn off normally. Closing a MacBook's lid can still put it to sleep; closed-lid use requires your MacBook to be connected to power and is up to macOS." : {
 
     },
-    "This Mac and this device can't work together yet." : {
+    "The Mac ended this session." : {
 
     },
     "This device must be updated before pairing" : {
@@ -1077,6 +1158,9 @@
     "This is a request policy, not a live toggle: even Always Allow Requests still requires the device to explicitly ask each session, and never bypasses the Allow Input master switch on the Input page." : {
 
     },
+    "This Mac and this device can't work together yet." : {
+
+    },
     "This removes trust, connection hints, and wake metadata for this device. It must be re-paired to connect again." : {
 
     },
@@ -1084,6 +1168,9 @@
 
     },
     "Too many pairing attempts. Try again in 30 seconds." : {
+
+    },
+    "Top" : {
 
     },
     "Top Left" : {
@@ -1097,6 +1184,9 @@
     },
     "Trackpad" : {
       "comment" : "Input mode: relative pointer control like a laptop trackpad, not the physical accessory."
+    },
+    "Trackpad Sensitivity" : {
+
     },
     "Tray item layout is configured on the device." : {
 
@@ -1114,9 +1204,6 @@
 
     },
     "Turning this off only stops automatic connecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected." : {
-
-    },
-    "USB" : {
 
     },
     "Update MeowDisplay on both devices to pair" : {
@@ -1164,12 +1251,6 @@
     "Waiting for your approval…" : {
 
     },
-    "Wake" : {
-
-    },
-    "Wake Testing" : {
-
-    },
     "Wake for Network Access" : {
 
     },
@@ -1182,10 +1263,13 @@
     "We couldn't restore the connection." : {
 
     },
-    "When a paired Mac starts sharing with this device, connect without asking. Blocked Macs are never connected." : {
-
+    "Wheel" : {
+      "comment" : "Chord palette shape."
     },
     "When a paired device asks to connect, start sharing without asking. Remote input always starts off." : {
+
+    },
+    "When a paired Mac starts sharing with this device, connect without asking. Blocked Macs are never connected." : {
 
     },
     "Your Mac" : {
@@ -1197,22 +1281,7 @@
     "Zoom Out" : {
 
     },
-    "caffeinate -i" : {
-
-    },
-    "macOS didn't allow the sleep-prevention request, so this Mac may still sleep." : {
-
-    },
-    "normalEndpoint=%@" : {
-
-    },
-    "pairingEndpoint=%@" : {
-
-    },
-    "peer=%@" : {
-
-    },
-    "possibly virtual" : {
+    "Zoom While Typing" : {
 
     }
   },

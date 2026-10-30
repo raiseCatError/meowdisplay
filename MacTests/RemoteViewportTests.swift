@@ -499,21 +499,21 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertEqual(clamped.scale, ManualViewportState.maxScale)
     }
 
-    func testReturningToMinimumScaleClearsPan() {
+    func testMinimumScaleKeepsPanWithinHalfTheContent() {
+        // 100% no longer forces the view back to center; an edge may reach
+        // the viewport's center and no further.
         let clamped = ManualViewportState(scale: 1, panX: 999, panY: -999).clamped(against: squareBounds)
-        XCTAssertEqual(clamped.panX, 0)
-        XCTAssertEqual(clamped.panY, 0)
+        XCTAssertEqual(clamped.panX, squareBounds.width / 2)
+        XCTAssertEqual(clamped.panY, -squareBounds.height / 2)
     }
 
-    func testPanClampsSoScaledContentAlwaysCoversTheBase() {
+    func testZoomedPanStopsWhenAnEdgeReachesTheViewportCenter() {
         let state = ManualViewportState(scale: 2, panX: 10_000, panY: -10_000)
         let clamped = state.clamped(against: squareBounds)
         let width = squareBounds.width * clamped.scale
         let height = squareBounds.height * clamped.scale
-        let maxPanX = (width - squareBounds.width) / 2
-        let maxPanY = (height - squareBounds.height) / 2
-        XCTAssertEqual(clamped.panX, maxPanX, accuracy: 0.001)
-        XCTAssertEqual(clamped.panY, -maxPanY, accuracy: 0.001)
+        XCTAssertEqual(clamped.panX, width / 2, accuracy: 0.001)
+        XCTAssertEqual(clamped.panY, -height / 2, accuracy: 0.001)
     }
 
     func testPinchZoomsAroundTheGestureMidpoint() {
@@ -718,5 +718,306 @@ final class RemoteViewportTests: XCTestCase {
             current: reset.current, memory: reset.memory, base: squareBounds))
         XCTAssertEqual(restored.current.rotationRadians, .pi / 2, accuracy: 0.0001)
         XCTAssertEqual(restored.current.scale, transformed.scale, accuracy: 0.0001)
+    }
+}
+
+/// Local pinch-to-zoom up to 8×: geometry stays finite, the content under
+/// the fingers stays put, touches still land on the right Mac point, and
+/// pan, rotation and reset keep working at every magnification.
+final class HighMagnificationViewportTests: XCTestCase {
+    /// The un-zoomed presentation of a 16:10 Mac on a portrait iPhone.
+    private let portraitBase = RemoteViewportCalculator.normal(
+        viewBounds: CGRect(x: 0, y: 0, width: 402, height: 874), remoteAspectSize: CGSize(width: 1728, height: 1080))
+    private let scales: [CGFloat] = [1, 3, 4, 6, 8]
+
+    private func zoomed(_ state: ManualViewportState, base: RemoteViewportTransform? = nil) -> RemoteViewportTransform {
+        RemoteViewportCalculator.applyManualZoom(to: base ?? portraitBase, state: state)
+    }
+
+    private func assertFinite(_ rect: CGRect, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue([rect.minX, rect.minY, rect.width, rect.height].allSatisfy(\.isFinite), file: file, line: line)
+        XCTAssertGreaterThan(rect.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(rect.height, 0, file: file, line: line)
+    }
+
+    /// Whether `point` lies on the displayed (rotated) picture, edges
+    /// included: the clamp lets an edge travel exactly to the center, which
+    /// `CGRect.contains` (open at the max edges) would count as off.
+    private func isOnPicture(_ point: CGPoint, _ transform: RemoteViewportTransform) -> Bool {
+        let rect = transform.displayedRect
+        let dx = point.x - rect.midX
+        let dy = point.y - rect.midY
+        let c = cos(-transform.rotationRadians)
+        let s = sin(-transform.rotationRadians)
+        let tolerance: CGFloat = 1e-6
+        return abs(dx * c - dy * s) <= rect.width / 2 + tolerance
+            && abs(dx * s + dy * c) <= rect.height / 2 + tolerance
+    }
+
+    /// How far inside the picture's nearest edge the view's center sits for
+    /// `state` as given, without clamping it: negative means off the picture.
+    private func edgeGap(_ state: ManualViewportState, rotation: CGFloat, base: CGRect) -> CGFloat {
+        let c = cos(-rotation)
+        let s = sin(-rotation)
+        let localX = -state.panX * c + state.panY * s
+        let localY = -state.panX * s - state.panY * c
+        return min(base.width * state.scale / 2 - abs(localX), base.height * state.scale / 2 - abs(localY))
+    }
+
+    /// The clamp at any angle, not only quarter turns: the view's center
+    /// always ends up on the picture, a pan already on it is kept exactly,
+    /// a pan that was off it lands on the picture's edge (give or take the
+    /// 0.01pt rest snap), and clamping twice changes nothing. The grid
+    /// includes near-zero components, where the rest snap meets the edge.
+    func testClampKeepsTheCenterOnThePictureAtArbitraryAngles() {
+        let base = portraitBase.displayedRect
+        let center = CGPoint(x: base.midX, y: base.midY)
+        let fractions: [CGFloat] = [-1.5, -1.05, -0.7, -0.45, -0.2, 0, 0.2, 0.45, 0.7, 1.05, 1.5]
+        let degreesList = Array(stride(from: -180.0, through: 180.0, by: 7.5)) + [0.1, -1, 44.9, 89.9]
+        for degrees in degreesList {
+            let rotation = CGFloat(degrees) * .pi / 180
+            for scale in scales {
+                let reach = base.width * scale
+                let offsets = fractions.map { $0 * reach } + [-0.004, 0.004]
+                for panX in offsets {
+                    for panY in offsets {
+                        let state = ManualViewportState(scale: scale, panX: panX, panY: panY, rotationRadians: rotation)
+                        let clamped = state.clamped(against: base)
+                        let transform = zoomed(clamped)
+                        XCTAssertTrue(isOnPicture(center, transform), "\(degrees)° \(scale)× \(state)")
+                        XCTAssertEqual(clamped.clamped(against: base), clamped, "\(degrees)° \(scale)×")
+                        let before = edgeGap(state, rotation: clamped.rotationRadians, base: base)
+                        if before >= 0, abs(state.panX) >= 0.01, abs(state.panY) >= 0.01 {
+                            XCTAssertEqual(clamped.panX, state.panX, "\(degrees)° \(scale)×")
+                            XCTAssertEqual(clamped.panY, state.panY, "\(degrees)° \(scale)×")
+                        } else if before < 0 {
+                            // Clamped onto the edge, not pulled further in.
+                            let after = edgeGap(clamped, rotation: clamped.rotationRadians, base: base)
+                            XCTAssertGreaterThanOrEqual(after, -1e-6, "\(degrees)° \(scale)× \(state)")
+                            XCTAssertLessThanOrEqual(after, 0.01, "\(degrees)° \(scale)× \(state)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pre-existing failure the rotated-frame clamp fixes: tilted 30°,
+    /// zoomed and dragged far along a diagonal, the bounding-box limits let
+    /// the whole picture leave the screen.
+    func testTiltedDiagonalExtremePanNoLongerLosesThePicture() {
+        let base = portraitBase.displayedRect
+        let center = CGPoint(x: base.midX, y: base.midY)
+        for scale in scales {
+            let state = ManualViewportState(scale: scale, panX: 1e6, panY: 1e6, rotationRadians: .pi / 6)
+                .clamped(against: base)
+            XCTAssertTrue(isOnPicture(center, zoomed(state)), "\(scale)×")
+        }
+    }
+
+    func testMaximumManualZoomIsEightTimesAndClampsAbove() {
+        XCTAssertEqual(ManualViewportState.maxScale, 8)
+        let over = ManualViewportState(scale: 50).clamped(against: portraitBase.displayedRect)
+        XCTAssertEqual(over.scale, 8)
+        XCTAssertEqual(ManualViewportState(scale: 0.2).clamped(against: portraitBase.displayedRect).scale, 1)
+        XCTAssertEqual(ManualViewportState(scale: .nan).clamped(against: portraitBase.displayedRect).scale, 1)
+        XCTAssertEqual(ManualViewportState(scale: .infinity).clamped(against: portraitBase.displayedRect).scale, 1)
+    }
+
+    /// The Separate Zoom While Typing cap is untouched.
+    func testZoomWhileTypingKeepsItsOwnLimit() {
+        XCTAssertEqual(RemoteViewportCalculator.defaultMaxZoom, 1.5)
+    }
+
+    func testPinchKeepsTheContentUnderTheMidpointAtEveryScale() throws {
+        let base = portraitBase.displayedRect
+        let midpoint = CGPoint(x: base.minX + base.width * 0.73, y: base.minY + base.height * 0.31)
+        let before = try XCTUnwrap(portraitBase.remotePoint(forView: midpoint))
+        for scale in scales {
+            let state = ManualViewportState.pinching(from: .identity, initialBase: base, initialMidpoint: midpoint,
+                                                     currentMidpoint: midpoint, scaleRatio: scale)
+            XCTAssertEqual(state.scale, scale, accuracy: 1e-9)
+            let transform = zoomed(state)
+            assertFinite(transform.displayedRect)
+            XCTAssertEqual(transform.displayedRect.width, base.width * scale, accuracy: 1e-6)
+            let after = try XCTUnwrap(transform.remotePoint(forView: midpoint))
+            XCTAssertEqual(after.x, before.x, accuracy: 1e-9, "\(scale)×")
+            XCTAssertEqual(after.y, before.y, accuracy: 1e-9, "\(scale)×")
+        }
+    }
+
+    /// A slow two-finger spread from 1× to 8× and back moves smoothly: no
+    /// jumps, no NaN, and the anchored content never drifts.
+    func testContinuousPinchToEightAndBackIsSmoothAndAnchored() throws {
+        let base = portraitBase.displayedRect
+        let midpoint = CGPoint(x: base.midX + 40, y: base.midY - 25)
+        let anchor = try XCTUnwrap(portraitBase.remotePoint(forView: midpoint))
+        var previous: CGFloat = 1
+        let ratios = (0...200).map { step -> CGFloat in
+            let t = CGFloat(step) / 100
+            return t <= 1 ? pow(8, t) : pow(8, 2 - t)
+        }
+        for ratio in ratios {
+            let state = ManualViewportState.pinching(from: .identity, initialBase: base, initialMidpoint: midpoint,
+                                                     currentMidpoint: midpoint, scaleRatio: ratio)
+            XCTAssertLessThan(abs(state.scale - previous), 0.17, "jump at ratio \(ratio)")
+            previous = state.scale
+            let mapped = try XCTUnwrap(zoomed(state).remotePoint(forView: midpoint))
+            XCTAssertEqual(mapped.x, anchor.x, accuracy: 1e-9)
+            XCTAssertEqual(mapped.y, anchor.y, accuracy: 1e-9)
+        }
+        XCTAssertEqual(previous, 1, accuracy: 1e-9)
+    }
+
+    /// Zoomed further than 8× in one gesture, the pinch stops at 8× without
+    /// throwing the content away from the fingers.
+    func testPinchingPastTheCapStaysAtEightAndOnScreen() {
+        let base = portraitBase.displayedRect
+        let midpoint = CGPoint(x: base.midX, y: base.midY)
+        let state = ManualViewportState.pinching(from: ManualViewportState(scale: 6), initialBase: base,
+                                                 initialMidpoint: midpoint, currentMidpoint: midpoint, scaleRatio: 40)
+        XCTAssertEqual(state.scale, 8)
+        XCTAssertTrue(zoomed(state).containsViewPoint(midpoint))
+    }
+
+    /// However far the user drags, an edge of the Mac can only reach the
+    /// middle of the view: the content can't be lost off screen.
+    func testExtremePanIsClampedSoTheMacStaysReachable() throws {
+        let base = portraitBase.displayedRect
+        let center = CGPoint(x: base.midX, y: base.midY)
+        for scale in scales {
+            for (dx, dy) in [(1e9, 1e9), (-1e9, 1e9), (1e9, -1e9), (-1e9, -1e9), (CGFloat.infinity, .nan)] {
+                let state = ManualViewportState(scale: scale, panX: dx, panY: dy).clamped(against: base)
+                XCTAssertTrue(state.panX.isFinite && state.panY.isFinite)
+                let transform = zoomed(state)
+                assertFinite(transform.displayedRect)
+                XCTAssertTrue(isOnPicture(center, transform), "\(scale)× pan (\(dx), \(dy))")
+                XCTAssertNotNil(transform.remotePoint(forView: center))
+            }
+        }
+    }
+
+    /// A pan that arrives through the gesture is bounded the same way.
+    func testExtremeDragAtEightTimesIsBounded() {
+        let base = portraitBase.displayedRect
+        let start = CGPoint(x: base.midX, y: base.midY)
+        let state = ManualViewportState.pinching(from: ManualViewportState(scale: 8), initialBase: base,
+                                                 initialMidpoint: start,
+                                                 currentMidpoint: CGPoint(x: start.x + 50_000, y: start.y - 50_000),
+                                                 scaleRatio: 1)
+        let limits = try? XCTUnwrap(state.panLimits(against: base))
+        XCTAssertEqual(abs(state.panX), limits?.x ?? -1, accuracy: 1e-6)
+        XCTAssertEqual(abs(state.panY), limits?.y ?? -1, accuracy: 1e-6)
+        XCTAssertTrue(isOnPicture(start, zoomed(state)))
+    }
+
+    /// Reset returns to exactly the normal presentation from any zoom, and
+    /// the restore toggle brings the same 8× view back.
+    func testResetAndRestoreAtEveryScale() {
+        let base = portraitBase.displayedRect
+        for scale in scales.dropFirst() {
+            let zoomedState = ManualViewportState(scale: scale, panX: 30, panY: -12, rotationRadians: .pi / 7)
+                .clamped(against: base)
+            let reset = ViewportResetRestorePolicy.toggled(current: zoomedState, memory: nil, base: base)
+            XCTAssertEqual(reset?.current, .identity)
+            XCTAssertEqual(zoomed(reset?.current ?? zoomedState), portraitBase)
+            let restored = ViewportResetRestorePolicy.toggled(current: .identity, memory: reset?.memory, base: base)
+            XCTAssertEqual(restored?.current, zoomedState)
+        }
+    }
+
+    /// Touch → Mac → view round trip at high zoom, with and without
+    /// rotation: a visible Mac control tapped at 8× receives the tap at
+    /// that exact point.
+    func testPointerMappingIsExactAtHighMagnificationAndRotation() throws {
+        let base = portraitBase.displayedRect
+        let view = CGRect(x: 0, y: 0, width: 402, height: 874)
+        for scale in scales {
+            for rotation: CGFloat in [0, .pi / 2, -.pi / 3, .pi] {
+                let state = ManualViewportState(scale: scale, panX: -base.width * 0.9, panY: base.height * 0.4,
+                                                rotationRadians: rotation).clamped(against: base)
+                let transform = zoomed(state)
+                for fx in stride(from: 0.05, through: 0.95, by: 0.15) {
+                    for fy in stride(from: 0.05, through: 0.95, by: 0.15) {
+                        let touch = CGPoint(x: view.width * fx, y: view.height * fy)
+                        guard transform.containsViewPoint(touch) else { continue }
+                        let mac = try XCTUnwrap(transform.remotePoint(forView: touch))
+                        let back = transform.viewPoint(forRemote: mac)
+                        XCTAssertEqual(back.x, touch.x, accuracy: 1e-6, "\(scale)× \(rotation)")
+                        XCTAssertEqual(back.y, touch.y, accuracy: 1e-6, "\(scale)× \(rotation)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// At 8× one point of finger travel moves 1/8 as far across the Mac as
+    /// at 1×: magnification makes pointing finer, never coarser.
+    func testOnePointOfTravelIsFinerAtEightTimes() throws {
+        let base = portraitBase.displayedRect
+        let center = CGPoint(x: base.midX, y: base.midY)
+        func step(at scale: CGFloat) throws -> CGFloat {
+            let transform = zoomed(ManualViewportState(scale: scale))
+            let a = try XCTUnwrap(transform.remotePoint(forView: center))
+            let b = try XCTUnwrap(transform.remotePoint(forView: CGPoint(x: center.x + 1, y: center.y)))
+            return b.x - a.x
+        }
+        XCTAssertEqual(try step(at: 8), try step(at: 1) / 8, accuracy: 1e-12)
+    }
+
+    /// Rotation stays available at 8× and snaps exactly like at 1×.
+    func testRotationAtEightTimesKeepsScaleAndAnchor() throws {
+        let base = portraitBase.displayedRect
+        let midpoint = CGPoint(x: base.midX - 30, y: base.midY + 10)
+        let start = ManualViewportState.pinching(from: .identity, initialBase: base, initialMidpoint: midpoint,
+                                                 currentMidpoint: midpoint, scaleRatio: 8)
+        let anchor = try XCTUnwrap(zoomed(start).remotePoint(forView: midpoint))
+        let rotated = ManualViewportState.pinching(from: start, initialBase: base, initialMidpoint: midpoint,
+                                                   currentMidpoint: midpoint, scaleRatio: 1,
+                                                   rotationDelta: .pi / 2)
+        XCTAssertEqual(rotated.scale, 8, accuracy: 1e-9)
+        XCTAssertEqual(rotated.rotationRadians, .pi / 2, accuracy: 1e-9)
+        let mapped = try XCTUnwrap(zoomed(rotated).remotePoint(forView: midpoint))
+        XCTAssertEqual(mapped.x, anchor.x, accuracy: 1e-9)
+        XCTAssertEqual(mapped.y, anchor.y, accuracy: 1e-9)
+    }
+
+    /// Rotating the device, resizing an iPad window or opening the keyboard
+    /// changes the base. An 8× state re-clamps against the new base into
+    /// valid, finite geometry that still covers the view's center.
+    func testEightTimesSurvivesOrientationWindowAndKeyboardChanges() {
+        let mac = CGSize(width: 1728, height: 1080)
+        let views = [CGRect(x: 0, y: 0, width: 402, height: 874), CGRect(x: 0, y: 0, width: 874, height: 402),
+                     CGRect(x: 0, y: 0, width: 1032, height: 1376), CGRect(x: 0, y: 0, width: 507, height: 688),
+                     CGRect(x: 0, y: 0, width: 320, height: 240)]
+        let state = ManualViewportState(scale: 8, panX: 5_000, panY: -5_000, rotationRadians: .pi / 4)
+        for view in views {
+            let normal = RemoteViewportCalculator.normal(viewBounds: view, remoteAspectSize: mac)
+            let typing = RemoteViewportCalculator.keyboardOpen(
+                viewBounds: view, remoteAspectSize: mac,
+                visibleRect: CGRect(x: 0, y: 0, width: view.width, height: view.height * 0.55),
+                anchor: CGPoint(x: 0.5, y: 0.8), zoomEnabled: true)
+            for base in [normal, typing] where base.isValid {
+                let clamped = state.clamped(against: base.displayedRect)
+                XCTAssertEqual(clamped.scale, 8)
+                let transform = RemoteViewportCalculator.applyManualZoom(to: base, state: clamped)
+                assertFinite(transform.displayedRect)
+                let center = CGPoint(x: base.displayedRect.midX, y: base.displayedRect.midY)
+                XCTAssertTrue(isOnPicture(center, transform), "\(view.size)")
+            }
+        }
+    }
+
+    /// Unusable geometry never yields NaN at any scale.
+    func testDegenerateGeometryNeverProducesNaN() {
+        let degenerate = RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: .zero)
+        for scale in scales {
+            let transform = RemoteViewportCalculator.applyManualZoom(to: degenerate, state: ManualViewportState(scale: scale))
+            XCTAssertNil(transform.remotePoint(forView: .zero))
+            let state = ManualViewportState.pinching(from: ManualViewportState(scale: scale), initialBase: .zero,
+                                                     initialMidpoint: .zero, currentMidpoint: CGPoint(x: 10, y: 10),
+                                                     scaleRatio: .nan)
+            XCTAssertEqual(state.scale, scale)
+        }
     }
 }

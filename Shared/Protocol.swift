@@ -150,7 +150,7 @@ enum WireProtocol {
     /// version at all. A pre-18 receiver simply sees `allowInputState.
     /// allowed` flip to true later (once/if granted) instead of instantly,
     /// exactly like a slow reply; a pv 18+ receiver can additionally render
-    /// "Requesting…"/"Not allowed"/"Requests disabled by Mac" from `state`.
+    /// "Requesting Control…"/"Control Declined"/"Control Not Available" from `state`.
     static let sessionScopedInputConsentWireVersion = 18
 
     /// Protocol version this build shipped HEVC/H.265 (Main, 8-bit) in, as
@@ -212,6 +212,80 @@ enum WireProtocol {
 /// Control-message `type` strings introduced with the handshake. The pre-
 /// existing types (`hello`, `ping`, `pong`, `touch`, …) stay inline for now to
 /// keep this change additive and low-risk; unify later if we do a wider pass.
+/// Window workspaces (PROTOCOL.md 6.10): the receiver's hello field `ws`
+/// (its workspace version) and the Mac's welcome feature that turn them on.
+enum WindowWorkspaceWire {
+    static let version = 1
+    static let helloField = "ws"
+    static let welcomeFeature = "window"
+    /// `displayModeRequest` / `displayModeState` value for Window mode.
+    static let mode = "window"
+}
+
+/// Remote Finder (PROTOCOL.md 6.12): folders the Mac's owner approved for this device.
+/// Offered only when the Mac lists `welcomeFeature`; every request also needs the owner's
+/// grant on the Mac, and each write, upload or transfer needs that grant's capability.
+enum RemoteFilesWire {
+    static let welcomeFeature = "files"
+    static let version = 1
+}
+
+/// Pane menu bar (PROTOCOL.md 6.13): the menus of the app a Window-mode pane shows, read and
+/// pressed through Accessibility. Only for a session with control; never the Apple menu.
+enum AppMenuWire {
+    static let welcomeFeature = "menus"
+}
+
+/// Lock This Mac (PROTOCOL.md 6.16), in any display mode: the Mac shows macOS's own lock screen,
+/// so its login password is needed to go on. Needs control. The Mac answers with what happened;
+/// the device never assumes it worked.
+enum LockMacWire {
+    static let welcomeFeature = "lockMac"
+    static let request = "lockMac"          // receiver -> Mac: {req}
+    static let result = "lockMacResult"     // Mac -> receiver: {req, result}
+}
+
+/// What the Mac reports after `lockMac`.
+enum LockMacResult: String, Sendable, CaseIterable {
+    /// macOS shows the lock screen.
+    case locked
+    /// This device doesn't have control of the Mac.
+    case control
+    /// MeowDisplay isn't allowed to post keys (Accessibility).
+    case accessibility
+    /// The shortcut was posted but macOS didn't lock (the shortcut may be changed or off).
+    case failed
+}
+
+/// Close Window from Stage Peek (PROTOCOL.md 6.10), in any display mode: presses one listed
+/// window's own close button through Accessibility. Needs control; never quits the app.
+enum WindowCloseWire {
+    static let welcomeFeature = "windowClose"
+}
+
+/// What the Mac reports after `windowClose`.
+enum WindowCloseResult: String, Sendable, CaseIterable {
+    /// The window is gone.
+    case closed
+    /// The app asked first (unsaved changes): answer it on the Mac.
+    case saveDialog
+    /// The app kept the window open.
+    case stillOpen
+    /// Not the listed window any more (closed already, or the id was reused).
+    case stale
+    /// This session has no control (View Only).
+    case control
+    /// MeowDisplay needs Accessibility permission on the Mac.
+    case accessibility
+    /// The window has no close button.
+    case noButton
+    /// More than one window matched: nothing was pressed.
+    case ambiguous
+
+    /// The card can go: the window is closed (or was already gone).
+    var removesCard: Bool { self == .closed || self == .stale }
+}
+
 enum WireMessage {
     static let welcome = "welcome"                  // Mac -> phone: Mac's pv + min supported
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
@@ -221,6 +295,34 @@ enum WireMessage {
     static let inputReset = "inputReset"             // Mac -> receiver: clear local modifier state
     static let displayModeRequest = "displayModeRequest" // receiver -> Mac: request Mirror/Extend
     static let displayModeState = "displayModeState" // Mac -> receiver: confirmed actual mode
+    // Window workspaces (PROTOCOL.md 6.10). Additive: only exchanged when the
+    // receiver's hello carries `ws` and the Mac's welcome lists "window".
+    static let windowCatalogRequest = "windowCatalogRequest"   // receiver -> Mac: list shareable windows
+    static let windowCatalog = "windowCatalog"                 // Mac -> receiver: windows + running apps
+    static let windowThumbnailRequest = "windowThumbnailRequest" // receiver -> Mac: stills while the picker is open
+    static let windowThumbnail = "windowThumbnail"             // Mac -> receiver: one window's JPEG still
+    static let appIcon = "appIcon"                             // Mac -> receiver: one app's PNG icon
+    static let workspaceRequest = "workspaceRequest"           // receiver -> Mac: tiles (rect, window, rotation, fit)
+    static let workspaceFocus = "workspaceFocus"               // receiver -> Mac: the tile keyboard input goes to
+    static let workspaceState = "workspaceState"               // Mac -> receiver: accepted tiles, states, focus
+    static let workspaceView = "workspaceView"                 // Mac -> receiver: {tiles: {id: view epoch}} once a frame with that view went out
+    static let workspaceRetry = "workspaceRetry"               // receiver -> Mac: {tile}: start that pane's capture again now
+    static let workspaceBackdropRequest = "workspaceBackdropRequest" // receiver -> Mac: {tile, max, req}: the pane's whole source as a still
+    static let workspaceBackdrop = "workspaceBackdrop"         // Mac -> receiver: {tile, window, gen, jpeg, req, stale}
+    static let windowAction = "windowAction"                   // receiver -> Mac: activate / launch / close (needs control)
+    static let appCatalogRequest = "appCatalogRequest"         // receiver -> Mac: every launchable app (any display mode)
+    static let appCatalog = "appCatalog"                       // Mac -> receiver: {rev, apps|same}
+    static let appLaunch = "appLaunch"                         // receiver -> Mac: open an app without activating it (needs control)
+    static let appLaunchResult = "appLaunchResult"             // Mac -> receiver: {bundle, ok}
+    static let windowClose = "windowClose"                     // receiver -> Mac: {window, gen, req}: close one listed window (control)
+    static let windowCloseResult = "windowCloseResult"         // Mac -> receiver: {window, req, result}
+    static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
+    static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
+    static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)
+    static let menuRequest = "menuRequest"                     // receiver -> Mac: a pane's app menus, one level (control)
+    static let menu = "menu"                                   // Mac -> receiver: that level's items
+    static let menuPress = "menuPress"                         // receiver -> Mac: press one menu item (control)
+    static let menuResult = "menuResult"                       // Mac -> receiver: whether it was pressed
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
@@ -310,6 +412,13 @@ enum WireMessage {
     static let sessionInviteResponse = "sessionInviteResponse"
     // Mac -> receiver: `id` — the Mac withdrew or declined this invitation.
     static let sessionInviteCancel = "sessionInviteCancel"
+    // receiver -> Mac: `open` — the on-screen keyboard opened or closed. Only
+    // sent to a Mac whose welcome `features` list `TextCaretWire.welcomeFeature`.
+    static let keyboardState = "keyboardState"
+    // Mac -> receiver: the focused text caret's rectangle, normalized to the
+    // streamed display (`v` 0 = none) — see `TextCaretWire`. Additive; an
+    // older receiver ignores the unknown type.
+    static let textCaret = "textCaret"
 }
 
 enum WireCrypto {
@@ -389,7 +498,7 @@ struct NativeAppGestureSessionState: Equatable {
 /// never reads this field and only ever sees the unchanged `allowed` bool,
 /// which stays a correct summary of every one of these: only `.allowed` is
 /// ever sent with `allowed: true`, every other case sends `allowed: false`.
-enum SessionInputWireState: String, Equatable {
+enum SessionInputWireState: String, Equatable, Sendable {
     /// No session grant, no pending request.
     case off
     /// A control-request prompt is up on the Mac, awaiting the owner.
@@ -405,10 +514,10 @@ enum SessionInputWireState: String, Equatable {
     var receiverDisplayText: String {
         switch self {
         case .off: return String(localized: "Off")
-        case .requesting: return String(localized: "Requesting…")
-        case .allowed: return String(localized: "Allowed for this session")
-        case .notAllowed: return String(localized: "Not allowed")
-        case .requestsDisabled: return String(localized: "Requests disabled by Mac")
+        case .requesting: return String(localized: "Requesting Control…")
+        case .allowed: return String(localized: "Control Allowed")
+        case .notAllowed: return String(localized: "Control Declined")
+        case .requestsDisabled: return String(localized: "Control Not Available")
         }
     }
 }

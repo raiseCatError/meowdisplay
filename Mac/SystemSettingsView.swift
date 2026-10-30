@@ -12,6 +12,7 @@ struct SystemSettingsView: View {
     // wire. `catModeTapCount` intentionally isn't persisted — a relaunch
     // mid-tapping just resets the count.
     @AppStorage(CatMode.unlockedDefaultsKey) private var catModeUnlocked = false
+    @AppStorage(PairedMacUserName.showKey) private var showUserName = true
     @AppStorage(CatMode.enabledDefaultsKey) private var catModeEnabledStorage = false
     @AppStorage(CatMode.tapCountDefaultsKey) private var catModeTapCount = 0
     @State private var showCatModeUnlockedAlert = false
@@ -63,7 +64,7 @@ struct SystemSettingsView: View {
                     "Local Network",
                     granted: !controller.discovered.isEmpty,
                     uncertain: controller.discovered.isEmpty,
-                    help: "Required for WiFi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there.",
+                    help: "Required for Wi-Fi mode. If no device appears in the Devices list, allow MeowDisplay under Privacy & Security → Local Network on this Mac AND on the device — and keep the MeowDisplay app open there.",
                     anchor: "Privacy_LocalNetwork"
                 )
                 WakeForNetworkAccessRow()
@@ -79,6 +80,9 @@ struct SystemSettingsView: View {
             } footer: {
                 Text("Turning this off only stops automatic connecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected.")
             }
+
+            PrivacyShieldSettingsSection()
+            StageManagerSettingsSection()
 
             Section("App Behavior") {
                 Picker("Show app in", selection: $controller.presentation) {
@@ -136,6 +140,8 @@ struct SystemSettingsView: View {
                 Text("Availability")
             }
 
+            SessionDiscoverySection(controller: controller)
+
             Section("Updates") {
                 if let updater {
                     CheckForUpdatesView(updater: updater)
@@ -150,6 +156,15 @@ struct SystemSettingsView: View {
             }
 
             Section {
+                // Devices list this Mac with the same ID, so two Macs with one name can be told apart.
+                if let spki = TrustStore.shared.ownSPKI() {
+                    LabeledContent("This Mac's ID", value: TrustStore.shortID(spki: spki))
+                        .help("Shown next to this Mac's name on paired iPhones, iPads and Android devices.")
+                }
+                Toggle("Show My Name to Paired Devices", isOn: $showUserName)
+                    .help(showUserName
+                          ? "Paired devices show \(NSFullUserName()) next to this Mac, from their next connection. It's sent only to paired devices over their secure connection, never on the network for discovery."
+                          : "Paired devices show only this Mac's name and ID. Each forgets your name the next time it connects.")
                 LabeledContent("Version", value: appVersion)
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance
@@ -157,6 +172,14 @@ struct SystemSettingsView: View {
                     // non-interactive detail row.
                     .contentShape(Rectangle())
                     .onTapGesture { registerCatModeTap() }
+                Link(destination: ProjectLinks.gitHub) {
+                    Label("MeowDisplay on GitHub", systemImage: "link")
+                }
+                if let support = ProjectLinks.support {
+                    Link(destination: support) {
+                        Label("Support MeowDisplay", systemImage: "heart")
+                    }
+                }
                 if catModeUnlocked {
                     Toggle(isOn: catModeToggleBinding) {
                         Label("Cat Mode", systemImage: "pawprint.fill")
@@ -170,6 +193,8 @@ struct SystemSettingsView: View {
                             .accessibilityHidden(true)
                     }
                 }
+            } footer: {
+                Text(ProjectLinks.tagline)
             }
         }
         .formStyle(.grouped)
@@ -210,5 +235,30 @@ struct SystemSettingsView: View {
                 .controlSize(.small)
             }
         }
+    }
+}
+
+/// Fast User Switching (`SessionDiscoveryPreferences`): this user's opt-in to
+/// being listed as one of several login sessions on this Mac. Only the name
+/// typed here is shown to receivers, never the account name; each session
+/// keeps its own pairings.
+private struct SessionDiscoverySection: View {
+    @ObservedObject var controller: SenderController
+    @AppStorage(SessionDiscoveryPreferences.enabledKey) private var enabled = false
+    @AppStorage(SessionDiscoveryPreferences.labelKey) private var label = ""
+
+    var body: some View {
+        Section {
+            TextField("Your Session's Name", text: $label, prompt: Text("For example, Alex"))
+                .onSubmit { controller.refreshSenderAdvertisement() }
+            Toggle("List My Session Separately", isOn: $enabled)
+                .disabled(SenderSessionAdvertisement.normalizedLabel(label) == nil)
+        } header: {
+            Text("Other People on This Mac")
+        } footer: {
+            Text("When several people are logged in to this Mac at once, devices list this Mac once, with each person's session under it. Each session pairs on its own, and a session that's switched out shows as unavailable.")
+        }
+        .onChange(of: enabled) { _, _ in controller.refreshSenderAdvertisement() }
+        .onDisappear { controller.refreshSenderAdvertisement() }
     }
 }

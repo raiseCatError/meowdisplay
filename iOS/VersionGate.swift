@@ -166,10 +166,12 @@ struct UpdateRequiredView: View {
             Image(systemName: "arrow.up.circle.fill")
                 .font(.system(size: 64, weight: .light))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
 
             VStack(spacing: 10) {
                 Text("Update required")
                     .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
                 Text(update.message)
                     .font(.body)
                     .foregroundStyle(.secondary)

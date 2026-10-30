@@ -25,7 +25,7 @@ private struct ReceiverOverviewPage: View {
 
     private var connectedMacName: String? {
         guard receiver.connected, let peerID = receiver.authenticatedPeerID else { return nil }
-        return TrustStore.shared.pinnedPeers().first { $0.peerID == peerID }?.displayName
+        return TrustStore.receiverRole.pinnedPeers().first { $0.peerID == peerID }?.displayName
     }
 
     /// Compatibility copy from the sender (issue #132) — surfaced inline;
@@ -137,9 +137,9 @@ private struct ReceiverOverviewPage: View {
             }
 
             Section {
-                ReceiverCaption("This Mac only displays the stream. Its keyboard and trackpad are not sent to the other Mac, so there is no input permission to request.")
+                ReceiverCaption("Use Request Control in the video window's title bar to control the other Mac with this Mac's keyboard and trackpad.")
             } header: {
-                Text("Input")
+                Text("Control")
             }
         }
     }

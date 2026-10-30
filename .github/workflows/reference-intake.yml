@@ -1,0 +1,43 @@
+name: Reference intake (OpenDisplay)
+
+# Lists the external OpenDisplay changes since the last reviewed commit that
+# could matter to MeowDisplay (security, reliability, rendering/decoding,
+# platform compatibility, regressions), with whether MeowDisplay already has
+# each one and a suggested recommendation (scripts/reference/intake.rb).
+# Read-only: it writes a report to the job summary and an artifact. It never
+# cherry-picks, merges, opens issues or PRs, or changes a branch; adopting a
+# change is a normal, reviewed MeowDisplay PR (REFERENCE.md).
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Last reviewed reference commit (REFERENCE.md's intake ledger)
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report
+        env:
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -euo pipefail
+          [[ $SINCE =~ ^[0-9a-f]{7,40}$ ]] || { echo "::error::since must be a commit id"; exit 1; }
+          git fetch -q --no-tags origin +refs/heads/reference/opendisplay:refs/remotes/origin/reference/opendisplay
+          ruby scripts/reference/intake.rb --since "$SINCE" --reference origin/reference/opendisplay --ours HEAD --out intake.md
+          cat intake.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reference-intake
+          path: intake.md
+          retention-days: 90

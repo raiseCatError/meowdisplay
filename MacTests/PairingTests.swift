@@ -8,11 +8,11 @@ final class PairingTests: XCTestCase {
     private func pair(name: String = "Phone") throws -> (PairingResult, PairingResult) {
         let initiator = PairingHandshake(
             role: .initiator, deviceID: "11111111-1111-1111-1111-111111111111",
-            displayName: "Mac", identitySPKI: Data("mac identity".utf8),
+            displayName: "Mac", identitySPKI: TestSPKI.of("mac identity"),
             ephemeralKey: initiatorKey, nonce: Data(repeating: 3, count: 32))
         let responder = PairingHandshake(
             role: .responder, deviceID: "22222222-2222-2222-2222-222222222222",
-            displayName: name, identitySPKI: Data("phone identity".utf8),
+            displayName: name, identitySPKI: TestSPKI.of("phone identity"),
             ephemeralKey: responderKey, nonce: Data(repeating: 4, count: 32))
         return (try initiator.result(peerHello: responder.localHello),
                 try responder.result(peerHello: initiator.localHello))
@@ -57,7 +57,7 @@ final class PairingTests: XCTestCase {
 
     private func makeInitiatorHello(deviceID: String = "11111111-1111-1111-1111-111111111111",
                                     displayName: String = "Mac",
-                                    identitySPKI: Data = Data("mac identity".utf8),
+                                    identitySPKI: Data = TestSPKI.of("mac identity"),
                                     ephemeralKey: P256.KeyAgreement.PrivateKey? = nil,
                                     nonce: Data = Data(repeating: 3, count: 32)) -> PairingHello {
         PairingHello(version: WireProtocol.pairingVersion, deviceID: deviceID, displayName: displayName,
@@ -95,7 +95,7 @@ final class PairingTests: XCTestCase {
     func testCommitmentRejectsChangedSPKI() {
         let hello = makeInitiatorHello()
         let commitment = PairingHelloCommitment.compute(initiatorHello: hello)
-        let changed = makeInitiatorHello(identitySPKI: Data("other identity".utf8))
+        let changed = makeInitiatorHello(identitySPKI: TestSPKI.of("other identity"))
         XCTAssertFalse(PairingHelloCommitment.verify(commitment, revealedInitiatorHello: changed))
     }
 
@@ -217,5 +217,32 @@ final class PairingTests: XCTestCase {
         let wanted = "11111111-1111-1111-1111-111111111111"
         let removed: [PairingServiceRecord<String>] = []
         XCTAssertNil(PairingServiceAssociation.endpoint(forStableID: wanted, in: removed))
+    }
+
+    // MARK: F1 — identity keys and one peer per key
+
+    func testOnlyACanonicalP256IdentityCanBePaired() throws {
+        XCTAssertTrue(PairingIdentity.isPinnable(TestSPKI.of("mac identity")))
+        XCTAssertFalse(PairingIdentity.isPinnable(Data("mac identity".utf8)), "not a key")
+        XCTAssertFalse(PairingIdentity.isPinnable(Data()))
+        let p384 = P384.Signing.PrivateKey().publicKey.derRepresentation
+        XCTAssertFalse(PairingIdentity.isPinnable(p384), "another curve can never authenticate in our TLS")
+        var padded = TestSPKI.of("mac identity"); padded.append(0)
+        XCTAssertFalse(PairingIdentity.isPinnable(padded), "non-canonical DER")
+        let bad = PairingHello(version: WireProtocol.pairingVersion, deviceID: UUID().uuidString, displayName: "Mac",
+                               identitySPKI: Data("garbage".utf8), ephemeralPublicKey: P256.KeyAgreement.PrivateKey().publicKey.x963Representation,
+                               nonce: Data(repeating: 7, count: 32))
+        XCTAssertThrowsError(try bad.validate())
+    }
+
+    func testAKeyHeldByTwoPeersBelongsToNeither() {
+        var state = PinSnapshotState()
+        let shared = TestSPKI.of("shared"), own = TestSPKI.of("own")
+        XCTAssertTrue(state.commit([.init(peerID: "a", spki: shared), .init(peerID: "b", spki: shared), .init(peerID: "c", spki: own)],
+                                   readAt: state.beginRefresh()))
+        XCTAssertNil(state.peerID(forSPKI: shared), "ambiguous: never the first match")
+        XCTAssertEqual(state.peerID(forSPKI: own), "c")
+        XCTAssertTrue(state.isHeldByAnotherPeer("d", spki: own))
+        XCTAssertFalse(state.isHeldByAnotherPeer("c", spki: own), "re-pairing the same peer is fine")
     }
 }

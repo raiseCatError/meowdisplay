@@ -4,6 +4,7 @@ import SwiftUI
 /// `SenderController.activeDisplayEntries` / `knownDeviceEntries` /
 /// `deviceEntries` for the sources of truth this view only renders.
 struct DevicesSettingsView: View {
+    @State private var cleanupCandidates: [KnownDeviceCleanup.Entry] = []
     @ObservedObject var controller: SenderController
 
     var body: some View {
@@ -47,6 +48,15 @@ struct DevicesSettingsView: View {
                 }
                 if let message = controller.pairingMessage {
                     Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                let old = controller.supersededKnownDevices
+                if !old.isEmpty {
+                    HStack {
+                        Text("\(old.count) old \(old.count == 1 ? "entry" : "entries") from earlier pairings of the same devices")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Clean Up…") { cleanupCandidates = old }.controlSize(.small)
+                    }
                 }
                 if controller.knownDeviceEntries.isEmpty {
                     Text("No known devices")
@@ -102,6 +112,16 @@ struct DevicesSettingsView: View {
                 }
             }
 
+            .confirmationDialog("Remove \(cleanupCandidates.count) old \(cleanupCandidates.count == 1 ? "entry" : "entries")?",
+                                isPresented: Binding(get: { !cleanupCandidates.isEmpty }, set: { if !$0 { cleanupCandidates = [] } }),
+                                titleVisibility: .visible) {
+                Button("Remove", role: .destructive) { controller.cleanUpKnownDevices(cleanupCandidates.map(\.id)); cleanupCandidates = [] }
+                Button("Cancel", role: .cancel) { cleanupCandidates = [] }
+            } message: {
+                Text(cleanupCandidates.map { e in
+                    "\(e.name)" + (e.paired.map { " · paired " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "")
+                }.joined(separator: "\n") + "\n\nThe newest pairing of each device stays. A removed one has to pair again to connect.")
+            }
             Section("Pair over Remote") {
                 switch controller.remotePairingPhase {
                 case .off:
@@ -125,7 +145,7 @@ struct DevicesSettingsView: View {
                 // here.
                 let nearby = controller.deviceEntries.filter { controller.pairedPeerID(for: $0) == nil }
                 if nearby.isEmpty {
-                    Text("No devices found — plug one in via USB, or open the MeowDisplay app on a device on this WiFi network.")
+                    Text("No devices found — plug one in via USB, or open the MeowDisplay app on a device on this Wi-Fi network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

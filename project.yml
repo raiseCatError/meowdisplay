@@ -3,21 +3,27 @@ options:
   createIntermediateGroups: true
 # Swift Package Manager dependencies. Sparkle is the macOS apps' out-of-store
 # auto-update framework (issue #52): embedded open-source code + CLI tooling,
-# not a hosted service. Its checks are currently switched off — MeowDisplay
-# has no appcast or signing key of its own yet (see SUEnableAutomaticChecks
-# on the Mac targets below).
+# not a hosted service. Feed URLs and the EdDSA public key are set on the Mac
+# targets below.
 packages:
+  # Exact versions, so a clean checkout builds against the same libraries the
+  # release candidate was tested with (the resolved file lives in the
+  # generated, untracked project). Raise them deliberately, then re-test.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    # 2.x is the current major (latest 2.9.x) and the first Sparkle line to
-    # support SPM. `from:` allows compatible 2.x updates.
-    from: "2.6.0"
+    # 2.9 is the first release that supports signed feeds
+    # (SURequireSignedFeed below).
+    exactVersion: "2.10.1"
   SwiftCertificates:
     url: https://github.com/apple/swift-certificates
-    from: "1.19.1"
+    exactVersion: "1.21.1"
   SwiftASN1:
     url: https://github.com/apple/swift-asn1
-    from: "1.1.0"
+    exactVersion: "1.7.3"
+  # Not linked directly: pins swift-certificates' own dependency.
+  SwiftCrypto:
+    url: https://github.com/apple/swift-crypto
+    exactVersion: "5.0.3"
 schemes:
   OpenSidecarMac:
     build:
@@ -30,6 +36,9 @@ schemes:
     build:
       targets:
         OpenSidecariOS: all
+    test:
+      targets:
+        - OpenSidecariOSUITests
   OpenSidecarMacReceiver:
     build:
       targets:
@@ -58,6 +67,18 @@ targets:
     sources:
       - Mac
       - Shared
+      # The unified app's "Use This Mac as a Display" role: the Mac
+      # Receiver's code, minus its own app entry point and bundle resources
+      # (MeowDisplay keeps one icon, string catalog and Info.plist). The
+      # standalone receiver target below still builds all of it for macOS
+      # 12-13.
+      - path: MacReceiver
+        excludes:
+          - OpenSidecarMacReceiverApp.swift
+          - Info.plist
+          - "*.entitlements"
+          - "*.xcstrings"
+          - Assets.xcassets
     dependencies:
       - package: Sparkle
       - package: SwiftCertificates
@@ -72,16 +93,26 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
-        NSLocalNetworkUsageDescription: MeowDisplay connects to your iPad or iPhone over the local network in WiFi mode.
+        NSLocalNetworkUsageDescription: MeowDisplay connects to your iPhone, iPad, Android device or other Mac over your Wi-Fi network.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
-        # --- Sparkle auto-update ---
-        # Disabled: MeowDisplay does not yet have its own appcast + signing
-        # infrastructure, and must not consume upstream OpenDisplay's feed or
-        # trust its signing key. Re-add SUFeedURL + SUPublicEDKey (a fresh
-        # MeowDisplay-owned key pair — never reuse upstream's) and flip this
-        # back to true once MeowDisplay hosts its own appcast.
-        SUEnableAutomaticChecks: false
+        # The receiver role keeps its own identity and pins (see
+        # ReceiverRoleConfiguration / TrustStore.receiverRole).
+        MeowDisplayReceiverRoleTrust: separate
+        # --- Sparkle auto-update (see RELEASE.md) ---
+        # MeowDisplay's own feed and EdDSA public key — never upstream
+        # OpenDisplay's. Both Mac apps trust the same key; each has its own
+        # feed so neither is offered the other app's update.
+        # SUEnableAutomaticChecks is deliberately unset: Sparkle then asks the
+        # user before turning on background checks.
+        SUFeedURL: https://meowdisplay.app/appcast.xml
+        SUPublicEDKey: M9Je3RXE9GYGv7ZvVmJj2xK2FrpSR/rQvbuZFfYORcU=
+        # Check the EdDSA signature before extracting an update, and only
+        # accept an appcast/release notes signed with that key (a compromised
+        # feed host can't redirect users elsewhere). generate_appcast signs
+        # the feed when it sees these keys in the archived app.
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac
@@ -103,6 +134,11 @@ targets:
           PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac.debug
           PRODUCT_NAME: MeowDisplay Dev
           BUNDLE_DISPLAY_NAME: MeowDisplay Dev
+          # No debug-dylib stub: with it every Debug build's main executable is the same tiny
+          # stub with one fixed UUID, and macOS Local Network privacy keys its grants by the
+          # main executable's UUID (TN3179). A shared, unchanging UUID left the grant unmatched,
+          # so outgoing connections to devices failed silently ("Local network prohibited").
+          ENABLE_DEBUG_DYLIB: NO
           # Grayscale icon (same composition as Release) so the dev build is
           # obvious in the Dock, cmd-tab and permission lists.
           ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Dev
@@ -138,9 +174,11 @@ targets:
         NSLocalNetworkUsageDescription: MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         LSApplicationCategoryType: public.app-category.utilities
-        # Disabled: see the sender target's Sparkle comment above — no
-        # MeowDisplay-owned appcast/signing infrastructure exists yet.
-        SUEnableAutomaticChecks: false
+        # Sparkle: see the sender target's comment above. Own feed, same key.
+        SUFeedURL: https://meowdisplay.app/appcast-receiver.xml
+        SUPublicEDKey: M9Je3RXE9GYGv7ZvVmJj2xK2FrpSR/rQvbuZFfYORcU=
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.mac.receiver
@@ -164,10 +202,20 @@ targets:
     sources:
       - MacTests
       - Mac/DisplayArrangement.swift
+      - Mac/CoalescingFetch.swift
+      - Mac/MissionControlMonitor.swift
+      - Shared/StagePeekDockLayout.swift
+      - Mac/OriginRestore.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
+      - Mac/TextCaretFollower.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
+      - MacReceiver/ReceiverInputForwarding.swift
+      - MacReceiver/ReceiverOwnership.swift
+      - Shared/ReceiverRoleConfiguration.swift
+      - Mac/MacAppRole.swift
+      - Mac/LoginSession.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
@@ -182,6 +230,8 @@ targets:
       # above reference these directly.
       - Mac/QUICTransportSession.swift
       - Mac/TransportProtocolSelection.swift
+      - Mac/TailscaleDiscovery.swift
+      - Mac/StartupHandoffPolicy.swift
       - Shared/QUICTransportProtocol.swift
       - Shared/QUICReceiverSession.swift
       - Mac/AutoConnectPolicy.swift
@@ -200,6 +250,7 @@ targets:
       - Mac/AppPresentation.swift
       - Mac/StartAtLoginPolicy.swift
       - Mac/MirrorDisplaySelection.swift
+      - Mac/DisplayModeAssignment.swift
       - Mac/DisplayHealth.swift
       - Mac/HiDPIEnforcementBackoff.swift
       - Mac/RouteArbitration.swift
@@ -209,6 +260,7 @@ targets:
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift
       - Shared/SessionInvitation.swift
+      - Shared/MacSessionDiscovery.swift
       - Shared/PickerSelection.swift
       - Shared/SessionStabilizationPolicy.swift
       - Shared/WakeOnLAN.swift
@@ -217,6 +269,37 @@ targets:
       - Shared/DisplayState.swift
       - Shared/LogSnapshot.swift
       - Shared/Protocol.swift
+      - Shared/WindowWorkspace.swift
+      - Mac/WindowCatalog.swift
+      - Mac/WindowWorkspaceTargeting.swift
+      - Mac/WindowWorkspaceEngine.swift
+      - Mac/StageManagerSwitch.swift
+      - Mac/StageManagerShortcutInstaller.swift
+      - Shared/KnownDeviceCleanup.swift
+      - Shared/ScreenAwakePolicy.swift
+      - Mac/StageStripAccess.swift
+      - Mac/LocalNetworkAccess.swift
+      - Mac/PrivacyShieldPolicy.swift
+      - Mac/MacScreenLock.swift
+      - Mac/WindowBrowserService.swift
+      - Mac/RemoteFileBrowser.swift
+      - Mac/RemoteFileTransfers.swift
+      - Mac/RemoteFilesAuthorization.swift
+      - Mac/AppMenuReader.swift
+      - Mac/WindowCloser.swift
+      - Mac/ClipboardHub.swift
+      # Mac-side input revocation end to end (MacSenderInputRevocationTests):
+      # the real MacSender and InputInjector, plus what MacSender links.
+      - Mac/MacSender.swift
+      - Mac/ShareableContentBroker.swift
+      - Mac/InputInjector.swift
+      - Mac/AudioCaptureEncoder.swift
+      - Mac/InteractiveWakePromotion.swift
+      - Mac/SystemGestureInvoker.swift
+      - Mac/Usbmux.swift
+      - Mac/VirtualDisplay.swift
+      - Mac/PowerLifecycleLogger.swift
+      - Mac/TestPatternWindow.swift
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift
@@ -231,24 +314,48 @@ targets:
       # closure `ReceiverUISinkTests` needs to construct a real one
       # (StreamReceiver.init touches all of these).
       - Shared/StreamReceiver.swift
+      - Shared/WorkspaceClient.swift
+      - Shared/RemoteFiles.swift
+      - Shared/RemoteFilesActions.swift
+      - Shared/ClipboardClient.swift
+      - Shared/RemoteTransferQueue.swift
+      - Shared/ControlChunks.swift
+      - Shared/AppMenu.swift
+      - Shared/WorkspaceBrowse.swift
       - Shared/ReceiverVideoTelemetry.swift
       - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift
       - Shared/ReceiverPipelineActor.swift
       - Shared/ReceiverAudioDecoder.swift
       - Shared/TrustStore.swift
+      - Shared/PairedMacUserName.swift
       - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/PairingNetwork.swift
       - Shared/LocalOwnerAuthenticator.swift
       - Shared/AppStore.swift
+      - Shared/ProjectLinks.swift
       - Shared/RemoteViewport.swift
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
       - Shared/KeyboardEditPlanner.swift
+      - Shared/TypedTextEcho.swift
+      - Shared/TextCaretWire.swift
       - Shared/ControlProfile.swift
+      - Shared/StagePeek.swift
+      - Shared/SpatialOverview.swift
+      - Shared/UnifiedClipboard.swift
       - Shared/ControlInteraction.swift
       - Shared/ControlTrayGeometry.swift
+      - Shared/PadControlLayout.swift
+      - Shared/CustomControlLayout.swift
+      - Shared/MobileSettingsCategory.swift
+      # iOS Demo Mode boundary (Foundation only, no UIKit).
+      - iOS/DemoSession.swift
+      - iOS/DemoDesktop.swift
+      - Shared/MobileSettingsSearch.swift
+      - Shared/CustomLayoutSharing.swift
+      - Shared/ReceiverInputPrompt.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
       - Shared/RemotePairing.swift
@@ -303,13 +410,33 @@ targets:
       path: iOS/Info.plist
       properties:
         CFBundleDisplayName: MeowDisplay
+        # Shown by some system UI (e.g. the menu bar when the iPad app runs on a Mac). Not an
+        # identity: the bundle ID, executable (OpenSidecariOS), keychain and settings are unchanged.
+        CFBundleName: MeowDisplay
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
+        # Opts the iPad out of Split View/Slide Over/Stage Manager resizing:
+        # the receiver surface assumes it owns the whole screen (safe-area,
+        # notch and tray geometry). Apple has deprecated this key; dropping it
+        # means supporting arbitrary window sizes, which is its own change.
+        # TODO: remove once the receiver surface handles resizable windows.
         UIRequiresFullScreen: true
-        NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over WiFi.
+        # Mouse and trackpad clicks arrive as pointer touches (hover, right click, scroll): HID-B.
+        UIApplicationSupportsIndirectInputEvents: true
+        NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over Wi-Fi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
+        # Save to Device: photos and videos from the Mac go to Photos (add only, never read).
+        NSPhotoLibraryAddUsageDescription: MeowDisplay saves the photos and videos you copy from your Mac to your photo library.
+        # Other saved files land in Files ▸ On My iPhone/iPad ▸ MeowDisplay ▸ Downloads.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # Export compliance, as declared in App Store Connect: the app uses
+        # only standard, exempt encryption (TLS and pairing through Apple's
+        # frameworks), so no non-exempt encryption. It does not mean the app
+        # has no cryptography. Revisit if the cryptography ever changes.
+        ITSAppUsesNonExemptEncryption: false
         NSBonjourServices: ["_opensidecar._tcp", "_meowdisp-q._udp", "_opendisplay-pair._tcp", "_opendisplay-mac-pair._tcp"]
         # "Audio, AirPlay, and Picture in Picture": required for the receiver's
         # Picture in Picture window to keep showing the stream in the background.
@@ -324,3 +451,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.ios
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  # Demo Mode smoke path for App Review (launch, Try the Demo, Settings, exit).
+  OpenSidecariOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.4"
+    sources:
+      - iOSUITests
+    dependencies:
+      - target: OpenSidecariOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: com.raisecaterror.meowdisplay.ios.uitests

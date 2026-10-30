@@ -239,9 +239,9 @@ final class PairingSessionTests: XCTestCase {
 
     private func makePair() throws -> (initiator: Side, responder: Side, iT: MemoryTransport, rT: MemoryTransport) {
         let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Phone",
-                                     identitySPKI: Data("phone identity".utf8))
+                                     identitySPKI: TestSPKI.of("phone identity"))
         let mac = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Mac",
-                                   identitySPKI: Data("mac identity".utf8))
+                                   identitySPKI: TestSPKI.of("mac identity"))
         let (a, b) = MemoryTransport.pair()
         let i = Side(role: .initiator, result: try phone.result(peerHello: mac.localHello), transport: a)
         let r = Side(role: .responder, result: try mac.result(peerHello: phone.localHello), transport: b)
@@ -567,9 +567,9 @@ final class PairingSessionTests: XCTestCase {
         let store = InMemoryPeerTrustStore()
         store.setPin(peerID: responderID, spki: Data("original".utf8), displayName: "Phone")
         let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Mac",
-                                     identitySPKI: Data("mac identity".utf8))
+                                     identitySPKI: TestSPKI.of("mac identity"))
         let impostor = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Phone",
-                                        identitySPKI: Data("impostor".utf8))
+                                        identitySPKI: TestSPKI.of("impostor"))
         let pending = PairingClassifier.classify(try phone.result(peerHello: impostor.localHello).pending,
                                                  existingPin: store.pin(peerID: responderID))
         XCTAssertThrowsError(try PairingClassifier.check(pending, allowIdentityChange: USBPairingPolicy.allowIdentityChange))
@@ -629,9 +629,9 @@ final class PairingSessionTests: XCTestCase {
 
     func testDefaultAllowIdentityChangeIsFalse() throws {
         let phone = PairingHandshake(role: .initiator, deviceID: initiatorID, displayName: "Mac",
-                                     identitySPKI: Data("mac identity".utf8))
+                                     identitySPKI: TestSPKI.of("mac identity"))
         let impostor = PairingHandshake(role: .responder, deviceID: responderID, displayName: "Phone",
-                                        identitySPKI: Data("impostor".utf8))
+                                        identitySPKI: TestSPKI.of("impostor"))
         let store = InMemoryPeerTrustStore()
         store.setPin(peerID: responderID, spki: Data("original".utf8), displayName: "Phone")
         let pending = PairingClassifier.classify(try phone.result(peerHello: impostor.localHello).pending,

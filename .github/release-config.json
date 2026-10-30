@@ -1,0 +1,27 @@
+{
+  "publishMode": "manual-final-approval",
+  "crossPlatformReady": false,
+  "requiredPlatforms": ["mac", "ios", "android"],
+  "mac": {
+    "products": ["sender", "receiver"]
+  },
+  "ios": {
+    "appId": "6817552864",
+    "bundleId": "com.raisecaterror.meowdisplay.ios",
+    "submitForReview": true,
+    "storeUrl": "https://apps.apple.com/app/id6817552864"
+  },
+  "android": {
+    "package": "com.raisecaterror.meowdisplay.android",
+    "uploadTrack": "internal",
+    "reviewTrack": "production",
+    "managedPublishing": true,
+    "storeUrl": "https://play.google.com/store/apps/details?id=com.raisecaterror.meowdisplay.android"
+  },
+  "website": {
+    "repository": "raiseCatError/MeowDisplayWebsite",
+    "branch": "main",
+    "manifestPath": "release.json",
+    "liveUrl": "https://meowdisplay.app/release.json"
+  }
+}

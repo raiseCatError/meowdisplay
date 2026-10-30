@@ -66,6 +66,8 @@ struct MenuBarQuickView: View {
                 }
             }
 
+            DisplayRoleMenuToggle(controller: controller)
+
             Button("Open Settings…") { MacSettingsWindow.show() }
                 .controlSize(.small)
 

@@ -15,10 +15,10 @@ final class RemotePairingTests: XCTestCase {
 
     /// The phone dials (initiator); the Mac listens (responder). Returns the
     /// phone's view: the result naming the Mac, plus the Mac's confirmation source.
-    private func pair(macSPKI: Data = Data("mac identity".utf8))
+    private func pair(macSPKI: Data = TestSPKI.of("mac identity"))
         throws -> (phone: PairingResult, mac: PairingResult) {
         let phone = PairingHandshake(role: .initiator, deviceID: phoneID, displayName: "Phone",
-                                     identitySPKI: Data("phone identity".utf8))
+                                     identitySPKI: TestSPKI.of("phone identity"))
         let mac = PairingHandshake(role: .responder, deviceID: macID, displayName: "Mac",
                                    identitySPKI: macSPKI)
         return (try phone.result(peerHello: mac.localHello), try mac.result(peerHello: phone.localHello))
@@ -44,7 +44,7 @@ final class RemotePairingTests: XCTestCase {
         let store = InMemoryPeerTrustStore()
         try PairingFinalizer.complete(result: phone, pending: phone.pending,
                                       peerConfirmation: mac.confirmation(accepted: true), store: store)
-        XCTAssertEqual(store.pin(peerID: macID), Data("mac identity".utf8))
+        XCTAssertEqual(store.pin(peerID: macID), TestSPKI.of("mac identity"))
     }
 
     // 3. Rejected by peer / cancelled: no pin.
@@ -77,7 +77,7 @@ final class RemotePairingTests: XCTestCase {
     func testChangedKeyIsHardFailureAndPreservesExistingPin() throws {
         let store = InMemoryPeerTrustStore()
         store.setPin(peerID: macID, spki: Data("original".utf8), displayName: "Mac")
-        let (phone, _) = try pair(macSPKI: Data("impostor".utf8))
+        let (phone, _) = try pair(macSPKI: TestSPKI.of("impostor"))
         let pending = PairingClassifier.classify(phone.pending, existingPin: store.pin(peerID: macID))
         XCTAssertEqual(pending.classification, .identityChanged)
         XCTAssertThrowsError(try PairingClassifier.check(pending, allowIdentityChange: false)) {
@@ -169,13 +169,13 @@ final class RemotePairingTests: XCTestCase {
     // 10. Already-trusted peer: deterministic, never overwritten with a different key.
     func testAlreadyTrustedSameKeyIsRePairAndKeepsPin() throws {
         let store = InMemoryPeerTrustStore()
-        store.setPin(peerID: macID, spki: Data("mac identity".utf8), displayName: "Mac")
+        store.setPin(peerID: macID, spki: TestSPKI.of("mac identity"), displayName: "Mac")
         let (phone, mac) = try pair()
         let pending = PairingClassifier.classify(phone.pending, existingPin: store.pin(peerID: macID))
         XCTAssertEqual(pending.classification, .rePairSameKey)
         try PairingFinalizer.complete(result: phone, pending: pending,
                                       peerConfirmation: mac.confirmation(accepted: true), store: store)
-        XCTAssertEqual(store.pin(peerID: macID), Data("mac identity".utf8))
+        XCTAssertEqual(store.pin(peerID: macID), TestSPKI.of("mac identity"))
         XCTAssertEqual(store.pins.count, 1)
     }
 

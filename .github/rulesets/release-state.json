@@ -1,0 +1,28 @@
+{
+  "name": "Release state: closed until a dedicated release App exists",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/release-state"
+      ],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "update"
+    },
+    {
+      "type": "creation"
+    }
+  ]
+}

@@ -62,9 +62,9 @@ final class SessionAuthorityRevocationTests: XCTestCase {
         let frames: [Data?] = [nil, RemoteConnectRequestIntent.frame(for: .automatic)]
         let policies: [IncomingSessionPeerPolicy?] = [nil, .alwaysAllow, .blocked]
         for autoAllow in [true, false] {
-            IncomingSessionPolicyStore.setAutomaticallyAllow(autoAllow, defaults: defaults)
+            IncomingSessionPolicyStore.setAutomaticallyAllow(autoAllow, role: .receiverRole, defaults: defaults)
             for policy in policies {
-                IncomingSessionPolicyStore.setPolicy(policy, peerID: "P", defaults: defaults)
+                IncomingSessionPolicyStore.setPolicy(policy, peerID: "P", role: .receiverRole, defaults: defaults)
                 for frame in frames {
                     let intent = RemoteConnectRequestIntent.intent(fromFrame: frame)
                     let action = ReceiverRequestAdmission.decide(peerID: "P", intent: intent, existing: nil,
@@ -76,8 +76,8 @@ final class SessionAuthorityRevocationTests: XCTestCase {
             }
         }
         // The only way to the prompt is an explicit request.
-        IncomingSessionPolicyStore.setAutomaticallyAllow(false, defaults: defaults)
-        IncomingSessionPolicyStore.setPolicy(nil, peerID: "P", defaults: defaults)
+        IncomingSessionPolicyStore.setAutomaticallyAllow(false, role: .receiverRole, defaults: defaults)
+        IncomingSessionPolicyStore.setPolicy(nil, peerID: "P", role: .receiverRole, defaults: defaults)
         XCTAssertEqual(ReceiverRequestAdmission.decide(
             peerID: "P", intent: RemoteConnectRequestIntent.intent(fromFrame: RemoteConnectRequestIntent.frame(for: .manual)),
             existing: nil, defaults: defaults), .start(needsSenderApproval: true))

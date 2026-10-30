@@ -16,6 +16,18 @@ that is not recorded in this repository.
 
 ---
 
+## App identity
+
+| Field | Value |
+|---|---|
+| Name | MeowDisplay |
+| Bundle ID | `com.raisecaterror.meowdisplay.ios` |
+| Apple ID (App Store Connect) | `6817552864` |
+| First version / build | 1.20.0 (1) |
+| Source | `https://github.com/raiseCatError/meowdisplay` |
+
+No donation or support-payment link ships in 1.20.0.
+
 ## App Information (applies to all versions)
 
 **Name**
@@ -77,9 +89,10 @@ CONTROL
 • Direct Touch: tap exactly where you want on screen
 • Trackpad: move a pointer with familiar gestures
 • Click, double-click, drag, right-click and scroll
-• Apple Pencil on supported iPads, with tilt and hover
 • Multi-finger gestures for Mission Control, Spaces, Spotlight and more
 • A keyboard, a Main Control Tray for modifier keys, a customizable Function Tray, and Chords with shortcut palettes
+• On iPad, place the controls as an edge Strip, a floating Overlay, or your own Custom layouts
+• Pan and zoom the view on your device without sending anything to the Mac
 • Controls can hide automatically while you work
 
 CONNECT
@@ -123,28 +136,26 @@ Work through this before pressing **Submit for Review**.
 | Marketing URL | Above |
 | Privacy Policy URL | Above |
 | Pricing | **[MAINTAINER INPUT]** — price tier |
-| Regions / availability | **[MAINTAINER INPUT]** |
+| Regions / availability | **[MAINTAINER INPUT]** — 1.20.0 excludes France (export compliance) |
 | Content-rights declaration | Draft above — confirm |
 | Age-rating questionnaire | **[MAINTAINER INPUT]** — the app shows only the user's own Mac screen; no built-in web browsing, user-generated content, or purchases |
 | App Privacy questionnaire | See [App Privacy](#app-privacy) — confirm |
 | Privacy manifest | `iOS/PrivacyInfo.xcprivacy`, bundled by `project.yml` — see [App Privacy](#app-privacy) |
-| Export-compliance questionnaire | See [Export compliance](#export-compliance) — **needs a maintainer/legal determination** |
+| Export-compliance questionnaire | Answered for 1.20.0 (standard encryption, no documentation); `ITSAppUsesNonExemptEncryption = NO` — see [Export compliance](#export-compliance) |
 | App Review contact (name, email, phone) | **[MAINTAINER INPUT]** — enter in App Store Connect only |
 | App Review notes | See [App Review notes](#app-review-notes) |
 | Sign-in required | No — there is no account |
 | Screenshots | See [Screenshot plan](#screenshot-plan) — **not captured yet** |
-| Build | Select the processed build uploaded by `fastlane ios release` |
+| Build | Select the processed build — uploaded by `fastlane ios release`, or from a local Release archive via Xcode Organizer → Distribute App → App Store Connect → Upload |
 | Version release | Choose **Manually release this version** |
 
 ### Before the first submission
 
-- [ ] **Set `AppStore.iOSAppID`** in `Shared/AppStore.swift` to this app's
-      Apple ID from App Store Connect (the digits only). It is `nil` until
-      then, so the iOS update screen and the Mac's `updateRequired` message
-      link to the GitHub project page instead of any App Store listing. It
-      must never be upstream OpenDisplay's ID — `AppStoreTests` fails if that
-      appears anywhere in the repository. Set it in the build that ships, or
-      the first release still points users at GitHub to update.
+- [x] **`AppStore.iOSAppID`** in `Shared/AppStore.swift` is this app's Apple
+      ID, `6817552864`, so the iOS update screen and the Mac's
+      `updateRequired` message open MeowDisplay's own listing. It must never be
+      upstream OpenDisplay's ID — `AppStoreTests` fails if that appears
+      anywhere in the repository.
 - [ ] **Provide a Mac build App Review can install.** There is no public
       notarized Mac download yet. Publish one (for example an unlisted or
       pre-release GitHub Release asset) or attach a download link in the review
@@ -173,6 +184,11 @@ How to test:
 6. Touch the screen to control the Mac: Direct Touch taps where you touch; Trackpad moves a pointer. The keyboard button and control trays send keys and shortcuts.
 
 Remote Access and Wake & Connect are optional and need extra network setup; they are not needed to review the core features.
+
+Permissions and background use:
+- Local Network: the app advertises itself over Bonjour so the user's own Mac can find it and connect directly. No other devices are contacted.
+- Face ID / passcode: only to confirm trusting a newly paired device.
+- Background audio (UIBackgroundModes "audio"): keeps the system Picture in Picture window of the user's Mac, and the Mac audio the user turned on, playing after they leave the app. With Picture in Picture off, leaving the app stops playback.
 ```
 
 ---
@@ -248,9 +264,12 @@ answer is a maintainer/legal decision — this section does not make it.
 
 ### Current declarations
 
-- `ITSAppUsesNonExemptEncryption` is **not set** in `project.yml` or
-  `iOS/Info.plist`, so App Store Connect will ask the export-compliance
-  questions for each uploaded build until it is answered.
+- `ITSAppUsesNonExemptEncryption` is **`NO`** (the iOS target's
+  `info.properties` in `project.yml`), matching the maintainer's App Store
+  Connect answer for 1.20.0: standard encryption only, no documentation
+  required. It means no *non-exempt* encryption, not no cryptography. No
+  `ITSEncryptionExportComplianceCode` applies. This version is not
+  distributed in France.
 
 ### What App Store Connect is likely to ask
 
@@ -282,6 +301,7 @@ Real captures from the running app only. No fake UI, no price wording
 | 4 | Direct Touch or Trackpad in use, control tray visible | Touch or trackpad control |
 | 5 | Function Tray / Chords shortcut palette open | Shortcuts at your fingertips |
 | 6 | Connected devices / connection choice | USB, Wi-Fi or Remote Access |
+| 7 | iPad with Strip or Overlay controls (iPad set only) | Controls that fit your iPad |
 
 Capture the same set on iPhone and iPad (the app is universal). Use a clean
 desktop, neutral content, and no personal names, addresses, or notifications.

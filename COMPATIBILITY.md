@@ -23,7 +23,7 @@ We cut Mac and iOS from one release tag, but distribution is not simultaneous:
 
 | | Update channel | Time to reach a user |
 |---|---|---|
-| **Mac** | Sparkle appcast (upstream: `opendisplay.app/appcast.xml`; MeowDisplay's Sparkle checks are off until it hosts its own) | hours — auto, silent |
+| **Mac** | Sparkle appcast (`meowdisplay.app/appcast.xml`, `appcast-receiver.xml`) | within a day once the user allows automatic checks (Sparkle asks); installs when the user accepts, unless they opted into automatic installs |
 | **iOS** | App Store (review + user tapping Update) | days → weeks, with a **long tail** |
 
 So at any moment the field holds many version pairings. The dominant one is
@@ -150,10 +150,10 @@ next to the Sparkle appcast.
 
 > **MeowDisplay status: disabled.** `VersionGate.manifestURL` is `nil`, so no
 > request is made: MeowDisplay hosts no policy file yet and must not follow
-> upstream OpenDisplay's. The design below is upstream's, kept for when a
-> MeowDisplay-owned file exists.
+> the OpenDisplay reference project's. The design below is that project's,
+> kept for when a MeowDisplay-owned file exists.
 
-- **URL:** upstream used `https://opendisplay.app/ios-version.json` (source of
+- **URL:** OpenDisplay used `https://opendisplay.app/ios-version.json` (source of
   truth: `public/ios-version.json`; Vite copies it into `docs/` and Pages
   serves it). This repository has no `public/ios-version.json`.
 - **Shape:**

@@ -1,0 +1,53 @@
+{
+ "comment": "PROTOCOL.md 6.14: one message split into chunk parts of partBytes raw bytes. Both receivers must reassemble `parts` into `message` (UTF-8) and the Swift/Kotlin splitters must produce the same parts.",
+ "partBytes": 16,
+ "id": 42,
+ "message": "{\"type\":\"files\",\"op\":\"preview\",\"ok\":true,\"req\":7,\"text\":\"héllo — 猫 \\\"quoted\\\"\\nline 2\"}",
+ "sha": "b4f3b0c6b7048dce",
+ "parts": [
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 0,
+   "n": 6,
+   "d": "eyJ0eXBlIjoiZmlsZXMiLA==",
+   "len": 92,
+   "sha": "b4f3b0c6b7048dce"
+  },
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 1,
+   "n": 6,
+   "d": "Im9wIjoicHJldmlldyIsIg=="
+  },
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 2,
+   "n": 6,
+   "d": "b2siOnRydWUsInJlcSI6Nw=="
+  },
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 3,
+   "n": 6,
+   "d": "LCJ0ZXh0IjoiaMOpbGxvIA=="
+  },
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 4,
+   "n": 6,
+   "d": "4oCUIOeMqyBcInF1b3RlZA=="
+  },
+  {
+   "type": "chunk",
+   "id": 42,
+   "i": 5,
+   "n": 6,
+   "d": "XCJcbmxpbmUgMiJ9"
+  }
+ ]
+}

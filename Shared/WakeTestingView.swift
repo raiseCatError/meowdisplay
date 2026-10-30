@@ -10,12 +10,12 @@ struct WakeTestingView: View {
     @State private var sendResult: String?
 
     private var pairedPeers: [(peerID: String, displayName: String)] {
-        TrustStore.shared.pinnedPeers()
+        TrustStore.receiverRole.pinnedPeers()
     }
 
     private var selectedMetadata: WakeMetadata? {
         guard !selectedPeerID.isEmpty else { return nil }
-        return WakeMetadataStore.metadata(forPeerID: selectedPeerID)
+        return WakeMetadataStore.metadata(forPeerID: selectedPeerID, role: .receiverRole)
     }
 
     var body: some View {

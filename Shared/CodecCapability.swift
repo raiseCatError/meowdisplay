@@ -209,15 +209,21 @@ enum CodecSelectionPolicy {
         let requestedWidth: Int
         let requestedHeight: Int
         let requestedFPS: Int
+        /// An HEVC session on this sender was created but then produced no
+        /// frames (the encode-failure safety net). Sticky for the sender's
+        /// life: every decision that would pick HEVC recovers to H.264.
+        let hevcFailedAtRuntime: Bool
 
         init(preference: CodecPreference, senderSupportsHEVC: Bool, receiverSupportsHEVC: Bool,
-             requestedWidth: Int, requestedHeight: Int, requestedFPS: Int) {
+             requestedWidth: Int, requestedHeight: Int, requestedFPS: Int,
+             hevcFailedAtRuntime: Bool = false) {
             self.preference = preference
             self.senderSupportsHEVC = senderSupportsHEVC
             self.receiverSupportsHEVC = receiverSupportsHEVC
             self.requestedWidth = requestedWidth
             self.requestedHeight = requestedHeight
             self.requestedFPS = requestedFPS
+            self.hevcFailedAtRuntime = hevcFailedAtRuntime
         }
 
         var hevcMutuallySupported: Bool { senderSupportsHEVC && receiverSupportsHEVC }
@@ -231,6 +237,12 @@ enum CodecSelectionPolicy {
     /// Pure decision function. Never touches VideoToolbox/UserDefaults —
     /// callers gather `Input` from actual capability probes and pass it in.
     static func select(_ input: Input) -> Result {
+        let result = selectFromCapabilities(input)
+        guard input.hevcFailedAtRuntime, result.codec == .hevc else { return result }
+        return Result(codec: .h264, reason: Reason.runtimeFallback.rawValue)
+    }
+
+    private static func selectFromCapabilities(_ input: Input) -> Result {
         switch input.preference {
         case .h264:
             return Result(codec: .h264, reason: Reason.explicitPreference.rawValue)

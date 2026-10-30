@@ -1,3 +1,4 @@
+import SwiftUI
 import CoreGraphics
 
 struct ControlSafeInsets: Equatable {
@@ -7,6 +8,13 @@ struct ControlSafeInsets: Equatable {
     var trailing: CGFloat
 
     static let zero = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+
+    var edgeInsets: EdgeInsets { EdgeInsets(top: top, leading: leading, bottom: bottom, trailing: trailing) }
+
+    /// The safe rectangle of a screen of [size].
+    func safeRect(in size: CGSize) -> CGRect {
+        CGRect(x: leading, y: top, width: max(0, size.width - leading - trailing), height: max(0, size.height - top - bottom))
+    }
 
     /// UIKit's live report is authoritative once the probe has published;
     /// GeometryProxy is only the startup fallback. Treating the runtime
@@ -388,8 +396,14 @@ enum ControlTrayGeometry {
 
         // Obstacle avoidance is deliberately after normal placement. A
         // non-intersecting frame must remain bit-for-bit unchanged.
-        trayFrame = avoidingUnsafeRegion(trayFrame, in: container, safeInsets: safeInsets, enabled: avoidNotch,
-                                         portrait: portrait, notchSide: notchSide)
+        let unsafeTrayFrame = avoidingUnsafeRegion(trayFrame, in: container, safeInsets: safeInsets,
+                                                   enabled: avoidNotch, portrait: portrait, notchSide: notchSide)
+        // The palette belongs to the tray: when the tray steps off the home
+        // indicator or notch, the palette moves with it instead of staying
+        // where the tray used to be.
+        paletteFrame = paletteFrame.offsetBy(dx: unsafeTrayFrame.minX - trayFrame.minX,
+                                             dy: unsafeTrayFrame.minY - trayFrame.minY)
+        trayFrame = unsafeTrayFrame
         paletteFrame = avoidingUnsafeRegion(paletteFrame, in: container, safeInsets: safeInsets, enabled: avoidNotch,
                                             portrait: portrait, notchSide: notchSide)
         let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
@@ -690,5 +704,19 @@ extension ControlTrayGeometry {
             if isAvailable(after) { return after }
             return frame
         }
+    }
+}
+
+extension ControlTrayGeometry {
+    /// The iPhone Main Tray's chip diameter along a screen edge `length`
+    /// points long: the standard size, shrunk just enough that every chip
+    /// and the layout margins fit (nine 40pt chips don't fit a 390pt
+    /// iPhone), never below `minimum`.
+    static func fittedChipDiameter(count: Int, length: CGFloat, preferred: CGFloat = 40,
+                                   gap: CGFloat = 4, slack: CGFloat = 4, margin: CGFloat = 12,
+                                   minimum: CGFloat = 30) -> CGFloat {
+        guard count > 0 else { return preferred }
+        let room = length - margin * 2 - slack - CGFloat(count - 1) * gap
+        return max(minimum, min(preferred, (room / CGFloat(count)).rounded(.down)))
     }
 }

@@ -303,6 +303,10 @@ final class SenderSessionAuthorizationTests: XCTestCase {
             WireMessage.videoRequest, WireMessage.streamingProfileRequest, WireMessage.streamingPriorityRequest,
             WireMessage.mirrorDisplayRequest, WireMessage.extendShapeRequest, WireMessage.maxFPSRequest,
             WireMessage.promoteInteractiveWake,
+            // Window titles, app names, thumbnails and the caret position
+            // never reach a connection that isn't admitted.
+            WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.workspaceRequest,
+            WireMessage.workspaceFocus, WireMessage.windowAction, WireMessage.keyboardState,
             "someFutureMessage",
         ]
         for type in admittedOnly {

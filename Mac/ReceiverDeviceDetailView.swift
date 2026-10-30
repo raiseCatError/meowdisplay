@@ -44,6 +44,7 @@ struct ReceiverDeviceDetailView: View {
             }
 
             if let session {
+                displayModeSection(session)
                 extendShapeSection(session)
                 maxFPSSection(session)
             }
@@ -95,6 +96,9 @@ struct ReceiverDeviceDetailView: View {
                 }
             }
 
+            filesSection
+            clipboardSection
+
             networkTransportSection
 
             Section {
@@ -127,6 +131,111 @@ struct ReceiverDeviceDetailView: View {
         }
     }
 
+    /// Remote Finder for this device: how long (Ask each session / Always / Block), where
+    /// (approved folders / all accessible files) and what (browse, download, upload, modify,
+    /// delete). Widening is refused while any device controls this Mac; narrowing and Revoke
+    /// always work and apply to a live session at its next request (Revoke: at once).
+    @ViewBuilder
+    private var filesSection: some View {
+        let policy = FilesDevicePolicyStore.policy(peerID: peerID)
+        let locked = controller.anySessionHasEffectiveInput
+        let session = controller.sessions.first { $0.deviceID == peerID && $0.applicationAuthenticated }
+        Section {
+            Picker("Access", selection: Binding(
+                get: { policy.access },
+                set: { var p = policy; p.access = $0; controller.setFilesPolicy(p, peerID: peerID) })) {
+                Text("Ask Every Session").tag(FilesAccess.ask)
+                Text("Always Allow").tag(FilesAccess.always)
+                Text("Block").tag(FilesAccess.block)
+            }
+            if policy.access == .always {
+                Picker("Reaches", selection: Binding(
+                    get: { policy.scope },
+                    set: { var p = policy; p.scope = $0; controller.setFilesPolicy(p, peerID: peerID) })) {
+                    Text("Approved Folders").tag(FilesScope.selectedFolders)
+                    Text("All Accessible Files").tag(FilesScope.allAccessible)
+                }
+                ForEach(FilesCapability.allCases, id: \.self) { c in
+                    Toggle(Self.capabilityTitle(c), isOn: Binding(
+                        get: { policy.capabilities.contains(c) },
+                        set: { on in
+                            var p = policy
+                            if on { p.capabilities.insert(c) } else { p.capabilities.remove(c) }
+                            if !p.capabilities.contains(.browse) { p.capabilities = [] }   // nothing works without browsing
+                            controller.setFilesPolicy(p, peerID: peerID)
+                        }))
+                    .disabled(locked && !policy.capabilities.contains(c))
+                }
+                Toggle("Show Hidden Files", isOn: Binding(
+                    get: { policy.showHidden },
+                    set: { var p = policy; p.showHidden = $0; controller.setFilesPolicy(p, peerID: peerID) }))
+                    .disabled(locked && !policy.showHidden)
+            }
+            if let session, session.filesAllowedEpoch != nil || policy.access == .always {
+                Button("Revoke Files Access Now", role: .destructive) { controller.revokeFilesAccess(peerID: peerID) }
+            }
+        } header: {
+            Text("Files")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if locked {
+                    Text("Files access can't be widened while a device controls this Mac. Narrowing and Revoke always work.")
+                }
+                Text(policy.scope == .allAccessible && policy.access == .always
+                     ? "All Accessible Files: the home folder and connected drives, only where macOS lets MeowDisplay read (it may ask you first). Never ~/Library, other users' files or protected locations."
+                     : "Approved folders are chosen in Settings ▸ Displays. Replaced and deleted items go to the Trash. Files access never gives control of this Mac, and control never gives Files access.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Unified Clipboard for this device: Ask each session / Always / Block, and which way.
+    /// Independent of Files and of control.
+    @ViewBuilder
+    private var clipboardSection: some View {
+        let hub = ClipboardHub.shared
+        let policy = hub.policy(peerID: peerID)
+        let locked = controller.anySessionHasEffectiveInput
+        Section {
+            Picker("Access", selection: Binding(
+                get: { policy.access },
+                set: { var p = policy; p.access = $0; hub.setPolicy(p, peerID: peerID); controller.objectWillChange.send() })) {
+                Text("Ask Every Session").tag(ClipboardAccess.ask)
+                Text("Always Allow").tag(ClipboardAccess.always)
+                Text("Block").tag(ClipboardAccess.block)
+            }
+            Picker("Direction", selection: Binding(
+                get: { policy.direction },
+                set: { var p = policy; p.direction = $0; hub.setPolicy(p, peerID: peerID); controller.objectWillChange.send() })) {
+                Text("Both Ways").tag(ClipDirection.both)
+                Text("Mac to Device Only").tag(ClipDirection.toDevice)
+                Text("Device to Mac Only").tag(ClipDirection.toMac)
+            }
+            .disabled(policy.access == .block)
+            Button("Revoke Clipboard Access Now", role: .destructive) { hub.revoke(peerID: peerID) }
+        } header: {
+            Text("Clipboard")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if locked { Text("Clipboard access can't be widened while a device controls this Mac. Narrowing and Revoke always work.") }
+                Text("Works only while Unified Clipboard is on in Settings ▸ Clipboard and the device turned it on too. Clipboard access never gives control of this Mac or access to its files.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    static func capabilityTitle(_ c: FilesCapability) -> String {
+        switch c {
+        case .browse: return String(localized: "Browse and Preview")
+        case .download: return String(localized: "Save to Device and Share")
+        case .upload: return String(localized: "Upload and New Folders")
+        case .modify: return String(localized: "Rename, Move, Copy, Compress")
+        case .delete: return String(localized: "Move to Trash")
+        }
+    }
+
     /// Per-device TCP/QUIC choice (the Mac is the only selection authority).
     /// QUIC is offered only once this device has shown it supports it; Auto
     /// then uses TCP until it does. USB ignores this setting.
@@ -155,6 +264,60 @@ struct ReceiverDeviceDetailView: View {
             Text(quicSelectable
                  ? "Auto uses QUIC when this device supports it and uses TCP if QUIC can't reach it. Both use the same pairing and encryption. USB is unaffected."
                  : "QUIC isn't available for this device yet, so Auto uses TCP. It becomes available after a connection with a MeowDisplay version that supports it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// This device's own Mirror/Extend mode and Mirror source (issue #20).
+    /// Mac-authoritative and Mac-local like Extend shape; changing it
+    /// rebuilds this device's stream only — other connected devices keep
+    /// running untouched.
+    @ViewBuilder
+    private func displayModeSection(_ session: DeviceSession) -> some View {
+        let preference = controller.displayModePreference(for: session)
+        Section {
+            Picker("Mode", selection: Binding(
+                get: { DeviceModeChoice(preference.mode) },
+                set: { choice in
+                    if let mode = choice.mode {
+                        controller.requestMode(mode, for: session)
+                    } else {
+                        controller.followDefaultMode(for: session)
+                    }
+                })) {
+                Text("Mac Default (\(controller.mode.title))",
+                     comment: "Per-device display mode option: follow the Mac's default mode, named in parentheses.")
+                    .tag(DeviceModeChoice.macDefault)
+                Text("Extend", comment: "Display mode: add the device as a second, separate screen (not the verb \"to extend\").")
+                    .tag(DeviceModeChoice.extend)
+                    .disabled(!controller.videoEnabled)
+                Text("Mirror", comment: "Display mode: duplicate the Mac's screen onto the device.")
+                    .tag(DeviceModeChoice.mirror)
+                    .disabled(!controller.hasUsablePhysicalDisplay)
+                if preference.mode == .window {
+                    // Chosen on the device, which picks the windows; shown so
+                    // the picker reflects it. Switching away is always allowed.
+                    Text("Windows", comment: "Display mode: selected Mac windows, chosen on the device.")
+                        .tag(DeviceModeChoice.window)
+                }
+            }
+            if session.displayAssignment.mode == .mirror {
+                DeviceMirrorSourcePicker(
+                    choice: preference.mirrorSource,
+                    defaultUUID: controller.mirrorDisplayUUID,
+                    onChange: { controller.requestMirrorSource($0, for: session) })
+            }
+            LabeledContent("Currently", value: session.displayAssignment.summary)
+            if let notice = session.displayModeNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Display Mode")
+        } footer: {
+            Text("Only affects this device. Changing it restarts this device's stream; other connected devices keep running.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -441,6 +604,93 @@ struct ReceiverDeviceDetailView: View {
             Text("Tray item layout is configured on the device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The per-device Mode picker's three choices.
+private enum DeviceModeChoice: Hashable {
+    case macDefault
+    case extend
+    case mirror
+    case window
+
+    init(_ mode: CaptureMode?) {
+        switch mode {
+        case nil: self = .macDefault
+        case .extend: self = .extend
+        case .mirror: self = .mirror
+        case .window: self = .window
+        }
+    }
+
+    var mode: CaptureMode? {
+        switch self {
+        case .macDefault: return nil
+        case .extend: return .extend
+        case .mirror: return .mirror
+        case .window: return .window
+        }
+    }
+}
+
+/// This device's own Mirror source: the Mac's default source, Automatic,
+/// or a specific display — including another device's extended desktop.
+private struct DeviceMirrorSourcePicker: View {
+    let choice: MirrorSourcePreference?
+    let defaultUUID: String?
+    let onChange: (MirrorSourcePreference?) -> Void
+    @State private var candidates: [MirrorDisplayCandidate] = []
+    @State private var loaded = false
+
+    private static let macDefaultTag = "\u{0}default"
+    private static let automaticTag = "\u{0}automatic"
+
+    private var tag: String {
+        switch choice {
+        case nil: return Self.macDefaultTag
+        case .automatic: return Self.automaticTag
+        case .display(let uuid): return uuid
+        }
+    }
+
+    /// The display this device would mirror if it isn't using Automatic.
+    private var explicitUUID: String? { choice.map(\.displayUUID) ?? defaultUUID }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Mirror Display", selection: Binding(
+                // A remembered display that is disconnected has no tag; it
+                // shows as Automatic, which is what capture uses meanwhile.
+                // The stored choice is kept.
+                get: {
+                    PickerSelection.valid(tag, among: [Self.macDefaultTag, Self.automaticTag]
+                        + candidates.compactMap(\.persistentID), fallback: Self.automaticTag)
+                },
+                set: { value in
+                    switch value {
+                    case Self.macDefaultTag: onChange(nil)
+                    case Self.automaticTag: onChange(.automatic)
+                    default: onChange(.display(uuid: value))
+                    }
+                })) {
+                Text("Mac Default").tag(Self.macDefaultTag)
+                Text("Automatic").tag(Self.automaticTag)
+                ForEach(candidates) { candidate in
+                    Text(candidate.label)
+                        .tag(candidate.persistentID ?? "")
+                        .disabled(candidate.persistentID == nil)
+                }
+            }
+            if let explicitUUID, loaded, !candidates.contains(where: { $0.persistentID == explicitUUID }) {
+                Text("Selected display isn't currently available — using Automatic until it reconnects.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .task {
+            candidates = await MirrorDisplayCandidate.listCandidates()
+            loaded = true
         }
     }
 }

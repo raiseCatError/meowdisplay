@@ -93,6 +93,48 @@ enum QUICFailureClassifier {
     // a TCP downgrade.
 }
 
+/// What the dialing Mac does with each `NWConnectionGroup` state of its
+/// QUIC tunnel. Pure so the transient-vs-fatal split is testable without a
+/// network.
+enum QUICGroupStatePolicy {
+    enum Action: Equatable {
+        /// First `.ready`: open Control, Video and Audio.
+        case openStreams
+        /// Nothing to do — including `.waiting`, which Network.framework
+        /// retries on its own (a physical Mac -> iPhone dial reported
+        /// `.waiting(ENETDOWN)` and then `.ready` moments later).
+        case ignore
+        case fail(QUICFailureClass, detail: String)
+    }
+
+    /// `.waiting` is never terminal, whatever error it carries: `.failed` is
+    /// the group's fatal state. A group that never progresses is bounded by
+    /// the application-handshake timer before the hello, and by the ping
+    /// watchdog after it.
+    static func action(for state: NWConnectionGroup.State, groupAlreadyReady: Bool) -> Action {
+        switch state {
+        case .ready:
+            return groupAlreadyReady ? .ignore : .openStreams
+        case .waiting:
+            return .ignore
+        case .failed(let error):
+            return .fail(QUICFailureClassifier.classify(error), detail: "group failed")
+        case .cancelled:
+            return .fail(.indeterminate, detail: "group cancelled")
+        default:
+            return .ignore
+        }
+    }
+
+    /// Class of the application-handshake timeout. Only a tunnel that never
+    /// became ready AND never showed the receiver's pinned certificate is
+    /// "unreachable"; a peer that completed the handshake but never said
+    /// hello is not, so it never earns an Auto fallback.
+    static func handshakeTimeoutClass(groupReady: Bool, peerVerified: Bool) -> QUICFailureClass {
+        !groupReady && !peerVerified ? .reachability : .indeterminate
+    }
+}
+
 /// What the Mac knows about this peer's QUIC support, strongest first.
 enum PeerQUICSupport: Equatable, Sendable {
     /// Positive capability from a previous AUTHENTICATED hello.
@@ -208,10 +250,46 @@ struct TransportProtocolSelector: Equatable, Sendable {
         if preference == .auto { sticky = protocolUsed }
     }
 
-    /// An established QUIC session was lost. The next dial is the single
-    /// QUIC recovery attempt; its own outcome decides what happens next.
-    mutating func liveQUICLost() {
+    /// A live QUIC session that ends this soon after its hello never carried
+    /// the stream. On such a path QUIC completes its handshake and then
+    /// stops delivering data (seen on every QUIC session to an iPhone that
+    /// hosts the Mac's Personal Hotspot, while TCP on the same path works).
+    /// Retrying QUIC there loops forever, so Auto treats it as unreachable.
+    static let earlyLiveLossWindow: TimeInterval = 20
+
+    /// True when a live QUIC session that ended `age` seconds after its
+    /// hello counts as a path that cannot carry QUIC.
+    static func isEarlyLiveLoss(age: TimeInterval?) -> Bool {
+        guard let age else { return false }
+        return age >= 0 && age < earlyLiveLossWindow
+    }
+
+    /// An established QUIC session was lost (EOF, watchdog or receive
+    /// error) `age` seconds after its hello. Auto falls back to TCP for the
+    /// rest of the logical session when the loss came early; otherwise the
+    /// next dial is the single QUIC recovery attempt.
+    @discardableResult
+    mutating func liveQUICLost(age: TimeInterval? = nil,
+                               preference: NetworkTransportPreference = .auto) -> FailureAction {
+        if preference == .auto, Self.isEarlyLiveLoss(age: age) {
+            inLiveRecovery = false
+            sticky = .tcp
+            return .fallbackToTCP
+        }
         inLiveRecovery = true
+        return .retryQUIC
+    }
+
+    /// The receiver turned out to host this Mac's own network (it is the
+    /// path's gateway: an iPhone's Personal Hotspot). Auto moves to TCP for
+    /// the rest of the logical session; explicit QUIC is left alone.
+    /// Returns true when the live session must migrate to TCP.
+    mutating func receiverHostsNetwork(preference: NetworkTransportPreference,
+                                       current: NetworkTransportProtocol?) -> Bool {
+        guard preference == .auto else { return false }
+        inLiveRecovery = false
+        sticky = .tcp
+        return current == .quic
     }
 
     /// A QUIC attempt failed with `failureClass`. `established` means the
@@ -220,13 +298,20 @@ struct TransportProtocolSelector: Equatable, Sendable {
     /// is then judged like any dial failure.
     mutating func quicFailed(_ failureClass: QUICFailureClass,
                              preference: NetworkTransportPreference,
-                             established: Bool = false) -> FailureAction {
+                             established: Bool = false,
+                             liveAge: TimeInterval? = nil) -> FailureAction {
         switch failureClass {
         case .security, .protocolViolation:
             inLiveRecovery = false
             return .stop(failureClass)
         case .indeterminate, .reachability:
             break
+        }
+        if established, preference == .auto, Self.isEarlyLiveLoss(age: liveAge) {
+            // A stream failed seconds after hello: same as an early live loss.
+            inLiveRecovery = false
+            sticky = .tcp
+            return .fallbackToTCP
         }
         if established {
             inLiveRecovery = true
@@ -263,6 +348,52 @@ struct TransportProtocolSelector: Equatable, Sendable {
             sticky = nil
             return current == .tcp ? .quic : nil
         }
+    }
+}
+
+// MARK: - Hotspot host
+
+/// Whether the receiver hosts this Mac's own network: the path's remote
+/// address is one of the path's gateways. That is an iPhone (or any phone)
+/// sharing its Personal Hotspot with this Mac — IPv4 172.20.10.1 on a
+/// classic hotspot, the phone's link-local IPv6 router address on an
+/// IPv6-only one (464XLAT carriers). Scope and port are ignored.
+enum NetworkHostDetector {
+    static func receiverIsGateway(remote: NWEndpoint?, gateways: [NWEndpoint]) -> Bool {
+        guard let remoteKey = addressKey(remote) else { return false }
+        return gateways.contains { addressKey($0) == remoteKey }
+    }
+
+    /// The endpoint's raw address bytes (no scope, no port), or nil for
+    /// anything that is not a literal IP address.
+    static func addressKey(_ endpoint: NWEndpoint?) -> Data? {
+        guard case .hostPort(let host, _)? = endpoint else { return nil }
+        switch host {
+        case .ipv4(let address):
+            return address.rawValue
+        case .ipv6(let address):
+            return withoutEmbeddedScope(address.rawValue)
+        case .name(let name, _):
+            var bare = name.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            if let scope = bare.firstIndex(of: "%") { bare = String(bare[..<scope]) }
+            if let v4 = IPv4Address(bare) { return v4.rawValue }
+            if let v6 = IPv6Address(bare) { return withoutEmbeddedScope(v6.rawValue) }
+            return nil
+        @unknown default:
+            return nil
+        }
+    }
+
+    /// The kernel hands out a link-local gateway with its interface index
+    /// embedded in bytes 2–3 (BSD's KAME form: fe80:c::… for en0 = index
+    /// 12), while a connection's remote endpoint carries zeros there. Both
+    /// mean the same address, so those bytes never take part in the match.
+    private static func withoutEmbeddedScope(_ raw: Data) -> Data {
+        var bytes = [UInt8](raw)
+        guard bytes.count == 16, bytes[0] == 0xfe, bytes[1] & 0xc0 == 0x80 else { return raw }
+        bytes[2] = 0
+        bytes[3] = 0
+        return Data(bytes)
     }
 }
 

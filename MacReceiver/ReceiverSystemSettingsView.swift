@@ -61,12 +61,24 @@ private struct ReceiverSystemPage: View {
             }
 
             Section("Support") {
-                Button("Reveal Log Files in Finder") { Log.revealInFinder() }
+                Button("Reveal Connection Log in Finder") { Log.revealInFinder() }
                     .controlSize(.small)
             }
 
-            Section("About") {
+            Section {
                 ReceiverValueRow("Version", value: appVersion)
+                Link(destination: ProjectLinks.gitHub) {
+                    Label("MeowDisplay on GitHub", systemImage: "link")
+                }
+                if let support = ProjectLinks.support {
+                    Link(destination: support) {
+                        Label("Support MeowDisplay", systemImage: "heart")
+                    }
+                }
+            } header: {
+                Text("About")
+            } footer: {
+                Text(ProjectLinks.tagline)
             }
         }
     }
@@ -74,8 +86,9 @@ private struct ReceiverSystemPage: View {
 
 /// The advertised-name editor — kept out of any high-frequency observed
 /// object so streaming updates can't rebuild it mid-edit (same reasoning as
-/// the iOS DeviceNameField).
-private struct ReceiverNameField: View {
+/// the iOS DeviceNameField). Also on MeowDisplay's "This Mac as a Display"
+/// page.
+struct ReceiverNameField: View {
     @AppStorage("receiverName") private var name = Host.current().localizedName ?? "Mac"
     let onChange: (String) -> Void
 

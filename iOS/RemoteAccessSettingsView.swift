@@ -18,7 +18,7 @@ struct RemoteAccessSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Text("Use a reachable private-network address for this paired Mac, such as its Tailscale address or MagicDNS name. This lets you connect when the Mac isn't on the same network — it's only used to reach the device, it does not grant trust, and every connection still requires the existing secure pairing.")
+                Text("Use a reachable private-network address for this paired Mac, such as its Tailscale address or MagicDNS name. This lets you connect when the Mac isn't on the same network — it's only used to reach the device, it does not grant trust, and every connection still requires the existing secure pairing. On the Mac, Settings → Remote Access → Check Tailscale shows its Tailscale name.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -45,7 +45,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private var selectedPeerHasSavedEndpoint: Bool {
-        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID) != nil
+        !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) != nil
     }
 
     var body: some View {
@@ -76,9 +76,16 @@ struct RemoteEndpointEditorView: View {
                 TextField("Port", text: $port)
                     .keyboardType(.numberPad)
                     .onChange(of: port) { _ in errorMessage = nil; savedConfirmation = false }
+                    .onChange(of: errorMessage) { message in
+                        if let message { UIAccessibility.post(notification: .announcement, argument: message) }
+                    }
+                    .onChange(of: savedConfirmation) { saved in
+                        if saved { UIAccessibility.post(notification: .announcement, argument: String(localized: "Saved")) }
+                    }
 
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(.red)
+                        .accessibilityLabel(Text("Error: \(errorMessage)"))
                 } else if savedConfirmation {
                     Text("Saved").font(.caption).foregroundStyle(.secondary)
                 }
@@ -96,7 +103,7 @@ struct RemoteEndpointEditorView: View {
     private func loadSavedEndpoint(for peerID: String) {
         errorMessage = nil
         savedConfirmation = false
-        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID) else {
+        guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) else {
             host = ""
             port = String(WireCrypto.remoteRequestPort)
             return
@@ -108,8 +115,8 @@ struct RemoteEndpointEditorView: View {
     private func save() {
         switch RemoteEndpointValidation.validate(host: host, port: port) {
         case .success(let value):
-            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID)
-            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID),
+            RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .receiverRole)
+            guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole),
                   readBack.host == value.host, readBack.port == value.port else {
                 errorMessage = String(localized: "Couldn't save this endpoint. Try again.")
                 return
@@ -132,7 +139,7 @@ struct RemoteEndpointEditorView: View {
     /// the Mac remains paired and reachable locally exactly as before (see
     /// `ForgetDeviceAction` on the Mac side for the same distinction).
     private func remove() {
-        RemoteEndpointStore.removeEndpoint(forPeerID: peerID)
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
         host = ""
         port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil

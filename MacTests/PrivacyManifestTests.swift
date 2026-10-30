@@ -90,15 +90,7 @@ final class PrivacyManifestTests: XCTestCase {
     /// compiles in.
     func testProjectCopiesTheManifestIntoTheIOSApp() throws {
         let spec = try String(contentsOf: Self.repoRoot.appendingPathComponent("project.yml"), encoding: .utf8)
-        let lines = spec.components(separatedBy: "\n")
-        let targets = try XCTUnwrap(lines.firstIndex(of: "targets:"))
-        let start = try XCTUnwrap(lines[targets...].firstIndex(of: "  OpenSidecariOS:"), "iOS target not found")
-        // The block ends at the next key indented as deeply as a target or less.
-        let end = lines[(start + 1)...].firstIndex { line in
-            let content = line.trimmingCharacters(in: .whitespaces)
-            return !content.isEmpty && !content.hasPrefix("#") && line.prefix { $0 == " " }.count <= 2
-        } ?? lines.endIndex
-        let target = lines[start..<end].map { $0.trimmingCharacters(in: .whitespaces) }
+        let target = try Self.iOSTargetLines(of: spec)
         let entry = try XCTUnwrap(target.firstIndex(of: "- path: \(Self.manifestPath)"),
                                   "the iOS target does not list the manifest")
         XCTAssertEqual(target[entry + 1], "buildPhase: resources")
@@ -108,5 +100,28 @@ final class PrivacyManifestTests: XCTestCase {
         let shared = try FileManager.default.contentsOfDirectory(
             atPath: Self.repoRoot.appendingPathComponent("Shared").path)
         XCTAssertFalse(shared.contains { $0.hasSuffix(".xcprivacy") })
+    }
+
+    /// Export compliance as declared in App Store Connect: standard, exempt
+    /// encryption only. Declared in the Info.plist so later uploads are not
+    /// asked again; no documentation code applies.
+    func testIOSAppDeclaresNoNonExemptEncryption() throws {
+        let spec = try String(contentsOf: Self.repoRoot.appendingPathComponent("project.yml"), encoding: .utf8)
+        let target = try Self.iOSTargetLines(of: spec)
+        XCTAssertTrue(target.contains("ITSAppUsesNonExemptEncryption: false"))
+        XCTAssertFalse(spec.contains("ITSEncryptionExportComplianceCode"))
+    }
+
+    /// The iOS target's block of project.yml, each line trimmed.
+    private static func iOSTargetLines(of spec: String) throws -> [String] {
+        let lines = spec.components(separatedBy: "\n")
+        let targets = try XCTUnwrap(lines.firstIndex(of: "targets:"))
+        let start = try XCTUnwrap(lines[targets...].firstIndex(of: "  OpenSidecariOS:"), "iOS target not found")
+        // The block ends at the next key indented as deeply as a target or less.
+        let end = lines[(start + 1)...].firstIndex { line in
+            let content = line.trimmingCharacters(in: .whitespaces)
+            return !content.isEmpty && !content.hasPrefix("#") && line.prefix { $0 == " " }.count <= 2
+        } ?? lines.endIndex
+        return lines[start..<end].map { $0.trimmingCharacters(in: .whitespaces) }
     }
 }

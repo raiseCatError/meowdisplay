@@ -1,0 +1,31 @@
+name: Repository guard
+
+# Read-only: reports drift in the settings the release system relies on
+# (default branch, rulesets, release environments, Actions token
+# permissions) via scripts/release/check-repository.sh. It never changes a
+# setting; an admin fixes drift deliberately (apply-rulesets.sh, BRANCHING.md).
+# Scheduled runs happen only while the repository variable REPOSITORY_GUARD
+# is `enabled`.
+on:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  guard:
+    if: github.event_name == 'workflow_dispatch' || vars.REPOSITORY_GUARD == 'enabled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Settings match expectations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DEFAULT_BRANCH: ${{ vars.EXPECTED_DEFAULT_BRANCH }}
+        run: scripts/release/check-repository.sh

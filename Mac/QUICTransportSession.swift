@@ -64,4 +64,7 @@ struct QUICTransportFailure {
     /// i.e. this is a LIVE QUIC failure, not a dial failure.
     let established: Bool
     let detail: String
+    /// Seconds between the session's hello and this failure (nil when it
+    /// never reached hello).
+    var liveAge: TimeInterval? = nil
 }

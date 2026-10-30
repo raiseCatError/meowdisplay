@@ -41,7 +41,39 @@ import SwiftASN1
 /// together with either. All three locks and `shared` are `let`s; `shared`'s
 /// one-time initialization is guaranteed by Swift's `static let` semantics.
 final class TrustStore: PeerTrustStoring, @unchecked Sendable {
-    static let shared = TrustStore()
+    /// Which Keychain items a store owns. Each namespace is a complete,
+    /// independent identity + pin set: nothing pinned in one authorizes a
+    /// peer in another.
+    struct Namespace: Equatable, Sendable {
+        let identityLabel: String
+        let pinService: String
+
+        /// The original names — every existing install's identity and pins.
+        static let standard = Namespace(identityLabel: WireCrypto.identityKeychainLabel,
+                                        pinService: WireCrypto.pinKeychainService)
+
+        /// The unified Mac app's receiver role ("Use This Mac as a Display"):
+        /// its own identity and pins, so pairing a Mac as this Mac's receiver
+        /// never makes it a trusted sender here, or the other way round —
+        /// the same separation the two standalone apps had.
+        static let macReceiverRole = Namespace(identityLabel: WireCrypto.identityKeychainLabel + ".receiver",
+                                               pinService: WireCrypto.pinKeychainService + ".receiver")
+    }
+
+    /// The sender's (and the iPhone/iPad app's) store: unchanged names, so
+    /// existing identities and pins are found exactly as before.
+    static let shared = TrustStore(namespace: .standard)
+
+    /// The store the receiver role uses (`StreamReceiver`, its pairing and
+    /// QUIC listener, receiver settings). The same object as `shared` in
+    /// every app except one that declares `MeowDisplayReceiverRoleTrust` =
+    /// `separate` in its Info.plist (the unified Mac app), where the receiver
+    /// role gets its own namespace. Read once, from the bundle, so it can't
+    /// change while anything holds keys from it.
+    static let receiverRole: TrustStore = ReceiverRoleConfiguration.separateTrust
+        ? TrustStore(namespace: .macReceiverRole) : shared
+
+    let namespace: Namespace
 
     /// Serializes own-identity lookup + generation (`ownIdentity`,
     /// `installID`). Held across Keychain I/O.
@@ -59,7 +91,8 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     /// Keychain I/O on the queue.
     private var pinState = PinSnapshotState()
 
-    private init() {
+    private init(namespace: Namespace) {
+        self.namespace = namespace
         refreshSnapshot()
     }
 
@@ -118,7 +151,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     func pin(peerID: String) -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecAttrAccount: peerID,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
@@ -144,6 +177,13 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
                 allowIdentityChange: Bool) -> Bool {
         pinWriteLock.lock()
         defer { pinWriteLock.unlock() }
+        snapshotLock.lock()
+        let heldElsewhere = pinState.isHeldByAnotherPeer(peerID, spki: spki)
+        snapshotLock.unlock()
+        guard !heldElsewhere else {
+            Log.info("SECURITY: refused a pin another peer already holds (peer \(peerID))")
+            return false
+        }
         switch TrustPinPolicy.decision(existing: pin(peerID: peerID), presented: spki) {
         case .match:
             return true
@@ -155,7 +195,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         }
         let deleteQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecAttrAccount: peerID,
             kSecUseDataProtectionKeychain: true,
         ]
@@ -163,7 +203,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
 
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecAttrAccount: peerID,
             kSecAttrLabel: displayName,
             kSecValueData: spki,
@@ -183,11 +223,12 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
 
     /// Remove one peer's pin and refresh the snapshot.
     func forget(peerID: String) {
+        PairedMacUserName.forget(peerID: peerID)
         pinWriteLock.lock()
         defer { pinWriteLock.unlock() }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecAttrAccount: peerID,
             kSecUseDataProtectionKeychain: true,
         ]
@@ -207,22 +248,22 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         let deletions: [[CFString: Any]] = [
             [
                 kSecClass: kSecClassGenericPassword,
-                kSecAttrService: WireCrypto.pinKeychainService,
+                kSecAttrService: namespace.pinService,
                 kSecUseDataProtectionKeychain: true,
             ],
             [
                 kSecClass: kSecClassGenericPassword,
-                kSecAttrService: WireCrypto.identityKeychainLabel,
+                kSecAttrService: namespace.identityLabel,
                 kSecUseDataProtectionKeychain: true,
             ],
             [
                 kSecClass: kSecClassCertificate,
-                kSecAttrLabel: WireCrypto.identityKeychainLabel,
+                kSecAttrLabel: namespace.identityLabel,
                 kSecUseDataProtectionKeychain: true,
             ],
             [
                 kSecClass: kSecClassKey,
-                kSecAttrApplicationTag: Data(WireCrypto.identityKeychainLabel.utf8),
+                kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
                 kSecUseDataProtectionKeychain: true,
             ],
         ]
@@ -235,13 +276,29 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         finishPinMutation(purged: true)
     }
 
+    /// When each pinned peer was paired (its Keychain row's creation date), for Clean Up.
+    func pinnedPeerDates() -> [String: Date] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let items = out as? [[CFString: Any]] else { return [:] }
+        return items.reduce(into: [:]) { r, item in
+            if let account = item[kSecAttrAccount] as? String, let date = item[kSecAttrCreationDate] as? Date { r[account] = date }
+        }
+    }
+
     /// (peerID, displayName) rows for the "Paired Macs"/forget UI
     /// (kSecMatchLimitAll enumeration). Wired to the iOS Settings
     /// "Paired Macs" list.
     func pinnedPeers() -> [(peerID: String, displayName: String)] {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecReturnAttributes: true,
             kSecMatchLimit: kSecMatchLimitAll,
             kSecUseDataProtectionKeychain: true,
@@ -315,7 +372,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     private func readPinsFromKeychain() -> [PinSnapshotState.Pin] {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.pinKeychainService,
+            kSecAttrService: namespace.pinService,
             kSecReturnAttributes: true,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitAll,
@@ -341,6 +398,21 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         }
         return fresh
     }
+
+    // MARK: - Short ID
+
+    /// Four hex characters that tell same-named Macs apart in lists ("Macbook · 4F2A"). Derived from
+    /// the identity key under its own HKDF label, so it shows none of the fingerprint's digits (those
+    /// stay hidden until asked for). The same on every device and in the Mac's own Settings.
+    static func shortID(spki: Data) -> String {
+        let output = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: spki),
+                                            salt: WireCrypto.fingerprintHKDFSalt,
+                                            info: Data("MeowDisplay short ID v1".utf8), outputByteCount: 2)
+        return output.withUnsafeBytes { $0.map { String(format: "%02X", $0) }.joined() }
+    }
+
+    /// The paired Mac's short ID, from its pinned key.
+    func shortID(peerID: String) -> String? { pin(peerID: peerID).map(Self.shortID(spki:)) }
 
     // MARK: - Fingerprint
 
@@ -374,7 +446,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     private func queryIdentity() -> SecIdentity? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassIdentity,
-            kSecAttrLabel: WireCrypto.identityKeychainLabel,
+            kSecAttrLabel: namespace.identityLabel,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain: true,
@@ -392,7 +464,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     private func queryInstallID() -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.identityKeychainLabel,
+            kSecAttrService: namespace.identityLabel,
             kSecAttrAccount: WireCrypto.installIDAccount,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
@@ -466,7 +538,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         var status = SecItemAdd([
             kSecClass: kSecClassKey,
             kSecValueRef: secKey,
-            kSecAttrApplicationTag: Data(WireCrypto.identityKeychainLabel.utf8),
+            kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary, nil)
@@ -483,7 +555,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         status = SecItemAdd([
             kSecClass: kSecClassCertificate,
             kSecValueRef: secCert,
-            kSecAttrLabel: WireCrypto.identityKeychainLabel,
+            kSecAttrLabel: namespace.identityLabel,
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary, nil)
@@ -496,7 +568,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         // 6. Persist installID in the SAME namespace (id+key die together).
         status = SecItemAdd([
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: WireCrypto.identityKeychainLabel,
+            kSecAttrService: namespace.identityLabel,
             kSecAttrAccount: WireCrypto.installIDAccount,
             kSecValueData: Data(installID.utf8),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -514,7 +586,7 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         var out: CFTypeRef?
         status = SecItemCopyMatching([
             kSecClass: kSecClassIdentity,
-            kSecAttrLabel: WireCrypto.identityKeychainLabel,
+            kSecAttrLabel: namespace.identityLabel,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain: true,
@@ -540,12 +612,12 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
     private func deletePartialIdentityItems() {
         SecItemDelete([
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Data(WireCrypto.identityKeychainLabel.utf8),
+            kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary)
         SecItemDelete([
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: WireCrypto.identityKeychainLabel,
+            kSecAttrLabel: namespace.identityLabel,
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary)
     }
