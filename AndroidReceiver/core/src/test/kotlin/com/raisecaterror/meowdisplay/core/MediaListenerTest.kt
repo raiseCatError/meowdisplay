@@ -295,6 +295,8 @@ class MediaListenerTest {
             assertTrue("over the bound: closed at once", endsWithoutTls(over))
         }
         idle.forEach { socket -> socket.use { assertTrue("handshake deadline", endsWithoutTls(it)) } }
+        // The listener frees a slot just after it closes the socket, on its worker thread.
+        eventually("the stalled handshakes' slots are free") { listener.pendingHandshakes == 0 }
         Mac(macA).use { it.admit() }
     }
 

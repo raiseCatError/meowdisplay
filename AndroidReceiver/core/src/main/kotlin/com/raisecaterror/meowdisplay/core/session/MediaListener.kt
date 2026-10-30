@@ -48,6 +48,9 @@ class MediaListener(
     private val workers: ExecutorService = Executors.newCachedThreadPool(daemon("meow-media"))
     private val timers: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(daemon("meow-media-timer"))
     private val pending = AtomicInteger()
+
+    /** Connections still in their TLS handshake (for tests). */
+    val pendingHandshakes: Int get() = pending.get()
     private val closed = AtomicBoolean()
 
     @Volatile private var server: SSLServerSocket? = null
