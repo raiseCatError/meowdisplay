@@ -196,7 +196,7 @@ final class AppMenuModel: ObservableObject {
     }
 
     /// A top-level reply names another app than the pane shows.
-    static func isStale(replyApp: String, expected: String?) -> Bool {
+    nonisolated static func isStale(replyApp: String, expected: String?) -> Bool {
         guard let expected, !replyApp.isEmpty else { return false }
         return replyApp.compare(expected, options: [.caseInsensitive, .diacriticInsensitive]) != .orderedSame
     }
