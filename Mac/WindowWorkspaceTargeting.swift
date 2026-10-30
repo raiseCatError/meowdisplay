@@ -539,6 +539,21 @@ enum TileCaptureWatch {
         return now - startedAt >= firstFrameTimeout ? .stalled : .waiting
     }
 
+    enum UnexplainedPause: Equatable { case restart, stayPaused }
+
+    /// macOS keeps a window paused although the catalog lists it on the stage. One fresh stream per
+    /// change in what the catalog says about the window; with nothing new, the pane stays Paused.
+    /// Before (2026-10-30 21:3x, after Home and back): each fresh stream sent one frame ("live
+    /// again", which also cleared the restart count), then paused again; restarted every 2–3 s.
+    static func unexplainedPause(signature: String, restartedFor: String?) -> UnexplainedPause {
+        signature == restartedFor ? .stayPaused : .restart
+    }
+
+    /// What the catalog says about a window that could make a paused capture resume.
+    static func windowSignature(frame: CGRect, availability: String, inStageStrip: Bool, isActive: Bool) -> String {
+        "\(Int(frame.minX)),\(Int(frame.minY)),\(Int(frame.width)),\(Int(frame.height)) \(availability) strip=\(inStageStrip) active=\(isActive)"
+    }
+
     /// Delay before restart number `attempt` (1-based), or nil when it's time to give up.
     static func retryDelay(attempt: Int) -> TimeInterval? {
         attempt >= 1 && attempt <= backoff.count ? backoff[attempt - 1] : nil

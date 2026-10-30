@@ -329,7 +329,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
     /// Per pane: restarts so far, when the next may start, when macOS paused it. Reset when the
     /// pane shows another source or the receiver asks to retry.
-    private struct Recovery { var generation: UInt64 = 0; var attempts = 0; var notBefore: TimeInterval = 0; var suspendedSince: TimeInterval?; var failed = false }
+    private struct Recovery {
+        var generation: UInt64 = 0; var attempts = 0; var notBefore: TimeInterval = 0; var suspendedSince: TimeInterval?; var failed = false
+        /// The window as the catalog described it when a pause it couldn't explain last got a fresh
+        /// stream (`TileCaptureWatch.unexplainedPause`). Kept across frames, so it can't loop.
+        var pauseRestartSignature: String?
+    }
     private var recovery: [String: Recovery] = [:]
     /// The view epochs last echoed to the receiver (`workspaceView`).
     private var echoedViews: [String: Int] = [:]
@@ -718,7 +723,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                         } else {
                             Log.info("workspace: tile=\(a.tileID) first frame after \(Int((h.firstCompleteAt ?? h.startedAt) * 1000 - h.startedAt * 1000)) ms")
                         }
-                        self.recovery[a.tileID] = nil
+                        // Restart counts start over; what an unexplained pause was restarted for stays.
+                        self.recovery[a.tileID] = self.recovery[a.tileID]?.pauseRestartSignature.map {
+                            Recovery(generation: a.assignmentGeneration, pauseRestartSignature: $0)
+                        }
                         self.setState(a.tileID, "live")
                         self.sendState()
                     }
@@ -915,6 +923,27 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 if state != "live", state != "offscreen", state != "closed", c.hasFrame { setState(a.tileID, "live"); changed = true }
             case .paused:
                 if state != "paused" { setState(a.tileID, "paused"); changed = true }
+            case .stalled where r.suspendedSince != nil:
+                // Paused by macOS though listed on the stage: one fresh stream per change in the
+                // window; otherwise stay Paused and say so, without a restart loop.
+                let entry = catalog[a.windowID]
+                let signature = TileCaptureWatch.windowSignature(
+                    frame: entry?.frame ?? .zero, availability: entry.map { "\($0.availability)" } ?? "gone",
+                    inStageStrip: entry?.inStageStrip ?? false, isActive: entry?.isActive ?? false)
+                if TileCaptureWatch.unexplainedPause(signature: signature, restartedFor: r.pauseRestartSignature) == .stayPaused {
+                    if state != "paused" {
+                        Log.info("workspace: tile=\(a.tileID) stays paused: macOS keeps window \(a.windowID) paused; resumes when it changes or sends frames")
+                        setState(a.tileID, "paused"); changed = true
+                    }
+                    continue
+                }
+                Log.info("workspace: tile=\(a.tileID) paused by macOS though on the stage: one fresh stream (\(signature))")
+                recovery[a.tileID, default: Recovery(generation: a.assignmentGeneration)].pauseRestartSignature = signature
+                captures[a.tileID] = nil
+                Self.releaseBudget(1)
+                Task { await c.stop() }
+                scheduleRestart(a.tileID, reason: "paused on stage")
+                changed = true
             case .stalled:
                 Log.info("workspace: tile=\(a.tileID) stalled (status=\(h.lastStatus.map { String($0.rawValue) } ?? "none") frames=\(h.completeFrames) after \(Int(now - h.startedAt)) s)")
                 captures[a.tileID] = nil

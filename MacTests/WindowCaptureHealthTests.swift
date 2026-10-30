@@ -116,4 +116,22 @@ final class WindowCaptureHealthTests: XCTestCase {
         XCTAssertEqual(TileCaptureWatch.verdict(now: h.startedAt + 4.1, startedAt: h.startedAt, firstCompleteAt: nil,
                                                 suspendedSince: nil, sourceLooksAvailable: true), .stalled, "a stream that never delivers still restarts")
     }
+
+    /// Regression (2026-10-30 21:3x): a Stage Manager strip window after Home and back looped
+    /// paused → one frame ("live again") → paused → restart every 2–3 s. Now: one fresh stream per
+    /// change in the window, otherwise it stays Paused.
+    func testAPauseMacOSKeepsGetsOneFreshStreamPerChangeNotALoop() {
+        let frame = CGRect(x: 100, y: 80, width: 900, height: 600)
+        let sig = TileCaptureWatch.windowSignature(frame: frame, availability: "visible", inStageStrip: false, isActive: false)
+        XCTAssertEqual(TileCaptureWatch.unexplainedPause(signature: sig, restartedFor: nil), .restart)
+        XCTAssertEqual(TileCaptureWatch.unexplainedPause(signature: sig, restartedFor: sig), .stayPaused,
+                       "nothing changed since the last fresh stream: stay Paused")
+        let activated = TileCaptureWatch.windowSignature(frame: frame, availability: "visible", inStageStrip: false, isActive: true)
+        XCTAssertEqual(TileCaptureWatch.unexplainedPause(signature: activated, restartedFor: sig), .restart,
+                       "brought forward on the Mac: try again")
+        let moved = TileCaptureWatch.windowSignature(frame: frame.offsetBy(dx: 40, dy: 0), availability: "visible", inStageStrip: false, isActive: false)
+        XCTAssertNotEqual(moved, sig)
+        let leftStrip = TileCaptureWatch.windowSignature(frame: frame, availability: "visible", inStageStrip: true, isActive: false)
+        XCTAssertNotEqual(leftStrip, sig)
+    }
 }
