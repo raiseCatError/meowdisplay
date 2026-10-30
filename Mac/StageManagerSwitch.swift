@@ -67,11 +67,15 @@ enum StageManagerSwitch {
         let now = ProcessInfo.processInfo.systemUptime
         if !refresh, let c = cacheLock.withLock({ shortcutsCache }), now - c.at < 30 { return c.ready }
         let r = runShortcuts(["list"])
-        let names = Set(r.output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) })
-        let ready = r.status == 0 && names.contains(offShortcut) && names.contains(onShortcut)
-        cacheLock.withLock { shortcutsCache = (ready, now) }
+        let found = StageManagerShortcutInstaller.inventory(listOutput: r.status == 0 ? r.output : "")
+        let ready = r.status == 0 && found.present.count == StageManagerShortcutInstaller.names.count
+        cacheLock.withLock { shortcutsCache = (ready, now); inventoryCache = found }
         return ready
     }
+
+    /// What the last check found: which of the two exist, and numbered copies of them.
+    static var lastInventory: (present: Set<String>, copies: [String])? { cacheLock.withLock { inventoryCache } }
+    nonisolated(unsafe) private static var inventoryCache: (present: Set<String>, copies: [String])?
 
     /// The last known answer of `shortcutsReady`, without running anything (state messages).
     static var shortcutsReadyKnown: Bool? { cacheLock.withLock { shortcutsCache?.ready } }
@@ -129,15 +133,36 @@ struct StageManagerSettingsSection: View {
     @State private var offDuringWindowMode = StageManagerSwitch.offDuringWindowMode
     @State private var confirming = false
     @State private var showingSetup = false
+    @State private var setup: SetupPhase = .idle
+    @State private var missing: [String] = []
+    @State private var copies: [String] = []
+    private enum SetupPhase: Equatable { case idle, preparing, waiting(until: Date), failed(String) }
 
     var body: some View {
         Section {
             LabeledContent("Stage Manager", value: isOn ? String(localized: "On") : String(localized: "Off"))
             LabeledContent("Switching from MeowDisplay") {
                 HStack {
-                    Text(ready ? "Ready" : "Not set up").foregroundStyle(.secondary)
-                    Button(ready ? "How It Works…" : "Set Up…") { showingSetup = true }
+                    Text(statusText).foregroundStyle(.secondary)
+                    if ready {
+                        Button("Open in Shortcuts") { StageManagerShortcutInstaller.view(StageManagerSwitch.offShortcut) }
+                    } else {
+                        Button(setup == .idle || isFailed ? "Set Up Automatically" : "Setting Up…") { setUp() }
+                            .disabled(setup == .preparing || isWaiting)
+                    }
+                    Button("How It Works…") { showingSetup = true }
                 }
+            }
+            if isWaiting {
+                Text("Shortcuts is asking you to add \(missing.map { "“\($0)”" }.joined(separator: " and ")). Click Add Shortcut there; MeowDisplay notices when it's done.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if case .failed(let message) = setup {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            if !copies.isEmpty {
+                Text("Shortcuts also has \(copies.map { "“\($0)”" }.joined(separator: ", ")). MeowDisplay uses only the exact names; you can delete the copies in Shortcuts.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Turn Off During Window Mode", isOn: Binding(get: { offDuringWindowMode && ready }, set: { on in
                 if on { confirming = true } else { offDuringWindowMode = false; StageManagerSwitch.offDuringWindowMode = false }
@@ -158,10 +183,73 @@ struct StageManagerSettingsSection: View {
         .sheet(isPresented: $showingSetup, onDismiss: refresh) { StageManagerShortcutSetup() }
     }
 
+    private var isWaiting: Bool { if case .waiting = setup { return true }; return false }
+    private var isFailed: Bool { if case .failed = setup { return true }; return false }
+
+    private var statusText: String {
+        if ready { return String(localized: "Ready") }
+        switch setup {
+        case .preparing: return String(localized: "Preparing…")
+        case .waiting: return String(localized: "Waiting for you in Shortcuts")
+        default:
+            return missing.count == 1 ? String(localized: "“\(missing[0])” missing") : String(localized: "Not set up")
+        }
+    }
+
     private func refresh() {
         isOn = StageManagerSwitch.isOn
         StageManagerSwitch.inBackground({ _ = StageManagerSwitch.shortcutsReady(refresh: true) }) {
-            ready = StageManagerSwitch.shortcutsReadyKnown ?? false
+            apply()
+        }
+    }
+
+    private func apply() {
+        ready = StageManagerSwitch.shortcutsReadyKnown ?? false
+        let found = StageManagerSwitch.lastInventory ?? (present: [], copies: [])
+        missing = StageManagerShortcutInstaller.missing(present: found.present)
+        copies = found.copies
+        if ready, setup != .idle {
+            setup = .idle
+            StageManagerShortcutInstaller.cleanUp()
+            Log.info("stage manager setup: both shortcuts are in Shortcuts")
+        }
+    }
+
+    /// Prepares only the missing shortcuts, opens them in Shortcuts for the owner to add, then
+    /// checks every 2 s (for up to 3 minutes) until both exist.
+    private func setUp() {
+        setup = .preparing
+        StageManagerSwitch.inBackground({ _ = StageManagerSwitch.shortcutsReady(refresh: true) }) {
+            apply()
+            guard !ready else { return }
+            let wanted = missing
+            let box = PreparedBox()
+            StageManagerSwitch.inBackground({ box.result = StageManagerShortcutInstaller.prepare(wanted) }) {
+                switch box.result {
+                case .success(let files)?:
+                    guard StageManagerShortcutInstaller.open(files) else { setup = .failed(String(localized: "Shortcuts didn't open. Try again, or make them yourself (How It Works…).")); return }
+                    setup = .waiting(until: Date().addingTimeInterval(180))
+                    poll()
+                case .failure(.sign)?:
+                    setup = .failed(String(localized: "macOS couldn't sign the shortcuts (it needs an internet connection). Try again in a moment."))
+                default:
+                    setup = .failed(String(localized: "MeowDisplay couldn't prepare the shortcuts. Try again, or make them yourself (How It Works…)."))
+                }
+            }
+        }
+    }
+
+    private func poll() {
+        guard case .waiting(let until) = setup else { return }
+        guard Date() < until else {
+            setup = .failed(String(localized: "Not added yet. Click Set Up Automatically to show them again."))
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            StageManagerSwitch.inBackground({ _ = StageManagerSwitch.shortcutsReady(refresh: true) }) {
+                apply()
+                if !ready { poll() }
+            }
         }
     }
 }
@@ -175,7 +263,7 @@ private struct StageManagerShortcutSetup: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Let MeowDisplay Switch Stage Manager").font(.title3.weight(.semibold))
-            Text("macOS lets apps change Stage Manager only through Shortcuts. Make these two shortcuts once in the Shortcuts app; MeowDisplay runs them only when you allow it.")
+            Text("macOS lets apps change Stage Manager only through Shortcuts. Set Up Automatically prepares these two shortcuts and opens them in Shortcuts, which asks you to Add Shortcut for each; nothing is added without that click. MeowDisplay runs them only when you allow it. To make them yourself instead:")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 step(1, "In Shortcuts, choose File ▸ New Shortcut and name it “\(StageManagerSwitch.offShortcut)”.")
@@ -208,4 +296,9 @@ private struct StageManagerShortcutSetup: View {
             Text(text).fixedSize(horizontal: false, vertical: true)
         }
     }
+}
+
+/// Carries a background result back to the main actor.
+private final class PreparedBox: @unchecked Sendable {
+    var result: Result<[URL], StageManagerShortcutInstaller.InstallError>?
 }

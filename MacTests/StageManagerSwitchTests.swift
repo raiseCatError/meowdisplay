@@ -65,4 +65,43 @@ final class StageManagerSwitchTests: XCTestCase {
         XCTAssertFalse(stageManagerOn)
         XCTAssertTrue(commands.isEmpty)
     }
+
+    func testSetupFindsExactNamesAndNumberedCopiesOnly() {
+        let list = "Morning\nMeowDisplay Stage Manager Off\nMeowDisplay Stage Manager Off 1\nMeowDisplay Stage Manager Onward\n"
+        let found = StageManagerShortcutInstaller.inventory(listOutput: list)
+        XCTAssertEqual(found.present, [StageManagerSwitch.offShortcut])
+        XCTAssertEqual(found.copies, ["MeowDisplay Stage Manager Off 1"])
+        XCTAssertEqual(StageManagerShortcutInstaller.missing(present: found.present), [StageManagerSwitch.onShortcut], "only the missing one is offered")
+        XCTAssertEqual(StageManagerShortcutInstaller.missing(present: Set(StageManagerShortcutInstaller.names)), [])
+    }
+
+    func testEachShortcutFileHoldsTheSystemSetStageManagerAction() throws {
+        for on in [false, true] {
+            let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: StageManagerShortcutInstaller.unsignedFile(on: on), format: nil) as? [String: Any])
+            let actions = try XCTUnwrap(plist["WFWorkflowActions"] as? [[String: Any]])
+            XCTAssertEqual(actions.count, 1)
+            XCTAssertEqual(actions[0]["WFWorkflowActionIdentifier"] as? String, "is.workflow.actions.stagemanager.set")
+            let params = try XCTUnwrap(actions[0]["WFWorkflowActionParameters"] as? [String: Any])
+            XCTAssertEqual(params["operation"] as? String, "set")
+            XCTAssertEqual(params["state"] as? Bool, on)
+        }
+    }
+
+    func testPrepareSignsEachMissingShortcutWithTheSupportedTool() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var calls: [[String]] = []
+        StageManagerSwitch.runShortcuts = { args in
+            calls.append(args)
+            if let o = args.firstIndex(of: "--output") { FileManager.default.createFile(atPath: args[o + 1], contents: Data("AEA1".utf8)) }
+            return (0, "")
+        }
+        let files = try StageManagerShortcutInstaller.prepare([StageManagerSwitch.onShortcut], in: folder).get()
+        XCTAssertEqual(files.map(\.lastPathComponent), ["MeowDisplay Stage Manager On.shortcut"], "named so Shortcuts uses the exact name")
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(Array(calls[0].prefix(3)), ["sign", "--mode", "anyone"])
+        XCTAssertFalse(calls.contains { $0.first == "run" }, "setup never runs a shortcut")
+        StageManagerSwitch.runShortcuts = { _ in (1, "") }
+        XCTAssertEqual(StageManagerShortcutInstaller.prepare([StageManagerSwitch.offShortcut], in: folder), .failure(.sign(1)))
+    }
 }
