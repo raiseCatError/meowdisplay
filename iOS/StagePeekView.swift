@@ -406,7 +406,10 @@ struct StagePeekOverlay: View {
         let x = compactX + (safe.midX - compactX) * e
         let barWidth = dockWide ? safe.width - 24 : width
         let barX = dockWide ? safe.midX : x
-        let room = max(safe.height - 24, 140)
+        // The grown bar stops above the Expand and Close buttons, so they stay visible and nobody
+        // has to swipe up from the screen's bottom edge, where the Dock or Home bar takes it
+        // (owner, 2026-10-31).
+        let room = max(toolbarY(safe.midX) - Self.toolbarHalfHeight - 10 - (safe.minY + 12), 140)
         // Searching filters the apps bar too, at every size (owner, 2026-10-31).
         let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
         let barApps = searching ? WorkspaceSearch.search(query, apps: dockApps, windows: []).apps : dockApps
@@ -485,6 +488,7 @@ struct StagePeekOverlay: View {
                 Capsule().fill(Color.white.opacity(0.5)).frame(width: 120, height: 5)
                     .frame(maxWidth: .infinity).frame(height: 34)
                     .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
                     .gesture(DragGesture(minimumDistance: 10).onEnded { d in
                         if d.translation.height < -30 || d.predictedEndTranslation.height < -80 {
                             withAnimation(.easeOut(duration: 0.2)) { launchpad = false }
@@ -636,12 +640,18 @@ struct StagePeekOverlay: View {
         let column = safe.midX
         let chosen = machine.highlightedID.flatMap { id in windows.first { $0.id == id } }
         return HStack(spacing: 6) {
+            // While the apps bar is grown, Compact puts it back to one row first.
+            let compacting = machine.expanded || dockRows > 1
             Button {
-                animate { machine.expanded ? machine.compact() : machine.expand() }
+                if dockRows > 1 {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { dockRows = 1; dockWide = false }
+                } else {
+                    animate { machine.expanded ? machine.compact() : machine.expand() }
+                }
             } label: {
-                Label(machine.expanded ? String(localized: "Compact") : String(localized: "Expand"),
-                      systemImage: machine.expanded ? "arrow.down.right.and.arrow.up.left"
-                                                    : "arrow.up.left.and.arrow.down.right")
+                Label(compacting ? String(localized: "Compact") : String(localized: "Expand"),
+                      systemImage: compacting ? "arrow.down.right.and.arrow.up.left"
+                                              : "arrow.up.left.and.arrow.down.right")
             }
             .accessibilityIdentifier("stagePeekExpand")
             if machine.expanded, model.canAddTile, let chosen {
