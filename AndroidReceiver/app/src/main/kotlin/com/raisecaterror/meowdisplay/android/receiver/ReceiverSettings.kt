@@ -317,6 +317,8 @@ private fun SettingsPageContent(
                 }
             }
             controller.workspace?.let { ws ->
+                var spatial by remember { mutableStateOf(ws.spatialOverview) }
+                Choice("Expanded Layout", listOf(false, true), spatial, { if (it) "Spatial Overview" else "Gallery" }) { on -> spatial = on; ws.spatialOverview = on }
                 var bring by remember { mutableStateOf(ws.bringStripWindowsForward) }
                 Toggle("Bring Stage Manager Windows Forward", bring) { on -> bring = on; ws.bringStripWindowsForward = on }
                 Caption("macOS pauses windows in Stage Manager's side strip. With this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")

@@ -57,6 +57,21 @@ enum StagePeekDockStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Stage Peek's expanded layout: the gallery grid, or Spatial Overview (windows at their shapes
+/// and relative sizes, `SpatialOverviewLayout`). A device setting ("stagePeek.expandedLayout").
+enum StagePeekExpandedLayout: String, CaseIterable, Identifiable {
+    case gallery
+    case spatial
+    static let storageKey = "stagePeek.expandedLayout"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .gallery: return String(localized: "Gallery", comment: "Stage Peek expanded layout.")
+        case .spatial: return String(localized: "Spatial Overview", comment: "Stage Peek expanded layout.")
+        }
+    }
+}
+
 /// Thresholds, in points and seconds. Tests and both apps share them.
 enum StagePeekConfig {
     /// The hold strip: this wide, just inside the safe area.

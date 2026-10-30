@@ -431,7 +431,7 @@ struct StagePeekOverlay: View {
                          },
                          onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
                          // A flick toward the edge (off the cards) compacts the gallery again.
-                         edge: edge, onCompact: { animate { machine.compact() } })
+                         edge: edge, onCompact: { animate { machine.compact() } }, height: height)
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)

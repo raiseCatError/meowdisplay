@@ -738,6 +738,80 @@ private fun DragPreview(w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap
  * Every window (and display) as a vertical gallery, as many columns as fit (phones two at most);
  * search results; an app's windows or its empty state.
  */
+/**
+ * Spatial Overview: each window at its shape and relative size (SpatialOverviewLayout, shared with
+ * iOS), pages when they can't all be comfortably tappable. Same tap / hold-to-drag / menu / close as
+ * the gallery's cards.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SpatialPages(
+    controller: WorkspaceController, host: StagePeekHost, windows: List<CatalogWindow>, thumbnails: Map<Long, ImageBitmap>,
+    icons: Map<String, ImageBitmap>, tiled: Set<Long>, ui: WorkspaceUi, inputAllowed: Boolean, width: Double, height: Double,
+) {
+    val w = max(width, 200.0)
+    val h = max(height, 220.0)
+    val placements = remember(windows, w, h) {
+        com.raisecaterror.meowdisplay.core.controls.SpatialOverviewLayout.layout(
+            windows.map { com.raisecaterror.meowdisplay.core.controls.SpatialOverviewLayout.Item(it.width.toDouble(), it.height.toDouble()) }, w, h)
+    }
+    val pages = (placements.maxOfOrNull { it.page } ?: 0) + 1
+    val pager = androidx.compose.foundation.pager.rememberPagerState { pages }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.size(w.dp, h.dp)) { page ->
+            Box(Modifier.size(w.dp, h.dp)) {
+                windows.forEachIndexed { i, win ->
+                    val p = placements[i]
+                    if (p.page == page) Box(Modifier.offset(p.rect.minX.dp, p.rect.minY.dp).size(p.rect.width.dp, p.rect.height.dp)) {
+                        SpatialCard(controller, host, win, thumbnails[win.id], icons[win.bundleID], win.id in tiled,
+                            ui.windowMode && ui.currentWindowID == win.id, ui.canCloseWindows && inputAllowed, win.id in ui.closingWindows)
+                    }
+                }
+            }
+        }
+        if (pages > 1) Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+            repeat(pages) { i -> Box(Modifier.size(6.dp).clip(CircleShape).background(Color.White.copy(alpha = if (i == pager.currentPage) 0.9f else 0.35f))) }
+        }
+    }
+}
+
+@Composable
+private fun SpatialCard(
+    controller: WorkspaceController, host: StagePeekHost, w: CatalogWindow, still: ImageBitmap?, icon: ImageBitmap?,
+    inTile: Boolean, current: Boolean, closable: Boolean, closing: Boolean,
+) {
+    val d = LocalDensity.current.density
+    var origin by remember { mutableStateOf(CGPoint.zero) }
+    var lifted by remember(w.id) { mutableStateOf(false) }
+    val lift by animateFloatAsState(if (lifted) 1.04f else 1f, label = "spatialLift")
+    val name = w.title.ifEmpty { w.app }
+    Box(
+        Modifier.fillMaxSize()
+            .graphicsLayer { scaleX = lift; scaleY = lift; alpha = if (closing) 0.6f else 1f }
+            .onGloballyPositioned { c -> val p = c.positionInWindow(); origin = CGPoint(p.x / d.toDouble(), p.y / d.toDouble()) }
+            .clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha = 0.08f))
+            .border(if (current) 2.5.dp else 1.dp, if (current) StagePeekAccent else Color.White.copy(alpha = if (inTile) 0.6f else 0.18f), RoundedCornerShape(8.dp))
+            .holdToDrag(controller, host, w, { origin }, onLift = { lifted = it }, onMenu = { host.menuWindow = w })
+            .clickable { if (controller.ui.value.drag == null) host.pick(w) }
+            .semantics {
+                contentDescription = "${w.app}: ${w.title.ifEmpty { "window" }}" + (if (inTile) ", in a pane" else "") + (if (closing) ", closing" else "")
+                customActions = listOfNotNull(
+                    CustomAccessibilityAction("Add as New Pane") { controller.choose(w, asNewTile = true); host.closeAfterPick(); true },
+                    if (closable) CustomAccessibilityAction("Close Window") { host.confirmClose = w; true } else null,
+                )
+            },
+    ) {
+        if (still != null) Image(still, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { AppIconView(icon, w.app, 32.0) }
+        Text(name, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.align(Alignment.BottomStart).padding(5.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape).padding(horizontal = 6.dp, vertical = 3.dp))
+        if (closable && !closing) Box(
+            Modifier.align(Alignment.TopStart).size(36.dp).clickable(role = Role.Button, onClickLabel = "Close Window") { host.confirmClose = w },
+            contentAlignment = Alignment.Center,
+        ) { Text("✕", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.background(Color.Black.copy(alpha = 0.6f), CircleShape).padding(5.dp)) }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Gallery(
@@ -788,6 +862,11 @@ private fun Gallery(
         horizontalArrangement = Arrangement.spacedBy(StagePeekGalleryLayout.spacing.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(12.dp)) }
+        // Spatial Overview (Settings ▸ Controls ▸ Expanded Layout): search results stay a grid.
+        val spatial = controller.spatialOverview
+        fun spatialCards(list: List<CatalogWindow>) = item(span = { GridItemSpan(columns) }, key = "spatial") {
+            SpatialPages(controller, host, list, thumbnails, icons, tiled, ui, inputAllowed, safe.width - 40, height - 110)
+        }
         fun windowCards(list: List<CatalogWindow>) = items(list, key = { "w" + it.id }) { w ->
             GalleryCard(
                 controller, host, w, thumbnails[w.id], icons[w.bundleID], inTile = w.id in tiled, current = ui.windowMode && ui.currentWindowID == w.id,
@@ -852,7 +931,7 @@ private fun Gallery(
                     }
                 }
                 if (list.isEmpty()) item(span = { GridItemSpan(columns) }) { EmptyApp(controller, ui, filter, icons[filter.bundleID], inputAllowed) }
-                else windowCards(list)
+                else if (spatial) spatialCards(list) else windowCards(list)
             }
             else -> {
                 if (displays.isNotEmpty()) {
@@ -864,7 +943,7 @@ private fun Gallery(
                 item(span = { GridItemSpan(columns) }) { SectionTitle("Windows") }
                 if (allWindows.isEmpty()) item(span = { GridItemSpan(columns) }) {
                     EmptyText(when { ui.catalog?.unavailable == true -> "The Mac can't list its windows right now."; ui.catalog == null -> "Loading windows…"; else -> "No windows are open on the Mac." })
-                } else windowCards(allWindows)
+                } else if (spatial) spatialCards(allWindows) else windowCards(allWindows)
             }
         }
         item(span = { GridItemSpan(columns) }) { Spacer(Modifier.height(20.dp)) }

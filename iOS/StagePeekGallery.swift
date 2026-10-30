@@ -278,6 +278,10 @@ struct StagePeekGallery: View {
     /// The peek's edge: a sideways flick toward it (off the cards) compacts the gallery.
     var edge: StagePeekEdge = .left
     var onCompact: () -> Void = {}
+    /// The gallery's visible height (Spatial Overview pages fill it).
+    var height: CGFloat = 600
+    @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
+    @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
     @Environment(\.controlRequest) private var controlRequest
     /// The card showing its Close Window button (swiped left), and a swipe in progress.
@@ -340,7 +344,7 @@ struct StagePeekGallery: View {
                 } else if let app = appFilter {
                     let windows = allWindows.filter { $0.bundleID == app.bundleID }
                     appHeader(app, count: windows.count)
-                    if windows.isEmpty { emptyApp(app) } else { grid(windows, cols) }
+                    if windows.isEmpty { emptyApp(app) } else { windowsView(windows, cols) }
                 } else {
                     if let displays = model.catalog?.displays, !displays.isEmpty {
                         sectionTitle(String(localized: "Displays"))
@@ -363,7 +367,7 @@ struct StagePeekGallery: View {
                         emptyText(model.catalog?.unavailable == true ? String(localized: "The Mac can't list its windows right now.")
                                   : (model.catalog == nil ? String(localized: "Loading windows…") : String(localized: "No windows are open on the Mac.")))
                     } else {
-                        grid(allWindows, cols)
+                        windowsView(allWindows, cols)
                     }
                 }
                 Color.clear.frame(height: 16)
@@ -397,6 +401,75 @@ struct StagePeekGallery: View {
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
+    }
+
+    /// The window list in the chosen expanded layout (search results always use the grid).
+    @ViewBuilder private func windowsView(_ windows: [CatalogWindowItem], _ cols: [GridItem]) -> some View {
+        if expandedLayout == StagePeekExpandedLayout.spatial.rawValue { spatial(windows) } else { grid(windows, cols) }
+    }
+
+    /// Spatial Overview: each window at its shape and relative size, packed in rows; pages when
+    /// they can't all be comfortably tappable. Same gestures as the grid's cards.
+    private func spatial(_ windows: [CatalogWindowItem]) -> some View {
+        let size = CGSize(width: max(width - 40, 200), height: max(height - 110, 220))
+        let placements = SpatialOverviewLayout.layout(windows.map { .init(width: Double($0.width), height: Double($0.height)) }, in: size)
+        let pages = (placements.map(\.page).max() ?? 0) + 1
+        return TabView(selection: $spatialPage) {
+            ForEach(0..<pages, id: \.self) { page in
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                    ForEach(Array(zip(windows, placements)).filter { $0.1.page == page }, id: \.0.id) { w, p in
+                        spatialCard(w).frame(width: p.rect.width, height: p.rect.height).offset(x: p.rect.minX, y: p.rect.minY)
+                    }
+                }
+                .frame(width: size.width, height: size.height)
+                .tag(page)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: pages > 1 ? .always : .never))
+        .frame(width: size.width, height: size.height + (pages > 1 ? 24 : 0))
+        .onChange(of: windows.count) { _ in spatialPage = min(spatialPage, max(pages - 1, 0)) }
+    }
+
+    private func spatialCard(_ w: CatalogWindowItem) -> some View {
+        let closing = model.closingWindows.contains(w.id)
+        let current = model.currentWindowID == w.id && model.windowMode
+        return ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.08))
+            if let cg = model.thumbnails[w.id] {
+                Image(decorative: cg, scale: 1).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .opacity(model.staleThumbnails.contains(w.id) || closing ? 0.6 : 1)
+            } else {
+                MacAppIcon(model: model, bundleID: w.bundleID, name: w.app, size: 32).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Text(w.title.isEmpty ? w.app : w.title).font(.caption2.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(Color.black.opacity(0.55), in: Capsule()).padding(5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(current ? meowAccent : (tiled.contains(w.id) ? Color.white.opacity(0.6) : Color.white.opacity(0.18)), lineWidth: current ? 2.5 : 1))
+        .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
+        .scaleEffect(held == w.id ? 1.04 : 1)
+        .overlay(cardGestures(w, onTap: { onWindow(w) }, swipe: false))
+        .overlay(alignment: .topLeading) {
+            if model.canCloseWindows, inputAllowed, !closing {
+                Button { confirmClose = w } label: {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 20, height: 20).background(Circle().fill(Color.black.opacity(0.6)))
+                        .frame(width: 36, height: 36).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).offset(x: -8, y: -8)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(w.title.isEmpty ? w.app : w.title), \(w.app)")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onWindow(w) }
+        .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+        .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
+        .accessibilityIdentifier("spatialWindowCard")
     }
 
     private func grid(_ windows: [CatalogWindowItem], _ cols: [GridItem]) -> some View {

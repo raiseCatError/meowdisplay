@@ -158,6 +158,7 @@ data class WorkspaceUi(
  * Mirrors iOS WorkspaceModel. Main thread only.
  */
 private const val BRING_STRIP_FORWARD = "workspace.bringStripWindowsForward"
+private const val EXPANDED_LAYOUT = "stagePeek.expandedLayout"
 
 class WorkspaceController(
     context: Context,
@@ -673,6 +674,11 @@ class WorkspaceController(
     var bringStripWindowsForward: Boolean
         get() = prefs.getBoolean(BRING_STRIP_FORWARD, false)
         set(on) { prefs.edit().putBoolean(BRING_STRIP_FORWARD, on).apply() }
+
+    /** Settings ▸ Controls ▸ Expanded Layout: Stage Peek's expanded windows as the gallery (default) or Spatial Overview. */
+    var spatialOverview: Boolean
+        get() = prefs.getString(EXPANDED_LAYOUT, "gallery") == "spatial"
+        set(on) { prefs.edit().putString(EXPANDED_LAYOUT, if (on) "spatial" else "gallery").apply() }
 
     fun choose(window: CatalogWindow, asNewTile: Boolean) {
         val host = host ?: return

@@ -831,6 +831,7 @@ private struct GestureSettingsPage: View {
 
 private struct ControlSettingsPage: View {
     @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
+    @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -900,6 +901,10 @@ private struct ControlSettingsPage: View {
                         ForEach(StagePeekDockStyle.allCases) { Text($0.title).tag($0) }
                     }
                     .accessibilityIdentifier("stagePeekDockPicker")
+                    Picker("Expanded Layout", selection: $expandedLayout) {
+                        ForEach(StagePeekExpandedLayout.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                    .accessibilityIdentifier("stagePeekExpandedLayoutPicker")
                 }
                 Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
                     .accessibilityIdentifier("bringStripWindowsForward")
