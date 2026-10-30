@@ -807,6 +807,12 @@
       "columns" : 1,
       "compact" : true,
       "textScale" : 1,
+      "width" : 240
+    },
+    {
+      "columns" : 2,
+      "compact" : true,
+      "textScale" : 1,
       "width" : 320
     },
     {
@@ -822,7 +828,7 @@
       "width" : 393
     },
     {
-      "columns" : 1,
+      "columns" : 2,
       "compact" : true,
       "textScale" : 1.3999999999999999,
       "width" : 393
@@ -831,7 +837,25 @@
       "columns" : 2,
       "compact" : true,
       "textScale" : 1,
+      "width" : 430
+    },
+    {
+      "columns" : 2,
+      "compact" : true,
+      "textScale" : 2,
+      "width" : 430
+    },
+    {
+      "columns" : 4,
+      "compact" : true,
+      "textScale" : 1,
       "width" : 734
+    },
+    {
+      "columns" : 3,
+      "compact" : true,
+      "textScale" : 1.3,
+      "width" : 852
     },
     {
       "columns" : 2,

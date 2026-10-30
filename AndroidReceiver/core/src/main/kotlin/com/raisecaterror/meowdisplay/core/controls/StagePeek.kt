@@ -693,11 +693,18 @@ object StagePeekGalleryLayout {
     const val sidePadding = 20.0
     const val minimumCompactCard = 150.0
     const val minimumRegularCard = 200.0
+    /** The narrowest a phone card gets before the gallery drops to one column. */
+    const val smallestPhoneCard = 100.0
+    const val maximumCompactColumns = 4
     const val maximumColumns = 6
 
+    /** Phones: two by default (larger text wraps, never one column), up to four when wide; see StagePeek.swift. */
     fun columns(width: Double, compactSize: Boolean, textScale: Double = 1.0): Int {
+        val usable = width - 2 * sidePadding
         val card = (if (compactSize) minimumCompactCard else minimumRegularCard) * min(max(textScale, 1.0), 2.0)
-        val fit = floor((width - 2 * sidePadding + spacing) / (card + spacing)).toInt()
-        return min(max(fit, 1), if (compactSize) 2 else maximumColumns)
+        val fit = floor((usable + spacing) / (card + spacing)).toInt()
+        if (!compactSize) return min(max(fit, 1), maximumColumns)
+        if (usable < 2 * smallestPhoneCard + spacing) return 1
+        return min(max(fit, 2), maximumCompactColumns)
     }
 }

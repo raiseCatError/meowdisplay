@@ -193,6 +193,7 @@ struct StagePeekWindowCard: View {
         .accessibilityValue(closing ? String(localized: "Closing")
                             : inTile ? String(localized: "Showing in a tile") : (window.pausedSpoken ?? ""))
         .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("galleryWindowCard")
     }
 
     @ViewBuilder private var preview: some View {

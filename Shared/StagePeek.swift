@@ -622,20 +622,28 @@ enum StagePeekLayout {
 
 // MARK: - Expanded gallery columns
 
-/// How many columns the expanded gallery uses: as many as fit at a readable card width,
-/// wider cards with larger text. Compact size classes (phones, narrow split views) stop at
-/// two, which is the phone default when it fits. Sizes only, never device names.
+/// How many columns the expanded gallery uses. Compact size classes (phones, narrow split
+/// views): two by default — larger text makes the cards' text wrap, never a single column —
+/// and up to four when wide (a phone in landscape); one only below two smallest cards.
+/// Regular: as many as fit at a readable card width, wider cards with larger text.
+/// Sizes only, never device names.
 enum StagePeekGalleryLayout {
     static let spacing: CGFloat = 14
     static let sidePadding: CGFloat = 20
-    /// Narrowest readable card: phones, and everything else.
+    /// Card widths that set how many more columns fit (phones; everything else).
     static let minimumCompactCard: CGFloat = 150
     static let minimumRegularCard: CGFloat = 200
+    /// The narrowest a phone card gets before the gallery drops to one column.
+    static let smallestPhoneCard: CGFloat = 100
+    static let maximumCompactColumns = 4
     static let maximumColumns = 6
 
     static func columns(width: CGFloat, compactSize: Bool, textScale: CGFloat = 1) -> Int {
+        let usable = width - 2 * sidePadding
         let card = (compactSize ? minimumCompactCard : minimumRegularCard) * min(max(textScale, 1), 2)
-        let fit = Int(((width - 2 * sidePadding + spacing) / (card + spacing)).rounded(.down))
-        return min(max(fit, 1), compactSize ? 2 : maximumColumns)
+        let fit = Int(((usable + spacing) / (card + spacing)).rounded(.down))
+        guard compactSize else { return min(max(fit, 1), maximumColumns) }
+        if usable < 2 * smallestPhoneCard + spacing { return 1 }
+        return min(max(fit, 2), maximumCompactColumns)
     }
 }

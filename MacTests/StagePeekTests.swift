@@ -571,7 +571,8 @@ final class StagePeekTests: XCTestCase {
                           "cards": cs.map(card), "hits": hits])
         }
         var columns: [[String: Any]] = []
-        for (w, compact, scale) in [(320.0, true, 1.0), (375.0, true, 1.0), (393.0, true, 1.0), (393.0, true, 1.4), (734.0, true, 1.0),
+        for (w, compact, scale) in [(240.0, true, 1.0), (320.0, true, 1.0), (375.0, true, 1.0), (393.0, true, 1.0), (393.0, true, 1.4),
+                                    (430.0, true, 1.0), (430.0, true, 2.0), (734.0, true, 1.0), (852.0, true, 1.3),
                                     (507.0, false, 1.0), (744.0, false, 1.0), (1032.0, false, 1.0), (1032.0, false, 1.5), (1366.0, false, 1.0),
                                     (2000.0, false, 1.0), (100.0, false, 1.0)] {
             columns.append(["width": w, "compact": compact, "textScale": scale,
@@ -718,11 +719,18 @@ final class StagePeekTests: XCTestCase {
     }
 
     func testGalleryColumnsFitTheWidthNotTheDevice() {
-        // Phones: two when they fit, one when too narrow or the text is large.
+        // Phones: two by default, whatever the text size; more in landscape; one only when tiny.
         XCTAssertEqual(StagePeekGalleryLayout.columns(width: 393, compactSize: true), 2)
-        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 734, compactSize: true), 2)
-        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 320, compactSize: true), 1)
-        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 393, compactSize: true, textScale: 1.4), 1)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 430, compactSize: true), 2)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 320, compactSize: true), 2)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 393, compactSize: true, textScale: 1.4), 2)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 430, compactSize: true, textScale: 2), 2)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 734, compactSize: true), 4)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 852, compactSize: true, textScale: 1.3), 3)
+        XCTAssertEqual(StagePeekGalleryLayout.columns(width: 240, compactSize: true), 1)
+        for w in stride(from: 254.0, through: 1000.0, by: 3.0) {
+            XCTAssertGreaterThanOrEqual(StagePeekGalleryLayout.columns(width: CGFloat(w), compactSize: true, textScale: 1.6), 2)
+        }
         // Tablets: as many as fit at a readable size, fewer with larger text, never zero.
         XCTAssertEqual(StagePeekGalleryLayout.columns(width: 744, compactSize: false), 3)
         XCTAssertEqual(StagePeekGalleryLayout.columns(width: 1032, compactSize: false), 4)

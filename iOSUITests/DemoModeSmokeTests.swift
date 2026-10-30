@@ -171,8 +171,15 @@ extension DemoModeSmokeTests {
         snapshot(app, "device-stage-peek-open")
 
         app.buttons["stagePeekExpand"].tap()
-        sleep(1)
+        sleep(2)
         snapshot(app, "device-stage-peek-expanded")
+        assertGalleryColumns(app, atLeast: 2, "portrait")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(2)
+        snapshot(app, "device-stage-peek-expanded-landscape")
+        assertGalleryColumns(app, atLeast: 2, "landscape")
+        XCUIDevice.shared.orientation = .portrait
+        sleep(2)
         app.buttons["stagePeekExpand"].tap()   // Compact
         sleep(1)
 
@@ -180,6 +187,18 @@ extension DemoModeSmokeTests {
         waitForNonExistence(close)
         XCTAssertFalse(close.exists, "a tap outside closes Stage Peek")
         snapshot(app, "device-stage-peek-dismissed")
+    }
+
+    /// The expanded gallery's first row holds at least `n` window cards (needs that many windows).
+    @MainActor
+    private func assertGalleryColumns(_ app: XCUIApplication, atLeast n: Int, _ label: String) {
+        let cards = app.descendants(matching: .any).matching(identifier: "galleryWindowCard").allElementsBoundByIndex
+            .map { $0.frame }.filter { !$0.isEmpty }
+        guard cards.count >= n else { XCTFail("\(label): only \(cards.count) window cards on screen"); return }
+        let top = cards.map(\.minY).min()!
+        let firstRow = cards.filter { abs($0.minY - top) < 4 }
+        print("GALLERY \(label): \(firstRow.count) per row, card width \(Int(firstRow.first?.width ?? 0)) pt, screen \(Int(app.frame.width)) pt")
+        XCTAssertGreaterThanOrEqual(firstRow.count, n, "\(label): \(firstRow.count) window cards in the first row")
     }
 
     private func openControlsSettings(_ app: XCUIApplication) {
