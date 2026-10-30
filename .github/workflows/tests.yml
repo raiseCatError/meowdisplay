@@ -73,6 +73,8 @@ jobs:
 
   mac:
     runs-on: xcode-27
+    # A hung test must fail the job, not hold a runner for GitHub's six-hour default.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -101,10 +103,14 @@ jobs:
         env:
           TEST_RUNNER_MEOW_REQUIRE_SECURITY_TESTS: "1"
         run: |
+          # Per-test time limits: a test that hangs fails by name instead of stalling the job.
           xcodebuild test \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecarMac \
             -destination 'platform=macOS' \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 120 \
+            -maximum-test-execution-time-allowance 600 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
