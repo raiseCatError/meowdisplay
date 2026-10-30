@@ -23,6 +23,10 @@ import SwiftUI
 /// - Removing it needs a click from this Mac's own mouse or trackpad and this Mac's login password,
 ///   asked by macOS (MeowDisplay never sees it). While macOS asks, no remote input reaches the Mac,
 ///   so the password can only come from its own keyboard, and devices don't see the prompt.
+///
+/// OLED care: the cover is black (an OLED panel's pixels are off). Its message and Unlock button
+/// move every minute, dim after a minute with no one at the Mac and go dark after five; any touch
+/// of the Mac's own input brings them back (PrivacyShieldPolicy.coverLook / coverCenter).
 @MainActor
 final class PrivacyShield {
     static let shared = PrivacyShield()
@@ -49,6 +53,12 @@ final class PrivacyShield {
     private var tap: CFMachPort?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    /// Where the message sits and how bright it is, shared by every cover.
+    private let appearance = PrivacyShieldAppearance()
+    /// When the cover last appeared (the message moves on from there).
+    private var coverSince = ProcessInfo.processInfo.systemUptime
+    /// Where the Unlock button is going (it may still be gliding there).
+    private var revealTarget: NSRect?
     private static var topLevel: NSWindow.Level { NSWindow.Level(rawValue: Int(CGShieldingWindowLevel())) }
 
     var isCovering: Bool { showing }
@@ -65,7 +75,7 @@ final class PrivacyShield {
         noticePanel = Self.panel(size: NSSize(width: 320, height: 40), level: Self.topLevel + 2, clicks: false)
         revealPanel.contentView = NSHostingView(rootView: RevealButton { [weak self] in self?.revealTapped() })
         // Covers for every display now plus spares for displays plugged in later.
-        pool = (0..<max(NSScreen.screens.count + 2, 3)).map { _ in Self.makeShield() }
+        pool = (0..<max(NSScreen.screens.count + 2, 3)).map { [appearance] _ in Self.makeShield(appearance) }
         publishIDs()
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -153,8 +163,14 @@ final class PrivacyShield {
     /// left out of the captures first, then shown.
     private func rebuild() {
         guard wantsCover, !unlocking else { return }
-        if !showing { Log.info("privacy shield: covering this Mac's screens") }
+        if !showing {
+            Log.info("privacy shield: covering this Mac's screens")
+            coverSince = ProcessInfo.processInfo.systemUptime
+            appearance.step = 0
+            appearance.look = .bright
+        }
         showing = true
+        refreshAppearance()
         let screens = Dictionary(NSScreen.screens.compactMap { s in s.displayID.map { ($0, s) } }, uniquingKeysWith: { a, _ in a })
         let wanted = Set(PrivacyShieldPolicy.coveredDisplays(Array(screens.keys), virtual: VirtualDisplayRegistry.shared.displayIDs))
         for (id, w) in shields where !wanted.contains(id) { w.orderOut(nil); shields[id] = nil }
@@ -164,18 +180,14 @@ final class PrivacyShield {
                 shields[id] = spare
             } else {
                 // More displays than spares: a new window, shown once the captures leave it out.
-                let w = Self.makeShield(); pool.append(w); shields[id] = w; fresh = true
+                let w = Self.makeShield(appearance); pool.append(w); shields[id] = w; fresh = true
             }
         }
         let present = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.showing else { return }
                 for (id, w) in self.shields { if let s = screens[id] { w.setFrame(s.frame, display: true); w.orderFrontRegardless() } }
-                let main = NSScreen.main.flatMap { $0.displayID }.flatMap { self.shields[$0] != nil ? $0 : nil } ?? self.shields.keys.first
-                if let main, let s = screens[main] {
-                    self.revealPanel.setFrameOrigin(NSPoint(x: s.frame.midX - 120, y: s.frame.midY - 120))
-                    self.revealPanel.orderFrontRegardless()
-                }
+                self.placeRevealButton(animate: false)
             }
         }
         guard fresh, publishIDs(), let update = onWindowsChanged else { present(); return }
@@ -190,7 +202,53 @@ final class PrivacyShield {
         }
     }
 
-    private static func makeShield() -> NSWindow {
+    /// The Unlock button under the message on the main covered display; gone while the cover is dark.
+    private func placeRevealButton(animate: Bool) {
+        guard showing, !unlocking else { return }
+        guard appearance.look != .dark else { revealPanel.orderOut(nil); return }
+        let screens = NSScreen.screens.filter { s in s.displayID.map { shields[$0] != nil } ?? false }
+        guard let s = screens.first(where: { $0 == NSScreen.main }) ?? screens.first else { return }
+        let c = PrivacyShieldPolicy.coverCenter(step: appearance.step, screen: s.frame.size)
+        let size = revealPanel.frame.size
+        let frame = NSRect(x: s.frame.minX + c.x - size.width / 2,
+                           y: s.frame.maxY - c.y - PrivacyShieldPolicy.coverButtonDrop - size.height / 2,
+                           width: size.width, height: size.height)
+        revealPanel.alphaValue = appearance.look == .dim ? 0.4 : 1
+        if frame != revealTarget || !revealPanel.isVisible {
+            if animate && revealPanel.isVisible {
+                // Glides with the message (not blocking the main thread).
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 1.5
+                    revealPanel.animator().setFrame(frame, display: true)
+                }
+            } else {
+                revealPanel.setFrame(frame, display: true)
+            }
+            revealTarget = frame
+        }
+        revealPanel.orderFrontRegardless()
+    }
+
+    /// Moves the message every minute and dims it with no one at the Mac (OLED care).
+    private func refreshAppearance() {
+        guard showing else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let step = max(0, Int((now - coverSince) / PrivacyShieldPolicy.coverMoveEvery))
+        let look = PrivacyShieldPolicy.coverLook(idle: now - max(coverSince, lastPhysicalInput))
+        guard step != appearance.step || look != appearance.look else { return }
+        if look != appearance.look { Log.info("privacy shield: message \(look)") }
+        appearance.step = step
+        appearance.look = look
+        placeRevealButton(animate: true)
+    }
+
+    /// Someone touched this Mac's own input: a dimmed or dark message comes back at once.
+    fileprivate func physicalInputArrived() {
+        guard showing, appearance.look != .bright else { return }
+        refreshAppearance()
+    }
+
+    private static func makeShield(_ appearance: PrivacyShieldAppearance) -> NSWindow {
         let w = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
         w.level = topLevel
         w.backgroundColor = .black
@@ -202,7 +260,7 @@ final class PrivacyShield {
         w.isReleasedWhenClosed = false
         w.sharingType = .none
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        w.contentView = NSHostingView(rootView: PrivacyShieldCover())
+        w.contentView = NSHostingView(rootView: PrivacyShieldCover(appearance: appearance))
         return w
     }
 
@@ -304,7 +362,10 @@ final class PrivacyShield {
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .tailAppendEventTap, options: .listenOnly, eventsOfInterest: mask,
                                 callback: { _, _, event, info in
             if let info, PrivacyShieldPolicy.isPhysical(sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID)) {
-                Unmanaged<PrivacyShield>.fromOpaque(info).takeUnretainedValue().lastPhysicalInput = ProcessInfo.processInfo.systemUptime
+                let shield = Unmanaged<PrivacyShield>.fromOpaque(info).takeUnretainedValue()
+                shield.lastPhysicalInput = ProcessInfo.processInfo.systemUptime
+                // The tap runs on the main run loop.
+                MainActor.assumeIsolated { shield.physicalInputArrived() }
             }
             return Unmanaged.passUnretained(event)
         }, userInfo: me)
@@ -327,17 +388,32 @@ private extension NSScreen {
     var displayID: CGDirectDisplayID? { (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value }
 }
 
+/// Where the cover's message sits (`step`) and how bright it is.
+@MainActor
+final class PrivacyShieldAppearance: ObservableObject {
+    @Published var step = 0
+    @Published var look: PrivacyShieldPolicy.CoverLook = .bright
+}
+
 private struct PrivacyShieldCover: View {
+    @ObservedObject var appearance: PrivacyShieldAppearance
+
     var body: some View {
-        ZStack {
-            Color.black
+        GeometryReader { g in
+            let c = PrivacyShieldPolicy.coverCenter(step: appearance.step, screen: g.size)
             VStack(spacing: 10) {
                 Image(systemName: "eye.slash").font(.system(size: 34, weight: .regular)).foregroundStyle(.white.opacity(0.55))
                 Text("This Mac is in use from another device").font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.75))
                 Text("Privacy Shield · Click Unlock, then type this Mac's login password").font(.callout).foregroundStyle(.white.opacity(0.45))
             }
+            .fixedSize()
+            .position(x: c.x, y: c.y - PrivacyShieldPolicy.coverMessageLift)
+            .opacity(appearance.look == .bright ? 1 : appearance.look == .dim ? 0.4 : 0)
         }
+        .background(Color.black)
         .ignoresSafeArea()
+        .animation(.easeInOut(duration: 1.5), value: appearance.step)
+        .animation(.easeInOut(duration: 0.6), value: appearance.look)
     }
 }
 
@@ -374,7 +450,7 @@ struct PrivacyShieldSettingsSection: View {
         } header: {
             Text("Privacy Shield")
         } footer: {
-            Text("While a device is connected, this Mac's own screens are covered in black; the device still sees and controls everything. Remote means Tailscale and other routed addresses; local means Wi-Fi, peer-to-peer, USB and hotspot. Someone at the Mac can remove it with this Mac's login password, typed on its own keyboard; it covers again after the time above without use at the Mac. It doesn't stop typing or clicking at the Mac, and some system alerts can appear above it.")
+            Text("While a device is connected, this Mac's own screens are covered in black; the device still sees and controls everything. Remote means Tailscale and other routed addresses; local means Wi-Fi, peer-to-peer, USB and hotspot. Someone at the Mac can remove it with this Mac's login password, typed on its own keyboard; it covers again after the time above without use at the Mac. It doesn't stop typing or clicking at the Mac, and some system alerts can appear above it. Its message moves every minute and fades when no one is at the Mac, so OLED screens don't burn in.")
         }
         .confirmationDialog(confirmingOff == true ? "Turn off the Privacy Shield for remote connections?" : "Turn off the Privacy Shield for local connections?",
                             isPresented: Binding(get: { confirmingOff != nil }, set: { if !$0 { confirmingOff = nil } })) {

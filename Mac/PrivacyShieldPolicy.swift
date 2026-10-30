@@ -36,6 +36,54 @@ enum PrivacyShieldPolicy {
         all.filter { !virtual.contains($0) }
     }
 
+    // MARK: OLED care
+    // The cover is black, which an OLED panel shows with its pixels off. Only the message and the
+    // Unlock button light pixels, so they move to a new spot every minute, dim after a minute
+    // without use at the Mac and go dark after five; touching the Mac's own mouse, trackpad or
+    // keyboard brings them back at once. macOS doesn't tell apps which panels are OLED, so every
+    // display gets this (it costs nothing on others).
+
+    enum CoverLook: Equatable { case bright, dim, dark }
+    static let coverMoveEvery: TimeInterval = 60
+    static let coverDimAfter: TimeInterval = 60
+    static let coverDarkAfter: TimeInterval = 5 * 60
+    /// The message (icon and two lines) with the Unlock button under it, as one block.
+    static let coverBlock = CGSize(width: 640, height: 200)
+    /// From the block's centre: up to the message's centre, down to the Unlock button's centre.
+    static let coverMessageLift: CGFloat = 50
+    static let coverButtonDrop: CGFloat = 48
+
+    /// `idle`: since the cover appeared or someone last used this Mac's own input, whichever is later.
+    static func coverLook(idle: TimeInterval) -> CoverLook {
+        idle >= coverDarkAfter ? .dark : idle >= coverDimAfter ? .dim : .bright
+    }
+
+    /// Where the block's centre goes at `step` on a screen of `size` (origin top left). The screen
+    /// is split into nine areas, visited in an order that always jumps to a different area, with
+    /// the spot inside each area varied so the same pixels aren't lit again round after round.
+    static func coverCenter(step: Int, screen size: CGSize, block: CGSize = coverBlock, margin: CGFloat = 24) -> CGPoint {
+        let order = [4, 0, 8, 2, 6, 1, 7, 3, 5]
+        let area = order[((step % order.count) + order.count) % order.count]
+        func axis(_ length: CGFloat, _ blockLength: CGFloat, cell: Int, salt: UInt64) -> CGFloat {
+            let room = length - blockLength - margin * 2
+            guard room > 0 else { return length / 2 }
+            // Within the middle half of its third, so neighbouring areas' spots never touch.
+            let jitter = CGFloat(mix(UInt64(bitPattern: Int64(step)) &* 2 &+ salt) % 10_000) / 10_000
+            let fraction = (CGFloat(cell) + 0.25 + jitter * 0.5) / 3
+            return margin + blockLength / 2 + room * fraction
+        }
+        return CGPoint(x: axis(size.width, block.width, cell: area % 3, salt: 0),
+                       y: axis(size.height, block.height, cell: area / 3, salt: 1))
+    }
+
+    /// SplitMix64's finaliser: a fixed, well-spread number for each step.
+    private static func mix(_ v: UInt64) -> UInt64 {
+        var z = v &+ 0x9E37_79B9_7F4A_7C15
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+
     /// Read from any thread (the welcome message). Remote defaults to on, local to off.
     static func isOn(remote: Bool) -> Bool {
         remote ? (UserDefaults.standard.object(forKey: remoteKey) as? Bool ?? true) : UserDefaults.standard.bool(forKey: localKey)

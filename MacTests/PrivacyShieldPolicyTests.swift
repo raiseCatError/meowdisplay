@@ -88,4 +88,36 @@ final class PrivacyShieldPolicyTests: XCTestCase {
         PrivacyShieldWindows.isUnlocking = false
         XCTAssertFalse(PrivacyShieldWindows.isUnlocking)
     }
+
+    func testTheCoverMessageDimsThenGoesDarkWithNoOneAtTheMac() {
+        XCTAssertEqual(PrivacyShieldPolicy.coverLook(idle: 0), .bright)
+        XCTAssertEqual(PrivacyShieldPolicy.coverLook(idle: 59), .bright)
+        XCTAssertEqual(PrivacyShieldPolicy.coverLook(idle: 60), .dim)
+        XCTAssertEqual(PrivacyShieldPolicy.coverLook(idle: 299), .dim)
+        XCTAssertEqual(PrivacyShieldPolicy.coverLook(idle: 300), .dark, "pure black: an OLED panel's pixels are off")
+    }
+
+    func testTheCoverMessageMovesAcrossTheScreenAndStaysOnIt() {
+        let block = PrivacyShieldPolicy.coverBlock
+        for screen in [CGSize(width: 1470, height: 956), CGSize(width: 3008, height: 1692), CGSize(width: 1024, height: 768)] {
+            let room = CGRect(origin: .zero, size: screen).insetBy(dx: 24, dy: 24)
+            var seen = Set<String>()
+            var previous: CGPoint?
+            for step in 0..<500 {
+                let c = PrivacyShieldPolicy.coverCenter(step: step, screen: screen)
+                let rect = CGRect(x: c.x - block.width / 2, y: c.y - block.height / 2, width: block.width, height: block.height)
+                XCTAssertTrue(room.contains(rect), "step \(step) on \(screen): \(rect) leaves the screen")
+                if let p = previous {
+                    // Always a different ninth of the screen, so the lit pixels change every minute.
+                    let gap = max(abs(c.x - p.x) / (screen.width - block.width - 48), abs(c.y - p.y) / (screen.height - block.height - 48))
+                    XCTAssertGreaterThan(gap, 0.08, "step \(step) on \(screen) barely moved")
+                }
+                previous = c
+                seen.insert("\(Int(c.x)),\(Int(c.y))")
+            }
+            XCTAssertGreaterThan(seen.count, 450, "spots vary from round to round on \(screen)")
+        }
+        // A screen smaller than the block: centred, never off screen.
+        XCTAssertEqual(PrivacyShieldPolicy.coverCenter(step: 3, screen: CGSize(width: 600, height: 180)), CGPoint(x: 300, y: 90))
+    }
 }
