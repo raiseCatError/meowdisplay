@@ -499,6 +499,10 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
     var drawnSource: WorkspaceSize?
     /// The window (or display key) the still must be of.
     var sourceKey: UInt32
+    /// The window's four corners as drawn when the gesture began (picture-normalized, clockwise from
+    /// its top-left): only this shape of the old picture is moved. At an angle the box `from` also
+    /// holds empty corners, which must never be dragged over the still below. Nil: all of `from`.
+    var fromQuad: [WorkspacePoint]?
 
     init?(tile: String, pane: WorkspaceRect, from old: WorkspaceRect, to new: WorkspaceRect,
           rotation: WorkspaceRotation = .none, sourceKey: UInt32 = 0) {
@@ -542,6 +546,11 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
         rotation = t1.rotation
         drawnSource = WorkspaceSize(width: t1.source.width * t1.scale / W, height: t1.source.height * t1.scale / H)
         self.sourceKey = sourceKey
+        let w = t0.source.width, h = t0.source.height
+        fromQuad = [WorkspacePoint(x: 0, y: 0), WorkspacePoint(x: w, y: 0), WorkspacePoint(x: w, y: h), WorkspacePoint(x: 0, y: h)].map {
+            let q = t0.canvasPoint(fromSource: $0)
+            return WorkspacePoint(x: q.x / W, y: q.y / H)
+        }
     }
 
     func apply(_ p: WorkspacePoint) -> WorkspacePoint {

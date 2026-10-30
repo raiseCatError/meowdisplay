@@ -2843,12 +2843,27 @@ struct VideoLayerView: UIViewRepresentable {
                 still.layer.anchorPoint = .zero
                 still.bounds = CGRect(origin: .zero, size: pane.size)
                 snapshot.frame = CGRect(origin: CGPoint(x: -pane.minX, y: -pane.minY), size: bounds.size)
-                // Only the part that showed the source: letterbox bars never cover the still below.
-                let shown = view(p.from).intersection(pane).offsetBy(dx: -pane.minX, dy: -pane.minY)
-                let mask = CALayer()
-                mask.backgroundColor = UIColor.black.cgColor
-                mask.frame = shown.isNull ? .zero : shown
-                still.layer.mask = mask
+                // Only the part that showed the window: letterbox bars, and a turned picture's empty
+                // corners, never cover the still below.
+                if let quad = p.fromQuad, quad.count == 4 {
+                    let mask = CAShapeLayer()
+                    let path = UIBezierPath()
+                    for (i, q) in quad.enumerated() {
+                        let v = CGPoint(x: base.minX + q.x * base.width - pane.minX, y: base.minY + q.y * base.height - pane.minY)
+                        if i == 0 { path.move(to: v) } else { path.addLine(to: v) }
+                    }
+                    path.close()
+                    mask.path = path.cgPath
+                    mask.fillColor = UIColor.black.cgColor
+                    mask.frame = CGRect(origin: .zero, size: pane.size)
+                    still.layer.mask = mask
+                } else {
+                    let shown = view(p.from).intersection(pane).offsetBy(dx: -pane.minX, dy: -pane.minY)
+                    let mask = CALayer()
+                    mask.backgroundColor = UIColor.black.cgColor
+                    mask.frame = shown.isNull ? .zero : shown
+                    still.layer.mask = mask
+                }
                 still.addSubview(snapshot)
                 clip.addSubview(still)
                 addSubview(clip)

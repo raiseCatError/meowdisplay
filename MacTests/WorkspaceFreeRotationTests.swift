@@ -99,6 +99,11 @@ final class WorkspaceFreeRotationTests: XCTestCase {
             XCTAssertEqual(moved.y, b.y / 1000, accuracy: 1e-9)
         }
         XCTAssertNotEqual(p.shearB, 0, "a turn has shear terms")
+        // Only the window's own outline moves (not the empty corners of its box).
+        let corner = t0.canvasPoint(fromSource: WorkspacePoint(x: 800, y: 400))
+        XCTAssertEqual(p.fromQuad?.count, 4)
+        XCTAssertEqual(p.fromQuad?[2].x ?? 0, corner.x / 2000, accuracy: 1e-12)
+        XCTAssertEqual(p.fromQuad?[2].y ?? 0, corner.y / 1000, accuracy: 1e-12)
         XCTAssertEqual(p.rotation.rawValue, 50)
     }
 }

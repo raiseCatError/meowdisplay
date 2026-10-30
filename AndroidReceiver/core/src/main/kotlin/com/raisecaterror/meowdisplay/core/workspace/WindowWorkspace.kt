@@ -380,6 +380,10 @@ data class WZoomPreview(
     val shearB: Double = 0.0, val shearC: Double = 0.0,
     /** The whole source's own (unturned) size as drawn now, picture-normalized per axis; null: from [source]. */
     val drawnSource: WSize? = null,
+    /** The window's corners as drawn when the gesture began (picture-normalized, clockwise from its
+     *  top-left): only this shape of the old picture moves; a turned picture's empty box corners never
+     *  cover the still below. Null: all of [from]. */
+    val fromQuad: List<WPoint>? = null,
 ) {
     fun apply(p: WPoint) = WPoint(scaleX * p.x + shearC * p.y + offsetX, shearB * p.x + scaleY * p.y + offsetY)
 
@@ -408,7 +412,9 @@ data class WZoomPreview(
                 !listOf(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y).all { it.isFinite() }) return null
             return WZoomPreview(tile, pane, p1.x - p0.x, p2.y - p0.y, p0.x, p0.y, new, old, t1.rotation, sourceKey,
                 shearB = p1.y - p0.y, shearC = p2.x - p0.x,
-                drawnSource = WSize(t1.source.width * t1.scale / cw, t1.source.height * t1.scale / ch))
+                drawnSource = WSize(t1.source.width * t1.scale / cw, t1.source.height * t1.scale / ch),
+                fromQuad = listOf(WPoint(0.0, 0.0), WPoint(t0.source.width, 0.0), WPoint(t0.source.width, t0.source.height), WPoint(0.0, t0.source.height))
+                    .map { t0.canvasPoint(it).let { q -> WPoint(q.x / cw, q.y / ch) } })
         }
     }
 }

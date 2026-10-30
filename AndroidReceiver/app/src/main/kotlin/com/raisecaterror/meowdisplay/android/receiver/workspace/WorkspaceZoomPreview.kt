@@ -30,6 +30,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
@@ -152,7 +154,24 @@ fun WorkspaceZoomPreviewLayer(controller: WorkspaceController, frame: CGRect, su
                     translationY = (ty * density).toFloat()
                 },
             ) {
-                // Only the part that showed the source: letterbox bars never cover the still below.
+                // Only the part that showed the window: letterbox bars, and a turned picture's empty
+                // corners, never cover the still below.
+                val quad = p.fromQuad
+                if (quad != null && quad.size == 4) {
+                    val path = Path().apply {
+                        quad.forEachIndexed { i, q ->
+                            val x = ((q.x - p.pane.x) / p.pane.width * this@Canvas.size.width).toFloat()
+                            val y = ((q.y - p.pane.y) / p.pane.height * this@Canvas.size.height).toFloat()
+                            if (i == 0) moveTo(x, y) else lineTo(x, y)
+                        }
+                        close()
+                    }
+                    clipPath(path) {
+                        drawImage(img, dstSize = IntSize(this@Canvas.size.width.roundToInt(), this@Canvas.size.height.roundToInt()),
+                            filterQuality = FilterQuality.Low)
+                    }
+                    return@Canvas
+                }
                 val fx0 = ((max(p.from.x, p.pane.x) - p.pane.x) / p.pane.width).coerceIn(0.0, 1.0)
                 val fy0 = ((max(p.from.y, p.pane.y) - p.pane.y) / p.pane.height).coerceIn(0.0, 1.0)
                 val fx1 = ((min(p.from.x + p.from.width, p.pane.x + p.pane.width) - p.pane.x) / p.pane.width).coerceIn(0.0, 1.0)
