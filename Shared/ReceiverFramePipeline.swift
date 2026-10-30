@@ -141,9 +141,11 @@ actor ReceiverFramePipeline {
         /// The live connection's `receive` reported an error. Treated
         /// exactly like EOF by the host — see the original `receive error`
         /// handling this replaces.
-        var connectionFailed: @Sendable (NWError) -> Void
+        /// Carries the generation of the connection that failed or closed: the actor ignores a
+        /// late report from a connection a newer one already replaced.
+        var connectionFailed: @Sendable (NWError, _ generation: Int) -> Void
         /// The peer closed the connection (`isComplete`).
-        var connectionClosedByPeer: @Sendable () -> Void
+        var connectionClosedByPeer: @Sendable (_ generation: Int) -> Void
         /// Whether the connection adopted at `generation` has been admitted
         /// (`ReceiverMediaAdmissionGate`). QUIC Video/Audio payloads are
         /// refused — and their QUIC connection closed — until it has.
@@ -279,11 +281,11 @@ actor ReceiverFramePipeline {
         // A QUIC protocol violation already closed the connection: stop.
         if let quicConnection, quicConnection.isClosed { return }
         if let error {
-            outputEffects.connectionFailed(error)
+            outputEffects.connectionFailed(error, generation)
             return
         }
         if isComplete {
-            outputEffects.connectionClosedByPeer()
+            outputEffects.connectionClosedByPeer(generation)
             return
         }
         beginReceiving(on: connection, generation: generation)
