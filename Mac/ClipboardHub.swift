@@ -274,7 +274,9 @@ final class ClipboardHub: ObservableObject {
                 if let n = v as? Int, n >= 0 { seen[k] = UInt64(n) }
             }
             p.seen = seen
-            sync.merge(seen: seen)   // a reconnect is never a new copy
+            // A reconnect is never a new copy: the device's own events it says it made are seen.
+            // What it claims about other devices is not trusted.
+            if let own = p.peerID, let n = seen[own] { sync.merge(seen: [own: n]) }
             persistCounters()
             connectedNames[p.sessionID] = p.name
             evaluateGrant(p)
@@ -613,6 +615,13 @@ final class ClipboardHub: ObservableObject {
 
     private func receive(_ e: ClipEvent, from p: Peer) {
         guard toMac(p) else { return }
+        // A device sends only its own copies (relays come from the Mac), and its claims about
+        // other devices' copies never go beyond what this Mac has seen.
+        guard let own = p.peerID, e.id.origin == own else { return }
+        var e = e
+        for (o, n) in e.header.context where o != own {
+            e.header.context[o] = min(n, o == sync.origin ? sync.seq : sync.seen[o] ?? 0)
+        }
         let decision = sync.receive(e.header)
         persistCounters()
         switch decision {
@@ -658,7 +667,9 @@ final class ClipboardHub: ObservableObject {
         if !event.files.isEmpty {
             try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
             for f in event.files where f.dir {
-                try? FileManager.default.createDirectory(at: fileURL(staging, f.path), withIntermediateDirectories: true)
+                let u = fileURL(staging, f.path)
+                try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+                Self.quarantine(u)
             }
         }
         jobs[job.id] = job
@@ -686,6 +697,7 @@ final class ClipboardHub: ObservableObject {
         if case .file(let i) = next.target {
             let url = fileURL(job.staging, job.event.files[i].path)
             FileManager.default.createFile(atPath: url.path, contents: nil)
+            Self.quarantine(url)
             job.handle = try? FileHandle(forWritingTo: url)
             if job.handle == nil { return finish(job, failure: "noSpace") }
         }
@@ -840,6 +852,16 @@ final class ClipboardHub: ObservableObject {
         alternative = nil; alternativeFrom = nil
         sync.dropAlternative()
         startApply(a.event, from: p, makeCurrentCopy: true)
+    }
+
+    /// Files from another device carry the quarantine mark, like a download: Gatekeeper checks
+    /// them before anything runs.
+    static func quarantine(_ url: URL) {
+        var v = URLResourceValues()
+        v.quarantineProperties = [kLSQuarantineAgentNameKey as String: "MeowDisplay",
+                                  kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String]
+        var u = url
+        try? u.setResourceValues(v)
     }
 
     static func failureText(_ code: String) -> String {

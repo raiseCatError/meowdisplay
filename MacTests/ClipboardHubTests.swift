@@ -152,6 +152,26 @@ final class ClipboardHubTests: XCTestCase {
         XCTAssertEqual(got, Data(big.utf8))
     }
 
+    func testADeviceCanOnlySpeakForItself() throws {
+        hub.enabled = true
+        allow("ipad"); allow("moto")
+        join("ipad"); join("moto")
+        _ = take("ipad"); _ = take("moto")
+        // The Moto can't send a copy in the iPad's name…
+        hub.handle(ref("moto"), event(from: "install-ipad", seq: 1, text: "forged"))
+        XCTAssertNil(pb.string(forType: .string))
+        XCTAssertTrue(take("ipad", op: "event").isEmpty)
+        // …nor claim it saw the iPad's future copies to silence them.
+        hub.handle(ref("moto"), event(from: "install-moto", seq: 1, text: "moto", context: ["install-ipad": 1_000_000]))
+        XCTAssertEqual(pb.string(forType: .string), "moto")
+        hub.handle(ref("ipad"), event(from: "install-ipad", seq: 1, text: "real iPad copy", context: ["install-moto": 1]))
+        XCTAssertEqual(pb.string(forType: .string), "real iPad copy", "the iPad's next copy still lands")
+        // A declared size past the hard cap is refused at parse.
+        var huge = event(from: "install-ipad", seq: 2, text: "x")
+        huge["items"] = [["reps": [["t": "png", "n": Int.max, "h": "0123456789abcdef", "b": 0]]]]
+        XCTAssertNil(ClipEvent.parse(huge))
+    }
+
     func testPrivateItemsPauseAndOneWayDevices() throws {
         hub.enabled = true
         allow("phone", direction: .toMac)

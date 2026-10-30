@@ -27,6 +27,9 @@ object ClipboardWire {
     const val MAX_FILES = 2_000
     const val MAX_DEPTH = 32
     const val MAX_ORIGIN = 128
+    /** Hard caps on declared sizes, so totals never overflow. */
+    const val MAX_REP_BYTES = 200_000_000
+    const val MAX_FILE_BYTES = 1L shl 40
     val SIZE_CHOICES = listOf(1_000_000, 10_000_000, 50_000_000, 200_000_000)
     const val DEFAULT_MAX_BYTES = 10_000_000
 }
@@ -145,7 +148,7 @@ data class ClipEvent(val header: ClipHeader, val at: Long, val items: List<ClipI
                 for (r in ((raw as? JsonObject)?.get("reps") as? JsonArray).orEmpty().take(ClipboardWire.MAX_REPS)) {
                     val ro = r as? JsonObject ?: continue
                     val kind = ClipKind.of(ro.str("t")) ?: continue
-                    val n = ro.long("n")?.takeIf { it >= 0 && it <= Int.MAX_VALUE }?.toInt() ?: return null
+                    val n = ro.long("n")?.takeIf { it >= 0 && it <= ClipboardWire.MAX_REP_BYTES }?.toInt() ?: return null
                     val h = ro.str("h")?.takeIf { it.length == 16 } ?: return null
                     val inline = ro.str("d")?.takeIf { it.length <= ClipboardWire.INLINE_BYTES * 4 / 3 + 8 }
                         ?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
@@ -161,7 +164,7 @@ data class ClipEvent(val header: ClipHeader, val at: Long, val items: List<ClipI
                 val fo = raw as? JsonObject ?: return null
                 val path = (fo["p"] as? JsonArray)?.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: return null } ?: return null
                 if (path.isEmpty() || path.size > ClipboardWire.MAX_DEPTH || !path.all(ClipFiles::isSafeName)) return null
-                val n = fo.long("n")?.takeIf { it >= 0 } ?: return null
+                val n = fo.long("n")?.takeIf { it >= 0 && it <= ClipboardWire.MAX_FILE_BYTES } ?: return null
                 files.add(ClipFile(path, n, fo.bool("dir") == true, fo.long("b")?.takeIf { it >= 0 }?.toInt()))
             }
             if (items.isEmpty() && files.isEmpty()) return null

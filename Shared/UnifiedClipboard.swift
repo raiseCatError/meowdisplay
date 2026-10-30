@@ -30,6 +30,9 @@ enum ClipboardWire {
     static let maxFiles = 2_000
     static let maxDepth = 32
     static let maxOriginLength = 128
+    /// Hard caps on declared sizes (a representation; one file), so totals never overflow.
+    static let maxRepBytes = 200_000_000
+    static let maxFileBytes = 1 << 40
     /// Size limits the person can choose for automatic transfers (bytes).
     static let sizeChoices = [1_000_000, 10_000_000, 50_000_000, 200_000_000]
     static let defaultMaxBytes = 10_000_000
@@ -202,7 +205,7 @@ struct ClipEvent: Equatable, Sendable {
             var reps: [ClipRep] = []
             for r in (raw["reps"] as? [[String: Any]] ?? []).prefix(ClipboardWire.maxReps) {
                 guard let t = (r["t"] as? String).flatMap(ClipKind.init(rawValue:)) else { continue }   // unknown types: skipped
-                guard let n = r["n"] as? Int, n >= 0, let h = r["h"] as? String, h.count == 16 else { return nil }
+                guard let n = r["n"] as? Int, n >= 0, n <= ClipboardWire.maxRepBytes, let h = r["h"] as? String, h.count == 16 else { return nil }
                 let inline = (r["d"] as? String).flatMap { s -> Data? in
                     s.count <= (ClipboardWire.inlineBytes * 4 / 3 + 8) ? Data(base64Encoded: s) : nil
                 }
@@ -216,7 +219,7 @@ struct ClipEvent: Equatable, Sendable {
         var files: [ClipFile] = []
         for f in (obj["files"] as? [[String: Any]] ?? []).prefix(ClipboardWire.maxFiles) {
             guard let path = f["p"] as? [String], !path.isEmpty, path.count <= ClipboardWire.maxDepth,
-                  path.allSatisfy(ClipFiles.isSafeName), let n = f["n"] as? Int, n >= 0 else { return nil }
+                  path.allSatisfy(ClipFiles.isSafeName), let n = f["n"] as? Int, n >= 0, n <= ClipboardWire.maxFileBytes else { return nil }
             files.append(ClipFile(path: path, size: n, dir: f["dir"] as? Bool ?? false, blob: (f["b"] as? Int).flatMap { $0 >= 0 ? $0 : nil }))
         }
         guard !items.isEmpty || !files.isEmpty else { return nil }
