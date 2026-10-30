@@ -41,7 +41,10 @@ final class PairingRevealDeadlineTests: XCTestCase {
             XCTAssertEqual(error as? PairingError, .malformedMessage)
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 3, "the attempt ends at the deadline")
-        if case .cancelled = client.state {} else { XCTFail("the connection is closed, got \(client.state)") }
+        // The state change is published on the connection's own queue, shortly after the cancel.
+        let closedBy = Date().addingTimeInterval(2)
+        while Date() < closedBy, client.state != .cancelled { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(client.state, .cancelled, "the connection is closed")
         listener.cancel()
         held.cancelAll()
     }
