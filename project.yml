@@ -323,6 +323,7 @@ targets:
       - Shared/TextCaretWire.swift
       - Shared/ControlProfile.swift
       - Shared/StagePeek.swift
+      - Shared/UnifiedClipboard.swift
       - Shared/ControlInteraction.swift
       - Shared/ControlTrayGeometry.swift
       - Shared/PadControlLayout.swift
