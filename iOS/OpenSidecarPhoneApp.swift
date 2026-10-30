@@ -140,7 +140,10 @@ struct ReceiverScreen: View {
     /// second one, so the established OFF-transition cleanup in `VideoView`
     /// (`clearInputStateForPause`) also runs on every session interruption.
     private var inputReachesMac: Bool {
-        model.receiver.session.allowsLiveInput && controlStore.preferences.allowInput
+        BlockedInputAttemptPolicy.inputReachesMac(sessionLive: model.receiver.session.allowsLiveInput,
+                                                  localAllow: controlStore.preferences.allowInput,
+                                                  macPV: model.receiver.macProtocolVersion,
+                                                  macState: controlStore.sessionInputState)
     }
 
     /// Screen edges whose system gestures wait for a second swipe — see
@@ -332,7 +335,7 @@ struct ReceiverScreen: View {
                                    onWorkspaceTouch: model.workspace.windowMode
                                        ? { p in
                                            model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
-                                           model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
+                                           return model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
                                        } : nil,
                                    workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
                                    onWorkspaceViewReset: model.workspace.windowMode
@@ -429,9 +432,18 @@ struct ReceiverScreen: View {
                         onCanvasChange: { padCanvas = $0 },
                         surfaceOrigin: canvas.origin)
                     if let kind = inputPrompt.kind {
+                        // Window mode: inside the selected pane, near its bottom, so it's clear which
+                        // window needs control; the pane, its tabs, zoom and pan stay as they are.
+                        let paneAnchor = model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
+                            let pic = RemoteViewportCalculator.normal(viewBounds: CGRect(origin: .zero, size: canvas.size),
+                                                                      remoteAspectSize: model.receiver.videoSize).displayedRect
+                                .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                            return CGPoint(x: pic.minX + r.midX * pic.width,
+                                           y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
+                        } : nil
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
-                            .position(x: canvas.midX,
-                                      y: keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                            .position(x: paneAnchor?.x ?? canvas.midX,
+                                      y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76)
                             .transition(slideTransition(from: .bottom))
                     }
@@ -2142,7 +2154,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// points normalized to the picture; returns whether a tile took the gesture.
     var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
     /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
-    var onWorkspaceTouch: ((CGPoint) -> Void)?
+    /// Window mode: a touch landed here; true when it only selected another pane.
+    var onWorkspaceTouch: ((CGPoint) -> Bool)?
     /// Window mode: the instant local zoom of the pane under the fingers, read after each pinch step.
     var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
     /// Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture).
@@ -2741,6 +2754,7 @@ struct VideoLayerView: UIViewRepresentable {
             guard !allowsInput else {
                 blockedSequenceTouchIDs.removeAll()
                 blockedSequenceMaxTouches = 0
+                blockedSequenceSelectedPane = false
                 return
             }
             let fingers = touches.filter { $0.type == .direct || $0.type == .pencil }
@@ -2752,10 +2766,12 @@ struct VideoLayerView: UIViewRepresentable {
             for touch in fingers { blockedSequenceTouchIDs.remove(ObjectIdentifier(touch)) }
             guard blockedSequenceTouchIDs.isEmpty else { return }
             if BlockedInputAttemptPolicy.isRemoteIntent(maximumTouchCount: blockedSequenceMaxTouches,
-                                                        moveViewActive: moveViewActive) {
+                                                        moveViewActive: moveViewActive,
+                                                        selectedPane: blockedSequenceSelectedPane) {
                 onBlockedInputAttempt?()
             }
             blockedSequenceMaxTouches = 0
+            blockedSequenceSelectedPane = false
         }
 
         // MARK: - Scroll direction
@@ -2788,7 +2804,9 @@ struct VideoLayerView: UIViewRepresentable {
         fileprivate var remoteInputAllowed: Bool { allowsInput }
 
         private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
-        var workspaceTouch: ((CGPoint) -> Void)?
+        var workspaceTouch: ((CGPoint) -> Bool)?
+        /// This touch sequence selected a pane: not an attempt at the Mac (no Request Control).
+        private var blockedSequenceSelectedPane = false
         var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
         var workspaceViewReset: ((CGPoint) -> Void)?
         /// The current two-finger gesture belongs to a tile (decided when it begins).
@@ -4535,7 +4553,9 @@ struct VideoLayerView: UIViewRepresentable {
                 let base = unzoomedBaseTransform().displayedRect
                 if base.width > 0, base.height > 0 {
                     let p = first.location(in: self)
-                    workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height))
+                    if workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)) {
+                        blockedSequenceSelectedPane = true
+                    }
                 }
             }
             trackBlockedSequence(touches, began: true, ended: false)

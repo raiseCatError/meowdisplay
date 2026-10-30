@@ -965,11 +965,17 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).
-    func selectTile(at p: WorkspacePoint) {
+    /// True when the touch chose another pane (selection only; nothing goes to the Mac).
+    @discardableResult
+    func selectTile(at p: WorkspacePoint) -> Bool {
         guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key,
-              layout.tiles[id]?.source != nil, active != id else { return }
+              layout.tiles[id]?.source != nil, active != id else { return false }
         focus(id)
+        return true
     }
+
+    /// The selected pane's frame (0–1 of the picture), for prompts shown inside it.
+    var activePaneRect: WorkspaceRect? { active.flatMap { frames.tiles[$0] } }
 
     // MARK: Tabs and drops
 

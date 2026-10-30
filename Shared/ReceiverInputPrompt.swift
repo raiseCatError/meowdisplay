@@ -114,9 +114,21 @@ struct ReceiverInputPrompt: Equatable {
 /// two-finger sequence is Local View Navigation (pan/zoom/rotate), never a
 /// reason to ask for input; nor is anything in Move View.
 enum BlockedInputAttemptPolicy {
-    static func isRemoteIntent(maximumTouchCount: Int, moveViewActive: Bool) -> Bool {
-        guard !moveViewActive, maximumTouchCount > 0 else { return false }
+    /// `selectedPane`: the touch only chose another Window-mode pane (local, never for the Mac).
+    /// Two fingers are this device's own pan and zoom, never an attempt at the Mac.
+    static func isRemoteIntent(maximumTouchCount: Int, moveViewActive: Bool, selectedPane: Bool = false) -> Bool {
+        guard !moveViewActive, !selectedPane, maximumTouchCount > 0 else { return false }
         return maximumTouchCount != 2
+    }
+
+    /// Whether remote input may leave this device. A Mac that reports its control decision
+    /// (pv 8+) must have granted it: View Only forwards nothing, and a touch meant for the Mac
+    /// offers Request Control instead (found 2026-10-30: in Window mode the touch went out, the
+    /// Mac dropped it, and no prompt appeared). Older Macs never report it, so only the live
+    /// session and this device's own switch count there.
+    static func inputReachesMac(sessionLive: Bool, localAllow: Bool, macPV: Int, macState: SessionInputWireState) -> Bool {
+        guard sessionLive, localAllow else { return false }
+        return macPV < WireProtocol.allowInputWireVersion || macState == .allowed
     }
 }
 
