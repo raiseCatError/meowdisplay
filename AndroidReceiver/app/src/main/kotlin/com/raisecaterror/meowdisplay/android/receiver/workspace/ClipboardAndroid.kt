@@ -75,14 +75,18 @@ import java.util.concurrent.Executors
  * images go on the clipboard as read-only content URIs from our FileProvider. Copies an app
  * marked sensitive (ClipDescription.EXTRA_IS_SENSITIVE) are never read for sending.
  */
-class AndroidClipboardPlatform(private val context: Context) : ClipboardPlatform {
+class AndroidClipboardPlatform(private val context: Context, tag: String) : ClipboardPlatform {
     private val cm = context.getSystemService(ClipboardManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "clipboard-read").apply { isDaemon = true } }
     private val root = File(context.cacheDir, "RemoteFinder")
     private val inDir = File(root, "clipboard-in")
-    private val outDir = File(root, "clipboard-out")
+    private val outDir = File(File(root, "clipboard-out"), tag)
     private val sentBatches = ArrayDeque<File>()
+
+    // Copies sent by an earlier run are not needed any more. (Images from the Mac stay until
+    // replaced: they are what the system clipboard holds.)
+    init { io.execute { outDir.deleteRecursively() } }
 
     override fun changeToken(): Long? {
         val d = runCatching { cm.primaryClipDescription }.getOrNull() ?: return null

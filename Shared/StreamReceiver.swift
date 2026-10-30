@@ -2687,7 +2687,7 @@ final class StreamReceiver: ObservableObject {
         switch type {
         case ControlChunkWire.type:
             // A message too long for one control frame, in parts (PROTOCOL.md 6.14).
-            switch chunkAssembler.add(obj, now: ProcessInfo.processInfo.systemUptime) {
+            switch chunkAssembler.add(obj, now: CACurrentMediaTime()) {
             case .pending: break
             case .complete(let whole):
                 // Never a chunk inside a chunk.

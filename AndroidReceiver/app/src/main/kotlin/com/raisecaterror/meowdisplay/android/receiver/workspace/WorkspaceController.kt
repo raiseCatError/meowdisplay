@@ -248,7 +248,7 @@ class WorkspaceController(
         send = { media.session.sendWorkspace(it) },
         scheduler = { ms, block -> val r = Runnable(block); main.postDelayed(r, ms); { main.removeCallbacks(r) } },
         tempRoot = java.io.File(java.io.File(java.io.File(context.cacheDir, "RemoteFinder"), "clipboard"), prefsName),
-    ).also { it.platform = AndroidClipboardPlatform(context.applicationContext) }
+    ).also { it.platform = AndroidClipboardPlatform(context.applicationContext, prefsName) }
 
     /** The focused pane's app menus (a bar under its label). */
     val menus = AppMenuModel(

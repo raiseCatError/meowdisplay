@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import QuartzCore
 
 // Remote Finder transfers on the receiver (PROTOCOL.md 6.12): downloads into this app's private
 // cache (to view in the app, save to Files or share) and uploads from files the user picked.
@@ -48,7 +49,7 @@ final class RemoteTransferQueue: ObservableObject {
     var send: ([String: Any]) -> Bool = { _ in false }
     /// Request ids come from the Finder model so they never collide with its own.
     var nextRequestID: () -> Int = { 0 }
-    var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var now: () -> TimeInterval = { CACurrentMediaTime() }
     /// Called when an item finished in any way (a finished download carries `localURL`).
     var onSettled: ((RemoteTransferItem) -> Void)?
     /// Called when an upload or folder step changed something on the Mac (refresh the folder).

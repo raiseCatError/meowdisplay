@@ -605,8 +605,8 @@ struct StagePeekGallery: View {
 /// When a card last swiped or was held, so the gallery's own flick ignores that touch.
 final class CardGestureClock {
     private var last: TimeInterval = 0
-    func mark() { last = ProcessInfo.processInfo.systemUptime }
-    var recent: Bool { ProcessInfo.processInfo.systemUptime - last < 0.8 }
+    func mark() { last = CACurrentMediaTime() }
+    var recent: Bool { CACurrentMediaTime() - last < 0.8 }
 }
 
 // MARK: - Launchpad

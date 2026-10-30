@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import QuartzCore
 
 // Remote Finder actions on the receiver (PROTOCOL.md 6.12): file operations, Save to Device,
 // Share, uploads, in-app viewers and favorites. The Mac checks every request against its
@@ -161,7 +162,7 @@ final class RemoteFileStream {
     func read(_ o: Int64, _ n: Int, done: @escaping (Data?) -> Void) {
         guard failed == nil, o >= 0, o < size, n > 0 else { return done(failed == nil && o >= size ? Data() : nil) }
         let len = Int(min(Int64(min(n, 1 << 20)), size - o))
-        reads.append(Read(o: o, n: len, done: done, asked: ProcessInfo.processInfo.systemUptime))
+        reads.append(Read(o: o, n: len, done: done, asked: CACurrentMediaTime()))
         guard send(RemoteFilesRequests.make("read", req: nextReq(), ["x": x, "o": o, "n": len])) else { return fail("disconnected") }
         startWatchdog()
     }
@@ -208,7 +209,7 @@ final class RemoteFileStream {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { return }
                 guard let first = self.reads.first else { self.watchdog = nil; return }
-                if ProcessInfo.processInfo.systemUptime - first.asked > Self.timeout { self.fail("timeout"); return }
+                if CACurrentMediaTime() - first.asked > Self.timeout { self.fail("timeout"); return }
             }
         }
     }
