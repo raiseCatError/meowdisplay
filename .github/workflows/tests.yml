@@ -171,3 +171,36 @@ jobs:
           fi
           echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version): reservedRegions declared=$declared referenced=$referenced"
           test "$declared" = "$referenced"
+
+  # iPhone Duo: the receiver's UI tests on the Duo simulator, so adaptive layouts (the
+  # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
+  # were made for. Not a required check yet: the first runs establish it.
+  ios-duo:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Boot an iPhone Duo simulator
+        id: duo
+        run: echo "udid=$(scripts/ci/duo-simulator.sh)" >> "$GITHUB_OUTPUT"
+      - name: UI tests on iPhone Duo
+        run: |
+          xcodebuild test \
+            -project MeowDisplay.xcodeproj \
+            -scheme OpenSidecariOS \
+            -destination "id=${{ steps.duo.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+            -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
+            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
