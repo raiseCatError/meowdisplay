@@ -21,6 +21,11 @@ struct StagePeekCardGestures: UIViewRepresentable {
     var swipeEnabled = false
     var onSwipe: (_ dx: CGFloat) -> Void = { _ in }
     var onSwipeEnd: (_ dx: CGFloat, _ velocity: CGFloat) -> Void = { _, _ in }
+    /// This overlay's origin in SwiftUI's global space (from a GeometryReader). Hold points are
+    /// reported there, the space the drag preview and the drop targets use. UIKit's window
+    /// space isn't always the same: on the iPad the dragged app sat away from the finger
+    /// (owner report 2026-10-31).
+    var globalOrigin: CGPoint? = nil
 
     static let holdDuration: TimeInterval = 0.35
     static let holdSlop: CGFloat = 10
@@ -74,7 +79,13 @@ struct StagePeekCardGestures: UIViewRepresentable {
         }
 
         @objc func hold(_ g: UILongPressGestureRecognizer) {
-            let p = g.location(in: nil)
+            let p: CGPoint
+            if let o = parent.globalOrigin {
+                let local = g.location(in: g.view)
+                p = CGPoint(x: o.x + local.x, y: o.y + local.y)
+            } else {
+                p = g.location(in: nil)
+            }
             switch g.state {
             case .began:
                 holdIgnored = landedWhileScrolling
@@ -144,6 +155,7 @@ extension StagePeekCardGestures {
     /// A hold released in place does nothing, and nothing opens just because a drag began.
     @MainActor
     static func app(_ app: MacAppItem, model: WorkspaceModel, heldAt: Binding<CGPoint>, clock: CardGestureClock? = nil,
+                    origin: CGPoint? = nil,
                     onTap: @escaping () -> Void, onDragEnded: @escaping (Bool) -> Void) -> StagePeekCardGestures {
         StagePeekCardGestures(
             onTap: { guard model.drag == nil else { return }; onTap() },
@@ -170,6 +182,7 @@ extension StagePeekCardGestures {
                 if dropped { UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.7) }
                 onDragEnded(dropped)
             },
-            onHoldCancel: { if model.drag != nil { model.cancelDrag() } })
+            onHoldCancel: { if model.drag != nil { model.cancelDrag() } },
+            globalOrigin: origin)
     }
 }

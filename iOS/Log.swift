@@ -9,9 +9,18 @@ import Foundation
 /// into something shareable from Settings & Help.
 enum Log {
     private static let queue = DispatchQueue(label: "log")
+    /// In Library, not Documents: Documents is shown in Files (Downloads for saved files), and
+    /// the internal log doesn't belong there. A log from before moves once.
     private static let fileURL: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("opensidecar-phone.log")
+        let fm = FileManager.default
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("opensidecar-phone.log")
+        let old = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("opensidecar-phone.log")
+        if fm.fileExists(atPath: old.path) {
+            if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: old) } else { try? fm.moveItem(at: old, to: url) }
+        }
+        return url
     }()
 
     /// Cap on the live file, and what survives a trim.

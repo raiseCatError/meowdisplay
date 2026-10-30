@@ -62,4 +62,18 @@ final class PaneRequestControlTests: XCTestCase {
         _ = prompt.blockedAttempt(now: 3, userTurnedOff: false, autoRequest: false)
         XCTAssertEqual(prompt.kind, .requestInput)
     }
+
+    /// Owner report 2026-10-31 (iPad): scrolling only panned a zoomed pane.
+    func testATwoFingerDragScrollsTheMacWithControlAndMovesThePaneOtherwise() {
+        XCTAssertTrue(WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: true, moveViewActive: false))
+        XCTAssertFalse(WorkspaceTwoFingerPolicy.scrollsMac(isPinch: true, inputReachesMac: true, moveViewActive: false), "a pinch zooms the pane")
+        XCTAssertFalse(WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: false, moveViewActive: false), "View Only: pan stays local")
+        XCTAssertFalse(WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: true, moveViewActive: true), "Move View moves the view")
+    }
+
+    /// Owner report 2026-10-31 (iPad, Chrome): web text 13 groups deep never scrolled.
+    func testDeepWebContentIsStillScrollable() {
+        let chrome = ["AXStaticText"] + Array(repeating: "AXGroup", count: 20) + ["AXWebArea", "AXGroup", "AXWindow"]
+        XCTAssertEqual(SmartTouchTargetClassifier.classify(roles: chrome), .scrollable(container: "AXWebArea"))
+    }
 }

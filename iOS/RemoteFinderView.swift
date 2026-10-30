@@ -64,7 +64,16 @@ struct RemoteFinderView: View {
         .sheet(item: $files.info) { RemoteFileInfoView(sheet: $0) }
         .onChange(of: files.export?.id) { _ in
             guard let e = files.export else { return }
-            RemoteExportPresenting.present(e) { ok in files.exportFinished(e, completed: ok) }
+            if e.mode == .save {
+                // Straight to Photos or Files ▸ MeowDisplay ▸ Downloads: no picker to get lost.
+                Task { @MainActor in
+                    let r = await RemoteSaveToDevice.save(e.urls)
+                    files.exportFinished(e, completed: false)
+                    files.show(.text(RemoteSaveToDevice.message(r, failed: e.failed)))
+                }
+            } else {
+                RemoteExportPresenting.present(e) { ok in files.exportFinished(e, completed: ok) }
+            }
         }
         .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { files.upload(urls) }

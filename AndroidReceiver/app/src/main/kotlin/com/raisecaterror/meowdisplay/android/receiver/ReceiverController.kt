@@ -160,6 +160,10 @@ class ReceiverController(
                                     turn: Double, snap: Boolean): Boolean {
             val ws = workspace ?: return false
             if (ws.ui.value.windowMode != true) return false
+            // A plain two-finger drag scrolls the Mac while this device controls it, even over a
+            // zoomed or filled pane (owner report 2026-10-31: it only panned). It moves the pane
+            // only in View Only, with Move View on, or as part of a pinch. Same rule as Apple devices.
+            if (WorkspaceTwoFinger.scrollsMac(isPinch, state.value.inputAllowed, store.transient.value.moveViewActive)) return false
             return ws.pinch(began, ended, isPinch, WPoint(initial.x, initial.y), WPoint(current.x, current.y), scale, turn, snap)
         }
         override fun workspaceViewReset(at: CGPoint) {
@@ -590,4 +594,11 @@ class ReceiverController(
         /** macOS cursors are at most 256 pt at 2x; anything larger than this is not a cursor. */
         const val MAX_CURSOR_SIDE = 512
     }
+}
+
+
+/** Window mode, two fingers on a pane: scroll the Mac, or move the pane on this device? */
+internal object WorkspaceTwoFinger {
+    fun scrollsMac(isPinch: Boolean, inputReachesMac: Boolean, moveViewActive: Boolean): Boolean =
+        !isPinch && inputReachesMac && !moveViewActive
 }

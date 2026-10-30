@@ -135,9 +135,8 @@ struct StagePeekOverlay: View {
                 .zIndex(45)
             if model.drag != nil, !model.windowMode {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
-                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
-            } else if model.drag != nil, (model.drag.map { if case .pane = $0.item { return false } else { return true } } ?? false) {
-                // Window mode: the pane chrome shows the landing areas; Cancel shows here too.
+                // (Window mode: the pane view draws them. Drawing them here too showed two
+                // "Drop Here to Cancel" zones, owner report 2026-10-31.)
                 WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
             }
             if let d = model.drag, case .window(let w) = d.item {

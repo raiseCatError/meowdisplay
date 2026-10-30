@@ -1,6 +1,7 @@
 package com.raisecaterror.meowdisplay.android.receiver.workspace
 
 import android.content.ClipData
+import android.content.ContentValues
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -15,6 +16,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Surface
 import android.view.TextureView
@@ -94,6 +96,7 @@ import com.raisecaterror.meowdisplay.core.workspace.RemoteFileConflictChoice
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFileInfoSheet
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesExport
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesFormat
+import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesNotice
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFilesModel
 import com.raisecaterror.meowdisplay.core.workspace.RemoteFolderConflictChoice
 import com.raisecaterror.meowdisplay.core.workspace.RemoteTransferItem
@@ -171,7 +174,7 @@ fun RemoteFinderSystem(files: RemoteFilesModel, requests: RemoteFinderRequests) 
     requests.uploadFiles = { pickFiles.launch(arrayOf("*/*")) }
     requests.uploadFolder = { pickFolder.launch(null) }
 
-    ExportLauncher(ui.export) { e, ok, keep -> files.exportFinished(e, ok, keep) }
+    ExportLauncher(ui.export, onSaved = { files.show(RemoteFilesNotice.Text(it)) }) { e, ok, keep -> files.exportFinished(e, ok, keep) }
 }
 
 /**
@@ -179,7 +182,8 @@ fun RemoteFinderSystem(files: RemoteFilesModel, requests: RemoteFinderRequests) 
  * for [export]; [finished] gets (export, completed, keep for ms). Remote Finder and the clipboard use it.
  */
 @Composable
-internal fun ExportLauncher(export: RemoteFilesExport?, finished: (RemoteFilesExport, Boolean, Long) -> Unit) {
+internal fun ExportLauncher(export: RemoteFilesExport?, onSaved: ((String) -> Unit)? = null,
+                            finished: (RemoteFilesExport, Boolean, Long) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val resolver = context.contentResolver
@@ -210,7 +214,15 @@ internal fun ExportLauncher(export: RemoteFilesExport?, finished: (RemoteFilesEx
     LaunchedEffect(export?.id) {
         val e = export ?: return@LaunchedEffect
         when (e.mode) {
-            RemoteFilesExport.Mode.Save -> {
+            RemoteFilesExport.Mode.Save -> if (onSaved != null) {
+                // Remote Finder (owner, 2026-10-31): no picker. Photos and videos go to the
+                // gallery (Pictures/Movies ▸ MeowDisplay), everything else to Download ▸ MeowDisplay.
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) { saveToDevice(resolver, e.files) }
+                    finished(e, false, 0)
+                    onSaved(r.message(e.failed))
+                }
+            } else {
                 saving = e
                 val single = e.files.singleOrNull()?.takeIf { it.isFile }
                 if (single != null) createDoc.launch(single.name to mimeOf(single.name)) else pickDest.launch(null)
@@ -736,3 +748,77 @@ fun grantDescription(g: com.raisecaterror.meowdisplay.core.workspace.RemoteFiles
     ).joinToString(" · ")
 }
 
+
+
+/** Where Save puts a file from the Mac: the gallery for photos and videos, otherwise Downloads. */
+internal enum class SaveDestination { Pictures, Movies, Downloads }
+
+internal object DeviceSaveRules {
+    private val photos = setOf("jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "bmp", "tif", "tiff", "dng", "avif")
+    private val videos = setOf("mov", "mp4", "m4v", "3gp", "webm", "mkv", "avi")
+
+    /** Only files picked directly go to the gallery; files inside a saved folder keep its layout in Downloads. */
+    fun destination(name: String, topLevel: Boolean): SaveDestination {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return when {
+            !topLevel -> SaveDestination.Downloads
+            ext in photos -> SaveDestination.Pictures
+            ext in videos -> SaveDestination.Movies
+            else -> SaveDestination.Downloads
+        }
+    }
+}
+
+internal data class DeviceSaveResult(val gallery: Int, val downloads: Int, val failed: Int) {
+    fun message(notCopied: Int): String {
+        val parts = buildList {
+            if (gallery > 0) add("$gallery to Photos (Pictures/Movies ▸ MeowDisplay)")
+            if (downloads > 0) add("$downloads to Download ▸ MeowDisplay")
+        }
+        var text = if (parts.isEmpty()) "Nothing could be saved." else "Saved ${parts.joinToString(", ")}."
+        val lost = failed + notCopied
+        if (lost > 0) text += " $lost couldn't be saved."
+        return text
+    }
+}
+
+/** Saves through MediaStore (no storage permission on Android 10+); a file the gallery refuses goes to Downloads. */
+private fun saveToDevice(resolver: ContentResolver, roots: List<java.io.File>): DeviceSaveResult {
+    var gallery = 0; var downloads = 0; var failed = 0
+    val volume = MediaStore.VOLUME_EXTERNAL_PRIMARY
+    fun insert(collection: Uri, relativePath: String, file: java.io.File): Boolean = runCatching {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeOf(file.name))
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(collection, values) ?: return@runCatching false
+        try {
+            (resolver.openOutputStream(uri) ?: throw IOException("open")).use { out -> file.inputStream().use { it.copyTo(out) } }
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            true
+        } catch (t: Throwable) {
+            resolver.delete(uri, null, null)
+            false
+        }
+    }.getOrDefault(false)
+    fun save(file: java.io.File, folder: String, topLevel: Boolean) {
+        if (file.isDirectory) {
+            file.listFiles()?.sortedBy { it.name }?.forEach { save(it, "$folder${file.name}/", false) }
+            return
+        }
+        val toGallery = when (DeviceSaveRules.destination(file.name, topLevel)) {
+            SaveDestination.Pictures -> insert(MediaStore.Images.Media.getContentUri(volume), "Pictures/MeowDisplay", file)
+            SaveDestination.Movies -> insert(MediaStore.Video.Media.getContentUri(volume), "Movies/MeowDisplay", file)
+            SaveDestination.Downloads -> false
+        }
+        when {
+            toGallery -> gallery++
+            insert(MediaStore.Downloads.getContentUri(volume), "Download/MeowDisplay/$folder", file) -> downloads++
+            else -> failed++
+        }
+    }
+    roots.forEach { save(it, "", true) }
+    return DeviceSaveResult(gallery, downloads, failed)
+}

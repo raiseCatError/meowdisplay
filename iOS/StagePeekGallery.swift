@@ -121,7 +121,10 @@ struct StagePeekDock: View {
                     }
                     .buttonStyle(.plain)
                     // Tap picks it; press, hold and move drags the app onto a pane.
-                    .overlay(StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, onTap: { onApp(app) }, onDragEnded: onDragEnded))
+                    .overlay(GeometryReader { g in
+                        StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, origin: g.frame(in: .global).origin,
+                                                  onTap: { onApp(app) }, onDragEnded: onDragEnded)
+                    })
                     .onAppear { model.requestIcons([app.bundleID]) }
                     .accessibilityLabel(app.name)
                     .accessibilityValue(app.running ? (app.windowCount == 1 ? String(localized: "Running, 1 window")
@@ -548,6 +551,10 @@ struct StagePeekGallery: View {
 
     /// The UIKit gestures for one card (they share each touch with the scroll view).
     private func cardGestures(_ w: CatalogWindowItem, onTap: @escaping () -> Void, swipe swipeEnabled: Bool) -> some View {
+        GeometryReader { g in cardGestures(w, onTap: onTap, swipe: swipeEnabled, origin: g.frame(in: .global).origin) }
+    }
+
+    private func cardGestures(_ w: CatalogWindowItem, onTap: @escaping () -> Void, swipe swipeEnabled: Bool, origin: CGPoint) -> StagePeekCardGestures {
         StagePeekCardGestures(
             onTap: {
                 guard model.drag == nil else { return }
@@ -608,7 +615,8 @@ struct StagePeekGallery: View {
                     swipe = nil
                 }
                 if open { UISelectionFeedbackGenerator().selectionChanged() }
-            })
+            },
+            globalOrigin: origin)
     }
 
     private func sectionTitle(_ text: String) -> some View {
@@ -632,8 +640,10 @@ struct StagePeekGallery: View {
             }
         }
         .buttonStyle(.plain)
-        .overlay(StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, clock: cardGestureClock,
-                                           onTap: { onApp(app) }, onDragEnded: onDragEnded))
+        .overlay(GeometryReader { g in
+            StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, clock: cardGestureClock, origin: g.frame(in: .global).origin,
+                                      onTap: { onApp(app) }, onDragEnded: onDragEnded)
+        })
         .onAppear { model.requestIcons([app.bundleID]) }
         .accessibilityLabel(app.name)
     }

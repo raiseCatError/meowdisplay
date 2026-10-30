@@ -2,6 +2,7 @@ import AVFoundation
 import AVKit
 import ImageIO
 import PDFKit
+import Photos
 import QuickLook
 import SwiftUI
 import UIKit
@@ -278,8 +279,19 @@ enum RemoteExportPresenting {
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { finish(false) }
     }
 
-    static func present(_ export: RemoteFilesExport, done: @escaping (Bool) -> Void) {
+    static func present(_ export: RemoteFilesExport, done: @escaping (Bool) -> Void) { present(export, attempt: 0, done: done) }
+
+    /// A copy that was quick finishes while the long-press menu (or a sheet) is still going
+    /// away; presenting then shows nothing (owner report 2026-10-31: Share from the long-press
+    /// menu never showed the share sheet). Wait for the screen to settle, up to 3 s.
+    private static func present(_ export: RemoteFilesExport, attempt: Int, done: @escaping (Bool) -> Void) {
         guard let top = topViewController() else { done(false); return }
+        let busy = top.transitionCoordinator != nil || top.isBeingPresented || top.isBeingDismissed
+            || top.presentedViewController?.isBeingDismissed == true
+        if busy, attempt < 20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { present(export, attempt: attempt + 1, done: done) }
+            return
+        }
         active?.finish(false)
         let c = Coordinator { ok in active = nil; done(ok) }
         active = c
@@ -304,10 +316,94 @@ enum RemoteExportPresenting {
 
     static func topViewController() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let windows = scenes.filter { $0.activationState == .foregroundActive }.flatMap(\.windows) + scenes.flatMap(\.windows)
+        // The app's own visible, normal-level windows: never a menu's or the keyboard's.
+        let windows = (scenes.filter { $0.activationState == .foregroundActive }.flatMap(\.windows) + scenes.flatMap(\.windows))
+            .filter { !$0.isHidden && $0.windowLevel == .normal && $0.rootViewController != nil }
         var top = (windows.first { $0.isKeyWindow } ?? windows.first)?.rootViewController
         while let p = top?.presentedViewController, !p.isBeingDismissed { top = p }
         return top
+    }
+}
+
+/// Save to Device without a picker (owner, 2026-10-31): photos and videos go to Photos, everything
+/// else (and anything Photos refuses) to Files ▸ On My iPhone/iPad ▸ MeowDisplay ▸ Downloads.
+@MainActor
+enum RemoteSaveToDevice {
+    struct Result: Equatable { var photos = 0; var files = 0; var photosDenied = false }
+
+    static var downloads: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Downloads", isDirectory: true)
+    }
+
+    /// Photos takes still images and movies; anything else, or a type it can't read, is a file.
+    nonisolated static func photosResource(for url: URL) -> PHAssetResourceType? {
+        guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return nil }
+        if type.conforms(to: .movie) { return .video }
+        if type.conforms(to: .image), !type.conforms(to: .svg), type != .ico, type != .icns { return .photo }
+        return nil
+    }
+
+    /// A name not taken in `folder`: "name.ext", then "name 2.ext", "name 3.ext"...
+    nonisolated static func freeName(_ name: String, in folder: URL, exists: (URL) -> Bool) -> URL {
+        let base = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        var candidate = folder.appendingPathComponent(name)
+        var n = 2
+        while exists(candidate) {
+            candidate = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+            n += 1
+        }
+        return candidate
+    }
+
+    static func save(_ urls: [URL]) async -> Result {
+        var result = Result()
+        let fm = FileManager.default
+        var media: [(URL, PHAssetResourceType)] = []
+        var files: [URL] = []
+        for url in urls {
+            var dir: ObjCBool = false
+            if fm.fileExists(atPath: url.path, isDirectory: &dir), !dir.boolValue, let kind = photosResource(for: url) {
+                media.append((url, kind))
+            } else {
+                files.append(url)
+            }
+        }
+        if !media.isEmpty {
+            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            if status == .authorized || status == .limited {
+                for (url, kind) in media {
+                    do {
+                        try await PHPhotoLibrary.shared().performChanges {
+                            PHAssetCreationRequest.forAsset().addResource(with: kind, fileURL: url, options: nil)
+                        }
+                        result.photos += 1
+                    } catch {
+                        files.append(url)   // a format Photos refuses still lands in Downloads
+                    }
+                }
+            } else {
+                result.photosDenied = true
+                files += media.map(\.0)
+            }
+        }
+        if !files.isEmpty {
+            try? fm.createDirectory(at: downloads, withIntermediateDirectories: true)
+            for url in files {
+                let dest = freeName(url.lastPathComponent, in: downloads) { fm.fileExists(atPath: $0.path) }
+                if (try? fm.copyItem(at: url, to: dest)) != nil { result.files += 1 }
+            }
+        }
+        return result
+    }
+
+    static func message(_ r: Result, failed: Int) -> String {
+        var parts: [String] = []
+        if r.photos > 0 { parts.append(String(localized: "\(r.photos) to Photos")) }
+        if r.files > 0 { parts.append(String(localized: "\(r.files) to Files ▸ MeowDisplay ▸ Downloads")) }
+        var text = parts.isEmpty ? String(localized: "Nothing could be saved.") : String(localized: "Saved \(parts.joined(separator: ", ")).")
+        if r.photosDenied { text += " " + String(localized: "Photos access is off, so photos and videos went to Downloads.") }
+        if failed > 0 { text += " " + String(localized: "\(failed) couldn't be copied from the Mac.") }
+        return text
     }
 }
 

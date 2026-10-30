@@ -191,3 +191,13 @@ enum KeyboardBarItem: Hashable {
     static let defaultItems: [KeyboardBarItem] = ControlModifier.allCases.map(KeyboardBarItem.modifier)
         + [.escape, .tab, .returnKey, .dismissKeyboard]
 }
+
+
+/// Window mode, two fingers on a pane: scroll the Mac, or move the pane on this device?
+enum WorkspaceTwoFingerPolicy {
+    /// A pinch always zooms/moves the pane locally; a plain drag scrolls the Mac when input
+    /// reaches it and Move View is off; otherwise (View Only) the pane moves locally.
+    static func scrollsMac(isPinch: Bool, inputReachesMac: Bool, moveViewActive: Bool) -> Bool {
+        !isPinch && inputReachesMac && !moveViewActive
+    }
+}

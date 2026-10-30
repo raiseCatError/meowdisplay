@@ -409,6 +409,9 @@ targets:
       path: iOS/Info.plist
       properties:
         CFBundleDisplayName: MeowDisplay
+        # Shown by some system UI (e.g. the menu bar when the iPad app runs on a Mac). Not an
+        # identity: the bundle ID, executable (OpenSidecariOS), keychain and settings are unchanged.
+        CFBundleName: MeowDisplay
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
@@ -423,6 +426,11 @@ targets:
         UIApplicationSupportsIndirectInputEvents: true
         NSLocalNetworkUsageDescription: MeowDisplay advertises itself on the local network so your Mac can connect over Wi-Fi.
         NSFaceIDUsageDescription: MeowDisplay asks for Face ID or your passcode to confirm that you want to trust a new device.
+        # Save to Device: photos and videos from the Mac go to Photos (add only, never read).
+        NSPhotoLibraryAddUsageDescription: MeowDisplay saves the photos and videos you copy from your Mac to your photo library.
+        # Other saved files land in Files ▸ On My iPhone/iPad ▸ MeowDisplay ▸ Downloads.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         # Export compliance, as declared in App Store Connect: the app uses
         # only standard, exempt encryption (TLS and pairing through Apple's
         # frameworks), so no non-exempt encryption. It does not mean the app
