@@ -49,12 +49,12 @@ cd AndroidReceiver && ./gradlew :core:test :app:testDebugUnitTest :app:assembleD
 CI: `.github/workflows/tests.yml`; release workflows `release-*.yml`; reference sync
 `reference-*.yml`; `repository-guard.yml`, `pr-title.yml`.
 
-Results at handoff (2026-10-31, code at 63c3c46): Mac unit tests 2461 run, 0 failures, 2
-skipped; Android 998/998; iOS device build and Mac sender/receiver builds succeed.
+Results at handoff (2026-10-31): full Mac unit suite at 63c3c46, 2461 run, 0 failures, 2
+skipped; at 70d3507 (apps bar only) StagePeekDockLayoutTests 5/5 and Android 998/998 (2
+skipped); iOS device build and Mac sender/receiver builds succeed.
 
 Installed for the final physical checks (in place, data and pairing kept): Mac Dev cdeda71 (Mac
-code unchanged since), iPhone and iPad iOS 2000058 (63c3c46), Moto debug b94abf6 (Android code
-unchanged since). Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
+code unchanged since), iPhone and iPad iOS 2000060 (70d3507), Moto debug 70d3507. Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
 device and don't run in CI.
 
 ## Features in 2.0 and their state
@@ -79,8 +79,10 @@ cloud review:
   gallery (Android, Pictures/Movies ▸ MeowDisplay), everything else in Files ▸ On My iPhone/iPad ▸
   MeowDisplay ▸ Downloads (Android: Download ▸ MeowDisplay), and says where. Share opens the
   system share sheet.
-- Stage Peek apps bar (iPhone/iPad): widens on scroll, pull down for rows up to every app with
-  names, swipe up to compact; tap empty space in the expanded view to close it.
+- Stage Peek apps bar (iPhone/iPad): widens on scroll; pulling down (or tapping the handle) opens
+  four rows with names, then the whole screen; swipe up to compact; choosing an app closes it.
+  The search filters the apps bar (Android's apps row too). Tap empty space in the expanded
+  view to close it.
 - Not built: Camera Mode / Microphone Mode (owner deferred). Clipboard is out of this release's
   checklist. The growing apps bar is not on Android yet.
 
