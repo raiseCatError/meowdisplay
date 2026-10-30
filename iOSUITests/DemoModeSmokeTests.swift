@@ -296,6 +296,44 @@ extension DemoModeSmokeTests {
         XCTAssertFalse(app.staticTexts["Connection lost"].exists, "the session doesn't drop")
     }
 
+    /// Live Mac (skips without one): in Trackpad mode a one-finger drag moves the pane's cursor
+    /// (screenshots show it), and a two-finger twist turns the pane freely; Reset View puts it back.
+    /// The Mac's log is the oracle for the angle it drew.
+    @MainActor
+    func testTwistTurnsAPaneAndTheTrackpadCursorShowsOnTheLiveMac() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let reconnect = app.buttons["Reconnect"]
+        let connect = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connect to' OR label BEGINSWITH 'Wake and connect to'")).firstMatch
+        if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
+        else if connect.waitForExistence(timeout: 10) { connect.tap() }
+        sleep(10)
+        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        guard pane.waitForExistence(timeout: 20) else { snapshot(app, "twist-no-pane"); throw XCTSkip("no Window-mode pane") }
+        snapshot(app, "cursor-before")
+        // Trackpad: one finger moves the cursor (a drag, never a tap: no click on the Mac).
+        let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+        middle.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.65)),
+                     withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(2)
+        snapshot(app, "cursor-after-drag")
+        // Two fingers twist about 50° over the Full Desktop pane (the first pane).
+        let paneArea = app.descendants(matching: .any).matching(identifier: "workspacePane").firstMatch
+        XCTAssertTrue(paneArea.waitForExistence(timeout: 5), "each pane is an element")
+        paneArea.rotate(.pi * 50 / 180, withVelocity: 0.8)
+        snapshot(app, "twist-lifted")
+        sleep(4)
+        snapshot(app, "twist-after")
+        // Leave the owner's layout as it was.
+        pane.press(forDuration: 0.7)
+        let reset = app.buttons["Reset View"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 5), "a turned pane offers Reset View")
+        snapshot(app, "twist-menu")
+        reset.tap()
+        sleep(3)
+        snapshot(app, "twist-reset")
+    }
+
     /// Live Mac (skips without one): Rotate from a pane's menu turns that pane's picture.
     @MainActor
     func testRotatesAPaneOnTheLiveMac() throws {

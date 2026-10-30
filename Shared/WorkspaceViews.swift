@@ -216,6 +216,13 @@ struct WorkspaceChromeView: View {
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
                 .allowsHitTesting(false)
+                // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
+                // never a tap through to the Mac.
+                .accessibilityElement()
+                .accessibilityLabel(String(localized: "\(tile.source.map { labelText($0, in: tile, id: id) } ?? String(localized: "Empty")) pane"))
+                .accessibilityIdentifier("workspacePane")
+                .accessibilityAddTraits(active ? .isSelected : [])
+                .accessibilityAction { model.focus(id) }
             tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
                 .padding(unsafeInsets(of: rect))
         }
