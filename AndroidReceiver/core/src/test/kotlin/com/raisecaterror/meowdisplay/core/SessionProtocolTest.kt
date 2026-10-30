@@ -68,6 +68,10 @@ class SessionProtocolTest {
         assertEquals("cursorImg", (SenderMessage.parse("{\"type\":\"cursorImg\",\"png\":\"\"}") as SenderMessage.Other).type)
         assertEquals(SenderMessage.Welcome(22, 1), SenderMessage.parse("{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"transports\":[\"tcp\",\"quic\"],\"qv\":1}"))
         assertEquals("absent pv is protocol 1", SenderMessage.Welcome(1, 1), SenderMessage.parse("{\"type\":\"welcome\"}"))
+        // Privacy Shield: shown on the device after each connection; an older Mac says nothing.
+        assertEquals(true, (SenderMessage.parse("{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"privacyShield\":true}") as SenderMessage.Welcome).privacyShield)
+        assertEquals(false, (SenderMessage.parse("{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"privacyShield\":false}") as SenderMessage.Welcome).privacyShield)
+        assertEquals(null, (SenderMessage.parse("{\"type\":\"welcome\",\"pv\":22,\"min\":1,\"privacyShield\":\"yes\"}") as SenderMessage.Welcome).privacyShield)
         assertEquals(SenderMessage.AllowInputState(true, InputWireState.Allowed), SenderMessage.parse("{\"type\":\"allowInputState\",\"allowed\":true}"))
         assertEquals(
             SenderMessage.AllowInputState(false, InputWireState.Requesting),

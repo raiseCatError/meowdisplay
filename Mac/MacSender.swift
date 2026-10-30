@@ -281,6 +281,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // API for callers.
     let statusSink = MacSenderStatusSink()
 
+    /// This session reached the Mac over a remote route (Tailscale): the Privacy Shield's remote
+    /// setting applies. Set before the session starts.
+    var isRemoteSession = false
+    /// The welcome went out (the device is connected). Runs on the main actor.
+    var onWelcomed: (@MainActor @Sendable () -> Void)?
+
     @MainActor var onStatus: ((String) -> Void)? {
         get { statusSink.onStatus }
         set { statusSink.onStatus = newValue }
@@ -2622,7 +2628,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let ticket = plan.ticket
         let stream: SCStream
         do {
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            // The Privacy Shield covers the Mac's own screens, never the device's picture.
+            let shieldIDs = Set(PrivacyShieldWindows.current)
+            var shield: [SCWindow] = []
+            if !shieldIDs.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) {
+                shield = content.windows.filter { shieldIDs.contains($0.windowID) }
+            }
+            let filter = SCContentFilter(display: display, excludingWindows: shield)
             let config = SCStreamConfiguration()
             config.width = plan.pixelsWide
             config.height = plan.pixelsHigh
@@ -2697,6 +2709,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let text { await status(text) }
         // Window mode: the new stream starts with the whole display's sound; narrow it again.
         _ = try? await onQueue { sender in sender.applyWindowAudio(nil) }
+    }
+
+    /// The Privacy Shield's windows changed: the Mac's screen capture leaves them out again.
+    func privacyShieldChanged() {
+        queue.async { [self] in
+            guard mode != .window, let stream = captureOwnership.liveStream else { return }
+            let displayID = captureDisplayID
+            let box = WindowAudioStreamBox(stream: stream)
+            Task {
+                guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+                      let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
+                let ids = Set(PrivacyShieldWindows.current)
+                let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { ids.contains($0.windowID) })
+                do { try await box.stream.updateContentFilter(filter) } catch { Log.info("privacy shield: capture filter update failed \((error as NSError).code)") }
+            }
+        }
     }
 
     /// `queue` only. Window mode: this receiver hears only the apps its panes show (nothing
@@ -6570,6 +6598,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendWelcome() {
         var welcome: [String: Any] = ["type": WireMessage.welcome, "pv": WireProtocol.version,
                                       "min": WireProtocol.minSupportedPeer]
+        // The device shows whether this Mac's screens are covered while it's connected.
+        welcome["privacyShield"] = PrivacyShieldPolicy.isOn(remote: isRemoteSession)
+        if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature]
         if WindowStreamingPolicy.isAllowed() {

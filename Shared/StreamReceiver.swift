@@ -2797,6 +2797,7 @@ final class StreamReceiver: ObservableObject {
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
             workspaceEvents.emit(.features(Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })))
+            if let shield = obj["privacyShield"] as? Bool { workspaceEvents.emit(.privacyShield(shield)) }
             if macPV < WireProtocol.sessionInvitationWireVersion {
                 admitLegacySenderOrClose()
             }

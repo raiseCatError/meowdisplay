@@ -545,7 +545,11 @@ final class SenderController: ObservableObject {
 
     @Published var sessions: [DeviceSession] = [] {
         // Clipboard grants and transfers end with their session.
-        didSet { ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id))) }
+        didSet {
+            ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
+            PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
+            PrivacyShield.shared.onWindowsChanged = { [weak self] in self?.sessions.forEach { $0.sender.privacyShieldChanged() } }
+        }
     }
     private var suppressModeRestart = false
     /// Per-device Mirror/Extend authority (issue #20). Starts from the stored
@@ -2672,6 +2676,13 @@ final class SenderController: ObservableObject {
                                streamingPriority: effectiveStreamingPriority,
                                codecPreference: effectiveCodecPreference)
         sender.autoReconnectEnabled = autoReconnectEnabled
+        let remoteRoute: Bool
+        switch target {
+        case .remote, .remoteCallback: remoteRoute = true
+        case .usb, .wifi: remoteRoute = false
+        }
+        sender.isRemoteSession = remoteRoute
+        sender.onWelcomed = { PrivacyShield.shared.connected(id, remote: remoteRoute) }
         // Explicit actions start a fresh invitation; a pipeline rebuilt by
         // `restartAll()` keeps its session's invitation so the receiver
         // recognizes it.

@@ -427,6 +427,20 @@ fun ReceiverScreen(
             )
         }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
+        // After each connection: whether the Mac's Privacy Shield covers its screens.
+        workspace?.let { ws ->
+            val wui by ws.ui.collectAsState()
+            val on = wui.privacyShieldNotice
+            if (on != null) {
+                androidx.compose.runtime.LaunchedEffect(wui.privacyNoticeSeq) { kotlinx.coroutines.delay(4000); ws.privacyNoticeShown(wui.privacyNoticeSeq) }
+                Text(
+                    if (on) "Privacy Shield is on: the Mac's screen is covered" else "Privacy Shield is off: the Mac's screen shows this session",
+                    color = androidx.compose.ui.graphics.Color.White, style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = (insets.top + 12).dp)
+                        .background(androidx.compose.ui.graphics.Color(0xE6202124), RoundedCornerShape(50)).padding(horizontal = 14.dp, vertical = 9.dp),
+                )
+            }
+        }
         // Unified Clipboard prompts (send a copy, the Mac's files), above the bottom controls.
         workspace?.let {
             com.raisecaterror.meowdisplay.android.receiver.workspace.ClipboardBanner(

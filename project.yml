@@ -266,6 +266,7 @@ targets:
       - Mac/WindowWorkspaceTargeting.swift
       - Mac/WindowWorkspaceEngine.swift
       - Mac/StageManagerSwitch.swift
+      - Mac/PrivacyShieldPolicy.swift
       - Mac/WindowBrowserService.swift
       - Mac/RemoteFileBrowser.swift
       - Mac/RemoteFileTransfers.swift

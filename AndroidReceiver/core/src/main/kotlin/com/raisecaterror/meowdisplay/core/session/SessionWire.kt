@@ -133,7 +133,8 @@ object ReceiverMessages {
 
 /** Sender-to-receiver control messages this core acts on (PROTOCOL.md 6.2). */
 sealed interface SenderMessage {
-    data class Welcome(val pv: Int, val min: Int, val features: Set<String> = emptySet()) : SenderMessage
+    /** [privacyShield]: the Mac covers its own screens while this device is connected (null: an older Mac). */
+    data class Welcome(val pv: Int, val min: Int, val features: Set<String> = emptySet(), val privacyShield: Boolean? = null) : SenderMessage
     data class UpdateRequired(val message: String?, val store: String?) : SenderMessage
     data class Pong(val t: Double, val mt: Double) : SenderMessage
     data object Ping : SenderMessage
@@ -193,6 +194,7 @@ sealed interface SenderMessage {
                     min = obj.int("min") ?: WireProtocol.ASSUMED_WHEN_ABSENT,
                     features = (obj["features"] as? kotlinx.serialization.json.JsonArray)?.take(16)
                         ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.take(32) }?.toSet() ?: emptySet(),
+                    privacyShield = (obj["privacyShield"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull(),
                 )
                 "updateRequired" -> UpdateRequired(obj.string("message"), obj.string("store"))
                 "pong" -> {

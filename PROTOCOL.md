@@ -1014,7 +1014,11 @@ still supports). Sent in response to every `hello`. A receiver whose own
 `pv` policy is not met by the sender (`welcome.pv < ` its minimum) is the
 only party that can detect an outdated sender and SHOULD tell its user to
 update the sender. A receiver that never gets a `welcome` at all is talking
-to a pre-pv-2 sender and MUST assume sender `pv` 1.
+to a pre-pv-2 sender and MUST assume sender `pv` 1. An optional boolean
+`privacyShield` says whether the Mac covers its own screens while this
+receiver is connected (on by default for remote connections, off for local
+ones); receivers show it briefly after each connection and ignore it when
+absent.
 
 **`updateRequired`**: the sender declares the pairing unsupported until the
 receiver updates. `target` names the end that must act (`"ios"` for the

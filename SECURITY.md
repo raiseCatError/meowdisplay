@@ -216,6 +216,32 @@ on in the device's own Settings ▸ Clipboard. Details: PROTOCOL.md 6.15.
   signing still applies to the updated app. The iOS app makes no
   update-check request.
 
+## Privacy Shield
+
+While a device is connected, the Mac can cover its own screens in black so
+people near it don't see the session. It's on by default for remote
+connections (Tailscale and other routed addresses) and off by default for
+local ones (Wi-Fi, peer-to-peer, USB, hotspot); the owner sets each in
+Settings ▸ System. Each connected device is told whether it's on.
+
+- The cover is left out of MeowDisplay's own captures, so the device's
+  picture and control are unchanged. MeowDisplay's virtual displays aren't
+  covered (nobody can look at them).
+- It covers every physical display, including ones attached while it's up,
+  at the highest window level apps may use. Some system UI (the login
+  window, some alerts) can appear above it, and macOS gives no guarantee
+  beyond that.
+- Clicks and keys pass through it, so someone at the Mac can still type or
+  click without seeing. It's a viewing shield, not an input lock.
+- Revealing the Mac needs a click from the Mac's own mouse or trackpad
+  (clicks injected for a device are ignored) and an administrator's
+  password, asked by macOS; MeowDisplay never sees the password. It covers
+  again after the chosen time (5 minutes by default) without physical input
+  at the Mac; remote and synthetic input don't count. Only timestamps are
+  kept, never what was typed.
+- Turning either setting off asks for confirmation, and for an
+  administrator's password while the cover is up.
+
 ## What this doesn't claim
 
 This document describes what's implemented, not a completed third-party

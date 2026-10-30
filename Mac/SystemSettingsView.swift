@@ -80,6 +80,7 @@ struct SystemSettingsView: View {
                 Text("Turning this off only stops automatic connecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected.")
             }
 
+            PrivacyShieldSettingsSection()
             StageManagerSettingsSection()
 
             Section("App Behavior") {

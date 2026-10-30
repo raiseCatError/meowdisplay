@@ -97,6 +97,9 @@ data class WorkspaceUi(
     val stacked: List<String> = emptyList(),
     val capacity: Int = 1,
     val remote: WorkspaceState? = null,
+    /** Shown for a few seconds after each connection: whether the Mac's Privacy Shield is on. */
+    val privacyShieldNotice: Boolean? = null,
+    val privacyNoticeSeq: Int = 0,
     val catalog: WindowCatalog? = null,
     val overviewOpen: Boolean = false,
     /** The overview is choosing a window for this tile. */
@@ -262,9 +265,13 @@ class WorkspaceController(
 
     // MARK: Session
 
+    /** The notice was shown long enough (only the one still showing is cleared). */
+    fun privacyNoticeShown(seq: Int) = state.update { if (it.privacyNoticeSeq == seq) it.copy(privacyShieldNotice = null) else it }
+
     fun onSessionEvent(event: SessionEvent) {
         when (event) {
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
+            is SessionEvent.PrivacyShield -> state.update { it.copy(privacyShieldNotice = event.on, privacyNoticeSeq = it.privacyNoticeSeq + 1) }
             is SessionEvent.MacFeatures -> {
                 state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)

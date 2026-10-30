@@ -117,6 +117,8 @@ struct WorkspaceStateMessage: Equatable, Sendable {
 
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
+    /// The Mac's Privacy Shield covers its own screens while this device is connected (welcome).
+    case privacyShield(Bool)
     case mode(window: Bool)
     case catalog(WorkspaceCatalogMessage)
     case state(WorkspaceStateMessage)
@@ -405,6 +407,9 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var stacked: [String] = []
     @Published private(set) var capacity = 1
     @Published private(set) var remote: WorkspaceStateMessage?
+    /// Shown for a few seconds after each connection: whether the Mac's Privacy Shield is on.
+    @Published private(set) var privacyShieldNotice: Bool?
+    private var privacyNoticeClear: DispatchWorkItem?
     @Published private(set) var catalog: WorkspaceCatalogMessage?
     @Published private(set) var missing: Set<String> = []
     @Published var overviewOpen = false
@@ -524,6 +529,12 @@ final class WorkspaceModel: ObservableObject {
         switch event {
         case .connected(let peer):
             if peer != host { load(for: peer) }
+        case .privacyShield(let on):
+            privacyShieldNotice = on
+            privacyNoticeClear?.cancel()
+            let clear = DispatchWorkItem { [weak self] in self?.privacyShieldNotice = nil }
+            privacyNoticeClear = clear
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: clear)
         case .features(let f):
             available = f.contains(WindowWorkspaceWire.welcomeFeature)
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))

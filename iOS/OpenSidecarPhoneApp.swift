@@ -545,6 +545,19 @@ struct ReceiverScreen: View {
                 .padding(.horizontal, 16)
         }
         .overlay(alignment: .top) {
+            if let on = model.workspace.privacyShieldNotice {
+                Label(on ? "Privacy Shield is on: the Mac's screen is covered" : "Privacy Shield is off: the Mac's screen shows this session",
+                      systemImage: on ? "eye.slash.fill" : "eye")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 52)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .accessibilityAddTraits(.isStaticText)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
+        .overlay(alignment: .top) {
             if showPairedToast {
                 PairedToast()
                     .padding(.top, 12)
