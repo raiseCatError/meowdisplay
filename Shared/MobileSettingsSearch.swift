@@ -104,6 +104,7 @@ enum MobileSettingsSearchIndex {
         .init("deviceName", String(localized: "Name"), .general, keywords: ["device name", "rename", "bonjour"]),
         .init("autoReconnect", String(localized: "Auto-Reconnect"), .general, keywords: ["reconnect", "automatic"]),
         .init("haptics", String(localized: "Haptics"), .general, keywords: ["vibration", "feedback"]),
+        .init("keepScreenAwake", String(localized: "Keep Screen Awake While Streaming"), .general, keywords: ["auto-lock", "sleep", "screen", "awake", "dim"]),
         // Display
         .init("video", String(localized: "Video"), .display, keywords: ["picture", "stream off"]),
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),

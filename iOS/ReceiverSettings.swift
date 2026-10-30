@@ -261,6 +261,7 @@ struct SettingNote: View {
 private struct GeneralSettingsPage: View {
     let receiver: StreamReceiver
     @ObservedObject var controlStore: ReceiverControlStore
+    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenAwake = ScreenAwakePolicy.defaultEnabled
 
     var body: some View {
         SettingsForm {
@@ -286,6 +287,12 @@ private struct GeneralSettingsPage: View {
             Section {
                 Toggle("Haptics", isOn: preferenceBinding(controlStore, \.hapticsEnabled))
                     .settingsAnchor("haptics")
+            }
+            Section {
+                Toggle("Keep Screen Awake While Streaming", isOn: $keepScreenAwake)
+                    .settingsAnchor("keepScreenAwake")
+            } footer: {
+                Text("While you watch a Mac's screen, this \(deviceKind) doesn't lock by itself. On Home, in Settings, in the background, or when a lost connection hasn't come back within 30 seconds, Auto-Lock works as usual.")
             }
         }
         .navigationTitle(MobileSettingsCategory.general.title)

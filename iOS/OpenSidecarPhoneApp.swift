@@ -74,6 +74,7 @@ struct ReceiverScreen: View {
     @State private var lastDesktopMode: ReceiverDisplayMode = .mirror
     // M4: "Zoom While Typing" — default ON (see SettingsView).
     @AppStorage("zoomWhileTyping") private var zoomWhileTyping = true
+    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenAwake = ScreenAwakePolicy.defaultEnabled
     // Demo Mode (see DemoMode.swift): a sample session with its own
     // control store. Both are nil outside the demo.
     @State private var demo: DemoSession?
@@ -99,6 +100,12 @@ struct ReceiverScreen: View {
 
     private var route: ReceiverPresentationRoute {
         .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface)
+    }
+
+    /// Auto-Lock is held off only while the Mac's picture is watched (ScreenAwakePolicy).
+    private var screenAwakeInputs: ScreenAwakePolicy.Inputs {
+        .init(enabled: keepScreenAwake, foreground: scenePhase == .active,
+              watching: route == .receiver && !showSettings, streaming: isStreaming)
     }
 
     /// Full-screen chrome rules apply to the demo surface as well.
@@ -718,8 +725,9 @@ struct ReceiverScreen: View {
                 showOnboarding = false
             }
         }
+        .onChange(of: screenAwakeInputs) { ScreenAwakeController.shared.update($0) }
         .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
+            ScreenAwakeController.shared.update(screenAwakeInputs)
             model.receiver.onReceiverUIPreferences = { update in
                 controlStore.applyRemote(update)
             }
