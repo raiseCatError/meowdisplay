@@ -109,22 +109,30 @@ struct StagePeekDock: View {
     /// The bar's width now, and the most height its rows may take.
     var width: CGFloat = 380
     var maxHeight: CGFloat = 400
+    /// Shown when a search leaves no apps.
+    var noMatch: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var heldAt: CGPoint = .zero
     @State private var pullBase: Int?
     @State private var scrollStart: CGFloat?
 
     static let cell: CGFloat = 42
-    static let spacing: CGFloat = 10
-    /// Rows of the grown bar (Launchpad-like): wider cells with the app's name under its icon.
-    static let gridCell: CGFloat = 68
-    static let rowHeight: CGFloat = 78
+    static let spacing = StagePeekDockLayout.spacing
+    static let gridCell = StagePeekDockLayout.gridCell
+    static let rowHeight = StagePeekDockLayout.rowHeight
 
     var body: some View {
         let layout = StagePeekDockLayout(apps: apps.count, width: width, maxHeight: maxHeight)
-        let shown = min(max(rows, 1), layout.maxRows)
+        // Grown stays a grid with names even when a search leaves fewer apps than its rows.
+        let grown = rows > 1
+        let shown = grown ? min(rows, layout.maxRows) : 1
         VStack(spacing: 0) {
-            if shown <= 1 {
+            if let noMatch, apps.isEmpty {
+                Text(noMatch).font(.footnote).foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(2).padding(.horizontal, 14).padding(.top, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !grown {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: Self.spacing) {
                         ForEach(apps) { appButton($0) }
@@ -146,9 +154,10 @@ struct StagePeekDock: View {
                 .frame(height: 64)
                 .simultaneousGesture(pull(layout: layout, shown: shown))
             } else {
+                // A grown bar covers the gallery; choosing an app closes it, as Launchpad does.
                 let grid = LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.gridCell), spacing: Self.spacing), count: layout.perRow),
                                      spacing: Self.spacing - 3) {
-                    ForEach(apps) { appButton($0, named: true) }
+                    ForEach(apps) { appButton($0, named: true, collapses: true) }
                     allAppsButton
                 }
                 .padding(.horizontal, 12)
@@ -179,12 +188,12 @@ struct StagePeekDock: View {
             .gesture(pull(layout: layout, shown: shown))
             .onTapGesture {
                 wide = true
-                rows = shown >= layout.maxRows ? 1 : layout.maxRows
+                rows = layout.nextStop(after: shown)
             }
             .accessibilityElement()
-            .accessibilityLabel(shown >= layout.maxRows ? String(localized: "Show One Row of Apps") : String(localized: "Show All Apps"))
+            .accessibilityLabel(shown >= layout.maxRows ? String(localized: "Show One Row of Apps") : String(localized: "Show More Apps"))
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { wide = true; rows = shown >= layout.maxRows ? 1 : layout.maxRows }
+            .accessibilityAction { wide = true; rows = layout.nextStop(after: shown) }
             .accessibilityIdentifier("stagePeekDockHandle")
     }
 
@@ -195,7 +204,7 @@ struct StagePeekDock: View {
                 let base = pullBase ?? shown
                 if pullBase == nil { pullBase = shown }
                 if !wide { wide = true }
-                let target = StagePeekDockLayout.rows(from: base, pulled: v.translation.height, rowHeight: Self.rowHeight, maxRows: layout.maxRows)
+                let target = layout.rows(from: base, pulled: v.translation.height)
                 if target != rows { rows = target; UISelectionFeedbackGenerator().selectionChanged() }
             }
             .onEnded { v in
@@ -222,9 +231,13 @@ struct StagePeekDock: View {
         .accessibilityIdentifier("stagePeekLaunchpad")
     }
 
-    private func appButton(_ app: MacAppItem, named: Bool = false) -> some View {
+    private func appButton(_ app: MacAppItem, named: Bool = false, collapses: Bool = false) -> some View {
         let isSelected = selected == app.bundleID
-        return Button { onApp(app) } label: {
+        let choose = {
+            if collapses { rows = 1; wide = false }
+            onApp(app)
+        }
+        return Button(action: choose) {
             VStack(spacing: 3) {
                 MacAppIcon(model: model, bundleID: app.bundleID, name: app.name, size: Self.cell)
                     .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
@@ -243,7 +256,7 @@ struct StagePeekDock: View {
         // Tap picks it; press, hold and move drags the app onto a pane.
         .overlay(GeometryReader { g in
             StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, origin: g.frame(in: .global).origin,
-                                      onTap: { onApp(app) }, onDragEnded: onDragEnded)
+                                      onTap: choose, onDragEnded: onDragEnded)
         })
         .onAppear { model.requestIcons([app.bundleID]) }
         .accessibilityLabel(app.name)
@@ -257,34 +270,6 @@ struct StagePeekDock: View {
 private struct StagePeekDockScrollKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// How many apps fit in a row of the bar and how many rows it can grow to (pure, tested).
-struct StagePeekDockLayout: Equatable {
-    let perRow: Int
-    let maxRows: Int
-    private let total: Int
-
-    init(apps: Int, width: CGFloat, maxHeight: CGFloat) {
-        total = apps + 1   // and All Apps
-        perRow = max(1, Int((width - 24 + StagePeekDock.spacing) / (StagePeekDock.gridCell + StagePeekDock.spacing)))
-        let needed = max(1, (total + perRow - 1) / perRow)
-        let room = max(1, Int((maxHeight - 30) / StagePeekDock.rowHeight))
-        maxRows = min(needed, room)
-    }
-
-    /// More apps than the rows show: the grid scrolls.
-    func needsScroll(rows: Int) -> Bool { total > perRow * rows }
-
-    /// A swipe up that ends at one row, or a quick flick up: back to the compact bar.
-    static func collapses(pulled: CGFloat, predicted: CGFloat, rows: Int) -> Bool {
-        pulled < -20 && (rows <= 1 || predicted < -StagePeekDock.rowHeight * 2)
-    }
-
-    /// Rows after pulling `pulled` points down (negative: up) from `base` rows.
-    static func rows(from base: Int, pulled: CGFloat, rowHeight: CGFloat, maxRows: Int) -> Int {
-        min(max(base + Int((pulled / rowHeight).rounded()), 1), max(maxRows, 1))
-    }
 }
 
 // MARK: - Cards

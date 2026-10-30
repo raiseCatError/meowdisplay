@@ -204,6 +204,7 @@ targets:
       - Mac/DisplayArrangement.swift
       - Mac/CoalescingFetch.swift
       - Mac/MissionControlMonitor.swift
+      - Shared/StagePeekDockLayout.swift
       - Mac/OriginRestore.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift

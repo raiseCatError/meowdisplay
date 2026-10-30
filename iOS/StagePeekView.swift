@@ -407,13 +407,18 @@ struct StagePeekOverlay: View {
         let barWidth = dockWide ? safe.width - 24 : width
         let barX = dockWide ? safe.midX : x
         let room = max(safe.height - 24, 140)
+        // Searching filters the apps bar too, at every size (owner, 2026-10-31).
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        let barApps = searching ? WorkspaceSearch.search(query, apps: dockApps, windows: []).apps : dockApps
         return VStack(spacing: 10) {
             StagePeekSearchPill(query: $query, focused: $searchFocused)
                 .frame(width: width)
-            StagePeekDock(model: model, apps: dockApps, selected: appFilter, onApp: { tapApp($0) },
+            StagePeekDock(model: model, apps: barApps, selected: appFilter,
+                          onApp: { a in if searching { query = ""; searchFocused = false }; tapApp(a) },
                           onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
                           onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } },
-                          wide: $dockWide, rows: $dockRows, width: barWidth, maxHeight: room * 0.7)
+                          wide: $dockWide, rows: $dockRows, width: barWidth, maxHeight: room - 52,
+                          noMatch: searching && barApps.isEmpty ? String(localized: "No apps match “\(query)”.") : nil)
                 .frame(width: barWidth)
         }
         .frame(width: max(barWidth, width), height: room, alignment: .top)

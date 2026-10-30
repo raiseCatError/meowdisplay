@@ -618,7 +618,11 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
     val compactX = if (host.edge == StagePeekEdge.Left) safe.minX + 12 + compactWidth / 2 else safe.maxX - 12 - compactWidth / 2
     val x = compactX + (safe.midX - compactX) * e
     val focus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     val d = LocalDensity.current.density
+    // Searching filters the apps row too (owner, 2026-10-31); choosing one clears the search.
+    val searching = host.query.isNotBlank()
+    val shownApps = if (searching) WorkspaceSearch.search(host.query, apps, emptyList()).apps else apps
     // Below any control already at the top of the screen (a badge, the rail handle).
     val band = CGRect(x - width / 2, safe.minY, width, 12.0 + TOP_CONTROLS)
     val top = maxOf(safe.minY + 12, (avoiding.filter { it.intersects(band) && it.minY < safe.minY + 80 }.maxOfOrNull { it.maxY + 8 } ?: 0.0))
@@ -663,15 +667,24 @@ private fun TopControls(host: StagePeekHost, controller: WorkspaceController, ap
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(apps.take(120), key = { it.bundleID }) { app ->
+            if (searching && shownApps.isEmpty()) Text(
+                "No apps match “${host.query.trim()}”.", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            )
+            else LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(shownApps.take(120), key = { it.bundleID }) { app ->
                     LaunchedEffect(app.bundleID) { controller.requestIcons(listOf(app.bundleID)) }
                     val selected = host.appFilter == app.bundleID
                     Box(
                         Modifier.size(50.dp).clip(RoundedCornerShape(12.dp))
                             .background(if (selected) StagePeekAccent.copy(alpha = 0.35f) else Color.Transparent)
                             .appHoldToDrag(controller, host, app)
-                            .clickable(role = Role.Button) { if (controller.ui.value.drag == null) host.tapApp(app) }
+                            .clickable(role = Role.Button) {
+                                if (controller.ui.value.drag == null) {
+                                    if (searching) { host.query = ""; focusManager.clearFocus(); host.searchFocused = false }
+                                    host.tapApp(app)
+                                }
+                            }
                             .semantics {
                                 contentDescription = app.name + if (app.running) ", running" else ""
                                 if (selected) stateDescription = "Showing only this app's windows"
