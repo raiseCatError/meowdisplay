@@ -103,4 +103,17 @@ final class WindowCaptureHealthTests: XCTestCase {
         let p = base + y * CVPixelBufferGetBytesPerRow(buffer) + x * 4
         return (Double(p[0]), Double(p[1]), Double(p[2]))
     }
+
+    /// A Full Desktop pane asks macOS for its content before its stream exists; it used to read
+    /// as started at uptime 0 and was restarted as "stalled" at once (log 2026-10-30 17:14:45).
+    func testAPaneWaitingToStartIsNotStalled() {
+        let capture = WindowTileCapture(tileID: "w7", windowID: 0, assignmentGeneration: 1)
+        let h = capture.healthNow
+        let now = ProcessInfo.processInfo.systemUptime
+        XCTAssertGreaterThan(h.startedAt, now - 1)
+        XCTAssertEqual(TileCaptureWatch.verdict(now: now + 0.5, startedAt: h.startedAt, firstCompleteAt: nil,
+                                                suspendedSince: nil, sourceLooksAvailable: true), .waiting)
+        XCTAssertEqual(TileCaptureWatch.verdict(now: h.startedAt + 4.1, startedAt: h.startedAt, firstCompleteAt: nil,
+                                                suspendedSince: nil, sourceLooksAvailable: true), .stalled, "a stream that never delivers still restarts")
+    }
 }

@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Use This Mac as a Display comes back only if the user left it on.
         controller.applyLaunchRole()
+        EncoderWarmUp.start()
     }
 
     // Quitting while this Mac is a display: tell the sending Mac we're

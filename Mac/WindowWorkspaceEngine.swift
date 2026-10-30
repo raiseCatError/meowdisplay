@@ -53,6 +53,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         self.tileID = tileID
         self.windowID = windowID
         self.assignmentGeneration = assignmentGeneration
+        // The first-frame wait counts from now: a Full Desktop pane asks macOS for its content
+        // before its stream exists, and with no start time the watch called it stalled at once.
+        health = Health(startedAt: ProcessInfo.processInfo.systemUptime)
     }
 
     /// The whole window. Never `sourceRect`: on a single-window filter it returns the crop at
