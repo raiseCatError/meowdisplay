@@ -174,18 +174,24 @@ enum PairingNetwork {
         throttleResolved = true
         await throttle.revealSucceeded()
         logReady(pending)
-        try await PairingSessionCore.run(
-            role: .responder, result: result, pending: pending, transport: transport,
-            gate: gate, abortSlot: slot,
-            decide: { pending in
-                let accepted = await prompt.request(pending, token: attemptToken)
-                // Owner-auth failure/cancel surfaces its own error, not "rejected".
-                if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
-                return accepted
-            },
-            onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
-            onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
-            store: store, isCurrent: isCurrent)
+        do {
+            try await PairingSessionCore.run(
+                role: .responder, result: result, pending: pending, transport: transport,
+                gate: gate, abortSlot: slot,
+                decide: { pending in
+                    let accepted = await prompt.request(pending, token: attemptToken)
+                    // Owner-auth failure/cancel surfaces its own error, not "rejected".
+                    if !accepted, let error = await prompt.takeOutcomeError(token: attemptToken) { throw error }
+                    return accepted
+                },
+                onPeerAbort: { Task { @MainActor in prompt.peerAborted(token: attemptToken) } },
+                onCommitting: { Task { @MainActor in prompt.markCommitting(token: attemptToken) } },
+                store: store, isCurrent: isCurrent)
+        } catch {
+            // A code was shown and nothing was paired (declined, timed out, aborted).
+            await throttle.codeShownWithoutPairing()
+            throw error
+        }
         // The ceremony reached authenticated trust completion (commit
         // verified and `PairingFinalizer` ran inside `PairingSessionCore.run`)
         // for THIS admitted attempt: only now is prior failure history

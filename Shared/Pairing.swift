@@ -196,7 +196,10 @@ struct PairingHandshake {
             | (UInt32(sasBytes[2]) << 8) | UInt32(sasBytes[3])) % 1_000_000
         return PairingResult(
             pending: PendingPairing(peerID: peerHello.deviceID,
-                                    peerName: peerHello.displayName,
+                                    // Shown on screen and stored as the device's name: without
+                                    // control, bidi or line-separator characters. The
+                                    // transcript above already bound the name as sent.
+                                    peerName: OwnerAuthPolicy.displayName(peerHello.displayName),
                                     peerSPKI: peerHello.identitySPKI,
                                     sas: String(format: "%03d %03d", number / 1000, number % 1000)),
             localConfirmationKey: Self.confirmationKey(root: root, role: role),

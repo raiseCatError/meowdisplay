@@ -1643,8 +1643,12 @@ final class StreamReceiver: ObservableObject {
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
-        pairingPrompt.onPending = { [weak self] pending in
+        pairingPrompt.onPending = { pending in
             Log.info("pairDebug: onPending peerID=\(pending.peerID)")
+        }
+        // Only an accepted code interrupts the current session (a prompt alone can come from
+        // any host on the network); pairing started on this device begins it itself.
+        pairingPrompt.onAccepted = { [weak self] pending in
             self?.beginExplicitPairing(peerID: pending.peerID)
         }
         displayLayer.videoGravity = .resizeAspect
