@@ -364,6 +364,12 @@ struct WorkspaceChromeView: View {
         }
         .frame(maxWidth: width, alignment: .leading)
         .fixedSize(horizontal: true, vertical: false)
+        .background(GeometryReader { g in
+            // Where this tab's label is, for putting a dragged tab back between two others.
+            Color.clear
+                .onAppear { if let tab { model.tabLabelFrames[id, default: [:]][tab] = g.frame(in: .global) } }
+                .onChange(of: g.frame(in: .global)) { f in if let tab { model.tabLabelFrames[id, default: [:]][tab] = f } }
+        })
         .foregroundStyle(highlighted ? Color.black : Color.white.opacity(shown ? 1 : 0.8))
         .padding(.horizontal, 9).padding(.vertical, 5)
         .background(highlighted ? workspaceAccent.opacity(0.9) : (shown ? workspaceChip : Color(white: 0.2, opacity: 0.6)), in: Capsule())
@@ -1003,7 +1009,9 @@ struct WorkspaceDropOverlay: View {
                 if model.windowMode { return String(localized: "Replace") }
                 if case .replace(let tile, _) = target, tile == WorkspaceModel.noDesktop { return String(localized: "Show in Window Mode") }
                 return String(localized: "Show Instead of Desktop")
-            case .tab: return String(localized: "Add as Tab")
+            case .tab(let t, _):
+                if case .pane(let p, let tab?) = item, p == t, tab >= 0 { return String(localized: "Move Tab Here") }
+                return String(localized: "Add as Tab")
             case .split: return String(localized: "New Pane")
             case .emptySlot: return String(localized: "Show Here")
             }

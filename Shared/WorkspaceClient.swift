@@ -468,6 +468,8 @@ final class WorkspaceModel: ObservableObject {
     /// Mirror/Extend: the desktop picture's global frame (reported by Stage Peek's overlay), so a
     /// window dragged onto the desktop can land beside it.
     var desktopPictureGlobal: CGRect = .zero
+    /// Each pane's tab labels on screen (global), by tab index: where a dragged tab is put back.
+    var tabLabelFrames: [String: [Int: CGRect]] = [:]
     /// The "Cancel" drop zone shown during a drag (global). Dropping there changes nothing.
     var cancelZoneGlobal: CGRect = .zero
 
@@ -1299,6 +1301,7 @@ final class WorkspaceModel: ObservableObject {
         case .window(let w):
             return place(w, on: target)
         case .pane(let id, let tab):
+            if let tab, case .tab(let t, _) = target, t == id { return reorderTab(id, from: tab, at: d.location) }
             dropTile(id, tab: tab, on: target)
             return true
         case .app(let app):
@@ -1308,6 +1311,17 @@ final class WorkspaceModel: ObservableObject {
             appDrop = AppDrop(app: app, windows: windows, target: target)
             return windows.isEmpty ? false : true
         }
+    }
+
+    /// A tab dropped back on its own pane's labels: it goes between the labels either side.
+    private func reorderTab(_ id: String, from: Int, at p: CGPoint) -> Bool {
+        guard let frames = tabLabelFrames[id], let count = layout.tiles[id]?.tabs.count, count > 1 else { return false }
+        let mids: [Double] = (0..<count).compactMap { i in frames[i].map { Double($0.midX) } }
+        guard mids.count == count else { return false }
+        let to = WorkspaceTabOrder.index(from: from, dropX: Double(p.x), labelMidXs: mids)
+        guard to != from else { return false }
+        edit { $0.movingTab(of: id, from: from, to: to) }
+        return true
     }
 
     /// An app dropped on a pane, waiting for the person: pick one of its windows, or open it.

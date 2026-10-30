@@ -301,8 +301,50 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     /// Empty for a single-window pane. `source` is always one of them.
     var tabs: [WorkspaceSource] = []
 
+    /// The views of the tabs not shown (rotation, Fit/Fill, zoom), by `WorkspaceSource.tabKey`:
+    /// each tab keeps its own while another is shown. Absent = the default view.
+    var tabViews: [String: WorkspaceTabView] = [:]
+
     /// The pane's windows in label order (one, or its tabs).
     var windows: [WorkspaceSource] { tabs.isEmpty ? (source.map { [$0] } ?? []) : tabs }
+
+    /// Shows `s` (one of its tabs): the shown tab's view is kept for it (unless it is leaving),
+    /// and `s` gets its own view back (the default the first time).
+    mutating func show(_ s: WorkspaceSource, keepingCurrent: Bool = true) {
+        if let current = source, current.tabKey != s.tabKey {
+            if keepingCurrent {
+                let v = WorkspaceTabView(rotation: rotation, fit: fit, zoom: zoom)
+                tabViews[current.tabKey] = v.isDefault ? nil : v
+            }
+            let v = tabViews.removeValue(forKey: s.tabKey) ?? WorkspaceTabView()
+            rotation = v.rotation; fit = v.fit; zoom = v.zoom
+        }
+        source = s
+        let keys = Set(tabs.map(\.tabKey))
+        tabViews = tabViews.filter { keys.contains($0.key) }
+    }
+}
+
+enum WorkspaceTabOrder {
+    /// Where a tab dragged from `from` lands when dropped at `dropX` on its pane's labels
+    /// (their centres, in label order): after every other label whose centre is left of it.
+    static func index(from: Int, dropX: Double, labelMidXs: [Double]) -> Int {
+        guard labelMidXs.indices.contains(from) else { return from }
+        return labelMidXs.enumerated().filter { $0.offset != from && $0.element < dropX }.count
+    }
+}
+
+/// A tab's own view, kept while another tab of its pane is shown.
+struct WorkspaceTabView: Equatable, Codable, Sendable {
+    var rotation: WorkspaceRotation = .none
+    var fit: WorkspaceFit = .fit
+    var zoom: WorkspacePaneZoom?
+    var isDefault: Bool { rotation == .none && fit == .fit && (zoom?.isIdentity ?? true) }
+}
+
+extension WorkspaceSource {
+    /// One window on one Mac (generation and follow aside): a tab's identity in its pane.
+    var tabKey: String { "\(host)#\(windowID)" }
 }
 
 /// Pinch and pan inside one pane: the source point under the fingers when they came down stays
@@ -619,8 +661,8 @@ struct WorkspaceLayout: Equatable, Sendable {
                 tile.tabs = Self.unique(tile.tabs)
             } else {
                 tile.tabs.remove(at: i)
-                tile.source = tile.tabs.isEmpty ? nil : tile.tabs[min(i, tile.tabs.count - 1)]
-                if tile.tabs.count <= 1 { tile.tabs = [] }
+                if tile.tabs.isEmpty { tile.source = nil } else { tile.show(tile.tabs[min(i, tile.tabs.count - 1)], keepingCurrent: false) }
+                if tile.tabs.count <= 1 { tile.tabs = []; tile.tabViews = [:] }
                 var copy = self
                 copy.tiles[id] = tile
                 return copy
@@ -648,8 +690,7 @@ struct WorkspaceLayout: Equatable, Sendable {
         list.removeAll { $0.host == source.host && $0.windowID == source.windowID }
         list.append(source)
         tile.tabs = list.count > 1 ? list : []
-        tile.source = source
-        tile.zoom = nil
+        tile.show(source)
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -658,8 +699,18 @@ struct WorkspaceLayout: Equatable, Sendable {
     /// Shows another tab of a pane (only the shown tab streams from the Mac).
     func switchingTab(of id: String, to index: Int) -> WorkspaceLayout {
         guard var tile = tiles[id], tile.tabs.indices.contains(index), tile.source != tile.tabs[index] else { return self }
-        tile.source = tile.tabs[index]
-        tile.zoom = nil
+        tile.show(tile.tabs[index])
+        var copy = self
+        copy.tiles[id] = tile
+        return copy
+    }
+
+    /// Moves a tab to another place among its pane's labels (the shown tab stays shown).
+    func movingTab(of id: String, from: Int, to: Int) -> WorkspaceLayout {
+        guard var tile = tiles[id], tile.tabs.indices.contains(from) else { return self }
+        let to = min(max(to, 0), tile.tabs.count - 1)
+        guard to != from else { return self }
+        tile.tabs.insert(tile.tabs.remove(at: from), at: to)
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -671,8 +722,11 @@ struct WorkspaceLayout: Equatable, Sendable {
         var copy = self
         var t = tile
         let removed = t.tabs.remove(at: index)
-        if t.source == removed { t.source = t.tabs.isEmpty ? nil : t.tabs[min(index, t.tabs.count - 1)]; t.zoom = nil }
-        if t.tabs.count <= 1 { t.tabs = [] }
+        t.tabViews[removed.tabKey] = nil
+        if t.source == removed {
+            if t.tabs.isEmpty { t.source = nil; t.zoom = nil } else { t.show(t.tabs[min(index, t.tabs.count - 1)], keepingCurrent: false) }
+        }
+        if t.tabs.count <= 1 { t.tabs = []; t.tabViews = [:] }
         copy.tiles[id] = t
         return copy
     }
@@ -1421,6 +1475,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var window: UInt32
         var bundle: String?
         var follow: String?
+        /// A tab's own view while another is shown (absent = the default view; older readers ignore it).
+        var rotation: Int?
+        var fit: String?
+        var zoom: [Double]?
     }
 
     var schema: Int
@@ -1441,7 +1499,11 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         tiles = layout.orderedTileIDs.compactMap { layout.tiles[$0] }.map {
             Tile(id: $0.id, host: $0.source?.host, window: $0.source?.windowID, bundle: $0.source?.bundleID,
                  follow: $0.source?.follow.rawValue, rotation: $0.rotation.rawValue, fit: $0.fit.rawValue,
-                 tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { TabRecord(host: $0.host, window: $0.windowID, bundle: $0.bundleID, follow: $0.follow.rawValue) },
+                 tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { [views = $0.tabViews] s in
+                     let v = views[s.tabKey]
+                     return TabRecord(host: s.host, window: s.windowID, bundle: s.bundleID, follow: s.follow.rawValue,
+                                      rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue }, zoom: v?.zoom?.wire)
+                 },
                  zoom: $0.zoom?.wire)
         }
         maximized = layout.maximized
@@ -1474,7 +1536,16 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
                                 follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
             }
-            if tabs.count > 1, let s = source, tabs.contains(s) { tile.tabs = Array(tabs) }
+            if tabs.count > 1, let s = source, tabs.contains(s) {
+                tile.tabs = Array(tabs)
+                for r in (t.tabs ?? []).prefix(8) where r.rotation != nil || r.fit != nil || r.zoom != nil {
+                    let key = WorkspaceSource(host: r.host, windowID: r.window).tabKey
+                    guard key != s.tabKey, tile.tabs.contains(where: { $0.tabKey == key }) else { continue }
+                    let v = WorkspaceTabView(rotation: WorkspaceRotation(degrees: r.rotation ?? 0), fit: r.fit == WorkspaceFit.fill.rawValue ? .fill : .fit,
+                                             zoom: WorkspacePaneZoom(wire: r.zoom).flatMap { $0.isIdentity ? nil : $0 })
+                    if !v.isDefault { tile.tabViews[key] = v }
+                }
+            }
             map[t.id] = tile
         }
         return WorkspaceLayout(root: decode(root), tiles: map, maximized: maximized)

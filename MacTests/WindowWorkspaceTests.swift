@@ -461,6 +461,39 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertEqual(record?.tiles["t"]?.tabs, [b, c], "tabs survive a save")
     }
 
+    /// Each tab keeps its own rotation, Fit/Fill and zoom while another tab is shown, through a
+    /// save; a new tab starts at the default view; reordering keeps what's shown.
+    func testEachTabKeepsItsOwnViewAndTabsReorder() {
+        let a = WorkspaceSource(host: "m", windowID: 1), b = WorkspaceSource(host: "m", windowID: 2), c = WorkspaceSource(host: "m", windowID: 3)
+        let z = WorkspacePaneZoom(scale: 2, centerX: 0.25, centerY: 0.75)
+        var l = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "t", source: a)])
+        l = l.rotating("t").settingFit(.fill, for: "t").zooming("t", to: z)
+        l = l.addingTab(b, to: "t")
+        XCTAssertEqual(l.tiles["t"]?.rotation, WorkspaceRotation.none, "a new tab starts at the default view")
+        XCTAssertEqual(l.tiles["t"]?.fit, .fit)
+        XCTAssertNil(l.tiles["t"]?.zoom)
+        l = l.addingTab(c, to: "t").switchingTab(of: "t", to: 1)
+        let saved = WorkspaceLayoutRecord(l).encoded().flatMap(WorkspaceLayoutRecord.decode)
+        for layout in [l, saved].compactMap({ $0 }) {
+            let back = layout.switchingTab(of: "t", to: 0)
+            XCTAssertEqual(back.tiles["t"]?.rotation, .quarter, "the first tab's view comes back")
+            XCTAssertEqual(back.tiles["t"]?.fit, .fill)
+            XCTAssertEqual(back.tiles["t"]?.zoom, z)
+            XCTAssertNil(back.switchingTab(of: "t", to: 1).tiles["t"]?.zoom, "the other tab kept its own (default) view")
+        }
+        // Reorder: the shown tab stays shown; a removed tab's view is forgotten.
+        let moved = l.movingTab(of: "t", from: 0, to: 2)
+        XCTAssertEqual(moved.tiles["t"]?.tabs, [b, c, a])
+        XCTAssertEqual(moved.tiles["t"]?.source, b)
+        XCTAssertEqual(moved.switchingTab(of: "t", to: 2).tiles["t"]?.rotation, .quarter)
+        XCTAssertNil(l.removingTab(of: "t", at: 0).tiles["t"]?.tabViews[a.tabKey])
+        // Where a dropped tab lands among labels centred at 50, 150, 250.
+        XCTAssertEqual(WorkspaceTabOrder.index(from: 0, dropX: 200, labelMidXs: [50, 150, 250]), 1)
+        XCTAssertEqual(WorkspaceTabOrder.index(from: 0, dropX: 300, labelMidXs: [50, 150, 250]), 2)
+        XCTAssertEqual(WorkspaceTabOrder.index(from: 2, dropX: 10, labelMidXs: [50, 150, 250]), 0)
+        XCTAssertEqual(WorkspaceTabOrder.index(from: 1, dropX: 160, labelMidXs: [50, 150, 250]), 1, "dropped on itself: unchanged")
+    }
+
     func testWindowDropZonesLabelStripTabsEdgesSplitMiddleReplaces() {
         let l = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: "t", source: WorkspaceSource(host: "m", windowID: 1))])
         let size = WorkspaceSize(width: 1000, height: 800)

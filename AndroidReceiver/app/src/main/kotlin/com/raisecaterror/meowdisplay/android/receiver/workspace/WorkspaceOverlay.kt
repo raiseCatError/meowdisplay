@@ -499,7 +499,11 @@ private fun PaneLabel(
     val highlighted = shown && active
     Row(
         Modifier
-            .onGloballyPositioned { c -> val p = c.positionInWindow(); labelOrigin = CGPoint(p.x / density.toDouble(), p.y / density.toDouble()) }
+            .onGloballyPositioned { c ->
+                val p = c.positionInWindow(); labelOrigin = CGPoint(p.x / density.toDouble(), p.y / density.toDouble())
+                // Where this tab's label is, for putting a dragged tab back between two others.
+                if (tab != null) controller.tabLabelMidX(id, tab, labelOrigin.x + c.size.width / density / 2.0)
+            }
             .widthIn(max = width.dp)
             .background(if (highlighted) Accent.copy(alpha = 0.92f) else if (shown) Chip else Chip.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
             .border(if (shown && !active) 0.75.dp else 0.dp, Color.White.copy(alpha = if (shown && !active) 0.3f else 0f), RoundedCornerShape(14.dp))
@@ -655,7 +659,7 @@ fun WorkspaceDropOverlay(controller: WorkspaceController, origin: CGPoint) {
                     target.tile.startsWith("\u0000") -> "Show in Window Mode"
                     else -> "Show Instead of Desktop"
                 }
-                is WWindowDrop.Tab -> "Add as Tab"
+                is WWindowDrop.Tab -> if ((drag.item as? WorkspaceDrag.Item.Pane)?.let { it.tile == target.tile && it.tab != null } == true) "Move Tab Here" else "Add as Tab"
                 is WWindowDrop.Split -> "New Pane"
                 is WWindowDrop.EmptySlot -> "Show Here"
             }

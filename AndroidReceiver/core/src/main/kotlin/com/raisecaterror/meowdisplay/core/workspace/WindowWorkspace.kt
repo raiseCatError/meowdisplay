@@ -202,8 +202,46 @@ data class WSource(val host: String, val windowID: Long, val generation: Long? =
 data class WTile(
     val id: String, val source: WSource? = null, val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Fit,
     val zoom: WPaneZoom? = null, val tabs: List<WSource> = emptyList(),
+    /** The views of the tabs not shown, by [WSource.tabKey]: each tab keeps its own. Absent = default. */
+    val tabViews: Map<String, WTabView> = emptyMap(),
 ) {
     val windows: List<WSource> get() = if (tabs.isEmpty()) listOfNotNull(source) else tabs
+
+    /** Shows [s] (one of its tabs): the shown tab's view is kept for it (unless it is leaving), and
+     *  [s] gets its own view back (the default the first time). WorkspaceTile.show. */
+    fun showing(s: WSource, keepingCurrent: Boolean = true): WTile {
+        var views = tabViews
+        var t = this
+        val current = source
+        if (current != null && current.tabKey != s.tabKey) {
+            if (keepingCurrent) {
+                val v = WTabView(rotation, fit, zoom)
+                views = if (v.isDefault) views - current.tabKey else views + (current.tabKey to v)
+            }
+            val v = views[s.tabKey] ?: WTabView()
+            views = views - s.tabKey
+            t = t.copy(rotation = v.rotation, fit = v.fit, zoom = v.zoom)
+        }
+        val keys = tabs.map { it.tabKey }.toSet()
+        return t.copy(source = s, tabViews = views.filterKeys { it in keys })
+    }
+}
+
+/** A tab's own view, kept while another tab of its pane is shown. */
+data class WTabView(val rotation: WRotation = WRotation.None, val fit: WFit = WFit.Fit, val zoom: WPaneZoom? = null) {
+    val isDefault: Boolean get() = rotation == WRotation.None && fit == WFit.Fit && (zoom?.isIdentity ?: true)
+}
+
+/** One window on one Mac (generation and follow aside): a tab's identity in its pane. */
+val WSource.tabKey: String get() = "$host#$windowID"
+
+object WTabOrder {
+    /** Where a tab dragged from [from] lands when dropped at [dropX] on its pane's labels (their
+     *  centres, in order): after every other label whose centre is left of it. WorkspaceTabOrder. */
+    fun index(from: Int, dropX: Double, labelMidXs: List<Double>): Int {
+        if (from !in labelMidXs.indices) return from
+        return labelMidXs.withIndex().count { it.index != from && it.value < dropX }
+    }
 }
 
 private fun WSource.sameWindow(o: WSource) = host == o.host && windowID == o.windowID
@@ -371,8 +409,10 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
             if (i >= 0) {
                 if (source == null) {
                     val rest = t.tabs.toMutableList().also { it.removeAt(i) }
-                    val shown = if (rest.isEmpty()) null else rest[min(i, rest.size - 1)]
-                    return with(tiles = tiles + (id to t.copy(source = shown, tabs = if (rest.size <= 1) emptyList() else rest)))
+                    var next = t.copy(tabs = rest)
+                    next = if (rest.isEmpty()) next.copy(source = null) else next.showing(rest[min(i, rest.size - 1)], keepingCurrent = false)
+                    if (rest.size <= 1) next = next.copy(tabs = emptyList(), tabViews = emptyMap())
+                    return with(tiles = tiles + (id to next))
                 }
                 val list = t.tabs.toMutableList().also { it[i] = source }.distinctBy { it.host to it.windowID }
                 return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size <= 1) emptyList() else list)))
@@ -420,22 +460,33 @@ class WLayout private constructor(val root: WNode, val tiles: Map<String, WTile>
         if (list.none { it.sameWindow(current) }) list += current
         list.removeAll { it.sameWindow(source) }
         list += source
-        return with(tiles = tiles + (id to t.copy(source = source, tabs = if (list.size > 1) list else emptyList(), zoom = null)))
+        return with(tiles = tiles + (id to t.copy(tabs = if (list.size > 1) list else emptyList()).showing(source)))
     }
 
     fun switchingTab(id: String, index: Int): WLayout {
         val t = tiles[id] ?: return this
         if (index !in t.tabs.indices || t.source == t.tabs[index]) return this
-        return with(tiles = tiles + (id to t.copy(source = t.tabs[index], zoom = null)))
+        return with(tiles = tiles + (id to t.showing(t.tabs[index])))
+    }
+
+    /** Moves a tab to another place among its pane's labels (the shown tab stays shown). */
+    fun movingTab(id: String, from: Int, to: Int): WLayout {
+        val t = tiles[id] ?: return this
+        if (from !in t.tabs.indices) return this
+        val dest = to.coerceIn(0, t.tabs.size - 1)
+        if (dest == from) return this
+        val list = t.tabs.toMutableList(); list.add(dest, list.removeAt(from))
+        return with(tiles = tiles + (id to t.copy(tabs = list)))
     }
 
     fun removingTab(id: String, index: Int): WLayout {
         val t = tiles[id] ?: return this
         if (index !in t.tabs.indices) return this
         val rest = t.tabs.toMutableList(); val removed = rest.removeAt(index)
-        var shown = t.source; var crop = t.zoom
-        if (shown == removed) { shown = if (rest.isEmpty()) null else rest[min(index, rest.size - 1)]; crop = null }
-        return with(tiles = tiles + (id to t.copy(source = shown, zoom = crop, tabs = if (rest.size <= 1) emptyList() else rest)))
+        var next = t.copy(tabs = rest, tabViews = t.tabViews - removed.tabKey)
+        if (t.source == removed) next = if (rest.isEmpty()) next.copy(source = null, zoom = null) else next.showing(rest[min(index, rest.size - 1)], keepingCurrent = false)
+        if (rest.size <= 1) next = next.copy(tabs = emptyList(), tabViews = emptyMap())
+        return with(tiles = tiles + (id to next))
     }
 
     fun tileHolding(host: String, windowID: Long): String? =
@@ -931,6 +982,11 @@ object WLayoutRecord {
                             put("host", s.host); put("window", s.windowID)
                             s.bundleID?.let { put("bundle", it) }
                             put("follow", s.follow.wire)
+                            // A tab's own view while another is shown (absent = the default view).
+                            t.tabViews[s.tabKey]?.let { v ->
+                                put("rotation", v.rotation.degrees); put("fit", v.fit.wire)
+                                v.zoom?.let { z -> put("zoom", buildJsonArray { z.wire.forEach { add(JsonPrimitive(it)) } }) }
+                            }
                         }) }
                     })
                 })
@@ -987,8 +1043,22 @@ object WLayoutRecord {
                 val w = (o["window"] as? JsonPrimitive)?.longOrNull ?: return@mapNotNull null
                 WSource(h, w, null, (o["bundle"] as? JsonPrimitive)?.contentOrNull(), WFollow.of((o["follow"] as? JsonPrimitive)?.contentOrNull()))
             }?.map { if (source != null && it.sameWindow(source)) source else it } ?: emptyList()
+            val keptTabs = if (tabs.size > 1 && source != null && tabs.any { it.sameWindow(source) }) tabs else emptyList()
+            val views = mutableMapOf<String, WTabView>()
+            if (keptTabs.isNotEmpty()) (t["tabs"] as? JsonArray)?.take(8)?.forEach { e ->
+                val o = e as? JsonObject ?: return@forEach
+                if (o["rotation"] == null && o["fit"] == null && o["zoom"] == null) return@forEach
+                val h = (o["host"] as? JsonPrimitive)?.contentOrNull() ?: return@forEach
+                val w = (o["window"] as? JsonPrimitive)?.longOrNull ?: return@forEach
+                val key = "$h#$w"
+                if (key == source?.tabKey || keptTabs.none { it.tabKey == key }) return@forEach
+                val v = WTabView(WRotation.of((o["rotation"] as? JsonPrimitive)?.intOrNull ?: 0),
+                    if ((o["fit"] as? JsonPrimitive)?.contentOrNull() == WFit.Fill.wire) WFit.Fill else WFit.Fit,
+                    WPaneZoom.fromWire(o["zoom"])?.takeIf { !it.isIdentity })
+                if (!v.isDefault) views[key] = v
+            }
             tiles[id] = WTile(id, source, WRotation.of((t["rotation"] as? JsonPrimitive)?.intOrNull ?: 0), fit, zoom = zoom,
-                tabs = if (tabs.size > 1 && source != null && tabs.any { it.sameWindow(source) }) tabs else emptyList())
+                tabs = keptTabs, tabViews = views)
         }
         return WLayout.of(node(obj["root"]), tiles, (obj["maximized"] as? JsonPrimitive)?.contentOrNull())
     }

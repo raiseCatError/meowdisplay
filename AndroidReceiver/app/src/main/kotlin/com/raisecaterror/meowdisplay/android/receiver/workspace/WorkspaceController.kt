@@ -56,6 +56,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WZoomPreview
 import com.raisecaterror.meowdisplay.core.workspace.WSize
 import com.raisecaterror.meowdisplay.core.workspace.WSource
 import com.raisecaterror.meowdisplay.core.workspace.WTile
+import com.raisecaterror.meowdisplay.core.workspace.WTabOrder
 import com.raisecaterror.meowdisplay.core.workspace.WWindowDrop
 import com.raisecaterror.meowdisplay.core.workspace.WZoom
 import com.raisecaterror.meowdisplay.core.workspace.WindowAvailability
@@ -206,6 +207,10 @@ class WorkspaceController(
     var pictureFrame: CGRect = CGRect.zero
     /** Mirror/Extend: the desktop picture's frame (Stage Peek reports it), so a window can land beside it. */
     var desktopFrame: CGRect = CGRect.zero
+    /** Each pane's tab labels' centres (window dp), by tab index: where a dragged tab is put back. */
+    private val tabLabelMids = mutableMapOf<String, MutableMap<Int, Double>>()
+    fun tabLabelMidX(tile: String, tab: Int, x: Double) { tabLabelMids.getOrPut(tile) { mutableMapOf() }[tab] = x }
+
     /** The "Cancel" drop zone shown during a drag (window dp). Dropping there changes nothing. */
     var cancelZone: CGRect = CGRect.zero
 
@@ -1149,7 +1154,10 @@ class WorkspaceController(
         target ?: return false
         return when (val item = d.item) {
             is WorkspaceDrag.Item.Window -> place(item.window, target)
-            is WorkspaceDrag.Item.Pane -> { dropTile(item.tile, item.tab, target); true }
+            is WorkspaceDrag.Item.Pane -> {
+                if (item.tab != null && target is WWindowDrop.Tab && target.tile == item.tile) return reorderTab(item.tile, item.tab, d.location.x)
+                dropTile(item.tile, item.tab, target); true
+            }
             is WorkspaceDrag.Item.App -> {
                 val windows = state.value.catalog?.windows.orEmpty().filter { it.bundleID == item.app.bundleID }
                 if (windows.size == 1) return place(windows[0], target)
@@ -1158,6 +1166,18 @@ class WorkspaceController(
                 windows.isNotEmpty()
             }
         }
+    }
+
+    /** A tab dropped back on its own pane's labels: it goes between the labels either side. */
+    private fun reorderTab(tile: String, from: Int, x: Double): Boolean {
+        val count = state.value.layout.tiles[tile]?.tabs?.size ?: return false
+        val known = tabLabelMids[tile] ?: return false
+        val mids = (0 until count).mapNotNull { known[it] }
+        if (count < 2 || mids.size != count) return false
+        val to = WTabOrder.index(from, x, mids)
+        if (to == from) return false
+        edit { it.movingTab(tile, from, to) }
+        return true
     }
 
     /** A window dropped on a pane (or, outside Window mode, beside the desktop). */
