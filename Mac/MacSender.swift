@@ -816,6 +816,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var deferredRotationRebuild = false
 
     private var lastHello: PhoneInfo?
+    /// The display stays awake while a device watches (see `StreamingDisplayAwake`). `queue` only.
+    private let streamingDisplayAwake = StreamingDisplayAwake()
     /// TCP/QUIC choice inside the network route (`TransportProtocolSelection.swift`).
     /// `queue`-confined. Sticky per logical session (this sender's lifetime).
     private var protocolSelector = TransportProtocolSelector()
@@ -3222,6 +3224,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.inputInjector?.cancelActiveInput()
             self.workspaceEngine?.setSuspended(true)
             self.windowBrowser?.setActive(false)
+            self.streamingDisplayAwake.set(watching: false)
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
@@ -5861,6 +5864,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
         windowBrowser?.setActive(false)
+        streamingDisplayAwake.set(watching: false)
         if dropped {
             sessionInputGrant.set(false)
             inputInjector?.cancelActiveInput()
@@ -7254,7 +7258,9 @@ extension MacSender {
         let paused = phase == .pausing || phase == .paused || phase == .stopped
         workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
         windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
+        streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted)
     }
+
 
     /// `queue` only. Stops every window stream this receiver owns.
     func stopWorkspaceEngine() {

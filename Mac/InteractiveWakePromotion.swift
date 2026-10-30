@@ -108,3 +108,45 @@ final class WakeStabilizationAssertion {
         }
     }
 }
+
+/// Keeps the Mac's display awake for as long as a device is watching (admitted, video on, not
+/// paused), on every route and in every mode. A sleeping display stops the window server, and
+/// every capture then delivers nothing: Mirror and Extend freeze, and Window-mode panes (Full
+/// Desktop included) stall and retry until they give up. That happened whenever the Mac sat idle
+/// during a session, for example covered by the Privacy Shield, once the 60 s session
+/// stabilization hold ran out. Display sleep only (the Mac's lock, lid and system sleep still
+/// apply), one public IOKit assertion, released as soon as nobody is watching.
+final class StreamingDisplayAwake {
+    static let reason = "MEOW Streaming to a device"
+
+    private let create: (String) -> IOPMAssertionID?
+    private let release: (IOPMAssertionID) -> Void
+    private var assertionID: IOPMAssertionID?
+
+    var isHeld: Bool { assertionID != nil }
+
+    init(create: @escaping (String) -> IOPMAssertionID? = { reason in
+             var id = IOPMAssertionID(0)
+             let r = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                                                 IOPMAssertionLevel(kIOPMAssertionLevelOn), reason as CFString, &id)
+             return r == kIOReturnSuccess ? id : nil
+         },
+         release: @escaping (IOPMAssertionID) -> Void = { IOPMAssertionRelease($0) }) {
+        self.create = create
+        self.release = release
+    }
+
+    /// Idempotent: holds one assertion while `watching`, none otherwise.
+    func set(watching: Bool) {
+        if watching, assertionID == nil {
+            assertionID = create(Self.reason)
+            Log.info("wakeDebug: streamingDisplayAwake \(assertionID.map { "held id=\($0)" } ?? "refused")")
+        } else if !watching, let id = assertionID {
+            release(id)
+            assertionID = nil
+            Log.info("wakeDebug: streamingDisplayAwake released")
+        }
+    }
+
+    deinit { if let id = assertionID { release(id) } }
+}
