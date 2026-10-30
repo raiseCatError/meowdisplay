@@ -163,6 +163,14 @@ class RemoteKnockTest {
         assertTrue(unknown.frames.isEmpty())
     }
 
+    /** SECURITY.md: a different key at the saved address is "different Mac", never a retry. */
+    @Test
+    fun aKeyThatIsNotP256IsADifferentMacNotARetryableFailure() {
+        val rsa = Mac(TestIdentity("rsa-mac", keyAlgorithm = "RSA"))
+        assertEquals(KnockResult.IdentityMismatch(null), knock(client(), rsa.port))
+        assertTrue(rsa.frames.isEmpty())
+    }
+
     @Test
     fun aMismatchIsFinalAndNoOtherAddressIsTried() {
         val impostor = Mac(macB)
