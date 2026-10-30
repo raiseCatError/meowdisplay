@@ -1,3 +1,4 @@
+import QuartzCore
 import UIKit
 
 /// Applies `ScreenAwakePolicy` with iOS's idle timer, only when the answer changes (never on
@@ -18,7 +19,7 @@ final class ScreenAwakeController {
 
     private func evaluate() {
         guard let inputs else { return }
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CACurrentMediaTime()   // not systemUptime: a required-reason API the manifest doesn't declare
         if inputs.streaming, inputs.watching, inputs.foreground { lastStreamingAt = now }
         let d = ScreenAwakePolicy.decide(inputs, sinceStreaming: lastStreamingAt.map { now - $0 })
         recheck?.cancel()

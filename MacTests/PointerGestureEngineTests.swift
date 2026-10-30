@@ -1450,12 +1450,13 @@ final class NaturalTouchVectorTests: XCTestCase {
 /// Touch Style preference: Natural for everyone unless Classic was chosen;
 /// nothing else in a saved blob changes.
 final class TouchStylePreferenceTests: XCTestCase {
-    func testNewInstallIsNatural() {
-        XCTAssertEqual(ReceiverControlPreferences().touchStyle, .natural)
+    /// Classic is the default Direct Touch style (owner's default, schema 21).
+    func testNewInstallIsClassic() {
+        XCTAssertEqual(ReceiverControlPreferences().touchStyle, .classic)
         XCTAssertFalse(ReceiverControlPreferences().naturalTouchHintShown)
     }
 
-    func testBlobWithoutTheFieldDecodesToNaturalAndKeepsEverythingElse() throws {
+    func testBlobWithoutTheFieldDecodesToClassicAndKeepsEverythingElse() throws {
         var old = ReceiverControlPreferences()
         old.inputMode = .trackpad
         old.smartTouchEnabled = false
@@ -1472,11 +1473,11 @@ final class TouchStylePreferenceTests: XCTestCase {
         defaults.set(data, forKey: ReceiverControlPreferencesRepository.defaultsKey)
         let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
 
-        XCTAssertEqual(loaded.touchStyle, .natural)
+        XCTAssertEqual(loaded.touchStyle, .classic, "schema 21 makes everyone Classic once")
         XCTAssertFalse(loaded.naturalTouchHintShown)
         XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
         var expected = old
-        expected.touchStyle = .natural
+        expected.touchStyle = .classic
         expected.naturalTouchHintShown = false
         XCTAssertEqual(loaded, expected, "only the new fields may differ")
         XCTAssertEqual(loaded.inputMode, .trackpad, "Trackpad users stay on Trackpad")

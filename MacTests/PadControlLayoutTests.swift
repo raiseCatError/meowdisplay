@@ -797,8 +797,11 @@ final class PadDefaultLayoutTests: XCTestCase {
         XCTAssertEqual(preferences.customLayouts.count, 1)
     }
 
-    func testFreshPhoneKeepsTheStandardDefaults() {
-        XCTAssertEqual(ReceiverControlPreferences.initial(isPad: false), ReceiverControlPreferences())
+    /// Phones start in Trackpad (owner's default, schema 21); everything else is standard.
+    func testFreshPhoneStartsInTrackpadWithTheStandardDefaults() {
+        var expected = ReceiverControlPreferences()
+        expected.inputMode = .trackpad
+        XCTAssertEqual(ReceiverControlPreferences.initial(isPad: false), expected)
     }
 
     func testRepositoryUsesTheInitialPreferencesOnlyWhenNothingIsSaved() {
