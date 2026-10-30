@@ -224,7 +224,7 @@ Mac Dev = cdeda71 (Smart Touch depth fix). iPhone = 2000058. Moto = b94abf6 debu
 | Save to Device | FAILED first (same; then a crash: Photos block isolated to the main actor) → fixed b94abf6 → pass (photos to Photos, other files to Files ▸ MeowDisplay ▸ Downloads, message says where) |
 | Expanded view: tap empty space closes it | built b94abf6 (owner asked) |
 | Apps bar: widens on scroll, pull down for rows up to all apps with names, handle, swipe up to compact; All Apps closes with a swipe up | built b94abf6 + names commit (iPhone/iPad only; Android not built) |
-| Apps bar opens to four rows, then the whole screen; search filters the apps bar | built 70d3507, iOS 2000060 (search also filters Android's apps row); StagePeekDockLayoutTests 5/5; not yet checked by hand |
+| Apps bar opens to four rows, then the whole screen, stopping above Expand and Close (Compact shrinks it); search filters the apps bar | built 70d3507 + 9b8ba92, iOS 2000061 (search also filters Android's apps row); StagePeekDockLayoutTests 5/5; not yet checked by hand |
 | Android crash on session end (InterruptedException while closing) | found in the Moto's crash log, fixed b94abf6 with a test |
 
 Not checked on the iPad: VoiceOver walkthrough, Larger Text, the Privacy Shield covering (the

@@ -54,7 +54,7 @@ skipped; at 70d3507 (apps bar only) StagePeekDockLayoutTests 5/5 and Android 998
 skipped); iOS device build and Mac sender/receiver builds succeed.
 
 Installed for the final physical checks (in place, data and pairing kept): Mac Dev cdeda71 (Mac
-code unchanged since), iPhone and iPad iOS 2000060 (70d3507), Moto debug 70d3507. Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
+code unchanged since), iPhone and iPad iOS 2000061 (9b8ba92), Moto debug 70d3507 (Android code unchanged since). Live UI tests (`iOSUITests/LiveStabilizationTests`) need a paired Mac and a
 device and don't run in CI.
 
 ## Features in 2.0 and their state
@@ -80,7 +80,9 @@ cloud review:
   MeowDisplay ▸ Downloads (Android: Download ▸ MeowDisplay), and says where. Share opens the
   system share sheet.
 - Stage Peek apps bar (iPhone/iPad): widens on scroll; pulling down (or tapping the handle) opens
-  four rows with names, then the whole screen; swipe up to compact; choosing an app closes it.
+  four rows with names, then the whole screen (stopping above the Expand and Close buttons, which
+  then shrink it; no swipe from the screen's bottom edge needed); swipe up on its handle to
+  compact; choosing an app closes it.
   The search filters the apps bar (Android's apps row too). Tap empty space in the expanded
   view to close it.
 - Not built: Camera Mode / Microphone Mode (owner deferred). Clipboard is out of this release's
