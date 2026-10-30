@@ -65,8 +65,16 @@ class PairingAttempt(
         decide: suspend (PendingPairing) -> Boolean,
         onPeerAbort: () -> Unit = {},
         onCommitting: () -> Unit = {},
+        onCommitmentReceived: () -> Unit = {},
     ): PendingPairing {
-        val request = transport.receive()
+        // Until its commitment arrives the peer is anyone on the network: it gets
+        // PreAuthSlots.DEADLINE_MS to send it.
+        val request = try {
+            withTimeout(PreAuthSlots.DEADLINE_MS) { transport.receive() }
+        } catch (_: TimeoutCancellationException) {
+            fail(PairingError.MalformedMessage)
+        }
+        onCommitmentReceived()
         val commitment = request.helloCommitment
         if (request.kind != PairingEnvelope.Kind.HelloCommit || commitment == null || commitment.size != 32) {
             fail(PairingError.MalformedMessage)
