@@ -162,6 +162,7 @@ fun ReceiverScreen(
     // Stage Peek's edge strip and the "Switch to Window view?" offer are controls too: the rest of the screen avoids them.
     var stripFrame by remember { mutableStateOf<CGRect?>(null) }
     var promptFrame by remember { mutableStateOf<CGRect?>(null) }
+    var clipFrame by remember { mutableStateOf<CGRect?>(null) }
     val folds = rememberFoldRegions()
 
     LaunchedEffect(prefs, transient.moveViewActive) { controller.refreshConfig() }
@@ -230,8 +231,8 @@ fun ReceiverScreen(
         // The Mac follows its text caret only while the keyboard is really up.
         LaunchedEffect(keyboardShown) { controller.keyboardVisibilityChanged(keyboardShown) }
         val windowRect = CGRect(0.0, 0.0, widthDp, heightDp)
-        LaunchedEffect(window, canvas, occupied, hintFrame, stripFrame, promptFrame, decoded, state.videoEnabled, prefs.inputMode) {
-            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame, stripFrame, promptFrame), folds)
+        LaunchedEffect(window, canvas, occupied, hintFrame, stripFrame, promptFrame, clipFrame, decoded, state.videoEnabled, prefs.inputMode) {
+            controller.layout(windowRect, canvas ?: windowRect, keyboardRect, insets, occupied + listOfNotNull(hintFrame, stripFrame, promptFrame, clipFrame), folds)
         }
 
         val transform = state.transform
@@ -422,6 +423,12 @@ fun ReceiverScreen(
             )
         }
         workspace?.let { WindowOverview(it, macName, state.inputAllowed, onMirror = { onMode(DisplayMode.Mirror) }, onExtend = { onMode(DisplayMode.Extend) }) }
+        // Unified Clipboard prompts (send a copy, the Mac's files), above the bottom controls.
+        workspace?.let {
+            com.raisecaterror.meowdisplay.android.receiver.workspace.ClipboardBanner(
+                it.clipboard, Modifier.align(Alignment.BottomCenter).padding(bottom = (insets.bottom + 90).dp, start = 16.dp, end = 16.dp),
+            ) { f -> clipFrame = f }
+        }
         // Remote Finder (Finder in the Stage Peek carousel): over everything, the picture unchanged.
         workspace?.let {
             // Below any chrome the host draws at the top (the demo's badge).

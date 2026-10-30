@@ -88,7 +88,7 @@ import kotlin.math.roundToInt
 /** The receiver categories of the iOS Settings (MobileSettingsCategory), plus the session actions. */
 enum class SettingsPage(val title: String) {
     Input("Input"), Gestures("Gestures"), Controls("Controls"), TabletLayout("Tablet Layout"),
-    Display("Display"), Audio("Audio"), Session("Session"), Help("Help"),
+    Display("Display"), Audio("Audio"), Clipboard("Clipboard"), Session("Session"), Help("Help"),
 }
 
 /**
@@ -350,6 +350,7 @@ private fun SettingsPageContent(
             }
         }
         SettingsPage.Help -> HelpPage()
+        SettingsPage.Clipboard -> com.raisecaterror.meowdisplay.android.receiver.workspace.ClipboardSettingsPage(controller.workspace?.clipboard, media.isDemo)
         SettingsPage.Session -> {
             val mediaUi by media.ui.collectAsState()
             val view by controller.view.collectAsState()

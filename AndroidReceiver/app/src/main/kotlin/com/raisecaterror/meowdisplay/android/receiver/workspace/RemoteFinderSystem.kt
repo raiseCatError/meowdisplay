@@ -162,21 +162,32 @@ fun RemoteFinderSystem(files: RemoteFilesModel, requests: RemoteFinderRequests) 
     requests.uploadFiles = { pickFiles.launch(arrayOf("*/*")) }
     requests.uploadFolder = { pickFolder.launch(null) }
 
-    // Save: one file → "create document"; several or folders → a folder to save into.
+    ExportLauncher(ui.export) { e, ok, keep -> files.exportFinished(e, ok, keep) }
+}
+
+/**
+ * Save (one file → "create document"; several or folders → a folder to save into) or Share
+ * for [export]; [finished] gets (export, completed, keep for ms). Remote Finder and the clipboard use it.
+ */
+@Composable
+internal fun ExportLauncher(export: RemoteFilesExport?, finished: (RemoteFilesExport, Boolean, Long) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val resolver = context.contentResolver
     var saving by remember { mutableStateOf<RemoteFilesExport?>(null) }
     val createDoc = rememberLauncherForActivityResult(CreateTypedDocument()) { uri ->
         val e = saving ?: return@rememberLauncherForActivityResult
         saving = null
-        if (uri == null) return@rememberLauncherForActivityResult files.exportFinished(e, false)
+        if (uri == null) return@rememberLauncherForActivityResult finished(e, false, 0)
         scope.launch {
             val ok = withContext(Dispatchers.IO) { runCatching { copyFile(resolver, e.files.single(), uri) }.isSuccess }
-            files.exportFinished(e, ok)
+            finished(e, ok, 0)
         }
     }
     val pickDest = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         val e = saving ?: return@rememberLauncherForActivityResult
         saving = null
-        if (tree == null) return@rememberLauncherForActivityResult files.exportFinished(e, false)
+        if (tree == null) return@rememberLauncherForActivityResult finished(e, false, 0)
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 runCatching {
@@ -184,11 +195,11 @@ fun RemoteFinderSystem(files: RemoteFilesModel, requests: RemoteFinderRequests) 
                     e.files.forEach { copyInto(resolver, it, parent) }
                 }.isSuccess
             }
-            files.exportFinished(e, ok)
+            finished(e, ok, 0)
         }
     }
-    LaunchedEffect(ui.export?.id) {
-        val e = ui.export ?: return@LaunchedEffect
+    LaunchedEffect(export?.id) {
+        val e = export ?: return@LaunchedEffect
         when (e.mode) {
             RemoteFilesExport.Mode.Save -> {
                 saving = e
@@ -198,7 +209,7 @@ fun RemoteFinderSystem(files: RemoteFilesModel, requests: RemoteFinderRequests) 
             RemoteFilesExport.Mode.Share -> {
                 share(context, e)
                 // The receiving app reads the copies when it likes; they go a while later (and when the app starts).
-                files.exportFinished(e, completed = false, keepForMs = SHARE_KEEP_MS)
+                finished(e, false, SHARE_KEEP_MS)
             }
         }
     }
@@ -262,11 +273,11 @@ private fun folderTree(resolver: ContentResolver, tree: Uri): RemoteUploadFolder
     return RemoteUploadFolder(rootName, folders, files)
 }
 
-private fun copyFile(resolver: ContentResolver, src: File, dest: Uri) {
+internal fun copyFile(resolver: ContentResolver, src: File, dest: Uri) {
     resolver.openOutputStream(dest, "w")?.use { out -> src.inputStream().use { it.copyTo(out, 256 * 1024) } } ?: throw IOException("no output")
 }
 
-private fun copyInto(resolver: ContentResolver, src: File, parent: Uri) {
+internal fun copyInto(resolver: ContentResolver, src: File, parent: Uri) {
     if (src.isDirectory) {
         val dir = DocumentsContract.createDocument(resolver, parent, DocumentsContract.Document.MIME_TYPE_DIR, src.name) ?: throw IOException("mkdir")
         src.listFiles()?.sortedBy { it.name }?.forEach { copyInto(resolver, it, dir) }
@@ -279,7 +290,7 @@ private fun copyInto(resolver: ContentResolver, src: File, parent: Uri) {
 private fun contentUri(context: Context, f: File): Uri = FileProvider.getUriForFile(context, context.packageName + ".remotefiles", f)
 
 /** The share sheet with read-only content URIs (folders are shared as the files inside them). */
-private fun share(context: Context, e: RemoteFilesExport) {
+internal fun share(context: Context, e: RemoteFilesExport) {
     val all = e.files.flatMap { f -> if (f.isDirectory) f.walkTopDown().filter { it.isFile }.toList() else listOf(f) }.take(100)
     if (all.isEmpty()) return
     val uris = all.map { contentUri(context, it) }

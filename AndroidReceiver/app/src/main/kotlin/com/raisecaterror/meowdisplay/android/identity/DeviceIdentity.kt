@@ -37,14 +37,20 @@ class DeviceIdentity private constructor(
         private const val PREFS = "identity"
         private const val INSTALL_ID = "installID"
 
+        /** The stable install id, created on first use (without the keys). */
         // commit() with its result checked: the install id must be durable
         // before anything is paired under it.
         @SuppressLint("UseKtx")
-        fun load(context: Context): DeviceIdentity {
+        @Synchronized
+        fun installID(context: Context): String {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val installID = prefs.getString(INSTALL_ID, null) ?: UUID.randomUUID().toString().uppercase().also {
+            return prefs.getString(INSTALL_ID, null) ?: UUID.randomUUID().toString().uppercase().also {
                 check(prefs.edit().putString(INSTALL_ID, it).commit()) { "could not store the install id" }
             }
+        }
+
+        fun load(context: Context): DeviceIdentity {
+            val installID = installID(context)
             val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             if (!keyStore.containsAlias(KEY_ALIAS)) generate()
             val entry = keyStore.getEntry(KEY_ALIAS, null) as KeyStore.PrivateKeyEntry

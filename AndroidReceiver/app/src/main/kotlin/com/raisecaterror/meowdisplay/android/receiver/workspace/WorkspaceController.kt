@@ -238,6 +238,18 @@ class WorkspaceController(
         macKey = { host },
     )
 
+    /** Unified Clipboard with the connected Mac (off until turned on here and allowed there). */
+    val clipboard = com.raisecaterror.meowdisplay.core.clipboard.ClipboardModel(
+        origin = com.raisecaterror.meowdisplay.android.identity.DeviceIdentity.installID(context),
+        settings = object : com.raisecaterror.meowdisplay.core.clipboard.ClipboardSettingsStore {
+            override fun get(key: String): String? = prefs.getString(key, null)
+            override fun set(key: String, value: String?) { prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply() }
+        },
+        send = { media.session.sendWorkspace(it) },
+        scheduler = { ms, block -> val r = Runnable(block); main.postDelayed(r, ms); { main.removeCallbacks(r) } },
+        tempRoot = java.io.File(java.io.File(java.io.File(context.cacheDir, "RemoteFinder"), "clipboard"), prefsName),
+    ).also { it.platform = AndroidClipboardPlatform(context.applicationContext) }
+
     /** The focused pane's app menus (a bar under its label). */
     val menus = AppMenuModel(
         send = { media.session.sendWorkspace(it) },
@@ -254,6 +266,7 @@ class WorkspaceController(
             is SessionEvent.MacFeatures -> {
                 state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
+                clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in event.features)
                 menus.setAvailable(AppMenuWire.WELCOME_FEATURE in event.features)
             }
             is SessionEvent.DisplayModeConfirmed -> {
@@ -269,6 +282,8 @@ class WorkspaceController(
                 planner.reset()
                 clearViews()
                 files.setAvailable(false)
+                clipboard.setAvailable(false)
+                (clipboard.platform as? AndroidClipboardPlatform)?.forgetSent()
                 menus.setAvailable(false)
                 state.update {
                     it.copy(windowMode = false, remote = null, available = false, arranging = false, stagePeekOpen = false,
@@ -306,6 +321,7 @@ class WorkspaceController(
                     requestIcons()
                 }
                 RemoteFilesWire.REPLY -> RemoteFilesReply.parse(event.body)?.let(files::apply)
+                com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.TYPE -> clipboard.handle(event.body)
                 AppMenuWire.MENU -> menus.apply(AppMenuReply.parse(event.body))
                 AppMenuWire.RESULT -> menus.applyResult(
                     (event.body["ok"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true",
