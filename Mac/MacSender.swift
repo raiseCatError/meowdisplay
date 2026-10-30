@@ -4348,6 +4348,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // boundary; it re-reads this queue-confined property once back on
     // `queue` instead. Only touched on `queue`.
     private var activeUSBBridgeTLS: TLSSessionConfig?
+    /// The current QUIC dial's endpoint came from an unauthenticated `_meowdisp-q._udp`
+    /// discovery hint: an identity mismatch there says the hint is wrong, not that the paired
+    /// device's identity changed (transportQUICFailed).
+    private var quicDialUsedDiscoveryHint = false
 
     private func connect() {
         guard !stopped else { return }
@@ -4370,6 +4374,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 connectTCP(endpoint, tls: tls)
             case .quic:
                 guard let quicEndpoint else { return }
+                quicDialUsedDiscoveryHint = QUICDiscoveryHintStore.shared.entry(peerID: tls.peerID)?.endpoint == quicEndpoint
                 dialingProtocol = .quic
                 Log.info("connectDebug: dialStarted peer=\(endpointName) route=tcp protocol=quic"
                     + " preference=\(networkPreference.rawValue)")
@@ -4557,7 +4562,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let selfBox = self.selfBox
         Task { @MainActor in
             guard let self = selfBox.resolve() else { return }
-            self.onTrustFailure?("MeowDisplay could not verify this device. Forget it and pair again if its identity was reset.")
+            // Honest about both causes: the address came from the network, and the device that
+            // answered there didn't prove it is the paired one. Nothing is forgotten automatically.
+            self.onTrustFailure?("MeowDisplay couldn't verify the device that answered and didn't connect. If this device's identity was reset (for example after reinstalling MeowDisplay), Forget it and pair again; otherwise another device on this network may be answering in its place.")
         }
     }
 
@@ -7150,6 +7157,18 @@ extension MacSender: MacSenderTransportDelegate {
         Log.info("quic: policy class=\(failure.failureClass.rawValue) established=\(failure.established)"
             + " preference=\(networkPreference.rawValue) action=\(action)")
         switch action {
+        case .stop(.security) where quicDialUsedDiscoveryHint && !failure.established:
+            // A spoofed or stale discovery record answered: drop the hint and dial again, which
+            // derives the endpoint from the TCP service (still the same pinned mutual TLS). No
+            // trust failure and no "Forget" prompt for what the network claimed.
+            QUICDiscoveryHintStore.shared.remove(peerID: tls.peerID)
+            // Auto then uses secure TCP for the cooldown, so a record that keeps reappearing
+            // can't loop the dial (explicit QUIC ignores the cooldown and uses the derived endpoint).
+            QUICCooldownStore.shared.start(peerID: tls.peerID, routeKind: NetworkRouteKind(endpoint: endpoint))
+            quicDialUsedDiscoveryHint = false
+            Log.info("SECURITY: the QUIC discovery hint for \(endpointName) answered with another identity; hint dropped")
+            invalidateApplicationSession(reason: "quicHintMismatch")
+            scheduleReconnect()
         case .stop(.security):
             invalidateApplicationSession(reason: "certificateRejected")
             reportTrustFailure()

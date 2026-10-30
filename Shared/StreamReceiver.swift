@@ -2843,8 +2843,12 @@ final class StreamReceiver: ObservableObject {
             // The Mac self-labels this with its own install ID purely as a
             // cache key — this is a network hint only (Remote Wake-on-LAN
             // foundation) and never affects trust or pairing.
-            guard let peerID = obj["peer"] as? String, let mac = obj["mac"] as? String,
-                  let interface = obj["interface"] as? String else { return }
+            guard let mac = obj["mac"] as? String, let interface = obj["interface"] as? String else { return }
+            guard let peerID = WakeMetadataStore.storageKey(claimedPeerID: obj["peer"] as? String,
+                                                            authenticatedPeerID: reconnectContext.current().authenticatedPeerIDHint) else {
+                Log.info("SECURITY: wakeInfo naming another peer than the authenticated Mac dropped")
+                return
+            }
             let metadata = WakeMetadata(macAddress: mac, interfaceName: interface,
                                         ipv4: obj["ipv4"] as? String,
                                         subnetMask: obj["subnet"] as? String,
