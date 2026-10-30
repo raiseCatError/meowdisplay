@@ -42,6 +42,7 @@ enum Log {
     }()
 
     static func info(_ message: String) {
+        let message = LogRedaction.redact(message)
         NSLog("[opensidecar] %@", message)
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }

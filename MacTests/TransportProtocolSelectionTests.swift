@@ -606,4 +606,22 @@ final class TransportProtocolSelectionTests: XCTestCase {
     func testRuntimeAvailabilityNeedsNoDeploymentFloorChange() {
         XCTAssertTrue(QUICRuntimeAvailability.isAvailable)
     }
+
+    // Discovery is unauthenticated: an ID claimed by records of different service names gets no
+    // hint (the dial derives the endpoint from the TCP service it chose); the same service seen
+    // on several interfaces is one record.
+    func testAnAmbiguousDiscoveryIDGetsNoHint() {
+        let hints = QUICDiscoveryHintStore()
+        let hint = QUICDiscoveryHint(txt: ["id": "p", "qv": "1"])!
+        let real = NWEndpoint.service(name: "iPad", type: QUICTransport.bonjourServiceType, domain: "local.", interface: nil)
+        let spoof = NWEndpoint.service(name: "Not an iPad", type: QUICTransport.bonjourServiceType, domain: "local.", interface: nil)
+        hints.replaceAll([.init(hint: hint, endpoint: real), .init(hint: hint, endpoint: spoof)])
+        XCTAssertNil(hints.entry(peerID: "p"))
+        XCTAssertEqual(TransportProtocolInputsResolver.quicEndpoint(
+            for: .service(name: "iPad", type: "_opensidecar._tcp", domain: "local.", interface: nil), peerID: "p", hints: hints),
+            .service(name: "iPad", type: QUICTransport.bonjourServiceType, domain: "local.", interface: nil))
+        hints.replaceAll([.init(hint: hint, endpoint: real), .init(hint: hint, endpoint: real)])
+        XCTAssertEqual(hints.entry(peerID: "p")?.endpoint, real, "one service on two interfaces keeps its hint")
+    }
+
 }

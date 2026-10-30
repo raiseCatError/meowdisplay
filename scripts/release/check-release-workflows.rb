@@ -31,6 +31,9 @@
 #     publish-mac job (release-publish environment, reviewer check unless both
 #     auto switches are set), after the gate (`publish start`), as draft ->
 #     byte check -> Latest -> live check with revert;
+#   - a resume (`resume: true`) needs release-publish's approval
+#     (authorize-resume) and live re-verification (verify-resume) before any
+#     store version is released; verify-stores confirms approvals live;
 #   - release-pr.yml: release-please only there, App token from the release-pr
 #     environment, skip-github-release, targets the release branch it runs on;
 #   - release-monitor.yml and the other scheduled workflows run on a schedule
@@ -45,6 +48,9 @@ require "yaml"
 DIR = ARGV[0] || File.expand_path("../../.github/workflows", __dir__)
 SYNC_SCRIPT = ARGV[1] || File.expand_path("../reference/sync-reference.sh", __dir__)
 @errors = []
+
+# The workflows are UTF-8 whatever the runner's locale says.
+Encoding.default_external = Encoding::UTF_8
 
 def err(file, msg)
   @errors << "#{file}: #{msg}"
@@ -141,6 +147,26 @@ def secrets_behind_environments(name, doc, allowed)
     end
     check = steps(job).index { |s| run_text(s).include?("check-environment.sh #{env}") }
     err(name, "job #{id} must run check-environment.sh #{env} before using secrets") unless check && check < first
+    next unless check
+
+    # A step that still runs after a failed check (always(), !cancelled(), failure()) would
+    # hand the secrets to an environment the check just found unprotected: it must also
+    # require the check's success.
+    check_id = steps(job)[check]["id"]
+    steps(job).each_with_index do |s, i|
+      next if i <= check
+      next unless uses_secrets?(s) || s["uses"].to_s.start_with?("actions/create-github-app-token@")
+      cond = s["if"].to_s
+      next unless cond.match?(/always\(\)|cancelled\(\)|failure\(\)/)
+      next if check_id && cond.match?(/steps\.#{Regexp.escape(check_id)}\.outcome\s*==\s*'success'/)
+
+      err(name, "job #{id} step '#{s['name'] || s['uses']}' uses secrets even when check-environment.sh failed " \
+                "(give the check an id and require steps.<id>.outcome == 'success')")
+    end
+  end
+  # Job-level env is visible to every step, the environment check included.
+  doc.fetch("jobs", {}).each do |id, job|
+    err(name, "job #{id} exposes secrets in job-level env; pass them to the steps that need them") if uses_secrets?(job["env"])
   end
 end
 
@@ -411,6 +437,45 @@ Dir[File.join(DIR, "*.yml")].sort.each do |path|
   common(name, doc, pin: false)
   no_publishing(name, doc)
   err(name, "release-please runs only in release-pr.yml") if File.read(path).include?("googleapis/release-please-action")
+end
+
+# Resumed publication (the monitor dispatches resume: true): no path may
+# release a store version without the final release-publish approval, and a
+# resume re-derives every fact live instead of trusting the release state.
+if (doc = load("release-publish.yml"))
+  name = "release-publish.yml"
+  jobs = doc["jobs"]
+  ar = jobs["authorize-resume"]
+  vr = jobs["verify-resume"]
+  vs = jobs["verify-stores"]
+  if ar.nil? || env_name(ar) != "release-publish" ||
+     steps(ar).none? { |x| run_text(x).include?("check-environment.sh release-publish --require-reviewers") }
+    err(name, "authorize-resume must hold the release-publish approval (required reviewers) for every resume")
+  end
+  if vr.nil? || !transitive_needs(jobs, "verify-resume").include?("authorize-resume")
+    err(name, "verify-resume must run only after authorize-resume")
+  else
+    text = steps(vr).map { |x| run_text(x) }.join("\n")
+    err(name, "verify-resume must confirm store approvals live (verify-live)") unless text.include?("verify-live STATE")
+    err(name, "verify-resume must confirm the Mac release is Latest") unless text.include?("releases/latest")
+    err(name, "verify-resume must check the live artifacts against the recorded hashes") unless text.include?("sha256sum -c")
+    err(name, "verify-resume must find a successful publish-mac job for this commit") unless text.include?('select(.name == "publish-mac" and .conclusion == "success")')
+  end
+  if vs.nil? || steps(vs).none? { |x| run_text(x).include?("verify-live STATE") }
+    err(name, "verify-stores must confirm store approvals live (verify-live), not only the recorded state")
+  end
+  jobs.each do |id, job|
+    next unless steps(job).any? { |x| run_text(x).include?("publish stores STATE") }
+
+    deps = transitive_needs(jobs, id)
+    unless %w[publish-mac authorize-resume verify-resume].all? { |d| deps.include?(d) }
+      err(name, "job #{id} releases store versions without depending on publish-mac, authorize-resume and verify-resume")
+    end
+    unless job["if"].to_s.include?("inputs.resume && needs.verify-resume.result == 'success'") &&
+           job["if"].to_s.include?("!inputs.resume && needs.publish-mac.result == 'success'")
+      err(name, "job #{id} must run only after publish-mac, or on resume only after verify-resume succeeded")
+    end
+  end
 end
 
 if @errors.empty?

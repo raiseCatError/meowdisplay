@@ -12,6 +12,7 @@ import com.raisecaterror.meowdisplay.core.pairing.PairingError
 import com.raisecaterror.meowdisplay.core.pairing.PairingException
 import com.raisecaterror.meowdisplay.core.pairing.PairingProtocol
 import com.raisecaterror.meowdisplay.core.pairing.PendingPairing
+import com.raisecaterror.meowdisplay.core.pairing.PreAuthSlots
 import com.raisecaterror.meowdisplay.core.pairing.SocketPairingTransport
 import com.raisecaterror.meowdisplay.core.remote.IpLiteral
 import com.raisecaterror.meowdisplay.core.remote.RemoteEndpoint
@@ -87,6 +88,7 @@ class PairingController(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val throttle = PairingCommitThrottle()
+    private val preAuth = PreAuthSlots(PreAuthSlots.PAIRING_LIMIT)
     private var remoteJob: Job? = null
     private var lastRemote: RemoteEndpoint? = null
     private val state = MutableStateFlow(PairingUiState())
@@ -239,18 +241,28 @@ class PairingController(
                     } catch (_: IOException) {
                         break
                     }
-                    scope.launch { respond(socket) }
+                    val slot = preAuth.tryAcquire()
+                    if (slot == null) {
+                        // Every slot is held by a connection that hasn't sent its
+                        // commitment yet: close this one at once.
+                        runCatching { socket.close() }
+                        continue
+                    }
+                    scope.launch {
+                        try { respond(socket, slot) } finally { slot.release() }
+                    }
                 }
             }
         }
     }
 
-    private suspend fun respond(socket: Socket) = socket.use {
+    private suspend fun respond(socket: Socket, slot: PreAuthSlots.Slot) = socket.use {
         socket.tcpNoDelay = true
         val attempt = attempt(socket)
         val outcome = try {
             val paired = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
-                attempt.runResponder(throttle, decide = { ask(it, attempt) })
+                attempt.runResponder(throttle, decide = { ask(it, attempt) },
+                                     onCommitmentReceived = { slot.release() })
             } ?: throw PairingException(PairingError.Rejected)
             "Paired with ${paired.peerName}"
         } catch (e: CancellationException) {

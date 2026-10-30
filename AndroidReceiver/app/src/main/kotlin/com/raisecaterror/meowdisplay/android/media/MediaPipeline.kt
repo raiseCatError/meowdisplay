@@ -19,7 +19,7 @@ class MediaPipeline(media: MediaController, avSyncOffsetMs: () -> Int = { 0 }) {
     val stats = StreamStats()
 
     val video = VideoDecoder(
-        requestKeyframe = { media.session.requestKeyframe() },
+        requestKeyframe = { media.session.requestKeyframeThrottled() },
         onVideoSize = { w, h -> size.value = w to h },
         stats = stats,
         captureToLocalMs = { capture -> media.session.clockOffsetMs?.let { capture - it } },

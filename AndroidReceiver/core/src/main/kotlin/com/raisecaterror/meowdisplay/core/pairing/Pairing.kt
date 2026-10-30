@@ -170,7 +170,9 @@ class PairingHandshake(
         return PairingResult(
             pending = PendingPairing(
                 peerID = peerHello.deviceID,
-                peerName = peerHello.displayName,
+                // Shown on screen and stored: without control, bidi or line-separator
+                // characters. The transcript above already bound the name as sent.
+                peerName = PairingNames.display(peerHello.displayName),
                 peerSPKI = peerHello.identitySPKI,
                 sas = String.format(java.util.Locale.ROOT, "%03d %03d", number / 1000, number % 1000),
             ),
@@ -218,4 +220,40 @@ class PairingResult internal constructor(
     }
 
     private fun confirmationBody(accepted: Boolean) = transcriptHash + byteArrayOf(if (accepted) 1 else 0)
+}
+
+/**
+ * A peer's self-chosen name (from an unauthenticated hello) as this device shows and stores it,
+ * the same rule as Shared/RemotePairing.swift `OwnerAuthPolicy.displayName`: no control
+ * characters and none of the bidi, zero-width and line-separator characters that can reorder,
+ * hide or fake text in a prompt (ZWJ/ZWNJ stay: emoji and several scripts need them), trimmed,
+ * at most 40 characters, and "Device" when nothing printable is left.
+ */
+object PairingNames {
+    private val dangerous: Set<Int> = buildSet {
+        addAll(listOf(0x061C, 0x200B, 0x200E, 0x200F, 0x2028, 0x2029, 0x2060, 0xFEFF))
+        addAll(0x202A..0x202E)
+        addAll(0x2066..0x2069)
+    }
+    const val MAX_CHARACTERS = 40
+    const val FALLBACK = "Device"
+
+    fun display(raw: String): String {
+        val kept = StringBuilder()
+        raw.codePoints().forEach { cp ->
+            if (Character.getType(cp) != Character.CONTROL.toInt() && cp !in dangerous) kept.appendCodePoint(cp)
+        }
+        val text = kept.toString().trim()
+        // 40 user-perceived characters (grapheme clusters), as Swift's String.prefix counts them.
+        val breaks = java.text.BreakIterator.getCharacterInstance(java.util.Locale.ROOT).apply { setText(text) }
+        var end = 0
+        var count = 0
+        while (count < MAX_CHARACTERS) {
+            val next = breaks.next()
+            if (next == java.text.BreakIterator.DONE) { end = text.length; break }
+            end = next
+            count += 1
+        }
+        return text.substring(0, end).trim().ifEmpty { FALLBACK }
+    }
 }

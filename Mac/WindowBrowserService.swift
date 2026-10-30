@@ -367,6 +367,8 @@ final class WindowBrowserService: @unchecked Sendable {
             defer { self?.queue.async { self?.displayStillsBusy = false } }
             for d in wanted {
                 guard let self, await self.isActive() else { return }
+                // No display still while the Mac asks for its password: it could show the prompt.
+                guard !PrivacyShieldWindows.isUnlocking else { continue }
                 let cfg = SCStreamConfiguration()
                 cfg.width = width
                 cfg.height = max(Int(Double(width) * Double(d.height) / Double(max(d.width, 1))) & ~1, 2)

@@ -141,6 +141,26 @@ struct InputControlRequestLifecycle: Equatable {
     }
 }
 
+/// The Not Now / timeout cooldown per device (verified peer ID), kept by the controller across
+/// that device's sessions: `InputControlRequestLifecycle` belongs to one session and starts
+/// clean with the next, so without this a declined device could disconnect and reconnect to put
+/// a new prompt on the Mac at once.
+struct InputControlRequestCooldowns: Equatable {
+    private var until: [String: Date] = [:]
+
+    func isCoolingDown(peerID: String, now: Date = Date()) -> Bool {
+        guard let end = until[peerID] else { return false }
+        return now < end
+    }
+
+    mutating func record(_ decision: InputControlRequestDecision, peerID: String, now: Date = Date()) {
+        until = until.filter { $0.value > now }
+        if decision == .notNow { until[peerID] = now.addingTimeInterval(InputControlRequestLifecycle.cooldown) }
+    }
+
+    mutating func forget(peerID: String) { until[peerID] = nil }
+}
+
 /// effectiveInput = macMasterAllowsInput AND thisSession'sGrant — the one
 /// formula every input-gate choke point evaluates (`MacSender.
 /// receiverInputIsAllowed`/`receiverKeyboardInputIsAllowed`, `InputInjector.

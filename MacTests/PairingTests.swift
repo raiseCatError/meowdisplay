@@ -245,4 +245,14 @@ final class PairingTests: XCTestCase {
         XCTAssertTrue(state.isHeldByAnotherPeer("d", spki: own))
         XCTAssertFalse(state.isHeldByAnotherPeer("c", spki: own), "re-pairing the same peer is fine")
     }
+
+    // The name in an unauthenticated hello is shown in the pairing prompt: no control, bidi or
+    // line-separator characters can rearrange or fake what the person reads.
+    func testPeerNamesAreCleanedForDisplay() {
+        XCTAssertEqual(OwnerAuthPolicy.displayName("Jai\u{202E}moc.elppa"), "Jaimoc.elppa")
+        XCTAssertEqual(OwnerAuthPolicy.displayName("Mac\u{2028}Approved\u{0007}"), "MacApproved")
+        XCTAssertEqual(OwnerAuthPolicy.displayName("Jai's iPhone 🐱"), "Jai's iPhone 🐱")
+        XCTAssertEqual(OwnerAuthPolicy.displayName("\u{202E}\u{2066}\u{0001}"), String(localized: "Device"))
+    }
+
 }

@@ -45,6 +45,15 @@ enum RemoteEndpointStore {
         return (hint.host, hint.port)
     }
 
+    /// Where a media connection to the peer goes: the saved host and port, except that a saved
+    /// port equal to the remote request listener's (9003, which the Mac's own editor wrongly
+    /// filled in for a while) means the media listener (9001). Nothing listens for media on
+    /// 9003, so such a hint could never have connected; the stored value is left as it is.
+    static func mediaEndpoint(forPeerID peerID: String, role: RolePreferences) -> (host: String, port: UInt16)? {
+        guard let hint = endpoint(forPeerID: peerID, role: role) else { return nil }
+        return (hint.host, hint.port == WireCrypto.remoteRequestPort ? WireCrypto.tlsPort : hint.port)
+    }
+
     /// The saved port is the media connection port. Remote Wake & Connect
     /// knocks use the Mac's separate authenticated request listener instead.
     /// Keep the host hint, but never reuse the media port for the knock.

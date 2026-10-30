@@ -14,8 +14,7 @@
   "android": {
     "package": "com.raisecaterror.meowdisplay.android",
     "uploadTrack": "internal",
-    "reviewTrack": "production",
-    "managedPublishing": true,
+    "reviewTrack": "alpha",
     "storeUrl": "https://play.google.com/store/apps/details?id=com.raisecaterror.meowdisplay.android"
   },
   "website": {

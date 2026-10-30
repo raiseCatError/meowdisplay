@@ -1643,8 +1643,12 @@ final class StreamReceiver: ObservableObject {
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
-        pairingPrompt.onPending = { [weak self] pending in
+        pairingPrompt.onPending = { pending in
             Log.info("pairDebug: onPending peerID=\(pending.peerID)")
+        }
+        // Only an accepted code interrupts the current session (a prompt alone can come from
+        // any host on the network); pairing started on this device begins it itself.
+        pairingPrompt.onAccepted = { [weak self] pending in
             self?.beginExplicitPairing(peerID: pending.peerID)
         }
         displayLayer.videoGravity = .resizeAspect
@@ -1709,6 +1713,10 @@ final class StreamReceiver: ObservableObject {
         TrustStore.receiverRole.forget(peerID: peerID)
         IncomingSessionPolicyStore.removePolicy(peerID: peerID, role: .receiverRole)
         InputAutoRequestStore.remove(peerID: peerID)
+        // Its saved Remote address and wake target go too: a later re-pair of the same ID
+        // starts without them (the Mac sender and Android already did this).
+        RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
+        WakeMetadataStore.removeMetadata(forPeerID: peerID, role: .receiverRole)
     }
 
     /// The per-Mac Connection Requests override (`IncomingSessionPolicyPicker`).
@@ -2436,7 +2444,7 @@ final class StreamReceiver: ObservableObject {
                         let paired = try await PairingNetwork.runResponder(
                             connection: connection, localID: installID,
                             localName: localName, prompt: prompt, allowIdentityChange: false,
-                            store: .receiverRole)
+                            throttle: .receiverRole, store: .receiverRole)
                         await prompt.finish(String(localized: "Paired with \(paired.peerName)"))
                         await uiSink.publishPairingSucceeded()
                         Self.finishExplicitPairing(
@@ -2843,8 +2851,12 @@ final class StreamReceiver: ObservableObject {
             // The Mac self-labels this with its own install ID purely as a
             // cache key — this is a network hint only (Remote Wake-on-LAN
             // foundation) and never affects trust or pairing.
-            guard let peerID = obj["peer"] as? String, let mac = obj["mac"] as? String,
-                  let interface = obj["interface"] as? String else { return }
+            guard let mac = obj["mac"] as? String, let interface = obj["interface"] as? String else { return }
+            guard let peerID = WakeMetadataStore.storageKey(claimedPeerID: obj["peer"] as? String,
+                                                            authenticatedPeerID: reconnectContext.current().authenticatedPeerIDHint) else {
+                Log.info("SECURITY: wakeInfo naming another peer than the authenticated Mac dropped")
+                return
+            }
             let metadata = WakeMetadata(macAddress: mac, interfaceName: interface,
                                         ipv4: obj["ipv4"] as? String,
                                         subnetMask: obj["subnet"] as? String,
@@ -5371,6 +5383,8 @@ final class StreamReceiver: ObservableObject {
         // the old `self.onDecodedFrame?(...)` read.
         let queue = self.queue
         let decodedFrameSink = self.decodedFrameSink
+        let keyframeThrottle = self.keyframeThrottle
+        let sendTargetBox = self.sendTargetBox
         return ReceiverVideoPresenter(
             displayLayer: displayLayer,
             outputEffects: .init(
@@ -5391,6 +5405,14 @@ final class StreamReceiver: ObservableObject {
                 // path.
                 decodeFlushIncurred: {
                     telemetry.incrementFlushCount()
+                    // The layer failed and was flushed: it shows nothing until the next
+                    // keyframe, and the Mac sends one on its own only every 60 s. Ask now,
+                    // through the same 1 s throttle as the decoder's requests.
+                    queue.async {
+                        guard keyframeThrottle.shouldSend(now: Date(), minimumInterval: 1.0) else { return }
+                        Log.info("requesting keyframe (display layer flushed after a failure)")
+                        Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                    }
                 },
                 debugFramePresented: {
                     #if DEBUG
@@ -5688,7 +5710,7 @@ final class StreamReceiver: ObservableObject {
             presentationFrame: { box, captureMs, sendMs in
                 queue.async { selfBox.currentOnQueue()?.presentDecodedSample(box.value, captureMs: captureMs, sendMs: sendMs) }
             },
-            connectionFailed: { error in
+            connectionFailed: { error, generation in
                 queue.async {
                     // FORENSIC FIX (media-death-with-input-still-working):
                     // see the original `processReceivedData`'s doc comment
@@ -5697,14 +5719,14 @@ final class StreamReceiver: ObservableObject {
                     // must mark the session down exactly like EOF.
                     Log.info("receive error: \(error)")
                     guard let pipeline = pipelineBox.current() else { return }
-                    Task { await pipeline.setConnected(false) }
+                    Task { await pipeline.connectionEnded(generation: generation) }
                 }
             },
-            connectionClosedByPeer: {
+            connectionClosedByPeer: { generation in
                 queue.async {
                     Log.info("peer closed connection")
                     guard let pipeline = pipelineBox.current() else { return }
-                    Task { await pipeline.setConnected(false) }
+                    Task { await pipeline.connectionEnded(generation: generation) }
                 }
             },
             mediaAdmitted: { [mediaAdmissionGate] generation in

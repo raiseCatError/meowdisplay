@@ -33,7 +33,7 @@ module MeowRelease
 
         return false
       end
-      blockers = @state.publication_blockers(branch_head: branch_head)
+      blockers = @state.publication_blockers(branch_head: branch_head) + config_blockers
       raise GateClosed, "not ready: #{blockers.join('; ')}" unless blockers.empty?
 
       @state.set_publication("in-progress", now: @now, sha: @state.candidate_sha, startedAt: @now.iso8601)
@@ -118,6 +118,27 @@ module MeowRelease
     end
 
     private
+
+    # What the release config itself rules out: a candidate whose recorded
+    # platforms differ from the config, or an Android release that would be
+    # "published" from a testing track (testers only, never the public).
+    def config_blockers
+      blockers = []
+      configured = @config.required_platforms.sort
+      if configured != @state.required_platforms.sort
+        blockers << "the release config requires #{configured.join(', ')}, the candidate records " \
+                    "#{@state.required_platforms.sort.join(', ')}"
+      end
+      if @state.required_platforms.include?("android")
+        begin
+          track = @config.android_review_track!(version: @state.version)
+          blockers << "android: #{track} is a testing track; a public release needs production authorization" unless track == "production"
+        rescue Error => e
+          blockers << "android: #{e.message}"
+        end
+      end
+      blockers
+    end
 
     def require_in_progress!
       return if @state.publication_stage == "in-progress"

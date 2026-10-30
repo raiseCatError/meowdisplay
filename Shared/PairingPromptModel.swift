@@ -17,6 +17,11 @@ final class PairingPromptModel: ObservableObject {
     private let timeoutNanoseconds: UInt64
 
     var onPending: ((PendingPairing) -> Void)?
+    /// The person at this device accepted the code (and any owner authentication passed).
+    /// Anything that interrupts this device's sessions for a pairing (ending a connection,
+    /// pausing auto-connect) belongs here, never in `onPending`: a prompt alone can come from
+    /// any host on the network, and must not be able to disrupt a live session.
+    var onAccepted: ((PendingPairing) -> Void)?
 
     // MARK: Attempt ownership
     //
@@ -266,9 +271,11 @@ final class PairingPromptModel: ObservableObject {
         timeoutTask?.cancel()
         timeoutTask = nil
         decision = nil
-        confirmedLocally = value ? pending : nil
+        let accepted = value ? pending : nil
+        confirmedLocally = accepted
         pending = nil
         Log.info("pairDebug: confirmationResolved value=\(value) reason=\(reason)")
+        if let accepted { onAccepted?(accepted) }
         current.resume(returning: value)
     }
 }

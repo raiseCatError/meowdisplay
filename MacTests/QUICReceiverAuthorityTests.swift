@@ -150,7 +150,7 @@ final class QUICReceiverAuthorityTests: XCTestCase {
             checkAddressChangeAndSendHello: { _ in })
         let framePipeline = ReceiverFramePipeline(outputEffects: .init(
             controlMessage: { _ in }, audioPayload: { _ in }, codecConfigurationChanged: { _, _ in },
-            presentationFrame: { _, _, _ in }, connectionFailed: { _ in }, connectionClosedByPeer: {}))
+            presentationFrame: { _, _, _ in }, connectionFailed: { _, _ in }, connectionClosedByPeer: { _ in }))
         return ReceiverPipelineActor(
             queue: queue, sendTargetBox: StreamReceiver.SendTargetBox(), reconnectContext: context,
             uiEffects: uiEffects, hostEffects: hostEffects, framePipeline: framePipeline, quicGroups: registry)
@@ -259,8 +259,8 @@ final class QUICReceiverAuthorityTests: XCTestCase {
             audioPayload: { recorder.audio($0) },
             codecConfigurationChanged: { _, _ in },
             presentationFrame: { _, _, _ in },
-            connectionFailed: { _ in },
-            connectionClosedByPeer: {},
+            connectionFailed: { _, _ in },
+            connectionClosedByPeer: { _ in },
             mediaAdmitted: { _ in recorder.isAdmitted() }))
         return (pipeline, recorder)
     }

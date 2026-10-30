@@ -64,6 +64,21 @@ class WorkflowChecksTest < Minitest::Test
                   "release-publish.yml" => ['--draft=true', '--draft=false-ish'])
     assert_caught("publish-mac must open the gate (publish start) before publishing",
                   "release-publish.yml" => ["publish start STATE", "summary STATE"])
+    assert_caught("authorize-resume must hold the release-publish approval",
+                  "release-publish.yml" => ["run: scripts/release/check-environment.sh release-publish --require-reviewers",
+                                            "run: scripts/release/check-environment.sh release-publish"])
+    assert_caught("verify-resume must run only after authorize-resume",
+                  "release-publish.yml" => ["needs: [guard, authorize-resume]", "needs: [guard]"])
+    assert_caught("verify-resume must check the live artifacts against the recorded hashes",
+                  "release-publish.yml" => ["sha256sum -c expected.sha256", "true expected.sha256"])
+    assert_caught("verify-resume must find a successful publish-mac job",
+                  "release-publish.yml" => ['.conclusion == "success")', '.conclusion != "")'])
+    assert_caught("verify-stores must confirm store approvals live",
+                  "release-publish.yml" => ["state verify-live STATE", "state summary STATE"])
+    assert_caught("releases store versions without depending on publish-mac, authorize-resume and verify-resume",
+                  "release-publish.yml" => ["needs: [guard, publish-mac, verify-resume]", "needs: [guard, publish-mac]"])
+    assert_caught("must run only after publish-mac, or on resume only after verify-resume succeeded",
+                  "release-publish.yml" => ["(inputs.resume && needs.verify-resume.result == 'success')", "inputs.resume"])
     assert_caught("only publish-mac may touch tags, releases or assets",
                   "release-publish.yml" => ["out=$(scripts/release/release-state.sh", "gh release edit v0 --latest\n          out=$(scripts/release/release-state.sh"])
   end
@@ -93,6 +108,15 @@ class WorkflowChecksTest < Minitest::Test
                   "release-ios.yml" => ["run: scripts/release/check-environment.sh ios-upload", "run: true"])
     assert_caught("must run check-environment.sh release-pr before using secrets",
                   "release-publish.yml" => ["run: scripts/release/check-environment.sh release-pr", "run: true"])
+  end
+
+  def test_secrets_used_after_a_failed_environment_check_are_caught
+    assert_caught("uses secrets even when check-environment.sh failed",
+                  "release-dry-run.yml" => ["if: ${{ !cancelled() && steps.protected.outcome == 'success' }}\n        env:\n          DEVELOPMENT_TEAM",
+                                            "if: ${{ !cancelled() }}\n        env:\n          DEVELOPMENT_TEAM"])
+    assert_caught("exposes secrets in job-level env",
+                  "release-dry-run.yml" => ["    environment: release-build\n",
+                                            "    environment: release-build\n    env:\n      KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}\n"])
   end
 
   def test_the_external_reference_never_merges_or_imports_tags
@@ -153,6 +177,6 @@ class WorkflowChecksTest < Minitest::Test
     assert_caught("touches a store's review or release",
                   "release-ios.yml" => ["bundle exec fastlane ios upload_candidate", "bundle exec fastlane ios release && submit_for_review"])
     assert_caught("stores must wait for publish-mac (or a resume)",
-                  "release-publish.yml" => ["(needs.publish-mac.result == 'success' || inputs.resume)", "(inputs.resume || true)"])
+                  "release-publish.yml" => ["(!inputs.resume && needs.publish-mac.result == 'success')", "(true)"])
   end
 end

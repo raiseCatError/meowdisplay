@@ -68,8 +68,19 @@ module MeowRelease
         attached_build: attached&.dig("attributes", "version"),
         submission_id: open_submission&.dig("id"),
         blockers: [],
-        listing_version: listing_version
+        listing_version: listing_version,
+        release_type: store_version&.dig("attributes", "releaseType"),
+        earliest_release_date: store_version&.dig("attributes", "earliestReleaseDate")
       )
+    end
+
+    # Makes the version (creating it if missing) manually released, with no
+    # earliest release date, and reads it back. Raises when App Store
+    # Connect doesn't end up with exactly that, so nothing is ever submitted
+    # under release settings that could publish it without the gate.
+    def ensure_manual_release(version)
+      enforce_manual!(version, version_record(version) || create_version(version))
+      true
     end
 
     # Attaches `build` to the version (creating the version with manual
@@ -77,7 +88,7 @@ module MeowRelease
     # Anything App Store Connect still needs (metadata, export compliance,
     # screenshots) comes back as its error text and becomes a blocker.
     def submit_for_review(version, build)
-      store_version = version_record(version) || create_version(version)
+      store_version = enforce_manual!(version, version_record(version) || create_version(version))
       build_data = build_record(version, build) or raise Error, "build #{build} of #{version} isn't in App Store Connect"
       patch("/v1/appStoreVersions/#{store_version['id']}/relationships/build",
             data: { type: "builds", id: build_data["id"] })
@@ -129,6 +140,25 @@ module MeowRelease
         type: "appStoreVersions", attributes: { platform: "IOS", versionString: version, releaseType: "MANUAL" },
         relationships: { app: { data: { type: "apps", id: @app_id } } }
       })["data"]
+    end
+
+    def manual?(store_version)
+      attributes = store_version.fetch("attributes", {})
+      attributes["releaseType"] == AppleReview::MANUAL && attributes["earliestReleaseDate"].nil?
+    end
+
+    def enforce_manual!(version, store_version)
+      return store_version if manual?(store_version)
+
+      patch("/v1/appStoreVersions/#{store_version['id']}", data: {
+        type: "appStoreVersions", id: store_version["id"],
+        attributes: { releaseType: AppleReview::MANUAL, earliestReleaseDate: nil }
+      })
+      reread = version_record(version)
+      return reread if reread && manual?(reread)
+
+      found = reread&.dig("attributes", "releaseType") || "missing"
+      raise Error, "App Store version #{version} is not set to manual release (#{found}); refusing to continue"
     end
 
     def attached_build(store_version)
