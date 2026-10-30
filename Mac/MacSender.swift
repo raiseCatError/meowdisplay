@@ -14,6 +14,7 @@
 //   e.g. {"type":"hello","pixelsWide":2556,"pixelsHigh":1179,"scale":3}
 
 @preconcurrency import ScreenCaptureKit
+import os
 import VideoToolbox
 import Network
 import CryptoKit
@@ -1757,6 +1758,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// that Task's own isolation domain.
     /// One startup step's duration (privacy-safe: names and milliseconds only), so a slow
     /// connection says where its time went.
+    /// This session's capture start, for `StartTrace` marks from any queue.
+    private let startTraceLock = OSAllocatedUnfairLock<StartTrace?>(initialState: nil)
+    private var startTrace: StartTrace? { startTraceLock.withLock { $0 } }
+
     nonisolated static func logStartupStep(_ step: String, since start: ContinuousClock.Instant) {
         let d = ContinuousClock.now - start
         let ms = Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
@@ -1781,6 +1786,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let (admitted, admittedGeneration) = try await awaitAdmittedConnection()
         Log.info("startupStep: admitted generation=\(admittedGeneration) mode=\(mode.rawValue)")
+        let trace = StartTrace(mode: mode.rawValue, generation: admittedGeneration)
+        startTraceLock.withLock { $0 = trace }
 
         switch mode {
         case .mirror:
@@ -1840,7 +1847,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func startMirrorCapture(preferredDisplayID: CGDirectDisplayID?,
                                     sessionGeneration: UInt64? = nil) async throws {
-        let content = try await SCShareableContent.current
+        let content = try await ShareableContent.content()
         // A display that went away (unplugged mid-session) falls back to
         // Automatic, which never lands on another device's extended desktop.
         let chosenID = MirrorSourceResolver.recoveryDisplay(
@@ -1865,7 +1872,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// against the current display list — an unresolvable or absent
     /// preference logs the decision and falls back to Automatic.
     private func startMirrorCaptureUsingPreference(sessionGeneration: UInt64? = nil) async throws {
-        let content = try await SCShareableContent.current
+        let content = try await ShareableContent.content()
         let resolution = MirrorSourceResolver.resolve(
             selectedUUID: mirrorDisplayUUID, in: Self.mirrorSourceCandidates(content.displays),
             excluding: VirtualDisplayRegistry.shared.displayIDs)
@@ -2018,7 +2025,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 + "bounds=(\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height))) "
                 + "mirror=\(reading.mirrorState) isMain=\(id == mainID)")
         }
-        if let content = try? await SCShareableContent.current {
+        if let content = try? await ShareableContent.content() {
             Log.info("displayDebug: topologyDiag scShareableDisplayIDs=\(content.displays.map(\.displayID))")
         }
     }
@@ -2224,6 +2231,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 await status("Preparing virtual display…")
             }
             guard let candidateID = createdID else { continue }
+            startTrace?.mark("displayCreated", "id=\(candidateID)")
+            // Answers from before the display existed can't list it.
+            ShareableContent.invalidate()
             do {
                 display = try await findSCDisplay(id: candidateID, isCancelled: { [weak self] in
                     self?.isExtendSetupStale(ownerGeneration: ownerGeneration) ?? true
@@ -2256,7 +2266,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 virtualDisplay = nil   // release the dead display and its serial
                 // No shareable displays at all is a permission-side failure —
                 // a different identity cannot help there.
-                if (error as NSError).domain == "MacSender", (error as NSError).code == 4 { throw error }
+                if (error as NSError).domain == "MacSender", [4, 13].contains((error as NSError).code) { throw error }
                 identityError = error as NSError
                 sawPoisonedIdentity = true
                 guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
@@ -2554,12 +2564,42 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on its own already stops the ~5s poll from outliving a plain
     /// disconnect (#288: a stale operation should not keep polling for dead
     /// work).
+    /// The longest a start waits for macOS to list a display before giving up with a clear error.
+    static let displayListingBudget: Duration = .seconds(45)
+
+    /// Waits for ScreenCaptureKit to list `id`. Asks through the shared broker (one request in
+    /// flight for the whole app), checks for cancellation every second while macOS's capture
+    /// service is slow, and stops after `displayListingBudget` instead of waiting without end.
     private func findSCDisplay(id: CGDirectDisplayID, expectedSize: CGSize? = nil,
                                isCancelled: () -> Bool = { false }) async throws -> SCDisplay {
         var lastDisplayCount = 0
-        for _ in 0..<20 {
+        var answers = 0
+        var freshness: ShareableContent.Freshness = .cachedWithin(.seconds(1))
+        let began = ContinuousClock.now
+        var reportedSlow = false
+        while answers < 20 {
             guard !stopped, !isCancelled() else { throw CancellationError() }
-            let content = try await SCShareableContent.current
+            let waited = ContinuousClock.now - began
+            guard waited < Self.displayListingBudget else {
+                Log.info("captureService: display \(id) not listed after \(ShareableContent.milliseconds(waited)) ms "
+                    + "(\(answers) answers) — giving up")
+                throw NSError(domain: "MacSender", code: 13, userInfo: [NSLocalizedDescriptionKey:
+                    "macOS's screen capture service didn't answer in time. Another app may be sending it many "
+                    + "requests (for example AltTab's window previews). Try again in a moment."])
+            }
+            if waited >= .seconds(3), !reportedSlow {
+                reportedSlow = true
+                Log.info("captureService: still waiting for macOS to list display \(id) after "
+                    + "\(ShareableContent.milliseconds(waited)) ms")
+                await status("Waiting for macOS screen capture to answer…")
+            }
+            let content: SCShareableContent
+            do {
+                content = try await ShareableContent.content(freshness, timeout: .seconds(1))
+            } catch is ShareableContent.TimedOut {
+                continue   // still in flight: check cancellation and the budget, then wait on
+            }
+            answers += 1
             lastDisplayCount = content.displays.count
             if let display = content.displays.first(where: {
                 $0.displayID == id
@@ -2567,8 +2607,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         || ($0.width == Int(expectedSize!.width)
                             && $0.height == Int(expectedSize!.height)))
             }) {
+                startTrace?.mark("displayListed", "id=\(id) answers=\(answers)")
                 return display
             }
+            freshness = .startedAfterNow
             try await Task.sleep(for: .milliseconds(250))
         }
         // An empty display list is a different disease from "ours is
@@ -2646,10 +2688,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let shieldIDs = Set(PrivacyShieldWindows.current)
             var shield: [SCWindow] = []
             let shieldClock = ContinuousClock.now
-            if !shieldIDs.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) {
+            if !shieldIDs.isEmpty {
+                // Usually the answer that just listed the display. A password prompt must be seen
+                // as it is now, so that case asks again.
+                let content = try await ShareableContent.content(
+                    PrivacyShieldWindows.isUnlocking ? .startedAfterNow : .cachedWithin(.seconds(5)),
+                    timeout: Self.displayListingBudget)
                 shield = Self.privacyHidden(content, ids: shieldIDs)
+                Self.logStartupStep("shieldContent", since: shieldClock)
             }
-            if !shieldIDs.isEmpty { Self.logStartupStep("shieldContent", since: shieldClock) }
+            startTrace?.mark("filterReady", "excluded=\(shield.count)")
             let filter = SCContentFilter(display: display, excludingWindows: shield)
             let config = SCStreamConfiguration()
             config.width = plan.pixelsWide
@@ -2709,6 +2757,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let startClock = ContinuousClock.now
             try await stream.startCapture()
             Self.logStartupStep("streamStart", since: startClock)
+            startTrace?.mark("streamStarted")
         } catch {
             _ = try? await onQueue { sender in sender.abandonCaptureStart(ticket, startAttempted: true) }
             throw error
@@ -2726,6 +2775,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("sessionDebug: ignored stale capture start generation=\(plan.sessionGeneration)")
             throw CancellationError()
         }
+        startTrace?.mark("captureCommitted")
         if let text { await status(text) }
         // Window mode: the new stream starts with the whole display's sound; narrow it again.
         _ = try? await onQueue { sender in sender.applyWindowAudio(nil) }
@@ -2749,7 +2799,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let box = WindowAudioStreamBox(stream: stream)
             Task {
                 defer { done?() }
-                guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
+                guard let content = try? await ShareableContent.content(.startedAfterNow),
                       let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
                 let filter = SCContentFilter(display: display, excludingWindows: Self.privacyHidden(content, ids: Set(PrivacyShieldWindows.current)))
                 do { try await box.stream.updateContentFilter(filter) } catch { Log.info("privacy shield: capture filter update failed \((error as NSError).code)") }
@@ -2773,7 +2823,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private static func updateWindowAudio(_ sources: WindowAudioSources, stream box: WindowAudioStreamBox, displayID: CGDirectDisplayID,
                                           generation: UInt64, selfBox: MacSenderSelfBox, queue: DispatchQueue) async {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
+        guard let content = try? await ShareableContent.content(),
               let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
         let everything = SCContentFilter(display: display, excludingWindows: [])
         var filter = everything
@@ -2892,6 +2942,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if videoEnabled {
             do {
                 try setupEncoder(width: pixelsWide, height: pixelsHigh, fps: targetFPS)
+                startTrace?.mark("encoderReady")
             } catch {
                 abandonCaptureStart(reservation.ticket, startAttempted: false)
                 throw error
@@ -4174,7 +4225,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("wakeCapture: requestingShareableContent")
         let content: SCShareableContent
         do {
-            content = try await SCShareableContent.current
+            content = try await ShareableContent.content()
         } catch {
             Log.info("wakeCapture: shareableContentFailed error=\(error)")
             scheduleCaptureRecoveryAfterWakeFailure()
@@ -6161,6 +6212,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 debugSCKFrameLogGeneration = generation
                 debugSCKFrameLogCount = 0
             }
+            startTrace?.markOnce("firstFrameCaptured")
             if debugSCKFrameLogCount < 5 {
                 debugSCKFrameLogCount += 1
                 let n = debugSCKFrameLogCount
@@ -6333,6 +6385,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let pipelineState = self.pipelineState
         let queue = self.queue
         let selfBox = self.selfBox
+        let startTraceLock = self.startTraceLock
         let submitStatus = videoEncoder.submit(
             pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
         ) { status, buffer, sessionCodec in
@@ -6368,6 +6421,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // actually emitting non-trivial output — and whether it's the
             // keyframe/parameter-set-bearing packet a dimension change
             // needs — for the first few encoded frames of every generation.
+            startTraceLock.withLock { $0 }?.markOnce("firstFrameEncoded")
             let encodeLogNumber = pipelineState.nextDebugEncodeLogNumber(generation: generation)
             if let encodeLogNumber {
                 let dims = CMSampleBufferGetFormatDescription(buffer).map { CMVideoFormatDescriptionGetDimensions($0) }
@@ -7140,7 +7194,7 @@ extension MacSender {
     /// holding the windows; it never creates one.
     func startWindowWorkspace(info: PhoneInfo, sessionGeneration: UInt64) async throws {
         let contentClock = ContinuousClock.now
-        let content = try await SCShareableContent.current
+        let content = try await ShareableContent.content()
         Self.logStartupStep("windowModeContent", since: contentClock)
         let main = CGMainDisplayID()
         guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
@@ -7162,7 +7216,7 @@ extension MacSender {
     /// Capture recovery in Window mode: restart the carrier display stream.
     func reattachWindowCarrier() async throws {
         guard let info = lastHello else { throw CancellationError() }
-        let content = try await SCShareableContent.current
+        let content = try await ShareableContent.content()
         let main = CGMainDisplayID()
         guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
             throw NSError(domain: "MacSender", code: 21,

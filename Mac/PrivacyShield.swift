@@ -282,7 +282,9 @@ final class PrivacyShield {
     @discardableResult
     private func publishIDs() -> Bool {
         let windows: [NSWindow] = pool + [revealPanel, noticePanel]
-        return PrivacyShieldWindows.replace(with: windows.map { CGWindowID($0.windowNumber) }.filter { $0 > 0 })
+        let changed = PrivacyShieldWindows.replace(with: windows.map { CGWindowID($0.windowNumber) }.filter { $0 > 0 })
+        if changed { ShareableContent.invalidate() }   // captures must list the new windows to leave them out
+        return changed
     }
 
     /// A small notice on the Mac when a device connects: whether the cover is on. Devices don't see it.

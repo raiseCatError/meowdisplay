@@ -202,6 +202,7 @@ targets:
     sources:
       - MacTests
       - Mac/DisplayArrangement.swift
+      - Mac/CoalescingFetch.swift
       - Mac/OriginRestore.swift
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
@@ -288,6 +289,7 @@ targets:
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
+      - Mac/ShareableContentBroker.swift
       - Mac/InputInjector.swift
       - Mac/AudioCaptureEncoder.swift
       - Mac/InteractiveWakePromotion.swift
