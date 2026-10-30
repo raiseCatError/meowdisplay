@@ -242,7 +242,12 @@ final class RemoteFileTransferTests: XCTestCase {
         b.handle(["op": "list", "root": "r1", "path": [], "req": 12], inputGranted: false)
         XCTAssertEqual(waitReply(box, "list", req: 12)["error"] as? String, "revoked")
         b.handle(["op": "list", "root": "r1", "path": [], "req": 13], inputGranted: false)
-        XCTAssertEqual(waitReply(box, "list", req: 13)["error"] as? String, "asking")
+        XCTAssertEqual(waitReply(box, "list", req: 13)["error"] as? String, "revoked",
+                       "requests already in flight keep hearing revoked")
+        b.handle(["op": "state", "req": 14], inputGranted: false)
+        XCTAssertEqual(waitReply(box, "state", req: 14)["state"] as? String, "asking", "asking again is explicit")
+        b.handle(["op": "list", "root": "r1", "path": [], "req": 15], inputGranted: false)
+        XCTAssertEqual(waitReply(box, "list", req: 15)["error"] as? String, "asking")
     }
 
     func testDownloadOverTheWireAndRevokeStopsIt() throws {
@@ -269,7 +274,13 @@ final class RemoteFileTransferTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         XCTAssertEqual(box.all.last?["state"] as? String, "revoked")
         b.handle(["op": "read", "x": x, "o": 0, "n": 10, "req": 5], inputGranted: false)
-        XCTAssertEqual(waitReply(box, "read", req: 5)["error"] as? String, "asking", "revoked: nothing more is read")
+        XCTAssertEqual(waitReply(box, "read", req: 5)["error"] as? String, "revoked", "revoked: nothing more is read")
+        // The race CI caught: reads the receiver sent before it heard "revoked" must not
+        // turn its state back into "asking".
+        b.handle(["op": "read", "x": x, "o": 10, "n": 10, "req": 6], inputGranted: false)
+        XCTAssertEqual(waitReply(box, "read", req: 6)["error"] as? String, "revoked")
+        XCTAssertEqual(box.all.last { $0["op"] as? String == "state" }?["state"] as? String, "revoked",
+                       "no grant comes back by itself")
     }
 }
 

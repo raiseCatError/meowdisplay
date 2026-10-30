@@ -394,7 +394,9 @@ fun ReceiverScreen(
         }
 
         // Window mode with a selected pane: the pill is drawn inside that pane instead.
-        val promptInPane = workspace?.ui?.value?.let { it.windowMode && it.active != null } == true
+        // Observed (collectAsState), not read once: entering or leaving Window mode, or selecting
+        // another pane, must move the pill between the screen and the pane.
+        val promptInPane = workspace?.ui?.collectAsState()?.value?.let { it.windowMode && it.active != null } == true
         InputPromptCapsule(
             kind = state.prompt.takeIf { !promptInPane },
             onTap = controller::requestInputTapped,
