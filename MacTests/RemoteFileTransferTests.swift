@@ -282,22 +282,6 @@ final class RemoteFileTransferTests: XCTestCase {
         XCTAssertEqual(box.all.last { $0["op"] as? String == "state" }?["state"] as? String, "revoked",
                        "no grant comes back by itself")
     }
-}
-
-/// Test helper: full SHA-256 hex.
-enum SHA256Hex {
-    static func of(_ d: Data) -> String {
-        var h = Sha256Box()
-        h.update(d)
-        return h.hex
-    }
-}
-
-import CryptoKit
-private struct Sha256Box {
-    var h = SHA256()
-    mutating func update(_ d: Data) { h.update(data: d) }
-    var hex: String { h.finalize().map { String(format: "%02x", $0) }.joined() }
 
     // MARK: Write policy (Show Hidden Files is read-only; writes re-check where they land)
 
@@ -403,5 +387,20 @@ private struct Sha256Box {
         let q = try out.appendingPathComponent("file.txt").resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
         XCTAssertEqual(q?["LSQuarantineAgentName"] as? String, "MeowDisplay")
     }
+}
 
+/// Test helper: full SHA-256 hex.
+enum SHA256Hex {
+    static func of(_ d: Data) -> String {
+        var h = Sha256Box()
+        h.update(d)
+        return h.hex
+    }
+}
+
+import CryptoKit
+private struct Sha256Box {
+    var h = SHA256()
+    mutating func update(_ d: Data) { h.update(data: d) }
+    var hex: String { h.finalize().map { String(format: "%02x", $0) }.joined() }
 }
