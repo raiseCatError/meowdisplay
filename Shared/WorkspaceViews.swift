@@ -43,6 +43,7 @@ struct WorkspaceChromeView: View {
     @State private var layoutName = ""
     /// The floating label menu: which pane (and tab) it is for.
     @State private var menu: PaneMenuTarget?
+    @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
     @State private var stripVisible = true
@@ -122,9 +123,14 @@ struct WorkspaceChromeView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { menu = nil } }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    paneMenu(m, tile: tile)
-                        .position(x: min(max(rect.minX + 132, picture.minX + 132), picture.maxX - 132),
-                                  y: min(rect.minY + 44 + 170, picture.maxY - 180))
+                    // Every item reachable: placed by its measured height inside the safe area (below the
+                    // label when it fits, moved up when not), scrolling when taller than the screen.
+                    let room = (safeArea.map { $0.intersection(picture) } ?? picture).insetBy(dx: 8, dy: 8)
+                    let height = min(menuHeight, room.height)
+                    let top = min(max(rect.minY + 40, room.minY), room.maxY - height)
+                    paneMenu(m, tile: tile, maxHeight: room.height)
+                        .position(x: min(max(rect.minX + 132, room.minX + 126), room.maxX - 126),
+                                  y: top + height / 2)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity))
                 }
                 if model.localFullscreen != nil { fullscreenStrip }
@@ -417,7 +423,26 @@ struct WorkspaceChromeView: View {
 
     // MARK: The label menu
 
-    private func paneMenu(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
+    private func paneMenu(_ m: PaneMenuTarget, tile: WorkspaceTile, maxHeight: CGFloat) -> some View {
+        let rows = paneMenuRows(m, tile: tile)
+        return ViewThatFits(in: .vertical) {
+            rows
+            ScrollView(.vertical) { rows }.scrollIndicators(.visible)
+        }
+        .frame(width: 252)
+        .frame(maxHeight: maxHeight)
+        .background(GeometryReader { g in Color.clear.preference(key: PaneMenuHeightKey.self, value: g.size.height) })
+        .onPreferenceChange(PaneMenuHeightKey.self) { menuHeight = $0 }
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.ultraThinMaterial))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+        .environment(\.colorScheme, .dark)
+        .onAppear { Self.haptic(.lift) }
+    }
+
+    private func paneMenuRows(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
         let full = model.localFullscreen == m.tile
         let isDesktop = tile.source?.isDisplay == true
         let isWindow = tile.source != nil && !isDesktop
@@ -453,18 +478,15 @@ struct WorkspaceChromeView: View {
                 menuRow("Close Window on Mac…", "xmark.square", destructive: true, enabled: inputAllowed) { confirmClose = m.tile }
                 if !inputAllowed {
                     Text("Minimize and Close need control of the Mac.")
-                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).padding(.horizontal, 14).padding(.bottom, 6)
+                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).padding(.horizontal, 14).padding(.bottom, 4)
+                    #if os(iOS)
+                    RequestControlInline(compact: true).padding(.horizontal, 14).padding(.bottom, 6)
+                    #endif
                 }
             }
         }
         .padding(.vertical, 6)
-        .frame(width: 252)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.ultraThinMaterial))
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35)))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 0.6))
-        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
-        .environment(\.colorScheme, .dark)
-        .onAppear { Self.haptic(.lift) }
+        .frame(width: 252, alignment: .leading)
     }
 
     private func menuRow(_ title: LocalizedStringKey, _ symbol: String, destructive: Bool = false, enabled: Bool = true,
@@ -1269,4 +1291,10 @@ struct PaneMenuBar: View {
         default: return String(localized: "This app's menus aren't available.")
         }
     }
+}
+
+/// The pane menu's measured height, so it is placed fully on screen.
+private struct PaneMenuHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
