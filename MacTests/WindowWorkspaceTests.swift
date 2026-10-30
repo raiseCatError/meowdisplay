@@ -411,7 +411,7 @@ final class WindowWorkspaceTests: XCTestCase {
         let recovered = WorkspaceLayoutRecord.decode(Data(malformed.replacingOccurrences(of: "\"x\"", with: "0").utf8))
         let r = try XCTUnwrap(recovered)
         XCTAssertEqual(Set(r.orderedTileIDs), ["a", "b"], "duplicate and unknown tiles dropped")
-        XCTAssertEqual(r.tiles["a"]?.rotation, WorkspaceRotation.none, "45° is not a tile rotation")
+        XCTAssertEqual(r.tiles["a"]?.rotation.rawValue, 45, "any whole-degree turn is kept (free rotation)")
         XCTAssertEqual(r.tiles["b"]?.rotation, .threeQuarter)
         XCTAssertEqual(r.tiles["b"]?.fit, .fit, "unknown fit falls back to Fit")
         XCTAssertNil(r.tiles["b"]?.source, "a tile without host+window has no source")

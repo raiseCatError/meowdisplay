@@ -69,23 +69,68 @@ enum WorkspaceAxis: String, Codable, Sendable {
 
 // MARK: - Tile presentation: rotation and fit
 
-/// Clockwise rotation of a tile's received image. Presentation only: the Mac
-/// window is never rotated, and input is mapped back through the inverse.
-enum WorkspaceRotation: Int, Codable, CaseIterable, Sendable {
-    case none = 0
-    case quarter = 90
-    case half = 180
-    case threeQuarter = 270
+/// Clockwise rotation of a tile's received image, in whole degrees (0..<360): any angle, turned
+/// freely with two fingers; the pane menu's Rotate steps to the next right angle. Presentation
+/// only: the Mac window is never rotated, and input is mapped back through the inverse. Whole
+/// degrees keep the wire and saved layouts integers (older peers read them as before).
+struct WorkspaceRotation: Equatable, Hashable, Codable, Sendable, CustomStringConvertible {
+    let rawValue: Int
 
-    var isQuarterTurn: Bool { self == .quarter || self == .threeQuarter }
+    static let none = WorkspaceRotation(degrees: 0)
+    static let quarter = WorkspaceRotation(degrees: 90)
+    static let half = WorkspaceRotation(degrees: 180)
+    static let threeQuarter = WorkspaceRotation(degrees: 270)
+    /// The right angles.
+    static let allCases = [none, quarter, half, threeQuarter]
 
-    var clockwise: WorkspaceRotation {
-        WorkspaceRotation(rawValue: (rawValue + 90) % 360) ?? .none
+    /// Lenient: any whole number of degrees, wrapped into 0..<360.
+    init(degrees: Int) {
+        rawValue = ((degrees % 360) + 360) % 360
     }
 
-    /// Lenient decode for wire/persisted values: anything else is no rotation.
-    init(degrees: Int) {
-        self = WorkspaceRotation(rawValue: ((degrees % 360) + 360) % 360) ?? .none
+    /// Rounded to a whole degree; not finite = no rotation.
+    init(degrees: Double) {
+        self.init(degrees: degrees.isFinite ? Int((degrees.truncatingRemainder(dividingBy: 360)).rounded()) : 0)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let i = try? c.decode(Int.self) { self.init(degrees: i) } else { self.init(degrees: (try? c.decode(Double.self)) ?? 0) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
+    }
+
+    var description: String { "\(rawValue)°" }
+    var isRightAngle: Bool { rawValue % 90 == 0 }
+    var isQuarterTurn: Bool { rawValue == 90 || rawValue == 270 }
+    var radians: Double { Double(rawValue) * .pi / 180 }
+
+    /// Cosine and sine, exact at the right angles.
+    var cosSin: (c: Double, s: Double) {
+        switch rawValue {
+        case 0: return (1, 0)
+        case 90: return (0, 1)
+        case 180: return (-1, 0)
+        case 270: return (0, -1)
+        default: return (cos(radians), sin(radians))
+        }
+    }
+
+    /// The pane menu's Rotate: the next right angle clockwise.
+    var clockwise: WorkspaceRotation { WorkspaceRotation(degrees: (rawValue / 90 + 1) * 90) }
+
+    /// Turned by `degrees` (clockwise); with `snap`, within `snapRange` of a right angle lands on it.
+    func turned(by degrees: Double, snap: Bool, snapRange: Double = 5) -> WorkspaceRotation {
+        guard degrees.isFinite else { return self }
+        let raw = Double(rawValue) + degrees
+        if snap {
+            let nearest = (raw / 90).rounded() * 90
+            if abs(raw - nearest) <= snapRange { return WorkspaceRotation(degrees: nearest) }
+        }
+        return WorkspaceRotation(degrees: raw)
     }
 }
 
@@ -150,9 +195,11 @@ struct TileContentTransform: Equatable, Sendable {
     /// The pane's own zoom and centre (identity: the whole source at the fit's size, centred).
     var zoom = WorkspacePaneZoom.identity
 
-    /// The rotated image's size before scaling.
+    /// The rotated image's size before scaling: its bounding box (any angle).
     var rotatedSourceSize: WorkspaceSize {
-        rotation.isQuarterTurn ? WorkspaceSize(width: source.height, height: source.width) : source
+        if rotation.isRightAngle { return rotation.isQuarterTurn ? WorkspaceSize(width: source.height, height: source.width) : source }
+        let (c, s) = rotation.cosSin
+        return WorkspaceSize(width: abs(source.width * c) + abs(source.height * s), height: abs(source.width * s) + abs(source.height * c))
     }
 
     /// `.auto` resolved for this tile and source.
@@ -205,13 +252,22 @@ struct TileContentTransform: Equatable, Sendable {
     /// (letterbox bars, cropped-away area, outside the tile). Input outside
     /// the visible image must never reach the Mac.
     func sourcePoint(fromCanvas q: WorkspacePoint) -> WorkspacePoint? {
-        guard let visible = visibleRect, visible.contains(q) else { return nil }
-        let c = contentRect, s = scale
-        guard s > 0 else { return nil }
-        let r = WorkspacePoint(x: (q.x - c.x) / s, y: (q.y - c.y) / s)
-        let p = unrotated(r)
+        guard let visible = visibleRect, visible.contains(q), let p = unclampedSourcePoint(fromCanvas: q) else { return nil }
+        // At an angle the corners of the turned picture's box show no window.
+        if !rotation.isRightAngle {
+            let slack = 1e-6 * max(source.width, source.height, 1)
+            guard p.x >= -slack, p.y >= -slack, p.x <= source.width + slack, p.y <= source.height + slack else { return nil }
+        }
         // Clamp float residue at the far edges into the window.
         return WorkspacePoint(x: min(max(p.x, 0), source.width), y: min(max(p.y, 0), source.height))
+    }
+
+    /// Canvas -> source for any canvas point, even one off the window (gestures need the
+    /// window point under the fingers wherever they are).
+    func unclampedSourcePoint(fromCanvas q: WorkspacePoint) -> WorkspacePoint? {
+        let c = contentRect, s = scale
+        guard s > 0 else { return nil }
+        return unrotated(WorkspacePoint(x: (q.x - c.x) / s, y: (q.y - c.y) / s))
     }
 
     /// Canvas -> source for a point that may lie outside the tile (a drag that
@@ -222,7 +278,10 @@ struct TileContentTransform: Equatable, Sendable {
         let eps = 1e-9
         let clamped = WorkspacePoint(x: min(max(q.x, visible.x), visible.maxX - eps),
                                      y: min(max(q.y, visible.y), visible.maxY - eps))
-        return sourcePoint(fromCanvas: clamped)
+        guard !rotation.isRightAngle else { return sourcePoint(fromCanvas: clamped) }
+        // At an angle: the nearest point of the window itself.
+        guard let p = unclampedSourcePoint(fromCanvas: clamped) else { return nil }
+        return WorkspacePoint(x: min(max(p.x, 0), source.width), y: min(max(p.y, 0), source.height))
     }
 
     /// Canvas-space vector (scroll, relative motion) -> source-space vector.
@@ -230,31 +289,39 @@ struct TileContentTransform: Equatable, Sendable {
         let s = scale
         guard s > 0 else { return WorkspacePoint(x: 0, y: 0) }
         let a = v.x / s, b = v.y / s
-        switch rotation {
-        case .none: return WorkspacePoint(x: a, y: b)
-        case .quarter: return WorkspacePoint(x: b, y: -a)
-        case .half: return WorkspacePoint(x: -a, y: -b)
-        case .threeQuarter: return WorkspacePoint(x: -b, y: a)
+        // The inverse turn (exact at the right angles: multiplying by 0 and ±1).
+        let (c, sn) = rotation.cosSin
+        return WorkspacePoint(x: a * c + b * sn, y: -a * sn + b * c)
+    }
+
+    /// Window point -> the turned picture's box (unscaled).
+    func rotated(_ p: WorkspacePoint) -> WorkspacePoint {
+        let w = source.width, h = source.height
+        switch rotation.rawValue {
+        case 0: return p
+        case 90: return WorkspacePoint(x: h - p.y, y: p.x)
+        case 180: return WorkspacePoint(x: w - p.x, y: h - p.y)
+        case 270: return WorkspacePoint(x: p.y, y: w - p.x)
+        default:
+            // About the window's centre, then into its turned bounding box.
+            let (c, s) = rotation.cosSin, box = rotatedSourceSize
+            let x = p.x - w / 2, y = p.y - h / 2
+            return WorkspacePoint(x: x * c - y * s + box.width / 2, y: x * s + y * c + box.height / 2)
         }
     }
 
-    private func rotated(_ p: WorkspacePoint) -> WorkspacePoint {
+    /// The turned picture's box (unscaled) -> window point.
+    func unrotated(_ r: WorkspacePoint) -> WorkspacePoint {
         let w = source.width, h = source.height
-        switch rotation {
-        case .none: return p
-        case .quarter: return WorkspacePoint(x: h - p.y, y: p.x)
-        case .half: return WorkspacePoint(x: w - p.x, y: h - p.y)
-        case .threeQuarter: return WorkspacePoint(x: p.y, y: w - p.x)
-        }
-    }
-
-    private func unrotated(_ r: WorkspacePoint) -> WorkspacePoint {
-        let w = source.width, h = source.height
-        switch rotation {
-        case .none: return r
-        case .quarter: return WorkspacePoint(x: r.y, y: h - r.x)
-        case .half: return WorkspacePoint(x: w - r.x, y: h - r.y)
-        case .threeQuarter: return WorkspacePoint(x: w - r.y, y: r.x)
+        switch rotation.rawValue {
+        case 0: return r
+        case 90: return WorkspacePoint(x: r.y, y: h - r.x)
+        case 180: return WorkspacePoint(x: w - r.x, y: h - r.y)
+        case 270: return WorkspacePoint(x: w - r.y, y: r.x)
+        default:
+            let (c, s) = rotation.cosSin, box = rotatedSourceSize
+            let x = r.x - box.width / 2, y = r.y - box.height / 2
+            return WorkspacePoint(x: x * c + y * s + w / 2, y: -x * s + y * c + h / 2)
         }
     }
 }
@@ -375,6 +442,39 @@ enum WorkspaceZoom {
         let drawn = TileContentTransform(tile: rect, source: source, rotation: rotation, fit: fit, zoom: wanted).effectiveZoom
         return drawn.isIdentity ? nil : drawn
     }
+
+    /// A two-finger gesture that turns as well: the window point under the fingers when they
+    /// came down stays under them while the picture scales by `ratio` and turns by `degrees`
+    /// (clockwise, from `rotation`). The size follows the fingers only: turning never shrinks or
+    /// grows the picture by itself (zoom stays 0.7x to 8x of the new angle's Fit or Fill size).
+    /// With `snap`, an angle within a few degrees of a right angle lands on it.
+    static func turned(_ start: WorkspacePaneZoom?, rotation: WorkspaceRotation, by degrees: Double, snap: Bool,
+                       tile: WorkspaceSize, source: WorkspaceSize, fit: WorkspaceFit,
+                       ratio: Double, from: WorkspacePoint, to: WorkspacePoint) -> (rotation: WorkspaceRotation, zoom: WorkspacePaneZoom?) {
+        let z0 = start ?? .identity
+        guard ratio.isFinite, ratio > 0, degrees.isFinite, [from.x, from.y, to.x, to.y].allSatisfy(\.isFinite),
+              tile.width > 0, tile.height > 0, source.width > 0, source.height > 0 else { return (rotation, start) }
+        let rect = WorkspaceRect(x: 0, y: 0, width: tile.width, height: tile.height)
+        let t0 = TileContentTransform(tile: rect, source: source, rotation: rotation, fit: fit, zoom: z0)
+        guard let anchor = t0.unclampedSourcePoint(fromCanvas: WorkspacePoint(x: from.x * tile.width, y: from.y * tile.height))
+        else { return (rotation, start) }
+        let r1 = rotation.turned(by: degrees, snap: snap)
+        let base1 = TileContentTransform(tile: rect, source: source, rotation: r1, fit: fit).baseScale
+        guard base1 > 0 else { return (rotation, start) }
+        let scale = min(max(t0.scale * ratio / base1, minimum), maximum)
+        let s1 = base1 * scale
+        let probe = TileContentTransform(tile: rect, source: source, rotation: r1, fit: fit,
+                                         zoom: WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5))
+        let box = probe.rotatedSourceSize
+        let w = box.width * s1, h = box.height * s1
+        guard w > 0, h > 0 else { return (rotation, start) }
+        // The anchor's place in the turned picture; the centre is what puts it under the fingers.
+        let u = probe.rotated(anchor)
+        let ox = to.x * tile.width - u.x * s1, oy = to.y * tile.height - u.y * s1
+        let wanted = WorkspacePaneZoom(scale: scale, centerX: (tile.width / 2 - ox) / w, centerY: (tile.height / 2 - oy) / h)
+        let drawn = TileContentTransform(tile: rect, source: source, rotation: r1, fit: fit, zoom: wanted).effectiveZoom
+        return (r1, drawn.isIdentity ? nil : drawn)
+    }
 }
 
 /// Instant local zoom: while the fingers move, the receiver moves the picture it already has
@@ -384,14 +484,19 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
     var tile: String
     /// The preview is clipped to this pane.
     var pane: WorkspaceRect
-    /// `v' = scale * v + offset` per axis: a point of the picture as drawn when the
-    /// gesture began, moved to where it belongs now.
+    /// `v' = (scaleX·x + shearC·y + offsetX, shearB·x + scaleY·y + offsetY)`: a point of the
+    /// picture as drawn when the gesture began, moved to where it belongs now (picture-normalized;
+    /// the shear terms carry a turn and are 0 without one).
     var scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double
+    var shearB: Double = 0, shearC: Double = 0
     /// Where the whole (rotated) source is drawn now: the whole-source still goes here.
     var source: WorkspaceRect
     /// Where it was drawn when the gesture began (the moved picture shows only this part).
     var from: WorkspaceRect
     var rotation: WorkspaceRotation
+    /// The whole source's own (unturned) size as drawn now, picture-normalized per axis: the
+    /// still is this size, turned by `rotation`, centred in `source`. Nil: work it out from `source`.
+    var drawnSource: WorkspaceSize?
     /// The window (or display key) the still must be of.
     var sourceKey: UInt32
 
@@ -411,8 +516,36 @@ struct WorkspaceZoomPreview: Equatable, Sendable {
         self.sourceKey = sourceKey
     }
 
+    /// From the pane's view when the gesture began (`start`) to now (`now`), both in canvas
+    /// pixels on a canvas of `canvas` pixels: any zoom, pan and turn.
+    init?(tile: String, pane: WorkspaceRect, start t0: TileContentTransform, now t1: TileContentTransform,
+          canvas: WorkspaceSize, sourceKey: UInt32 = 0) {
+        let W = canvas.width, H = canvas.height
+        guard W > 0, H > 0, t0.scale > 0, t1.scale > 0 else { return nil }
+        func map(_ x: Double, _ y: Double) -> WorkspacePoint? {
+            guard let s = t0.unclampedSourcePoint(fromCanvas: WorkspacePoint(x: x * W, y: y * H)) else { return nil }
+            let q = t1.canvasPoint(fromSource: s)
+            return WorkspacePoint(x: q.x / W, y: q.y / H)
+        }
+        guard let p0 = map(0, 0), let p1 = map(1, 0), let p2 = map(0, 1) else { return nil }
+        func norm(_ r: WorkspaceRect) -> WorkspaceRect { WorkspaceRect(x: r.x / W, y: r.y / H, width: r.width / W, height: r.height / H) }
+        let old = norm(t0.contentRect), new = norm(t1.contentRect)
+        guard old.width > 0, old.height > 0, new.width > 0, new.height > 0,
+              [p0.x, p0.y, p1.x, p1.y, p2.x, p2.y].allSatisfy(\.isFinite) else { return nil }
+        self.tile = tile
+        self.pane = pane
+        scaleX = p1.x - p0.x; shearB = p1.y - p0.y
+        shearC = p2.x - p0.x; scaleY = p2.y - p0.y
+        offsetX = p0.x; offsetY = p0.y
+        source = new
+        from = old
+        rotation = t1.rotation
+        drawnSource = WorkspaceSize(width: t1.source.width * t1.scale / W, height: t1.source.height * t1.scale / H)
+        self.sourceKey = sourceKey
+    }
+
     func apply(_ p: WorkspacePoint) -> WorkspacePoint {
-        WorkspacePoint(x: scaleX * p.x + offsetX, y: scaleY * p.y + offsetY)
+        WorkspacePoint(x: scaleX * p.x + shearC * p.y + offsetX, y: shearB * p.x + scaleY * p.y + offsetY)
     }
 }
 
@@ -761,6 +894,17 @@ struct WorkspaceLayout: Equatable, Sendable {
         let zoom = zoom?.isIdentity == true ? nil : zoom
         guard var tile = tiles[id], tile.zoom != zoom else { return self }
         tile.zoom = zoom
+        var copy = self
+        copy.tiles[id] = tile
+        return copy
+    }
+
+    /// A pane's turn and zoom together (a two-finger turn changes both).
+    func viewing(_ id: String, rotation: WorkspaceRotation, zoom: WorkspacePaneZoom?) -> WorkspaceLayout {
+        let zoom = zoom?.isIdentity == true ? nil : zoom
+        guard var tile = tiles[id], tile.zoom != zoom || tile.rotation != rotation else { return self }
+        tile.zoom = zoom
+        tile.rotation = rotation
         var copy = self
         copy.tiles[id] = tile
         return copy

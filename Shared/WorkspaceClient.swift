@@ -741,7 +741,12 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, start: WorkspacePaneZoom?, rect: WorkspaceRect, drawn: WorkspaceRect?)?
+    private var zoomGesture: (tile: String, start: WorkspacePaneZoom?, rect: WorkspaceRect, drawn: WorkspaceRect?,
+                              rotation: WorkspaceRotation, turnFrom: Double?)?
+
+    /// A twist this large (degrees) starts turning the pane, so a pinch's natural wobble never
+    /// turns it; the turn then follows the fingers from there, without a jump.
+    static let turnDeadZone = 8.0
 
     /// The instant local zoom of the pane under the fingers (nil when there is none): the receiver
     /// moves the picture it already has (and the pane's whole-source still where that doesn't
@@ -776,32 +781,45 @@ final class WorkspaceModel: ObservableObject {
     /// Only the pane under the fingers where the gesture began changes. A pinch zooms it from
     /// 0.7x to 8x of its Fit (or Fill) size around the fingers; a two-finger pan moves a pane
     /// that is zoomed or filled (otherwise it stays a scroll on the Mac).
+    /// `turn`: how far the fingers have twisted since they came down (degrees, clockwise); a pinch
+    /// also turns the pane freely, any angle, once past `turnDeadZone`. `snapTurn`: a turn ending
+    /// near a right angle lands on it (the Snap Rotation setting).
     @discardableResult
-    func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double) -> Bool {
+    func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double,
+               turn: Double = 0, snapTurn: Bool = true) -> Bool {
         if began || zoomGesture == nil {
             guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
                   let tile = layout.tiles[id], tile.source != nil,
                   isPinch || tile.zoom != nil || effectiveFit(id) == .fill,
                   windowSize(tile) != nil else { zoomGesture = nil; zoomPreview = nil; return false }
-            zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect))
+            zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
             zoomPreview = nil
             if active != id { focus(id) }
             requestBackdrop(id)
         }
-        guard let g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
+        guard var g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
         let pane = WorkspaceSize(width: g.rect.width * size.width, height: g.rect.height * size.height)
         func inPane(_ p: WorkspacePoint) -> WorkspacePoint {
             WorkspacePoint(x: (p.x - g.rect.x) / max(g.rect.width, 1e-6), y: (p.y - g.rect.y) / max(g.rect.height, 1e-6))
         }
-        let zoom = WorkspaceZoom.pinched(g.start, tile: pane, source: source, rotation: tile.rotation, fit: effectiveFit(g.tile),
-                                         ratio: scale, from: inPane(initial), to: inPane(current))
-        let next = saved.zooming(g.tile, to: zoom)
+        if isPinch, g.turnFrom == nil, turn.isFinite, abs(turn) >= Self.turnDeadZone {
+            g.turnFrom = turn
+            zoomGesture = g
+        }
+        let degrees = g.turnFrom.map { turn - $0 } ?? 0
+        let view = WorkspaceZoom.turned(g.start, rotation: g.rotation, by: degrees, snap: snapTurn,
+                                        tile: pane, source: source, fit: effectiveFit(g.tile),
+                                        ratio: scale, from: inPane(initial), to: inPane(current))
+        let next = saved.viewing(g.tile, rotation: view.rotation, zoom: view.zoom)
         if next != saved {
             saved = next
             publish(); scheduleThrottledSend()
         }
-        if let start = g.drawn, let now = next.tiles[g.tile].flatMap({ drawnSourceRect($0, in: g.rect) }) {
-            zoomPreview = WorkspaceZoomPreview(tile: g.tile, pane: g.rect, from: start, to: now, rotation: tile.rotation,
+        if size.width > 0, size.height > 0, let now = next.tiles[g.tile] {
+            let px = WorkspaceRect(x: g.rect.x * size.width, y: g.rect.y * size.height, width: pane.width, height: pane.height)
+            let t0 = TileContentTransform(tile: px, source: source, rotation: g.rotation, fit: effectiveFit(g.tile), zoom: g.start ?? .identity)
+            let t1 = TileContentTransform(tile: px, source: source, rotation: now.rotation, fit: effectiveFit(g.tile), zoom: now.zoom ?? .identity)
+            zoomPreview = WorkspaceZoomPreview(tile: g.tile, pane: g.rect, start: t0, now: t1, canvas: size,
                                                sourceKey: tile.source?.windowID ?? 0)
         } else {
             zoomPreview = nil
@@ -811,7 +829,7 @@ final class WorkspaceModel: ObservableObject {
             persist()
             // The final view goes now (its epoch is what the preview waits for), not on the next tick.
             sendNow()
-            if zoom != nil { requestBackdrop(g.tile, refresh: true) }   // fresh for the next gesture
+            if view.zoom != nil || view.rotation != .none { requestBackdrop(g.tile, refresh: true) }   // fresh for the next gesture
         }
         return true
     }

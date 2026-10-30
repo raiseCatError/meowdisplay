@@ -317,11 +317,11 @@ struct ReceiverScreen: View {
                                    // Window mode: the picture is every tile at once, so pinch and pan go to
                                    // the tile under the fingers instead of zooming the whole picture.
                                    onWorkspacePinch: model.workspace.windowMode
-                                       ? { began, ended, pinch, initial, current, scale in
+                                       ? { began, ended, pinch, initial, current, scale, turn, snap in
                                            model.workspace.pinch(began: began, ended: ended, isPinch: pinch,
                                                                  initial: WorkspacePoint(x: initial.x, y: initial.y),
                                                                  current: WorkspacePoint(x: current.x, y: current.y),
-                                                                 scale: Double(scale)) }
+                                                                 scale: Double(scale), turn: Double(turn), snapTurn: snap) }
                                        : nil,
                                    onWorkspaceTouch: model.workspace.windowMode
                                        ? { p in
@@ -2099,7 +2099,7 @@ struct VideoLayerView: UIViewRepresentable {
     var allowLocalViewNavigation = true
     /// Window mode's per-tile pinch/pan: (began, ended, isPinch, initial, current, scale) with
     /// points normalized to the picture; returns whether a tile took the gesture.
-    var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
+    var onWorkspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
     /// Window mode: the first touch in a tile selects it (typing and zoom go there), with or without input.
     var onWorkspaceTouch: ((CGPoint) -> Void)?
     /// Window mode: the instant local zoom of the pane under the fingers, read after each pinch step.
@@ -2740,7 +2740,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         fileprivate var remoteInputAllowed: Bool { allowsInput }
 
-        private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?
+        private var workspacePinch: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?
         var workspaceTouch: ((CGPoint) -> Void)?
         var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
         var workspaceViewReset: ((CGPoint) -> Void)?
@@ -2759,7 +2759,7 @@ struct VideoLayerView: UIViewRepresentable {
         private var heldRightTapWork: DispatchWorkItem?
         private var suppressRightTapsUntil: CFTimeInterval = 0
 
-        func setWorkspacePinch(_ handler: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat) -> Bool)?) {
+        func setWorkspacePinch(_ handler: ((Bool, Bool, Bool, CGPoint, CGPoint, CGFloat, CGFloat, Bool) -> Bool)?) {
             let entering = workspacePinch == nil && handler != nil
             workspacePinch = handler
             if handler == nil {
@@ -2784,23 +2784,25 @@ struct VideoLayerView: UIViewRepresentable {
             guard base.width > 0, base.height > 0 else { return false }
             func norm(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height) }
             let pinch = recognizer.intent == .viewportZoomPan
+            // A twist turns the pane freely (degrees, clockwise), unless rotating is turned off.
+            let turn = pinch && rotateTarget != .disabled ? recognizer.rotationDelta * 180 / .pi : 0
             switch recognizer.state {
             case .began:
                 workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
-                                                       pinch ? recognizer.scaleRatio : 1)
+                                                       pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
                 if workspaceGestureOwned { updateZoomPreview(base: base, began: true, ended: false) }
                 return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
             case .changed:
                 guard workspaceGestureOwned else { return pinch }
                 _ = workspacePinch(false, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
-                                   pinch ? recognizer.scaleRatio : 1)
+                                   pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
                 updateZoomPreview(base: base, began: false, ended: false)
                 return true
             default:
                 guard workspaceGestureOwned else { return pinch }
                 workspaceGestureOwned = false
                 _ = workspacePinch(false, true, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
-                                   pinch ? recognizer.scaleRatio : 1)
+                                   pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
                 updateZoomPreview(base: base, began: false, ended: true)
                 return true
             }
@@ -2855,9 +2857,12 @@ struct VideoLayerView: UIViewRepresentable {
                 zoomPreviewBackdrop = backdrop
             }
             guard let clip = zoomPreviewClip, let still = zoomPreviewStill else { return }
-            // In view points the picture moves by v' = scale * v + t; the still's (0,0) is the pane's corner.
-            let tx = base.minX * (1 - p.scaleX) + p.offsetX * base.width
-            let ty = base.minY * (1 - p.scaleY) + p.offsetY * base.height
+            // In view points the picture moves by P' = L·P + m (a turn included); the still's (0,0) is
+            // the pane's corner. The picture's own axes differ in length, so the shear terms are rescaled.
+            let la = CGFloat(p.scaleX), ld = CGFloat(p.scaleY)
+            let lb = CGFloat(p.shearB) * base.height / base.width, lc = CGFloat(p.shearC) * base.width / base.height
+            let mx = base.minX + CGFloat(p.offsetX) * base.width - (la * base.minX + lc * base.minY)
+            let my = base.minY + CGFloat(p.offsetY) * base.height - (lb * base.minX + ld * base.minY)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             clip.alpha = 1
@@ -2869,7 +2874,11 @@ struct VideoLayerView: UIViewRepresentable {
                     let target = view(p.source).offsetBy(dx: -pane.minX, dy: -pane.minY)
                     let turned = p.rotation.isQuarterTurn
                     backdrop.transform = .identity
-                    backdrop.bounds = CGRect(x: 0, y: 0, width: turned ? target.height : target.width, height: turned ? target.width : target.height)
+                    if let d = p.drawnSource {
+                        backdrop.bounds = CGRect(x: 0, y: 0, width: d.width * base.width, height: d.height * base.height)
+                    } else {
+                        backdrop.bounds = CGRect(x: 0, y: 0, width: turned ? target.height : target.width, height: turned ? target.width : target.height)
+                    }
                     backdrop.center = CGPoint(x: target.midX, y: target.midY)
                     backdrop.transform = CGAffineTransform(rotationAngle: CGFloat(p.rotation.rawValue) * .pi / 180)
                     backdrop.isHidden = false
@@ -2877,8 +2886,9 @@ struct VideoLayerView: UIViewRepresentable {
                     backdrop.isHidden = true
                 }
             }
-            still.transform = CGAffineTransform(scaleX: p.scaleX, y: p.scaleY)
-            still.layer.position = CGPoint(x: p.scaleX * pane.minX + tx - pane.minX, y: p.scaleY * pane.minY + ty - pane.minY)
+            still.transform = CGAffineTransform(a: la, b: lb, c: lc, d: ld, tx: 0, ty: 0)
+            still.layer.position = CGPoint(x: la * pane.minX + lc * pane.minY + mx - pane.minX,
+                                           y: lb * pane.minX + ld * pane.minY + my - pane.minY)
             CATransaction.commit()
             if ended { awaitComposedFrame(base: base, deadline: CACurrentMediaTime() + 1.5) }
         }

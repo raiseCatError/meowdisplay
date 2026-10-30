@@ -571,6 +571,7 @@ extension WindowWorkspaceTargetingTests {
             case .none: XCTAssertTrue(abs(v.dx) < 1e-6 && v.dy > 0, "\(rotation) \(v)")
             case .half: XCTAssertTrue(abs(v.dx) < 1e-6 && v.dy < 0, "\(rotation) \(v)")
             case .quarter, .threeQuarter: XCTAssertTrue(abs(v.dy) < 1e-6 && abs(v.dx) > 0, "\(rotation) \(v)")
+            default: XCTFail("only right angles here")
             }
             XCTAssertEqual(t.resolveAtPointer(.scroll)?.tileID, "b", "\(rotation)")
         }
