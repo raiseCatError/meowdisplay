@@ -198,8 +198,11 @@ final class ClipboardHub: ObservableObject {
         sync = ClipboardSync(origin: origin ?? TrustStore.shared.installID() ?? "mac",
                              seq: UInt64(max(0, defaults.integer(forKey: K.seq))), lamport: UInt64(max(0, defaults.integer(forKey: K.lamport))))
         lastChange = pasteboard.changeCount
-        // Nothing transferred survives a relaunch.
+        // Nothing transferred survives quitting or a relaunch.
         try? FileManager.default.removeItem(at: stagingRoot)
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [stagingRoot] _ in
+            try? FileManager.default.removeItem(at: stagingRoot)
+        }
         refreshReadAccess()
     }
 

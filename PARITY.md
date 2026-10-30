@@ -66,6 +66,17 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 | Typing goes only to the active tile's window | Yes | Yes | Yes | Mac checks focus; verified with Android |
 | Typing strip above the keyboard; Zoom While Typing follows the Mac's text caret | Yes | Yes | — | Strip checked on both phones; caret follow needs Accessibility on the Mac and is unit-tested only |
 
+## Files and clipboard
+
+| Feature | iOS | Android | Mac Receiver | Notes |
+| --- | --- | --- | --- | --- |
+| Remote Finder: browse, previews, save and share copies | Yes | Yes | No | the Mac owner's Files permission per device; unit and loop tests, physical check pending |
+| Remote Finder: upload, rename, move, copy, Trash | Yes | Yes | No | only with the matching capability granted on the Mac |
+| Unified Clipboard: text, links, rich text, images both ways | Yes | Yes | No | off by default on both sides; Mac grants per device; unit and loop tests, physical check pending |
+| Unified Clipboard: copied files and folders | Yes | Yes | No | listed at once, fetched on Save or Share; folders keep their structure |
+| Copies made on the device reach the Mac | Partial | Partial | — | only when MeowDisplay is in front (OS rule); iOS may ask each time, Android shows a notice |
+| Copies marked private are skipped | — | Yes | — | Mac skips nspasteboard concealed/transient items; Android skips EXTRA_IS_SENSITIVE; never guaranteed |
+
 ## Help and diagnostics
 
 | Feature | iOS | Android | Mac Receiver | Notes |

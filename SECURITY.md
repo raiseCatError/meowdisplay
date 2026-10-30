@@ -121,6 +121,51 @@ other end. It does not by itself admit a session:
   and IDs) is never used to put a trusted-looking prompt on screen before
   the connection is authenticated.
 
+## Unified Clipboard
+
+Copying on the Mac and pasting on a connected device (and back) is off until
+the Mac owner turns it on in Settings ▸ Clipboard **and** the person turns it
+on in the device's own Settings ▸ Clipboard. Details: PROTOCOL.md 6.15.
+
+- **Per-device permission.** Each paired device (by its authenticated install
+  id, never its name, IP or Tailscale address) is *Ask* (the default: the Mac
+  shows Not Now / Allow This Session / Always Allow), *Always Allow* or
+  *Block*, with a direction (both ways, Mac to device, device to Mac).
+  Clipboard permission is independent of remote input and of Remote Finder
+  file access: none of them implies another.
+- **Never broadcast.** A copy goes only to devices that are paired, connected,
+  admitted, turned on and allowed in that direction; it never goes back to
+  the device it came from. A device can only send copies in its own name.
+- **Pause and revoke.** Pause stops every copy at once. Revoke, Block or
+  Forget ends that device's grant and cancels its transfers at once. Clear in
+  Settings ▸ Clipboard drops transfers in progress and files waiting there.
+- **What is kept.** No clipboard history, on any platform. A copy from
+  another device is held only until something replaces it; files received on
+  the Mac are staged in a private temporary folder (with the quarantine
+  attribute, so Gatekeeper checks them) and deleted when replaced, on Clear,
+  and when the app quits or starts. Devices keep copies of the Mac's files
+  only while you save or share them (a shared copy stays a short while so the
+  receiving app can read it). Clipboard content is never logged or shown in
+  notifications; the status shows only a summary such as "Text" or
+  "2 files, 3 MB".
+- **Private items.** The Mac skips items the copying app marks as concealed,
+  transient or auto-generated (the nspasteboard.org markers that many
+  password managers set); Android skips copies marked sensitive. This
+  depends on the copying app: **passwords are not guaranteed to be
+  recognized**. Turn the clipboard on only for devices and Macs you trust, and
+  pause it when copying secrets.
+- **Operating-system limits are respected, not bypassed.** macOS 15.4 and
+  later may ask before MeowDisplay reads the pasteboard. iOS and Android let
+  an app read the clipboard only while it is in front (iOS may ask each time;
+  Android shows a notice), so copies made on a device reach the Mac when you
+  return to MeowDisplay, not in the background. Writes stay on the device
+  (not passed on to Universal Clipboard). No private APIs or background
+  polling are used.
+- **Files are validated on the Mac.** Names that could escape their folder
+  are refused, sizes are capped at parse, every range is checked against its
+  digest, and files copied on the Mac are read only when a device asks for
+  them, through the same checks as when they were copied.
+
 ## Network paths and what leaves the local network
 
 - **USB**: local only, over macOS's `usbmuxd`. Nothing leaves the device
