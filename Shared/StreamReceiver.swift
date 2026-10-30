@@ -766,6 +766,8 @@ final class StreamReceiver: ObservableObject {
     /// frame) arrives.
     @MainActor @Published private(set) var activeStreamCodec: StreamCodec = .h264
     @MainActor @Published var connected = false
+    /// The paired Mac of the current session (nil when not connected).
+    @MainActor var connectedMacPeerID: String? { connected ? reconnectContext.current().authenticatedPeerIDHint : nil }
     @MainActor @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @MainActor @Published private(set) var displayState = DisplayState.running
     @MainActor @Published private(set) var videoEnabled = true

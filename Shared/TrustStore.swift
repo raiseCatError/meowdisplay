@@ -275,6 +275,22 @@ final class TrustStore: PeerTrustStoring, @unchecked Sendable {
         finishPinMutation(purged: true)
     }
 
+    /// When each pinned peer was paired (its Keychain row's creation date), for Clean Up.
+    func pinnedPeerDates() -> [String: Date] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let items = out as? [[CFString: Any]] else { return [:] }
+        return items.reduce(into: [:]) { r, item in
+            if let account = item[kSecAttrAccount] as? String, let date = item[kSecAttrCreationDate] as? Date { r[account] = date }
+        }
+    }
+
     /// (peerID, displayName) rows for the "Paired Macs"/forget UI
     /// (kSecMatchLimitAll enumeration). Wired to the iOS Settings
     /// "Paired Macs" list.

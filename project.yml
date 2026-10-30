@@ -272,6 +272,7 @@ targets:
       - Mac/WindowWorkspaceEngine.swift
       - Mac/StageManagerSwitch.swift
       - Mac/StageManagerShortcutInstaller.swift
+      - Shared/KnownDeviceCleanup.swift
       - Mac/LocalNetworkAccess.swift
       - Mac/PrivacyShieldPolicy.swift
       - Mac/MacScreenLock.swift

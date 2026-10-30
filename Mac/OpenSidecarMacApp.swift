@@ -3257,6 +3257,30 @@ final class SenderController: ObservableObject {
 
     var hasActiveDisplay: Bool { !activeDisplayEntries.isEmpty }
 
+    /// Old copies in Known Devices: same name as a newer pairing, not connected or nearby.
+    var supersededKnownDevices: [KnownDeviceCleanup.Entry] {
+        let dates = TrustStore.shared.pinnedPeerDates()
+        return KnownDeviceCleanup.superseded(knownDeviceEntries.map {
+            KnownDeviceCleanup.Entry(id: $0.id, name: $0.name, paired: dates[$0.id],
+                                     inUse: $0.activeSessionID != nil || $0.resolvedTarget != nil)
+        })
+    }
+
+    /// Forgets the confirmed old copies, each exactly like Forget. Only from this Mac's own
+    /// mouse, trackpad or keyboard: a device with remote control can't clear other pairings.
+    func cleanUpKnownDevices(_ ids: [String]) {
+        guard let event = NSApp.currentEvent?.cgEvent,
+              PrivacyShieldPolicy.isPhysical(sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID)) else {
+            Log.info("trustDebug: clean up ignored: it didn't come from this Mac's own input")
+            return
+        }
+        let still = Set(supersededKnownDevices.map(\.id))
+        let removing = ids.filter { still.contains($0) }
+        for id in removing { forgetPairing(peerID: id) }
+        Log.info("trustDebug: cleaned up \(removing.count) old Known Devices entries")
+        objectWillChange.send()
+    }
+
     struct KnownDeviceEntry: Identifiable {
         let id: String   // peerID
         let name: String

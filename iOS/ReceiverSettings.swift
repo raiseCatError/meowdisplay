@@ -1203,9 +1203,27 @@ private struct PairedMacsSettingsPage: View {
     let receiver: StreamReceiver
     @State private var trustRefresh = 0
     @State private var forgetConfirmation = PeerForgetPrompt()
+    @State private var cleanupCandidates: [KnownDeviceCleanup.Entry] = []
+
+    /// Old copies: same Mac name as a newer pairing, not the Mac connected now.
+    private var supersededPeers: [KnownDeviceCleanup.Entry] {
+        let dates = TrustStore.shared.pinnedPeerDates()
+        let current = receiver.connectedMacPeerID
+        return KnownDeviceCleanup.superseded(TrustStore.shared.pinnedPeers().map {
+            KnownDeviceCleanup.Entry(id: $0.peerID, name: $0.displayName, paired: dates[$0.peerID], inUse: $0.peerID == current)
+        })
+    }
 
     var body: some View {
         SettingsForm {
+            let old = supersededPeers
+            if !old.isEmpty {
+                Section {
+                    Button("Clean Up \(old.count) Old \(old.count == 1 ? "Entry" : "Entries")…") { cleanupCandidates = old }
+                } footer: {
+                    Text("Earlier pairings of the same Mac that can't connect any more. The newest pairing of each Mac stays.")
+                }
+            }
             Section {
                 let peers = TrustStore.shared.pinnedPeers()
                 if peers.isEmpty {
@@ -1246,6 +1264,21 @@ private struct PairedMacsSettingsPage: View {
             Button("Cancel", role: .cancel) { forgetConfirmation.cancel() }
         } message: {
             Text("You'll need to pair with this Mac again before connecting.")
+        }
+        .confirmationDialog("Remove \(cleanupCandidates.count) old \(cleanupCandidates.count == 1 ? "entry" : "entries")?",
+                            isPresented: Binding(get: { !cleanupCandidates.isEmpty }, set: { if !$0 { cleanupCandidates = [] } }),
+                            titleVisibility: .visible) {
+            Button("Remove", role: .destructive) {
+                let still = Set(supersededPeers.map(\.id))
+                for e in cleanupCandidates where still.contains(e.id) { receiver.forgetPeer(e.id) }
+                cleanupCandidates = []
+                trustRefresh &+= 1
+            }
+            Button("Cancel", role: .cancel) { cleanupCandidates = [] }
+        } message: {
+            Text(cleanupCandidates.map { e in
+                e.name + (e.paired.map { " · paired " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "")
+            }.joined(separator: "\n"))
         }
     }
 }
