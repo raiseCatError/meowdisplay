@@ -163,6 +163,9 @@ struct StagePeekOverlay: View {
         .ignoresSafeArea(.keyboard)   // the search keyboard never resizes (or closes) the peek
         .onAppear { machine.naturalScrolling = naturalScrolling; syncItems(); playHint() }
         .onChange(of: naturalScrolling) { machine.naturalScrolling = $0 }
+        // Every new opening starts unfiltered: all windows, no app selected, no search; the
+        // Compact/Normal and layout preferences are kept. Dismissal clears them too.
+        .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
         .onChange(of: model.currentWindowID) { _ in syncItems() }

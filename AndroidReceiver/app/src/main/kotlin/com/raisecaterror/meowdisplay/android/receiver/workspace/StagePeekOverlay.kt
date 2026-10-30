@@ -224,6 +224,8 @@ fun StagePeekOverlay(
     val density = LocalDensity.current.density
     val scope = rememberCoroutineScope()
     val host = remember { StagePeekHost(controller, scope) }
+    // Every new opening starts unfiltered: all windows, no app selected, no search (layout prefs kept).
+    LaunchedEffect(ui.stagePeekOpen) { if (ui.stagePeekOpen) host.resetBrowsing() }
     val machine = host.machine
     // Reading the revision subscribes this composition to every state change of the machine.
     @Suppress("UNUSED_VARIABLE") val revision = host.revision
@@ -1539,6 +1541,9 @@ private class StagePeekHost(private val controller: WorkspaceController, private
         if (controller.ui.value.windowMode && display != null) controller.switchTo(controller.displayWindow(display)) else onFullDesktop()
     }
 
+    /** Temporary browsing state only; pins, favourites and preferences are untouched. */
+    fun resetBrowsing() { query = ""; appFilter = null; launchpad = false }
+
     fun closeAfterPick() {
         query = ""; appFilter = null
         machine.cancelAll()
@@ -1550,7 +1555,10 @@ private class StagePeekHost(private val controller: WorkspaceController, private
     fun finish(effects: List<StagePeekEffect>) {
         changed()
         perform(effects)
-        if (machine.phase == StagePeekMachine.Phase.Closed && controller.ui.value.stagePeekOpen) controller.setStagePeekOpen(false)
+        if (machine.phase == StagePeekMachine.Phase.Closed) {
+            resetBrowsing()
+            if (controller.ui.value.stagePeekOpen) controller.setStagePeekOpen(false)
+        }
     }
 
     private fun now(): Double = SystemClock.uptimeMillis() / 1000.0
