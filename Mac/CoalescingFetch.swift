@@ -1,6 +1,6 @@
 import Foundation
 
-/// One request in flight at a time, shared by every caller, with recent answers reused.
+/// Requests shared by every caller (at most two out, usually one), with recent answers reused.
 ///
 /// Built for ScreenCaptureKit's shareable content: macOS's capture service (replayd) answers
 /// every app's requests in turn, so while another app floods it (AltTab 10.x screenshot bursts
@@ -12,8 +12,9 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
     enum Freshness: Sendable {
         /// An answer from a request started after the last `invalidate()` and at most this old.
         case cachedWithin(Duration)
-        /// An answer from a request started after this call (something just changed that the
-        /// caller must see, such as a password prompt appearing).
+        /// An answer from a request started after this call, or at most `sameMoment` before it
+        /// (something just changed that the caller must see, such as a password prompt
+        /// appearing; callers reacting to the same change share one request).
         case startedAfterNow
     }
 
@@ -44,7 +45,13 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
     private var nextSequence: UInt64 = 1
     /// Requests numbered below this started before the last `invalidate()`.
     private var validFrom: UInt64 = 1
-    private var inFlight: UInt64?
+    /// Requests out now. A second goes out only when the one out started too early for a caller
+    /// (before a display appeared): waiting for it would put the fresh request at the back of
+    /// replayd's queue, behind everything other apps sent meanwhile.
+    private var inFlight: Set<UInt64> = []
+    static var maxInFlight: Int { 2 }
+    static var sameMoment: Duration { .milliseconds(50) }
+    private var lastStart: (sequence: UInt64, at: ContinuousClock.Instant)?
     private var cached: (value: Value, sequence: UInt64, at: ContinuousClock.Instant, took: Duration)?
     private var waiters: [UInt64: Waiter] = [:]
     private var nextWaiter: UInt64 = 0
@@ -111,6 +118,9 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
                 }
                 return .wait(validFrom)
             case .startedAfterNow:
+                if let lastStart, inFlight.contains(lastStart.sequence), now - lastStart.at <= Self.sameMoment {
+                    return .wait(lastStart.sequence)
+                }
                 return .wait(nextSequence)
             }
         }
@@ -123,12 +133,15 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
         waiter?.continuation.resume(with: result)
     }
 
-    /// Lock held. Starts the next request when someone waits and none is in flight.
+    /// Lock held. Starts a request when a caller needs a newer answer than any request out can
+    /// give, within `maxInFlight`.
     private func startIfNeededLocked() -> (() -> Void)? {
-        guard inFlight == nil, !waiters.isEmpty else { return nil }
+        let newestOut = inFlight.max() ?? 0
+        guard inFlight.count < Self.maxInFlight, waiters.values.contains(where: { $0.needs > newestOut }) else { return nil }
         let sequence = nextSequence
         nextSequence += 1
-        inFlight = sequence
+        inFlight.insert(sequence)
+        lastStart = (sequence, .now)
         requestsSent += 1
         return { [self] in
             Task {
@@ -143,8 +156,8 @@ final class CoalescingFetch<Value: Sendable>: @unchecked Sendable {
     private func completed(sequence: UInt64, result: Result<Value, Error>, took: Duration) {
         if took >= slowFetch { onSlowFetch?(took) }
         lock.lock()
-        inFlight = nil
-        if case .success(let value) = result, sequence >= validFrom {
+        inFlight.remove(sequence)
+        if case .success(let value) = result, sequence >= validFrom, sequence > (cached?.sequence ?? 0) {
             cached = (value, sequence, ContinuousClock.now, took)
         }
         let served = waiters.filter { $0.value.needs <= sequence }
