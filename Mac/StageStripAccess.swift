@@ -12,6 +12,9 @@ enum StageStripAccess {
     }
 
     static let addAction = "AXAddToStage"
+    /// Off: on macOS 27 the action is acknowledged but the window doesn't join the stage (research
+    /// 2026-10-30, also single-window items). Devices only offer it when the Mac says it works.
+    static let isAvailable = false
 
     /// Which strip item holds `windowID`: its index, or why none can be used.
     static func target(windowID: CGWindowID, groups: [[CGWindowID]]) -> Swift.Result<Int, StageStripAccess.ResultError> {

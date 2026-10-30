@@ -116,6 +116,8 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     /// The last Add to Current Stage (for 8 s): the window and "added", "notInStrip", "ambiguous",
     /// "accessibility" or "failed".
     var stageAdd: StageAddReply?
+    /// The Mac can add a strip window to the current stage (off until it is shown to work).
+    var stageAddAvailable = false
 }
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
@@ -203,7 +205,8 @@ enum WorkspaceEvent: Sendable {
                                                 stageManagerControl: str(obj, "stageManagerControl", 16),
                                                 stageAdd: (obj["stageAdd"] as? [String: Any]).flatMap { a in
                                                     u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
-                                                }))
+                                                },
+                                                stageAddAvailable: obj["stageAddAvailable"] as? Bool ?? false))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }

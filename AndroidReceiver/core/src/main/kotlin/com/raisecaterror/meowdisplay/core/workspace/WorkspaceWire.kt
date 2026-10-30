@@ -233,6 +233,8 @@ data class WorkspaceState(
     val stageManagerControl: String? = null,
     /** The last Add to Current Stage (for 8 s): window id and "added", "notInStrip", "ambiguous", "accessibility" or "failed". */
     val stageAdd: Pair<Long, String>? = null,
+    /** The Mac can add a strip window to the current stage (off until it is shown to work). */
+    val stageAddAvailable: Boolean = false,
 ) {
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
@@ -246,7 +248,8 @@ data class WorkspaceState(
             val rejected = (obj["rejected"] as? JsonObject)?.entries?.take(32)?.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { k to it } }?.toMap() ?: emptyMap()
             return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES,
                 obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16),
-                (obj["stageAdd"] as? JsonObject)?.let { a -> a.long("window")?.let { w -> a.str("result")?.take(16)?.let { w to it } } })
+                (obj["stageAdd"] as? JsonObject)?.let { a -> a.long("window")?.let { w -> a.str("result")?.take(16)?.let { w to it } } },
+                obj.bool("stageAddAvailable") == true)
         }
     }
 }

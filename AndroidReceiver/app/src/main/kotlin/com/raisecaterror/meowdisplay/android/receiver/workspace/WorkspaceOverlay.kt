@@ -223,7 +223,7 @@ fun WorkspaceChrome(
                     remote.state == TileStatus.Failed -> "The Mac stopped sending ${remote.app.ifEmpty { "this window" }}. Tap Retry."
                     remote.state == TileStatus.Limit -> "Paused: too many windows at once"
                     remote.state == TileStatus.Paused -> if (remote.inStageStrip)
-                        "${remote.app.ifEmpty { "This window" }} is in Stage Manager's side strip, so macOS pauses its picture. Add it to the current stage to see it live."
+                        "${remote.app.ifEmpty { "This window" }} is in Stage Manager's side strip, so macOS pauses its picture. Show it on the Mac, or turn Stage Manager off, to see it live."
                     else "macOS paused ${remote.app.ifEmpty { "this window" }}'s picture. It comes back when the window is shown on the Mac."
                     remote.state == TileStatus.Retrying -> "Reconnecting to ${remote.app.ifEmpty { "the window" }}… (try ${remote.attempt})"
                     else -> null
@@ -248,7 +248,9 @@ fun WorkspaceChrome(
                         // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
                         if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop) {
                             if (inputAllowed) {
-                                PaneButton("Add to Current Stage", enabled = true) { controller.addToStage(id) }
+                                if (ui.remote?.stageAddAvailable == true) PaneButton("Add to Current Stage", enabled = true) { controller.addToStage(id) }
+                                // Explicit only: switches the Mac to that window's stage (brings its app forward).
+                                PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
                                 var confirmOff by remember { mutableStateOf(false) }
                                 // Offered only when the Mac can actually do it (the owner's shortcuts exist).
                                 val smControl = ui.remote?.stageManagerControl

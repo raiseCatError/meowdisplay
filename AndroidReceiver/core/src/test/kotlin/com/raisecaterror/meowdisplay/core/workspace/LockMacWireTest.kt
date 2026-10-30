@@ -25,5 +25,9 @@ class StageAddWireTest {
         val state = WorkspaceState.parse(kotlinx.serialization.json.Json.parseToJsonElement(
             """{"type":"workspaceState","tiles":[],"stageAdd":{"window":17007,"result":"failed"}}""") as kotlinx.serialization.json.JsonObject)
         assertEquals(17007L to "failed", state.stageAdd)
+        assertEquals(false, state.stageAddAvailable)
+        val offered = WorkspaceState.parse(kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"type":"workspaceState","tiles":[],"stageAddAvailable":true}""") as kotlinx.serialization.json.JsonObject)
+        assertEquals(true, offered.stageAddAvailable)
     }
 }

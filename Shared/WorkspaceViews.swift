@@ -192,7 +192,7 @@ struct WorkspaceChromeView: View {
         case .limit: return "Paused: too many windows at once"
         case .paused:
             return remote.inStageStrip
-                ? "\(app) is in Stage Manager's side strip, so macOS pauses its picture. Add it to the current stage to see it live."
+                ? "\(app) is in Stage Manager's side strip, so macOS pauses its picture. Show it on the Mac, or turn Stage Manager off, to see it live."
                 : "macOS paused \(app)'s picture. It comes back when the window is shown on the Mac."
         case .retrying: return "Reconnecting to \(remote.app.isEmpty ? "the window" : remote.app)… (try \(remote.attempt))"
         }
@@ -263,14 +263,24 @@ struct WorkspaceChromeView: View {
                     }
                     if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed {
                         HStack(spacing: 8) {
-                            // Explicit only: Stage Manager's own Add to Stage on this exact window's strip item.
-                            Button { model.addToStage(id) } label: {
-                                Label("Add to Current Stage", systemImage: "rectangle.stack.badge.plus").font(.callout.weight(.semibold))
-                                    .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
-                                    .background(.white, in: Capsule())
+                            if model.remote?.stageAddAvailable == true {
+                                // Explicit only: Stage Manager's own Add to Stage on this exact window's strip item.
+                                Button { model.addToStage(id) } label: {
+                                    Label("Add to Current Stage", systemImage: "rectangle.stack.badge.plus").font(.callout.weight(.semibold))
+                                        .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
+                                        .background(.white, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("addToCurrentStage")
+                            }
+                            // Explicit only: switches the Mac to that window's stage (brings its app forward).
+                            Button { model.showOnMac(id) } label: {
+                                Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                                    .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(workspaceChip, in: Capsule())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityIdentifier("addToCurrentStage")
+                            .accessibilityIdentifier("showOnMac")
                             // Every strip window live: Stage Manager off while Window mode is used (confirmed).
                             // Offered only when the Mac can actually do it (the owner's shortcuts exist).
                             if ["ready", "failed"].contains(model.remote?.stageManagerControl ?? "") {

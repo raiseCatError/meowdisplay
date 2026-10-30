@@ -2073,3 +2073,6 @@ then checks the window left the strip within 2 s. The whole strip item joins the
 answer rides in `workspaceState` for 8 s: `"stageAdd":{"window":ID,"result":R}`, R one of
 `added`, `notInStrip`, `ambiguous`, `accessibility`, `failed`. A pane whose window was added
 gets a fresh stream through the usual back-from-the-strip recovery (no reconnect).
+The Mac offers it only with `"stageAddAvailable":true` in `workspaceState`; receivers hide it
+otherwise. macOS 27 acknowledges AXAddToStage without the window joining the stage, so the Mac
+currently never sends it (research: RESEARCH-2026-10-30-add-to-stage.md in the integration folder).

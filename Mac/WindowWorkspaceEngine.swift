@@ -1009,6 +1009,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
             if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         }
+        if StageStripAccess.isAvailable { msg["stageAddAvailable"] = true }
         if let add = stageAdd, ProcessInfo.processInfo.systemUptime - add.at < 8 {
             msg["stageAdd"] = ["window": Int(add.window), "result": add.result.rawValue]
         }
@@ -1042,6 +1043,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         case "addToStage":
             // Confirmed on the device by a person with control (the caller checks the grant):
             // Stage Manager's own Add to Stage on the strip item holding exactly this window.
+            guard StageStripAccess.isAvailable else { return }
             guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
