@@ -2736,7 +2736,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private static func privacyHidden(_ content: SCShareableContent, ids: Set<CGWindowID>) -> [SCWindow] {
         let unlocking = PrivacyShieldWindows.isUnlocking
         return content.windows.filter {
-            ids.contains($0.windowID) || (unlocking && $0.owningApplication?.bundleIdentifier == "com.apple.SecurityAgent")
+            ids.contains($0.windowID) || (unlocking && PrivacyShieldPolicy.unlockPromptBundleIDs.contains($0.owningApplication?.bundleIdentifier ?? ""))
         }
     }
 

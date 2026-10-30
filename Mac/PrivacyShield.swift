@@ -1,4 +1,5 @@
 import AppKit
+import LocalAuthentication
 import Security
 import SwiftUI
 
@@ -332,7 +333,7 @@ final class PrivacyShield {
                 revealed = true
                 held = false
                 lastPhysicalInput = ProcessInfo.processInfo.systemUptime
-                Log.info("privacy shield: removed with this Mac's login password")
+                Log.info("privacy shield: removed at this Mac (owner confirmed)")
                 hide()
             } else {
                 shields.values.forEach { $0.level = Self.topLevel }
@@ -350,10 +351,44 @@ final class PrivacyShield {
         for delay in [0.4, 1.2, 2.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { if PrivacyShieldWindows.isUnlocking { refresh() } } }
         }
-        let ok = await Task.detached(priority: .userInitiated) { authenticateSessionUser() }.value
+        let method = PrivacyShieldPolicy.unlockMethod(
+            touchIDAllowed: UserDefaults.standard.object(forKey: PrivacyShieldPolicy.touchIDKey) as? Bool ?? true,
+            touchIDAvailable: touchIDAvailable())
+        let ok: Bool
+        switch method {
+        case .touchIDOrPassword: ok = await authenticateWithTouchIDOrPassword()
+        case .password: ok = await Task.detached(priority: .userInitiated) { authenticateSessionUser() }.value
+        }
+        Log.info("privacy shield: owner check by \(method == .touchIDOrPassword ? "Touch ID or password" : "login password"): \(ok ? "confirmed" : "not confirmed")")
         PrivacyShieldWindows.isUnlocking = false
         refresh()
         return ok
+    }
+
+    /// A Touch ID sensor with an enrolled finger that can be used now (not with the lid closed).
+    static func touchIDAvailable() -> Bool {
+        let context = LAContext()
+        return context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) && context.biometryType == .touchID
+    }
+
+    /// This Mac has a Touch ID sensor at all (for showing the setting), enrolled or not.
+    static func hasTouchIDSensor() -> Bool {
+        let context = LAContext()
+        _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        return context.biometryType == .touchID
+    }
+
+    /// macOS's own sheet: a finger on this Mac's Touch ID, or "Use Password…". MeowDisplay only
+    /// learns yes or no.
+    private static func authenticateWithTouchIDOrPassword() async -> Bool {
+        let context = LAContext()
+        context.localizedFallbackTitle = String(localized: "Use Password…")
+        do {
+            return try await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                    localizedReason: String(localized: "remove the Privacy Shield cover"))
+        } catch {
+            return false
+        }
     }
 
     nonisolated private static func authenticateSessionUser() -> Bool {
@@ -486,6 +521,8 @@ struct PrivacyShieldSettingsSection: View {
     @AppStorage(PrivacyShieldPolicy.remoteKey) private var remoteOn = true
     @AppStorage(PrivacyShieldPolicy.localKey) private var localOn = false
     @AppStorage(PrivacyShieldPolicy.relockMinutesKey) private var relockMinutes = PrivacyShieldPolicy.defaultRelockMinutes
+    @AppStorage(PrivacyShieldPolicy.touchIDKey) private var touchID = true
+    @State private var hasTouchID = PrivacyShield.hasTouchIDSensor()
     @State private var confirmingOff: Bool?   // true = remote, false = local
     @State private var authFailed = false
 
@@ -498,11 +535,16 @@ struct PrivacyShieldSettingsSection: View {
             }
             .disabled(!remoteOn && !localOn)
             .onChange(of: relockMinutes) { PrivacyShield.shared.settingsChanged() }
-            if authFailed { Text("Not turned off: the login password wasn't confirmed.").font(.caption).foregroundStyle(.secondary) }
+            if hasTouchID {
+                Toggle("Remove With Touch ID", isOn: $touchID)
+                    .disabled(!remoteOn && !localOn)
+                    .help("Touch ID on this Mac, or its login password, removes the cover. Off: only the login password.")
+            }
+            if authFailed { Text("Not turned off: the owner wasn't confirmed at this Mac.").font(.caption).foregroundStyle(.secondary) }
         } header: {
             Text("Privacy Shield")
         } footer: {
-            Text("While a device is connected, this Mac's own screens are covered in black; the device still sees and controls everything. Remote means Tailscale and other routed addresses; local means Wi-Fi, peer-to-peer, USB and hotspot. Someone at the Mac can remove it with this Mac's login password, typed on its own keyboard; it covers again after the time above without use at the Mac. It doesn't stop typing or clicking at the Mac, and some system alerts can appear above it. Its message moves every minute and fades when no one is at the Mac, so OLED screens don't burn in.")
+            Text("While a device is connected, this Mac's own screens are covered in black; the device still sees and controls everything. Remote means Tailscale and other routed addresses; local means Wi-Fi, peer-to-peer, USB and hotspot. Someone at the Mac can remove it with Touch ID (when this Mac has it and it's allowed above) or this Mac's login password, typed on its own keyboard; it covers again after the time above without use at the Mac. It doesn't stop typing or clicking at the Mac, and some system alerts can appear above it. Its message moves every minute and fades when no one is at the Mac, so OLED screens don't burn in.")
         }
         .confirmationDialog(confirmingOff == true ? "Turn off the Privacy Shield for remote connections?" : "Turn off the Privacy Shield for local connections?",
                             isPresented: Binding(get: { confirmingOff != nil }, set: { if !$0 { confirmingOff = nil } })) {
@@ -510,7 +552,7 @@ struct PrivacyShieldSettingsSection: View {
             Button("Cancel", role: .cancel) { confirmingOff = nil }
         } message: {
             Text(PrivacyShield.shared.isCovering
-                 ? "If that turns the cover off now, macOS asks for this Mac's login password, typed on its own keyboard."
+                 ? "If that turns the cover off now, macOS asks for Touch ID or this Mac's login password, at this Mac."
                  : "This Mac's screens will show what those devices do.")
         }
     }

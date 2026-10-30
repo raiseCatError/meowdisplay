@@ -8,6 +8,26 @@ enum PrivacyShieldPolicy {
     /// Local connections (Wi-Fi, peer-to-peer, USB, hotspot): off by default.
     static let localKey = "privacyShield.local"
     static let relockMinutesKey = "privacyShield.relockMinutes"
+    /// Touch ID may remove the cover, with the login password as the fallback: on by default.
+    static let touchIDKey = "privacyShield.touchID"
+
+    /// The macOS prompts that confirm the owner (password dialog, Touch ID sheet). While unlocking,
+    /// their windows are left out of every capture and no remote input reaches the Mac.
+    static let unlockPromptBundleIDs: Set<String> = [
+        "com.apple.SecurityAgent", "com.apple.LocalAuthentication.UIAgent", "com.apple.coreautha",
+    ]
+
+    enum UnlockMethod: Equatable {
+        /// Touch ID, or the login password from the same sheet.
+        case touchIDOrPassword
+        case password
+    }
+
+    /// Touch ID only when the owner allows it and this Mac can use it right now (a sensor with an
+    /// enrolled finger, lid open); otherwise the login password.
+    static func unlockMethod(touchIDAllowed: Bool, touchIDAvailable: Bool) -> UnlockMethod {
+        touchIDAllowed && touchIDAvailable ? .touchIDOrPassword : .password
+    }
     static let relockChoices = [1, 5, 15, 30]
     static let defaultRelockMinutes = 5
 

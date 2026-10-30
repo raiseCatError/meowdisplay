@@ -120,4 +120,20 @@ final class PrivacyShieldPolicyTests: XCTestCase {
         // A screen smaller than the block: centred, never off screen.
         XCTAssertEqual(PrivacyShieldPolicy.coverCenter(step: 3, screen: CGSize(width: 600, height: 180)), CGPoint(x: 300, y: 90))
     }
+
+    // MARK: Touch ID
+
+    func testTouchIDIsUsedOnlyWhenAllowedAndAvailable() {
+        XCTAssertEqual(PrivacyShieldPolicy.unlockMethod(touchIDAllowed: true, touchIDAvailable: true), .touchIDOrPassword)
+        XCTAssertEqual(PrivacyShieldPolicy.unlockMethod(touchIDAllowed: false, touchIDAvailable: true), .password,
+                       "the owner turned Touch ID off")
+        XCTAssertEqual(PrivacyShieldPolicy.unlockMethod(touchIDAllowed: true, touchIDAvailable: false), .password,
+                       "no sensor, no enrolled finger, or the lid is closed")
+    }
+
+    func testTheTouchIDSheetIsHiddenFromDevicesLikeThePasswordDialog() {
+        XCTAssertTrue(PrivacyShieldPolicy.unlockPromptBundleIDs.contains("com.apple.SecurityAgent"))
+        XCTAssertTrue(PrivacyShieldPolicy.unlockPromptBundleIDs.contains("com.apple.LocalAuthentication.UIAgent"))
+        XCTAssertTrue(PrivacyShieldPolicy.unlockPromptBundleIDs.contains("com.apple.coreautha"))
+    }
 }
