@@ -267,7 +267,8 @@ fun WorkspaceChrome(
                         // Mission Control: one pane offers Exit (needs control; without it, ask here).
                         if (ui.remote?.missionControlActionPane == id) {
                             if (inputAllowed) PaneButton("Exit Mission Control", enabled = true) { controller.exitMissionControl() }
-                            else RequestControlInline()
+                            // On a chip: readable over the paused picture.
+                            else RequestControlInline(modifier = Modifier.background(Chip, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 4.dp))
                         }
                         // Stage Manager keeps the window in its strip: only bringing it forward shows it (explicit; needs control).
                         if (remote?.state == TileStatus.Paused && remote.inStageStrip && !desktop && ui.remote?.missionControlOpen != true) {
