@@ -1008,13 +1008,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             "hostFocus": decision.rawValue, "canvas": [Int(canvas.width), Int(canvas.height)],
             "limit": WorkspaceLayout.maximumTiles,
         ]
-        // Stage Manager is on: receivers can offer to turn it off (owner-confirmed, control only).
-        if StageManagerSwitch.isOnRecently {
-            msg["stageManager"] = true
-            // "setup": the owner hasn't made the two shortcuts yet, so a device explains instead of offering Turn Off.
-            msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
-            if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
-        }
+        // Stage Manager on or off: receivers offer Turn Off (owner-confirmed) and Turn On, control only.
+        let stageManagerOn = StageManagerSwitch.isOnRecently
+        msg["stageManagerState"] = stageManagerOn ? "on" : "off"
+        if stageManagerOn { msg["stageManager"] = true }   // older receivers only read this
+        // "setup": the owner hasn't made the two shortcuts yet, so a device explains instead of offering it.
+        msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
+        if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         if StageStripAccess.isAvailable { msg["stageAddAvailable"] = true }
         if let add = stageAdd, ProcessInfo.processInfo.systemUptime - add.at < 8 {
             msg["stageAdd"] = ["window": Int(add.window), "result": add.result.rawValue]
@@ -1034,11 +1034,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         switch action {
         case "stageManager":
             // Confirmed on the device by a person with control (the caller checks the grant).
-            // Off: remembered and turned back on when Window mode ends. On: only undoes our change.
+            // Off: remembered and turned back on when Window mode ends. On: turns it on (from the
+            // device's Settings), and then there is nothing left to restore.
             // Shortcuts take a moment: never on this queue. A change macOS didn't apply is reported.
             let off = obj["on"] as? Bool == false
             StageManagerSwitch.inBackground({ [weak self] in
-                let ok = off ? StageManagerSwitch.turnOffForWindowMode() : { StageManagerSwitch.restoreIfTurnedOffByUs(); return true }()
+                let ok = off ? StageManagerSwitch.turnOffForWindowMode() : StageManagerSwitch.turnOnFromDevice()
                 self?.queue.async {
                     guard let self else { return }
                     self.stageManagerFailedAt = ok ? nil : ProcessInfo.processInfo.systemUptime

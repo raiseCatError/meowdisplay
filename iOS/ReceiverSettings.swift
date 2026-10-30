@@ -659,6 +659,7 @@ private struct InputSettingsPage: View {
                 }
             }
             if let lockMacClient { LockMacSection(workspace: lockMacClient) }
+            if let lockMacClient { StageManagerSection(workspace: lockMacClient) }
             Section {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {
                     ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
@@ -1589,6 +1590,52 @@ extension EnvironmentValues {
     var lockMacClient: WorkspaceModel? {
         get { self[LockMacClientKey.self] }
         set { self[LockMacClientKey.self] = newValue }
+    }
+}
+
+/// Stage Manager on the Mac (Window mode): its side strip pauses windows, so their panes stand
+/// still. Turn it off here (confirmed; MeowDisplay turns it back on when Window mode ends) or on.
+/// Needs control; shows what the Mac reports.
+private struct StageManagerSection: View {
+    @ObservedObject var workspace: WorkspaceModel
+    @State private var confirmingOff = false
+
+    var body: some View {
+        if let on = workspace.stageManagerIsOn {
+            Section {
+                LabeledContent("Stage Manager on the Mac", value: on ? String(localized: "On") : String(localized: "Off"))
+                    .accessibilityIdentifier("stageManagerState")
+                    .settingsAnchor("stageManager")
+                switch workspace.remote?.stageManagerControl {
+                case "setup"?:
+                    SettingNote("To switch it from here, open MeowDisplay's Settings on the Mac ▸ System ▸ Stage Manager and choose Set Up Automatically.")
+                default:
+                    if on {
+                        Button("Turn Off Stage Manager") { confirmingOff = true }
+                            .disabled(!workspace.canControlMac)
+                            .accessibilityIdentifier("stageManagerOff")
+                    } else {
+                        Button("Turn On Stage Manager") { workspace.turnOnStageManager() }
+                            .disabled(!workspace.canControlMac)
+                            .accessibilityIdentifier("stageManagerOn")
+                    }
+                    if workspace.remote?.stageManagerControl == "failed" {
+                        Text("The Mac didn't change it. Try again, or switch it in Control Center on the Mac.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else if !workspace.canControlMac {
+                        Text("Needs control of the Mac. Request Control first.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("Stage Manager's side strip pauses the windows in it, so their panes stand still. With it off they show live. If MeowDisplay turned it off, it turns it back on when Window mode ends.")
+            }
+            .confirmationDialog("Turn off Stage Manager on the Mac?", isPresented: $confirmingOff, titleVisibility: .visible) {
+                Button("Turn Off") { workspace.turnOffStageManager() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Windows in its side strip then show live here. MeowDisplay turns Stage Manager back on when Window mode ends.")
+            }
+        }
     }
 }
 

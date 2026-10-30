@@ -235,7 +235,12 @@ data class WorkspaceState(
     val stageAdd: Pair<Long, String>? = null,
     /** The Mac can add a strip window to the current stage (off until it is shown to work). */
     val stageAddAvailable: Boolean = false,
+    /** Stage Manager on (true) or off (false); null: an older Mac that only says when it is on. */
+    val stageManagerOn: Boolean? = null,
 ) {
+    /** As Settings shows it: on, off, or null when the Mac doesn't say. */
+    val stageManagerIsOn: Boolean? get() = stageManagerOn ?: if (stageManager) true else null
+
     companion object {
         fun parse(obj: JsonObject): WorkspaceState {
             val tiles = obj.arrayOrEmpty("tiles").objects().take(WLayout.MAXIMUM_TILES).mapNotNull { t ->
@@ -249,7 +254,8 @@ data class WorkspaceState(
             return WorkspaceState(obj.str("host"), tiles, obj.str("active"), HostFocus.of(obj.str("hostFocus")), rejected, obj.int("limit") ?: WLayout.MAXIMUM_TILES,
                 obj.bool("stageManager") == true, obj.str("stageManagerControl")?.take(16),
                 (obj["stageAdd"] as? JsonObject)?.let { a -> a.long("window")?.let { w -> a.str("result")?.take(16)?.let { w to it } } },
-                obj.bool("stageAddAvailable") == true)
+                obj.bool("stageAddAvailable") == true,
+                when (obj.str("stageManagerState")) { "on" -> true; "off" -> false; else -> null })
         }
     }
 }

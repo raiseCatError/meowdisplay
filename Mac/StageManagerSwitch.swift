@@ -115,6 +115,18 @@ enum StageManagerSwitch {
         if !isOn, set(true) { Log.info("stage manager: turned back on") }
     }
 
+    /// Turns it on because the owner asked from a device; nothing is left for Window mode to
+    /// restore afterwards. True when it is on.
+    @discardableResult
+    static func turnOnFromDevice() -> Bool {
+        UserDefaults.standard.set(false, forKey: turnedOffKey)
+        cacheLock.withLock { cached = nil }
+        if isOn { return true }
+        guard set(true) else { return false }
+        Log.info("stage manager: turned on from a device")
+        return true
+    }
+
     /// Runs `body` on a utility queue (shortcuts take a moment), then `done` on the main queue.
     static func inBackground(_ body: @escaping @Sendable () -> Void, done: (@MainActor @Sendable () -> Void)? = nil) {
         DispatchQueue.global(qos: .utility).async {

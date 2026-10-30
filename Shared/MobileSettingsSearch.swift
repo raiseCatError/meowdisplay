@@ -115,6 +115,7 @@ enum MobileSettingsSearchIndex {
         // Input
         .init("control", String(localized: "Control"), .input, keywords: ["request control", "request input", "allow input", "permission"]),
         .init("inputMode", String(localized: "Input Mode"), .input, keywords: ["direct touch", "trackpad", "pointer", "mouse"]),
+        .init("stageManager", String(localized: "Stage Manager on the Mac"), .input, keywords: ["stage manager", "side strip", "paused", "window mode", "turn on", "turn off"]),
         .init("touchStyle", String(localized: "Touch Style"), .input, keywords: ["natural touch", "classic", "tap to click", "long press", "right click"]),
         .init("smartTouch", "Smart Touch", .input, keywords: ["scroll", "one finger", "title bar", "window"]),
         .init("smartTouchHaptics", String(localized: "Smart Touch Haptics"), .input, keywords: ["vibration"]),

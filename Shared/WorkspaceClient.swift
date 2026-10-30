@@ -110,6 +110,8 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var rejected: [String: String]
     /// Stage Manager is on on the Mac (its strip pauses windows).
     var stageManager = false
+    /// Whether Stage Manager is on (true) or off (false); nil: an older Mac that only says when it is on.
+    var stageManagerOn: Bool?
     /// Whether the Mac can switch it: "ready", "setup" (the owner hasn't made the two shortcuts on
     /// the Mac yet) or "failed" (macOS didn't apply the last change). nil: an older Mac, never offered.
     var stageManagerControl: String?
@@ -202,6 +204,7 @@ enum WorkspaceEvent: Sendable {
             return .state(WorkspaceStateMessage(host: str(obj, "host"), tiles: Array(tiles), active: str(obj, "active", 32),
                                                 hostFocus: (obj["hostFocus"] as? String).flatMap(RemoteHostFocus.init(rawValue:)) ?? .noActiveTile,
                                                 rejected: rejected, stageManager: obj["stageManager"] as? Bool ?? false,
+                                                stageManagerOn: (obj["stageManagerState"] as? String).flatMap { $0 == "on" ? true : $0 == "off" ? false : nil },
                                                 stageManagerControl: str(obj, "stageManagerControl", 16),
                                                 stageAdd: (obj["stageAdd"] as? [String: Any]).flatMap { a in
                                                     u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
@@ -912,6 +915,22 @@ final class WorkspaceModel: ObservableObject {
         guard inputAllowed() else { return }
         _ = send(WorkspaceRequests.stageManager(on: false))
     }
+
+    /// Turn Stage Manager on on the Mac (Settings; control).
+    func turnOnStageManager() {
+        guard inputAllowed() else { return }
+        _ = send(WorkspaceRequests.stageManager(on: true))
+    }
+
+    /// Stage Manager on the Mac as Settings shows it: on, off, or nil when the Mac doesn't say
+    /// (not in Window mode, or an older Mac).
+    var stageManagerIsOn: Bool? {
+        guard let r = remote else { return nil }
+        return r.stageManagerOn ?? (r.stageManager ? true : nil)
+    }
+
+    /// Whether this device may switch Stage Manager now (it has control).
+    var canControlMac: Bool { inputAllowed() }
 
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
     /// Add to Current Stage: Stage Manager's own action on the strip item holding this pane's

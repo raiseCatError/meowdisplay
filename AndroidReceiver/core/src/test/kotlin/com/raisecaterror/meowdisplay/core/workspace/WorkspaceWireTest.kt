@@ -191,6 +191,14 @@ class WorkspaceWireTest {
         assertNull(WZoomPreview.between("t", pane, WRect(0.0, 0.0, 0.0, 1.0), now))
     }
 
+    @Test fun stageManagerStateSaysOnOrOffForSettings() {
+        fun parse(extra: String) = WorkspaceState.parse(Json.parseToJsonElement("""{"type":"workspaceState","tiles":[],"hostFocus":"noActiveTile"$extra}""").jsonObject)
+        assertEquals(true, parse(""","stageManager":true,"stageManagerState":"on"""").stageManagerIsOn)
+        assertEquals(false, parse(""","stageManagerState":"off","stageManagerControl":"ready"""").stageManagerIsOn)
+        assertEquals("an older Mac that says it is on", true, parse(""","stageManager":true""").stageManagerIsOn)
+        assertNull("an older Mac says nothing when it is off", parse("").stageManagerIsOn)
+    }
+
     @Test fun stageManagerControlSaysWhetherTheMacCanSwitchIt() {
         fun parse(extra: String) = WorkspaceState.parse(Json.parseToJsonElement("""{"type":"workspaceState","tiles":[],"hostFocus":"noActiveTile"$extra}""").jsonObject)
         assertEquals("setup", parse(""","stageManager":true,"stageManagerControl":"setup"""").stageManagerControl)

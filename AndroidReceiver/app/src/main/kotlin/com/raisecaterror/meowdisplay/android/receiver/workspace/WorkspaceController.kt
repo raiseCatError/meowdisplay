@@ -1048,6 +1048,15 @@ class WorkspaceController(
         media.session.sendWorkspace(WorkspaceWire.stageManager(false))
     }
 
+    /** Stage Manager on on the Mac (Settings; needs control). */
+    fun turnOnStageManager() {
+        if (!inputAllowed) return
+        media.session.sendWorkspace(WorkspaceWire.stageManager(true))
+    }
+
+    /** Whether this device may switch Stage Manager now (it has control). */
+    val canControlMac: Boolean get() = inputAllowed
+
     /** A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (needs control). */
     /** Add to Current Stage (needs control): the Mac answers in its state. */
     fun addToStage(id: String) {

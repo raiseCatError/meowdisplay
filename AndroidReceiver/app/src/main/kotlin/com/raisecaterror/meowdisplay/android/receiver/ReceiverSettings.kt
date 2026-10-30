@@ -177,6 +177,7 @@ private fun SettingsPageContent(
             }
             Caption("Your Mac decides. Every session starts View Only; control stops the moment the Mac revokes it.")
             controller.workspace?.let { ws -> LockMacSection(ws) }
+            controller.workspace?.let { ws -> StageManagerSection(ws) }
             Section("Keyboard")
             val zoomWhileTyping by controller.store.zoomWhileTyping.collectAsState()
             Toggle("Zoom While Typing", zoomWhileTyping) { on -> controller.store.setZoomWhileTyping(on) }
@@ -631,6 +632,42 @@ internal fun LabeledSlider(title: String, value: Float, range: ClosedFloatingPoi
     Column {
         Row { Text(title, Modifier.weight(1f)); Text("%.2f×".format(value)) }
         Slider(value = value, onValueChange = onChange, valueRange = range)
+    }
+}
+
+/**
+ * Stage Manager on the Mac (Window mode): its side strip pauses windows, so their panes stand still.
+ * Turn it off (confirmed; MeowDisplay turns it back on when Window mode ends) or on. Needs control.
+ */
+@Composable
+private fun StageManagerSection(ws: com.raisecaterror.meowdisplay.android.receiver.workspace.WorkspaceController) {
+    val s by ws.ui.collectAsState()
+    val on = s.remote?.stageManagerIsOn ?: return
+    var confirmingOff by remember { mutableStateOf(false) }
+    Section("Stage Manager on the Mac")
+    Text(if (on) "On" else "Off", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.semantics { contentDescription = "Stage Manager on the Mac: ${if (on) "on" else "off"}" })
+    val control = s.remote?.stageManagerControl
+    if (control == "setup") {
+        Caption("To switch it from here, open MeowDisplay's Settings on the Mac ▸ System ▸ Stage Manager and choose Set Up Automatically.")
+    } else {
+        val canControl = ws.canControlMac
+        OutlinedButton(onClick = { if (on) confirmingOff = true else ws.turnOnStageManager() }, enabled = canControl) {
+            Text(if (on) "Turn Off Stage Manager" else "Turn On Stage Manager")
+        }
+        when {
+            control == "failed" -> Caption("The Mac didn't change it. Try again, or switch it in Control Center on the Mac.")
+            !canControl -> Caption("Needs control of the Mac. Request Control first.")
+        }
+    }
+    Caption("Stage Manager's side strip pauses the windows in it, so their panes stand still. With it off they show live. If MeowDisplay turned it off, it turns it back on when Window mode ends.")
+    if (confirmingOff) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmingOff = false },
+            title = { Text("Turn off Stage Manager on the Mac?") },
+            text = { Text("Windows in its side strip then show live here. MeowDisplay turns Stage Manager back on when Window mode ends.") },
+            confirmButton = { TextButton(onClick = { confirmingOff = false; ws.turnOffStageManager() }) { Text("Turn Off") } },
+            dismissButton = { TextButton(onClick = { confirmingOff = false }) { Text("Cancel") } },
+        )
     }
 }
 
