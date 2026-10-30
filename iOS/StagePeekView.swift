@@ -82,7 +82,11 @@ struct StagePeekOverlay: View {
         return WorkspaceSearch.carouselOrder(running)
     }
     private var filterApp: MacAppItem? { appFilter.flatMap { b in dockApps.first { $0.bundleID == b } } }
-    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// Roomier chrome when the window is regular in both directions (a full iPad, an unfolded
+    /// iPhone Duo), whatever the device; a phone in landscape stays compact.
+    private var roomy: Bool { horizontalSizeClass == .regular && verticalSizeClass == .regular }
 
     var body: some View {
         let cards = revealShifted(layout())
@@ -202,13 +206,13 @@ struct StagePeekOverlay: View {
             return Double(w.width) / Double(w.height)
         }
         return StagePeekLayout.cards(aspects: aspects, position: machine.position, expansion: machine.expansion,
-                                     edge: edge, safe: safe, isPad: isPad, reduceMotion: reduceMotion, region: dockRegion)
+                                     edge: edge, safe: safe, isPad: roomy, reduceMotion: reduceMotion, region: dockRegion)
     }
 
     /// The Compact Dock's band: under the search and app carousel, above the buttons.
     private var dockRegion: CGRect? {
         guard dock == .compact else { return nil }
-        let compactWidth = min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+        let compactWidth = min(max(safe.width * (roomy ? 0.24 : 0.36), 110), roomy ? 300 : 210)
         let column = edge == .left ? safe.minX + 16 + compactWidth / 2 : safe.maxX - 16 - compactWidth / 2
         return StagePeekLayout.dockRegion(safe: safe, controlsAbove: safe.minY + Self.topControlsBottom,
                                           controlsBelow: toolbarY(column) - Self.toolbarHalfHeight)
@@ -313,7 +317,7 @@ struct StagePeekOverlay: View {
             LinearGradient(colors: [Color.black.opacity(reduceTransparency ? 0.5 : 0.30), Color.black.opacity(0)],
                            startPoint: edge == .left ? .leading : .trailing,
                            endPoint: edge == .left ? .trailing : .leading)
-                .frame(width: min(frame.width, (isPad ? 520 : 380) + e * frame.width))
+                .frame(width: min(frame.width, (roomy ? 520 : 380) + e * frame.width))
                 .frame(maxWidth: .infinity, alignment: edge == .left ? .leading : .trailing)
             if e > 0 {
                 // Expanded: a light blur of the Mac picture behind the gallery (the cards stay
@@ -334,7 +338,7 @@ struct StagePeekOverlay: View {
         let window = window(at: card.index)
         let thumbnail = window.flatMap { model.thumbnails[$0.id] }
         let icon = window.flatMap { model.icons[$0.bundleID] }
-        let shape = RoundedRectangle(cornerRadius: isPad ? 14 : 11, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: roomy ? 14 : 11, style: .continuous)
         let displayIndex = machine.ids.indices.contains(card.index) ? StagePeekIDs.displayIndex(machine.ids[card.index]) : nil
         let fullDesktop = displayIndex != nil
         let display = displayIndex.flatMap { displays.indices.contains($0) ? displays[$0] : nil }
@@ -363,7 +367,7 @@ struct StagePeekOverlay: View {
             if let icon, thumbnail != nil {
                 // The app's icon at the card's bottom-left, like Stage Manager.
                 Image(decorative: icon, scale: 1).resizable()
-                    .frame(width: isPad ? 30 : 24, height: isPad ? 30 : 24)
+                    .frame(width: roomy ? 30 : 24, height: roomy ? 30 : 24)
                     .shadow(color: .black.opacity(0.5), radius: 3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
@@ -399,8 +403,8 @@ struct StagePeekOverlay: View {
     /// pinned at the top of the peek's column (compact) or centred over the gallery (expanded).
     private var topControls: some View {
         let e = machine.expansion
-        let compactWidth = min(isPad ? 380 : 320, safe.width - 24)
-        let wideWidth = min(isPad ? 620 : 560, safe.width - 32)
+        let compactWidth = min(roomy ? 380 : 320, safe.width - 24)
+        let wideWidth = min(roomy ? 620 : 560, safe.width - 32)
         let width = compactWidth + (wideWidth - compactWidth) * e
         let compactX = edge == .left ? safe.minX + 12 + compactWidth / 2 : safe.maxX - 12 - compactWidth / 2
         let x = compactX + (safe.midX - compactX) * e

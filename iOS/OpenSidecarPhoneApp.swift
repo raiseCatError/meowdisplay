@@ -505,10 +505,9 @@ struct ReceiverScreen: View {
                              onExploreDemo: { enterDemo() })
                 }
             }
-            .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
-            .onChange(of: geo.size) { size in
-                model.receiver.setOrientation(portrait: size.height > size.width)
-            }
+            .background(ReceiverWindowPanelProbe { points, scale in
+                model.panelSettler.windowChanged(points: points, scale: scale)
+            })
             .sheet(isPresented: $showOnboarding) {
                 OnboardingView { onboardingDismissed = true }
             }
@@ -794,6 +793,54 @@ struct ReceiverScreen: View {
 /// UIKit remains authoritative for physical window safe-area insets even
 /// while the streaming SwiftUI tree deliberately renders edge-to-edge.
 /// `safeAreaInsetsDidChange` makes rotation updates immediate.
+/// Reports this window's size and pixel scale whenever either changes: rotation, folding or
+/// unfolding iPhone Duo, or resizing in Stage Manager or Split View. Reads the window itself,
+/// not the screen, and never the device type.
+private struct ReceiverWindowPanelProbe: UIViewRepresentable {
+    let onChange: (CGSize, CGFloat) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.onChange = onChange
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.onChange = onChange
+        view.publishIfNeeded()
+    }
+
+    final class ProbeView: UIView {
+        var onChange: ((CGSize, CGFloat) -> Void)?
+        private var lastSize: CGSize?
+        private var lastScale: CGFloat?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            publishIfNeeded()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            publishIfNeeded()
+        }
+
+        func publishIfNeeded() {
+            guard let window else { return }
+            let size = window.bounds.size
+            // Native pixels per point of the screen this window is on (its scene's screen, never
+            // `UIScreen.main`), so a full-screen window announces exactly the screen's native size.
+            let scale = window.windowScene?.screen.nativeScale ?? window.traitCollection.displayScale
+            guard size != lastSize || scale != lastScale else { return }
+            lastSize = size
+            lastScale = scale
+            // Avoid mutating SwiftUI state during representable updates.
+            DispatchQueue.main.async { [weak self] in self?.onChange?(size, scale) }
+        }
+    }
+}
+
 private struct ReceiverSafeAreaProbe: UIViewRepresentable {
     let onChange: (ControlSafeInsets, LandscapeTraySide?) -> Void
 
@@ -1892,6 +1939,9 @@ final class ReceiverModel: ObservableObject {
     let workspace = WorkspaceModel()
     let wakeConnect: WakeConnectCoordinator
     let pictureInPicture: ReceiverPictureInPictureController
+    /// Turns this window's size into the panel the Mac's Extend display takes (iPhone Duo,
+    /// Stage Manager, Split View): see `ReceiverPanelGeometry`.
+    let panelSettler: ReceiverPanelSettler
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -1912,6 +1962,10 @@ final class ReceiverModel: ObservableObject {
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
                                 short: Int(min(native.width, native.height)),
                                 scale: Double(ActiveScene.screen.nativeScale))
+        let panelReceiver = receiver
+        panelSettler = ReceiverPanelSettler(
+            isConnected: { panelReceiver.connected },
+            apply: { panelReceiver.setPanel(pixelsWide: $0.wide, pixelsHigh: $0.high, scale: $0.scale) })
         let savedName = UserDefaults.standard.string(forKey: "deviceName")
         receiver.serviceName = (savedName?.isEmpty == false) ? savedName! : UIDevice.current.name
         receiver.objectWillChange
