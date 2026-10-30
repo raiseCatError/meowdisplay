@@ -119,15 +119,13 @@ data class TileTransform(val tile: WRect, val source: WSize, val rotation: WRota
 
     val scale: Double get() = baseScale * zoom.scale
 
-    /** The zoom's centre at the pane's centre, kept navigable per axis (no gap when larger, inside when smaller). */
+    /** The zoom's centre at the pane's centre. Free canvas: any edge or corner of the source can be
+     *  brought to the pane's centre (empty canvas intended); the source always covers the centre. */
     val contentRect: WRect get() {
         val r = rotatedSource; val s = scale
         val w = r.width * s; val h = r.height * s
-        fun place(start: Double, extent: Double, size: Double, center: Double): Double {
-            val want = start + extent / 2 - center * size
-            val lo = min(start, start + extent - size); val hi = max(start, start + extent - size)
-            return min(max(want, lo), hi)
-        }
+        fun place(start: Double, extent: Double, size: Double, center: Double): Double =
+            start + extent / 2 - min(max(center, 0.0), 1.0) * size
         return WRect(place(tile.x, tile.width, w, zoom.centerX), place(tile.y, tile.height, h, zoom.centerY), w, h)
     }
 

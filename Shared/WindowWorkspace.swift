@@ -170,16 +170,15 @@ struct TileContentTransform: Equatable, Sendable {
 
     var scale: Double { baseScale * zoom.scale }
 
-    /// Where the whole (rotated, scaled) source lands: `zoom`'s centre at the pane's centre,
-    /// then kept navigable per axis. Larger than the pane: no gap at either edge. Smaller
-    /// (zoomed out): the whole source stays inside the pane.
+    /// Where the whole (rotated, scaled) source lands: `zoom`'s centre at the pane's centre.
+    /// A free canvas: the centre may be any point of the source, so any edge or corner can be
+    /// brought to the pane's centre and left there (the empty canvas around it is intended).
+    /// The source always covers the pane's centre, so it can never be lost.
     var contentRect: WorkspaceRect {
         let r = rotatedSourceSize, s = scale
         let w = r.width * s, h = r.height * s
         func place(_ start: Double, _ extent: Double, _ size: Double, _ center: Double) -> Double {
-            let want = start + extent / 2 - center * size
-            let lo = min(start, start + extent - size), hi = max(start, start + extent - size)
-            return min(max(want, lo), hi)
+            start + extent / 2 - min(max(center, 0), 1) * size
         }
         return WorkspaceRect(x: place(tile.x, tile.width, w, zoom.centerX), y: place(tile.y, tile.height, h, zoom.centerY),
                              width: w, height: h)
