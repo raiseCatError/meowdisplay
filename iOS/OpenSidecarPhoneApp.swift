@@ -61,6 +61,8 @@ struct ReceiverScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     // First-run onboarding (issue #49): explain the Mac app is required.
@@ -263,6 +265,11 @@ struct ReceiverScreen: View {
     private var recommendedUpdate: VersionGate.Update? {
         if case let .recommended(update) = versionGate.status, !nagDismissed { return update }
         return nil
+    }
+
+    private func updateControlLayoutClass() {
+        controlStore.updateLayoutClass(horizontalRegular: horizontalSizeClass == .regular,
+                                       verticalRegular: verticalSizeClass == .regular)
     }
 
     var body: some View {
@@ -508,6 +515,9 @@ struct ReceiverScreen: View {
             .background(ReceiverWindowPanelProbe { points, scale in
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
+            .onAppear { updateControlLayoutClass() }
+            .onChange(of: horizontalSizeClass) { _ in updateControlLayoutClass() }
+            .onChange(of: verticalSizeClass) { _ in updateControlLayoutClass() }
             .sheet(isPresented: $showOnboarding) {
                 OnboardingView { onboardingDismissed = true }
             }
