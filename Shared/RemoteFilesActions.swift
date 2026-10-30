@@ -575,8 +575,12 @@ extension RemoteFilesModel {
     static let maxExportFiles = 5000
 
     private func startExport(_ entries: [RemoteFileEntry], mode: RemoteFilesExport.Mode) {
-        guard allowed("download"), !entries.isEmpty else { return }
+        guard allowed("download"), !entries.isEmpty else {
+            Log.info("files export: \(mode) of \(entries.count) not started (download allowed: \(grant?.canDownload ?? false))")
+            return
+        }
         let batch = UUID()
+        Log.info("files export: \(mode) of \(entries.count) started batch=\(batch.uuidString.prefix(8))")
         exportBatches[batch] = RemoteFilesExportBatch(mode: mode)
         for e in entries {
             guard let p = place(of: e) else { continue }
@@ -635,6 +639,7 @@ extension RemoteFilesModel {
             show(.needs(item.direction == .upload ? "upload" : "download"))
         }
         guard case .download(.save) = item.direction else { return }
+        Log.info("files export: copy settled state=\(item.state) batch=\(item.batch.uuidString.prefix(8)) inBatch=\(exportBatches[item.batch] != nil)")
         if var b = exportBatches[item.batch], b.pending.contains(item.id) {
             b.pending.remove(item.id)
             if item.state != .done { b.failed += 1 }
@@ -656,12 +661,11 @@ extension RemoteFilesModel {
             try? fm.createDirectory(at: f.reduce(dir) { $0.appendingPathComponent($1, isDirectory: true) }, withIntermediateDirectories: true)
         }
         var moved = 0
-        let base = dir.standardizedFileURL.path + "/"
         for (id, rel) in b.paths {
             guard let item = transfers.items.first(where: { $0.id == id }), item.state == .done, let src = item.localURL else { continue }
             let dest = rel.reduce(dir) { $0.appendingPathComponent($1) }
             // Second guard: every copy stays inside the export folder.
-            guard rel.allSatisfy(RemoteFilesReply.isSafeName), dest.standardizedFileURL.path.hasPrefix(base) else { continue }
+            guard rel.allSatisfy(RemoteFilesReply.isSafeName), Self.isInside(dest, dir) else { continue }
             try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if (try? fm.moveItem(at: src, to: dest)) != nil {
                 moved += 1
@@ -670,13 +674,24 @@ extension RemoteFilesModel {
         }
         var seen = Set<String>()
         let urls = b.tops.filter { RemoteFilesReply.isSafeName($0) && seen.insert($0).inserted }.map { dir.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
+        Log.info("files export: batch=\(batch.uuidString.prefix(8)) ready moved=\(moved) urls=\(urls.count) failed=\(b.failed)")
         guard !urls.isEmpty, moved > 0 || !b.folders.isEmpty else {
             try? fm.removeItem(at: dir)
-            if b.failed > 0 { show(.text(String(localized: "Nothing could be copied from the Mac."))) }
+            // Never silent: the person pressed Save or Share and must hear what happened.
+            show(.text(String(localized: "Nothing could be copied from the Mac.")))
             return
         }
         if b.truncated { show(.text(String(localized: "Only the first \(Self.maxExportFiles) files are included."))) }
         export = RemoteFilesExport(mode: b.mode, urls: urls, directory: dir, failed: b.failed)
+    }
+
+    /// `dest` lies inside `dir`. Plain paths, never `standardizedFileURL`: on iOS the temporary
+    /// folder is under /private/var, and standardizing drops "/private" only for paths that
+    /// exist, so the folder (which exists) and a file not moved there yet never matched and
+    /// every Save and Share ended with nothing (owner report 2026-10-31, iPad log moved=0).
+    nonisolated static func isInside(_ dest: URL, _ dir: URL) -> Bool {
+        let base = dir.path.hasSuffix("/") ? dir.path : dir.path + "/"
+        return dest.path.hasPrefix(base) && !dest.pathComponents.contains("..")
     }
 
     /// Stops preparing copies for Save or Share; what was copied so far is removed.

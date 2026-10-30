@@ -288,6 +288,7 @@ enum RemoteExportPresenting {
         guard let top = topViewController() else { done(false); return }
         let busy = top.transitionCoordinator != nil || top.isBeingPresented || top.isBeingDismissed
             || top.presentedViewController?.isBeingDismissed == true
+        Log.info("files export: present \(export.mode) attempt=\(attempt) top=\(type(of: top)) busy=\(busy) presenting=\(top.presentedViewController.map { "\(type(of: $0))" } ?? "none")")
         if busy, attempt < 20 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { present(export, attempt: attempt + 1, done: done) }
             return
@@ -310,7 +311,9 @@ enum RemoteExportPresenting {
                 pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 1, height: 1)
                 pop.permittedArrowDirections = []
             }
-            top.present(sheet, animated: true)
+            top.present(sheet, animated: true) {
+                Log.info("files export: share sheet shown=\(sheet.presentingViewController != nil)")
+            }
         }
     }
 
@@ -372,12 +375,9 @@ enum RemoteSaveToDevice {
             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             if status == .authorized || status == .limited {
                 for (url, kind) in media {
-                    do {
-                        try await PHPhotoLibrary.shared().performChanges {
-                            PHAssetCreationRequest.forAsset().addResource(with: kind, fileURL: url, options: nil)
-                        }
+                    if await addToPhotos(url, kind) {
                         result.photos += 1
-                    } catch {
+                    } else {
                         files.append(url)   // a format Photos refuses still lands in Downloads
                     }
                 }
@@ -393,7 +393,22 @@ enum RemoteSaveToDevice {
                 if (try? fm.copyItem(at: url, to: dest)) != nil { result.files += 1 }
             }
         }
+        Log.info("files export: saved photos=\(result.photos) files=\(result.files) photosDenied=\(result.photosDenied)")
         return result
+    }
+
+    /// Not on the main actor: Photos runs the change block on its own queue, and a block made in
+    /// a main-actor function is checked against the main queue at run time and crashed the app
+    /// (owner's iPad, 2026-10-31: EXC_BREAKPOINT in dispatch_assert_queue).
+    nonisolated static func addToPhotos(_ url: URL, _ kind: PHAssetResourceType) async -> Bool {
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetCreationRequest.forAsset().addResource(with: kind, fileURL: url, options: nil)
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 
     static func message(_ r: Result, failed: Int) -> String {

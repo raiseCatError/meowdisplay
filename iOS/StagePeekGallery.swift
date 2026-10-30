@@ -102,54 +102,180 @@ struct StagePeekDock: View {
     let onApp: (MacAppItem) -> Void
     var onDragEnded: (Bool) -> Void = { _ in }
     let onLaunchpad: () -> Void
+    /// Scrolling the bar widens it to the screen's width (owner, 2026-10-31).
+    @Binding var wide: Bool
+    /// Pulling the bar down adds rows, up to every app (Launchpad-like); pushing up removes them.
+    @Binding var rows: Int
+    /// The bar's width now, and the most height its rows may take.
+    var width: CGFloat = 380
+    var maxHeight: CGFloat = 400
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var heldAt: CGPoint = .zero
+    @State private var pullBase: Int?
+    @State private var scrollStart: CGFloat?
+
+    static let cell: CGFloat = 42
+    static let spacing: CGFloat = 10
+    static let rowHeight: CGFloat = 59
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 10) {
-                ForEach(apps) { app in
-                    let isSelected = selected == app.bundleID
-                    Button { onApp(app) } label: {
-                        VStack(spacing: 3) {
-                            MacAppIcon(model: model, bundleID: app.bundleID, name: app.name, size: 42)
-                                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .stroke(meowAccent, lineWidth: isSelected ? 2.5 : 0).padding(-3))
-                                .scaleEffect(isSelected && !reduceMotion ? 1.1 : 1)
-                            Circle().fill(Color.white.opacity(app.running ? 0.85 : 0)).frame(width: 4, height: 4)
-                        }
+        let layout = StagePeekDockLayout(apps: apps.count, width: width, maxHeight: maxHeight)
+        let shown = min(max(rows, 1), layout.maxRows)
+        VStack(spacing: 0) {
+            if shown <= 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: Self.spacing) {
+                        ForEach(apps) { appButton($0) }
+                        allAppsButton
                     }
-                    .buttonStyle(.plain)
-                    // Tap picks it; press, hold and move drags the app onto a pane.
-                    .overlay(GeometryReader { g in
-                        StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, origin: g.frame(in: .global).origin,
-                                                  onTap: { onApp(app) }, onDragEnded: onDragEnded)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: StagePeekDockScrollKey.self, value: g.frame(in: .named("stagePeekDock")).minX)
                     })
-                    .onAppear { model.requestIcons([app.bundleID]) }
-                    .accessibilityLabel(app.name)
-                    .accessibilityValue(app.running ? (app.windowCount == 1 ? String(localized: "Running, 1 window")
-                                                       : String(localized: "Running, \(app.windowCount) windows"))
-                                                    : String(localized: "Not running"))
-                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.75), value: selected)
                 }
-                Button(action: onLaunchpad) {
-                    Image(systemName: "square.grid.3x3.fill")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .background(Circle().fill(Color.white.opacity(0.16)))
-                        .padding(.bottom, 7)
+                .coordinateSpace(name: "stagePeekDock")
+                .onPreferenceChange(StagePeekDockScrollKey.self) { x in
+                    // A scroll (not the first layout) widens the bar.
+                    guard let start = scrollStart else { scrollStart = x; return }
+                    if !wide, abs(x - start) > 6 { withAnimation(.easeOut(duration: 0.2)) { wide = true } }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("All Apps")
-                .accessibilityIdentifier("stagePeekLaunchpad")
+                .frame(height: 64)
+                .simultaneousGesture(pull(layout: layout, shown: shown))
+            } else {
+                let grid = LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.cell), spacing: Self.spacing), count: layout.perRow),
+                                     spacing: Self.spacing - 3) {
+                    ForEach(apps) { appButton($0) }
+                    allAppsButton
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.75), value: selected)
+                Group {
+                    if layout.needsScroll(rows: shown) {
+                        ScrollView(.vertical, showsIndicators: true) { grid }
+                    } else {
+                        grid
+                    }
+                }
+                .frame(height: CGFloat(shown) * Self.rowHeight + 16, alignment: .top)
+                .clipped()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.75), value: selected)
+            grabber(layout: layout, shown: shown)
         }
-        .frame(height: 64)
         .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: shown)
+    }
+
+    /// The handle under the bar: pull it down for more rows, up for fewer; a tap shows every app
+    /// or goes back to one row.
+    private func grabber(layout: StagePeekDockLayout, shown: Int) -> some View {
+        Capsule().fill(Color.white.opacity(0.45)).frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity).frame(height: 22)
+            .contentShape(Rectangle())
+            .gesture(pull(layout: layout, shown: shown))
+            .onTapGesture {
+                wide = true
+                rows = shown >= layout.maxRows ? 1 : layout.maxRows
+            }
+            .accessibilityElement()
+            .accessibilityLabel(shown >= layout.maxRows ? String(localized: "Show One Row of Apps") : String(localized: "Show All Apps"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { wide = true; rows = shown >= layout.maxRows ? 1 : layout.maxRows }
+            .accessibilityIdentifier("stagePeekDockHandle")
+    }
+
+    private func pull(layout: StagePeekDockLayout, shown: Int) -> some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { v in
+                guard abs(v.translation.height) > abs(v.translation.width) * 1.2 else { return }
+                let base = pullBase ?? shown
+                if pullBase == nil { pullBase = shown }
+                if !wide { wide = true }
+                let target = StagePeekDockLayout.rows(from: base, pulled: v.translation.height, rowHeight: Self.rowHeight, maxRows: layout.maxRows)
+                if target != rows { rows = target; UISelectionFeedbackGenerator().selectionChanged() }
+            }
+            .onEnded { v in
+                pullBase = nil
+                // A swipe up from the bottom edge puts the bar back into compact mode (owner, 2026-10-31).
+                if StagePeekDockLayout.collapses(pulled: v.translation.height, predicted: v.predictedEndTranslation.height, rows: rows) {
+                    rows = 1
+                    wide = false
+                }
+            }
+    }
+
+    private var allAppsButton: some View {
+        Button(action: onLaunchpad) {
+            Image(systemName: "square.grid.3x3.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: Self.cell, height: Self.cell)
+                .background(Circle().fill(Color.white.opacity(0.16)))
+                .padding(.bottom, 7)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("All Apps")
+        .accessibilityIdentifier("stagePeekLaunchpad")
+    }
+
+    private func appButton(_ app: MacAppItem) -> some View {
+        let isSelected = selected == app.bundleID
+        return Button { onApp(app) } label: {
+            VStack(spacing: 3) {
+                MacAppIcon(model: model, bundleID: app.bundleID, name: app.name, size: Self.cell)
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(meowAccent, lineWidth: isSelected ? 2.5 : 0).padding(-3))
+                    .scaleEffect(isSelected && !reduceMotion ? 1.1 : 1)
+                Circle().fill(Color.white.opacity(app.running ? 0.85 : 0)).frame(width: 4, height: 4)
+            }
+        }
+        .buttonStyle(.plain)
+        // Tap picks it; press, hold and move drags the app onto a pane.
+        .overlay(GeometryReader { g in
+            StagePeekCardGestures.app(app, model: model, heldAt: $heldAt, origin: g.frame(in: .global).origin,
+                                      onTap: { onApp(app) }, onDragEnded: onDragEnded)
+        })
+        .onAppear { model.requestIcons([app.bundleID]) }
+        .accessibilityLabel(app.name)
+        .accessibilityValue(app.running ? (app.windowCount == 1 ? String(localized: "Running, 1 window")
+                                           : String(localized: "Running, \(app.windowCount) windows"))
+                                        : String(localized: "Not running"))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+private struct StagePeekDockScrollKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// How many apps fit in a row of the bar and how many rows it can grow to (pure, tested).
+struct StagePeekDockLayout: Equatable {
+    let perRow: Int
+    let maxRows: Int
+    private let total: Int
+
+    init(apps: Int, width: CGFloat, maxHeight: CGFloat) {
+        total = apps + 1   // and All Apps
+        perRow = max(1, Int((width - 24 + StagePeekDock.spacing) / (StagePeekDock.cell + StagePeekDock.spacing)))
+        let needed = max(1, (total + perRow - 1) / perRow)
+        let room = max(1, Int((maxHeight - 30) / StagePeekDock.rowHeight))
+        maxRows = min(needed, room)
+    }
+
+    /// More apps than the rows show: the grid scrolls.
+    func needsScroll(rows: Int) -> Bool { total > perRow * rows }
+
+    /// A swipe up that ends at one row, or a quick flick up: back to the compact bar.
+    static func collapses(pulled: CGFloat, predicted: CGFloat, rows: Int) -> Bool {
+        pulled < -20 && (rows <= 1 || predicted < -StagePeekDock.rowHeight * 2)
+    }
+
+    /// Rows after pulling `pulled` points down (negative: up) from `base` rows.
+    static func rows(from base: Int, pulled: CGFloat, rowHeight: CGFloat, maxRows: Int) -> Int {
+        min(max(base + Int((pulled / rowHeight).rounded()), 1), max(maxRows, 1))
     }
 }
 
@@ -285,6 +411,8 @@ struct StagePeekGallery: View {
     /// The peek's edge: a sideways flick toward it (off the cards) compacts the gallery.
     var edge: StagePeekEdge = .left
     var onCompact: () -> Void = {}
+    /// A tap on empty space (between and around the cards) closes the peek, as on the Mac.
+    var onEmptyTap: () -> Void = {}
     /// The gallery's visible height (Spatial Overview pages fill it).
     var height: CGFloat = 600
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
@@ -380,6 +508,9 @@ struct StagePeekGallery: View {
                 Color.clear.frame(height: 16)
             }
             .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
+            // Behind the cards: only a tap on empty space lands here (owner, 2026-10-31).
+            .background(Color.white.opacity(0.001).onTapGesture { if model.drag == nil { onEmptyTap() } })
         }
         .scrollDismissesKeyboard(.interactively)
         .scrollDisabled(model.drag != nil)

@@ -206,12 +206,24 @@ class MediaListener(
             runCatching { writer.execute { closeQuietly(socket) } }
             writer.shutdown()
             runCatching {
-                closer.execute { if (!writer.awaitTermination(CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)) closeQuietly(socket) }
+                closer.execute { if (!awaitQuietly(writer, CLOSE_GRACE_MS)) closeQuietly(socket) }
             }.onFailure { closeQuietly(socket) }
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * Waits for [executor] to finish; false on timeout or when this thread is interrupted
+         * (session teardown). An interruption escaping a pool thread killed the app when the
+         * Moto's session ended (2026-10-31 00:45:33, InterruptedException in awaitTermination).
+         */
+        fun awaitQuietly(executor: java.util.concurrent.ExecutorService, ms: Long): Boolean = try {
+            executor.awaitTermination(ms, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
         fun closeQuietly(socket: SSLSocket) {
             runCatching { socket.close() }
         }

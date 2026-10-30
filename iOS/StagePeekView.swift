@@ -45,6 +45,9 @@ struct StagePeekOverlay: View {
     @Environment(\.controlRequest) private var controlRequest
     @State private var appFilter: String?
     @State private var launchpad = false
+    /// The apps bar: widened by a scroll, rows added by pulling it down (reset when the peek closes).
+    @State private var dockWide = false
+    @State private var dockRows = 1
     @State private var hint = false
     @State private var overlayOrigin: CGPoint = .zero
     @FocusState private var searchFocused: Bool
@@ -401,14 +404,22 @@ struct StagePeekOverlay: View {
         let width = compactWidth + (wideWidth - compactWidth) * e
         let compactX = edge == .left ? safe.minX + 12 + compactWidth / 2 : safe.maxX - 12 - compactWidth / 2
         let x = compactX + (safe.midX - compactX) * e
+        let barWidth = dockWide ? safe.width - 24 : width
+        let barX = dockWide ? safe.midX : x
+        let room = max(safe.height - 24, 140)
         return VStack(spacing: 10) {
             StagePeekSearchPill(query: $query, focused: $searchFocused)
+                .frame(width: width)
             StagePeekDock(model: model, apps: dockApps, selected: appFilter, onApp: { tapApp($0) },
                           onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
-                          onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } })
+                          onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } },
+                          wide: $dockWide, rows: $dockRows, width: barWidth, maxHeight: room * 0.7)
+                .frame(width: barWidth)
         }
-        .frame(width: width)
-        .position(x: x, y: safe.minY + 12 + 58)
+        .frame(width: max(barWidth, width), height: room, alignment: .top)
+        .position(x: dockWide ? barX : x, y: safe.minY + 12 + room / 2)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: dockWide)
+        .onChange(of: machine.isVisible) { visible in if !visible { dockWide = false; dockRows = 1 } }
         .environment(\.colorScheme, .dark)
         .zIndex(30)
     }
@@ -437,7 +448,8 @@ struct StagePeekOverlay: View {
                          },
                          onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
                          // A flick toward the edge (off the cards) compacts the gallery again.
-                         edge: edge, onCompact: { animate { machine.compact() } }, height: height)
+                         edge: edge, onCompact: { animate { machine.compact() } },
+                         onEmptyTap: { searchFocused = false; finish(machine.dismiss()) }, height: height)
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)
@@ -462,6 +474,23 @@ struct StagePeekOverlay: View {
                                },
                                onClose: { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } })
                 .frame(width: safe.width, height: safe.height)
+            // Swipe up from the bottom edge: back to the peek (owner, 2026-10-31).
+            VStack {
+                Spacer()
+                Capsule().fill(Color.white.opacity(0.5)).frame(width: 120, height: 5)
+                    .frame(maxWidth: .infinity).frame(height: 34)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 10).onEnded { d in
+                        if d.translation.height < -30 || d.predictedEndTranslation.height < -80 {
+                            withAnimation(.easeOut(duration: 0.2)) { launchpad = false }
+                        }
+                    })
+                    .accessibilityElement()
+                    .accessibilityLabel(String(localized: "Close All Apps"))
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
+            }
+            .frame(width: safe.width, height: safe.height)
         }
         .frame(width: frame.width, height: frame.height)
         .position(x: frame.width / 2, y: frame.height / 2)
@@ -596,9 +625,10 @@ struct StagePeekOverlay: View {
     }
 
     /// Expand/Compact, Add as Tile (expanded, room for another tile), Close.
-    /// Kept at the bottom of the stack's column, away from the cards' centre.
+    /// Fixed at the bottom centre: it used to follow the highlighted card, so it slid and jumped
+    /// while the compact peek scrolled (owner report 2026-10-31).
     private func toolbar(cards: [StagePeekCard]) -> some View {
-        let column = cards.first(where: \.highlighted)?.center.x ?? safe.midX
+        let column = safe.midX
         let chosen = machine.highlightedID.flatMap { id in windows.first { $0.id == id } }
         return HStack(spacing: 6) {
             Button {

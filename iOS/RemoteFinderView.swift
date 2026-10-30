@@ -64,6 +64,7 @@ struct RemoteFinderView: View {
         .sheet(item: $files.info) { RemoteFileInfoView(sheet: $0) }
         .onChange(of: files.export?.id) { _ in
             guard let e = files.export else { return }
+            Log.info("files export: ready to hand on \(e.mode) urls=\(e.urls.count)")
             if e.mode == .save {
                 // Straight to Photos or Files ▸ MeowDisplay ▸ Downloads: no picker to get lost.
                 Task { @MainActor in

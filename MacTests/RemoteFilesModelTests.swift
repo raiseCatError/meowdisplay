@@ -167,4 +167,15 @@ final class RemoteFilesModelTests: XCTestCase {
         XCTAssertNil(r.image)
         XCTAssertNil(RemoteFilesReply.parse(["ok": true]))
     }
+
+    /// Regression (owner's iPad, 2026-10-31): every Save and Share ended with nothing because
+    /// the export folder (existing, under /private/var) and the file not yet moved there were
+    /// compared after standardizing, which drops "/private" only for paths that exist.
+    func testAnExportCopyInsideTheFolderIsAcceptedWhateverThePathPrefix() {
+        let dir = URL(fileURLWithPath: "/private/var/mobile/Containers/Data/Application/X/tmp/RemoteFinder/export-1", isDirectory: true)
+        XCTAssertTrue(RemoteFilesModel.isInside(dir.appendingPathComponent("IMG_2192.PNG"), dir))
+        XCTAssertTrue(RemoteFilesModel.isInside(dir.appendingPathComponent("Folder").appendingPathComponent("a.txt"), dir))
+        XCTAssertFalse(RemoteFilesModel.isInside(URL(fileURLWithPath: dir.path + "x/file"), dir), "a sibling sharing the prefix")
+        XCTAssertFalse(RemoteFilesModel.isInside(dir.appendingPathComponent("..").appendingPathComponent("escape"), dir))
+    }
 }

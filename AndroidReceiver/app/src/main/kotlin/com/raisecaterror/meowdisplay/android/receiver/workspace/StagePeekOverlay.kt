@@ -716,7 +716,9 @@ private fun toolbarY(column: Double, safe: CGRect, avoiding: List<CGRect>): Doub
 @Composable
 private fun Toolbar(host: StagePeekHost, cards: List<StagePeekCard>, safe: CGRect, avoiding: List<CGRect>) {
     val machine = host.machine
-    val column = if (machine.expanded) safe.midX else cards.firstOrNull { it.highlighted }?.center?.x ?: safe.midX
+    // Fixed at the bottom centre: following the highlighted card made it slide and jump while the
+    // compact peek scrolled (owner report 2026-10-31). Same as Apple devices.
+    val column = safe.midX
     CenteredAt(min(max(column, safe.minX + 130), safe.maxX - 130), toolbarY(column, safe, avoiding), safe.width) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             ToolbarButton(if (machine.expanded) "Compact" else "Expand") { if (machine.expanded) host.compact() else host.expand() }
