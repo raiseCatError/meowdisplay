@@ -269,6 +269,7 @@ internal object OverlayScenes {
             portrait = portrait, mainSide = layout.side, position = prefs.functionTrayPosition,
             mainTrayFrame = renderedMain, groupSizes = groupSizes, avoiding = renderedPalette,
             avoidNotch = prefs.avoidNotch, notchSide = env.notchSide, reservedRegions = env.reservedRegions,
+            bottomRow = true,
         )
         val horizontal = layout.axis == ControlTrayAxis.Horizontal
         val frames = LinkedHashMap<String, CGRect>()

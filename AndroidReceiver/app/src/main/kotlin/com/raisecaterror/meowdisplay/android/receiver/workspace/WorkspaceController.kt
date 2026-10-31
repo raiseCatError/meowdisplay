@@ -1068,7 +1068,6 @@ class WorkspaceController(
     /** Whether this device may switch Stage Manager now (it has control). */
     val canControlMac: Boolean get() = inputAllowed
 
-    /** A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (needs control). */
     /** Add to Current Stage (needs control): the Mac answers in its state. */
     fun addToStage(id: String) {
         val source = state.value.layout.tiles[id]?.source ?: return
@@ -1089,6 +1088,10 @@ class WorkspaceController(
         }
     }
 
+    /**
+     * A window macOS keeps paused (Stage Manager's strip) or that is minimized or hidden: the Mac
+     * un-minimizes or unhides it and brings it forward (needs control).
+     */
     fun showOnMac(id: String) {
         val source = state.value.layout.tiles[id]?.source ?: return
         if (source.isDisplay || !inputAllowed) return

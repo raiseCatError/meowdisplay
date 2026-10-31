@@ -611,7 +611,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             avoiding: renderedPaletteFrame,
             avoidNotch: store.preferences.avoidNotch,
             notchSide: notchSide,
-            reservedRegions: reservedRegions)
+            reservedRegions: reservedRegions,
+            bottomRow: true)
         #if DEBUG
         // Only computed when the overlay is actually on — a second,
         // avoidNotch:false pass purely for the debug visualization below.
@@ -626,7 +627,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             groupSizes: functionGroupSizes,
             avoiding: renderedPaletteFrame,
             avoidNotch: false,
-            reservedRegions: reservedRegions) : []
+            reservedRegions: reservedRegions,
+            bottomRow: true) : []
         #endif
         let occupiedFrames = [renderedMainTrayFrame]
             + functionFrames

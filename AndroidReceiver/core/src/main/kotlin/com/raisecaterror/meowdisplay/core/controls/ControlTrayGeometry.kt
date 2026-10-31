@@ -538,6 +538,7 @@ object ControlTrayGeometry {
         avoiding: CGRect?, avoidNotch: Boolean,
         notchSide: LandscapeTraySide? = null,
         reservedRegions: List<ControlReservedRegion> = emptyList(),
+        bottomRow: Boolean = false,
         spacing: CGFloat = 10.0, groupGap: CGFloat = 14.0,
     ): List<CGRect> {
         val collisionFrame = avoiding
@@ -571,6 +572,35 @@ object ControlTrayGeometry {
                 x += size.width + groupGap
                 frame
             }.toMutableList()
+        } else if (bottomRow && groupSizes.size > 1) {
+            // Landscape with `bottomRow`: the first group keeps the top corner and every other group
+            // sits side by side along the bottom edge, bottoms aligned, starting in the corner (the
+            // Edit column, then Return beside it). Nothing is left in the middle of the side, where
+            // the camera cutout is.
+            val side = if (position == FunctionTrayPosition.SameSide) mainSide else mainSide.opposite
+            val topBound = if (position == FunctionTrayPosition.SameSide) mainTrayFrame.minY - spacing
+            else visible.maxY - margin
+            val first = bounded(groupSizes[0])
+            frames = mutableListOf(CGRect(
+                if (side == LandscapeTraySide.Trailing) visible.maxX - margin - first.width else visible.minX + margin,
+                max(visible.minY + margin, min(visible.minY + margin, topBound - first.height)),
+                first.width, first.height))
+            val rest = groupSizes.drop(1).map(::bounded)
+            val rowWidth = rest.fold(0.0) { acc, s -> acc + s.width } + (rest.size - 1).toDouble() * groupGap
+            val rowHeight = rest.maxOfOrNull { it.height } ?: 0.0
+            // From the corner inward, or from just past the Main Tray when it shares the edge and
+            // reaches down that far.
+            var corner = if (side == LandscapeTraySide.Trailing) visible.maxX - margin else visible.minX + margin
+            val row = CGRect(if (side == LandscapeTraySide.Trailing) corner - rowWidth else corner,
+                visible.maxY - margin - rowHeight, rowWidth, rowHeight)
+            if (position == FunctionTrayPosition.SameSide && row.intersects(mainTrayFrame)) {
+                corner = if (side == LandscapeTraySide.Trailing) mainTrayFrame.minX - spacing else mainTrayFrame.maxX + spacing
+            }
+            for (size in rest) {
+                val x = if (side == LandscapeTraySide.Trailing) corner - size.width else corner
+                frames.add(CGRect(x, visible.maxY - margin - size.height, size.width, size.height))
+                corner = if (side == LandscapeTraySide.Trailing) x - groupGap else x + size.width + groupGap
+            }
         } else {
             val side = if (position == FunctionTrayPosition.SameSide) mainSide else mainSide.opposite
             fun originX(width: CGFloat): CGFloat =

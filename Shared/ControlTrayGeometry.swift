@@ -563,6 +563,7 @@ extension ControlTrayGeometry {
                                    avoiding collisionFrame: CGRect?, avoidNotch: Bool,
                                    notchSide: LandscapeTraySide? = nil,
                                    reservedRegions: [ControlReservedRegion] = [],
+                                   bottomRow: Bool = false,
                                    spacing: CGFloat = 10, groupGap: CGFloat = 14) -> [CGRect] {
         guard !groupSizes.isEmpty else { return [] }
         var fullVisible = container
@@ -597,6 +598,33 @@ extension ControlTrayGeometry {
                 let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
                 x += size.width + groupGap
                 return frame
+            }
+        } else if bottomRow, groupSizes.count > 1 {
+            // Landscape with `bottomRow`: the first group keeps the top corner and every other
+            // group sits side by side along the bottom edge, bottoms aligned, starting in the
+            // corner (the Edit column, then Return beside it). Nothing is left in the middle of
+            // the side, where the camera housing is.
+            let side = position == .sameSide ? mainSide : mainSide.opposite
+            let topBound = position == .sameSide ? mainTrayFrame.minY - spacing : visible.maxY - margin
+            let first = bounded(groupSizes[0])
+            frames = [CGRect(x: side == .trailing ? visible.maxX - margin - first.width : visible.minX + margin,
+                             y: max(visible.minY + margin, min(visible.minY + margin, topBound - first.height)),
+                             width: first.width, height: first.height)]
+            let rest = groupSizes.dropFirst().map(bounded)
+            let rowWidth = rest.reduce(0) { $0 + $1.width } + CGFloat(rest.count - 1) * groupGap
+            let rowHeight = rest.map(\.height).max() ?? 0
+            // From the corner inward, or from just past the Main Tray when it shares the edge
+            // and reaches down that far.
+            var corner = side == .trailing ? visible.maxX - margin : visible.minX + margin
+            let row = CGRect(x: side == .trailing ? corner - rowWidth : corner, y: visible.maxY - margin - rowHeight,
+                             width: rowWidth, height: rowHeight)
+            if position == .sameSide, row.intersects(mainTrayFrame) {
+                corner = side == .trailing ? mainTrayFrame.minX - spacing : mainTrayFrame.maxX + spacing
+            }
+            for size in rest {
+                let x = side == .trailing ? corner - size.width : corner
+                frames.append(CGRect(x: x, y: visible.maxY - margin - size.height, width: size.width, height: size.height))
+                corner = side == .trailing ? x - groupGap : x + size.width + groupGap
             }
         } else {
             let side = position == .sameSide ? mainSide : mainSide.opposite

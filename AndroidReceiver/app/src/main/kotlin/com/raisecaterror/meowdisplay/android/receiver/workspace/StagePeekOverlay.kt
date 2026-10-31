@@ -915,6 +915,13 @@ private fun Gallery(
                 onConfirmClose = { host.confirmClose = w }, onMenu = { host.menuWindow = w },
             )
         }
+        // The cards' close buttons need control and are hidden without it. An app with no windows
+        // offers its own Request Control (Open on Mac).
+        if (!inputAllowed && ui.canCloseWindows && filter?.let { f -> allWindows.none { it.bundleID == f.bundleID } } != true) {
+            item(span = { GridItemSpan(columns) }, key = "moreActionsNeedControl") {
+                MoreActionsNeedControl("Request Control for more actions, like closing windows.", Modifier.fillMaxWidth())
+            }
+        }
         when {
             results != null -> {
                 if (results.apps.isNotEmpty()) {
@@ -1346,8 +1353,10 @@ private fun Launchpad(controller: WorkspaceController, ui: WorkspaceUi, host: St
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Text(if (inputAllowed) "Tap an app to see its windows. Hold to make it a favorite." else "Tap an app to see its windows. Opening apps needs control of the Mac.",
+                if (inputAllowed) Text("Tap an app to see its windows. Hold to make it a favorite.",
                     color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+                else MoreActionsNeedControl("Tap an app to see its windows. Request Control for more actions, like opening apps on the Mac.",
+                    Modifier.fillMaxWidth().padding(vertical = 16.dp))
             }
         }
     }

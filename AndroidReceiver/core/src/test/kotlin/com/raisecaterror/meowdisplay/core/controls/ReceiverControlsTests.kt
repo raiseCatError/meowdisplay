@@ -1025,6 +1025,28 @@ class ReceiverControlsTests {
         assertTrue(frames.all { container.contains(it) })
     }
 
+    /** Landscape `bottomRow` (phone): Zoom keeps the top corner; the Edit column sits in the bottom
+     *  corner and Return to its right, bottoms aligned, so nothing is left beside the cutout. */
+    @Test
+    fun testLandscapeBottomRowPutsEditInTheCornerAndReturnBesideIt() {
+        val container = CGRect(0, 0, 932, 430)
+        val insets = ControlSafeInsets(0.0, 59.0, 21.0, 59.0)
+        val mainFrame = CGRect(932.0 - 59 - 12 - 44, 40.0, 44.0, 350.0)
+        val frames = ControlTrayGeometry.functionTrayLayout(
+            container = container, safeInsets = insets, keyboardVisibleRect = null,
+            portrait = false, mainSide = LandscapeTraySide.Trailing, position = FunctionTrayPosition.OppositeSide,
+            mainTrayFrame = mainFrame, groupSizes = listOf(CGSize(44, 84), CGSize(44, 84), CGSize(44, 44)),
+            avoiding = null, avoidNotch = true, notchSide = LandscapeTraySide.Leading, bottomRow = true,
+        )
+        assertEquals(3, frames.size)
+        assertTrue("Zoom stays at the top", frames[0].midY < container.midY)
+        assertEquals(frames[1].maxY, frames[2].maxY, 0.001)
+        assertTrue(frames[1].midY > container.midY)
+        assertTrue("Return sits to the right of Edit", frames[1].maxX < frames[2].minX)
+        val notch = CGRect(0.0, container.midY - 59 * 1.5, 59.0, 59.0 * 3)
+        assertTrue(frames.none { it.intersects(notch) })
+    }
+
     @Test
     fun testFunctionTrayProfilesPersistIndependentlyFromMainTrayProfiles() {
         val repository = ReceiverControlPreferencesRepository(MapStore())

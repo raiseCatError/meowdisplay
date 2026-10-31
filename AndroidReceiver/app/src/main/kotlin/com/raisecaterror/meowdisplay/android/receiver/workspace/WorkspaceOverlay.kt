@@ -118,6 +118,7 @@ import com.raisecaterror.meowdisplay.core.workspace.WRotation
 import com.raisecaterror.meowdisplay.core.workspace.WSource
 import com.raisecaterror.meowdisplay.core.workspace.WTile
 import com.raisecaterror.meowdisplay.core.workspace.WWindowDrop
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
@@ -174,6 +175,20 @@ fun WorkspaceChrome(
     var savingLayout by remember { mutableStateOf(false) }
     /** Outside Arrange: the divider held (long press) and being dragged. */
     var heldDivider by remember { mutableStateOf<Pair<List<Int>, Int>?>(null) }
+    /** The pane whose tabs show in full beside the menu bar; the others show the shown tab's icon and "+N". */
+    var tabsExpanded by remember { mutableStateOf<String?>(null) }
+    var tabsTouched by remember { mutableStateOf(0) }
+    /** Where each pane's label strip ends (this view's dp): the menu bar starts there. */
+    val labelStripEnd = remember { mutableStateMapOf<String, Double>() }
+    val menusUi by controller.menus.ui.collectAsState()
+    fun expandTabs(id: String) { tabsExpanded = id; tabsTouched++ }
+    // A few seconds after the last tap, scroll or drag on the tabs they fold again (not while one is
+    // being dragged or its menu is open).
+    LaunchedEffect(tabsTouched) {
+        val id = tabsExpanded ?: return@LaunchedEffect
+        delay(4_000)
+        if (controller.ui.value.drag != null || menu?.tile == id) tabsTouched++ else if (tabsExpanded == id) tabsExpanded = null
+    }
     val chromeView = androidx.compose.ui.platform.LocalView.current
     val screenReader = remember(chromeView) {
         (chromeView.context.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager)?.isTouchExplorationEnabled == true
@@ -296,6 +311,14 @@ fun WorkspaceChrome(
                                 )
                             } else RequestControlInline()
                         }
+                        // Minimized, hidden or paused by macOS: un-minimizes or unhides it on the Mac and brings it
+                        // forward (explicit; needs control).
+                        if ((remote?.state == TileStatus.Offscreen || (remote?.state == TileStatus.Paused && !remote.inStageStrip)) &&
+                            !desktop && ui.remote?.missionControlOpen != true
+                        ) {
+                            if (inputAllowed) PaneButton("Show on Mac", enabled = true) { controller.showOnMac(id) }
+                            else RequestControlInline(modifier = Modifier.background(Chip, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 4.dp))
+                        }
                         // A closed window's app can open it again (explicit; needs control).
                         val bundle = remote?.bundleID?.ifEmpty { null } ?: tile.source?.bundleID
                         if (remote?.state == TileStatus.Closed && bundle != null && !desktop) {
@@ -314,11 +337,18 @@ fun WorkspaceChrome(
                     // Where the strip would sit; if the rail handle or a control is there, it moves down below it.
                     val nominal = CGRect(r.minX + 6, maxOf(r.minY, topInset) + 6, minOf(r.width - 12, 200.0), 30.0)
                     val clear = (avoid + listOfNotNull(railHandle)).filter { it.intersects(nominal) }.maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
+                    // The menu bar shares this row (below): the tabs shrink to the shown one's icon and "+N".
+                    val sharesRow = active && menusUi.barShown && menusUi.tile == id && !ui.arranging && ui.drag == null &&
+                        (multi || ui.localFullscreen == id)
                     LabelStrip(
                         controller, ui, id, tile, r, active, icons,
                         top = maxOf(0.0, topInset - r.minY) + clear,
                         onMenu = { tab -> menu = PaneMenuTarget(id, tab) },
+                        compact = sharesRow && tabsExpanded != id,
+                        onTabsUsed = { if (sharesRow) expandTabs(id) },
+                        onEnd = { end -> labelStripEnd[id] = end - origin.x },
                     )
+                    DisposableEffect(id) { onDispose { labelStripEnd.remove(id) } }
                 }
                 if (active && ui.remote?.hostFocus?.isMismatch == true) {
                     Text(
@@ -334,7 +364,8 @@ fun WorkspaceChrome(
             }
         }
 
-        // The focused pane's app menus, as a bar under its label (control only).
+        // The focused pane's app menus (control only), in its label row right after the labels. While all its
+        // tabs are shown and leave too little room, the bar steps aside.
         val activeSource = ui.active?.let { ui.layout.tiles[it]?.source }
         // `available` too: after a reconnect the same pane and app need their menus asked for again.
         val menusAvailable = controller.menus.ui.collectAsState().value.available
@@ -346,7 +377,11 @@ fun WorkspaceChrome(
         if (activeRect != null && !ui.arranging && ui.drag == null && (multi || ui.localFullscreen == ui.active)) {
             val nominal = CGRect(activeRect.minX + 6, maxOf(activeRect.minY, topInset) + 6, minOf(activeRect.width - 12, 200.0), 30.0)
             val clear = (avoid + listOfNotNull(railHandle)).filter { it.intersects(nominal) }.maxOfOrNull { it.maxY + 4 - nominal.minY } ?: 0.0
-            PaneMenuBar(controller, activeRect, top = nominal.minY + clear + 30 + 4, bounds = picture)
+            val end = labelStripEnd[ui.active]
+            if (end != null && end > activeRect.minX && end < activeRect.maxX) {
+                PaneMenuBar(controller, CGRect(end - 2, activeRect.minY, activeRect.maxX - end + 2, activeRect.height),
+                    top = nominal.minY + clear - 1, bounds = picture)
+            } else PaneMenuBar(controller, activeRect, top = nominal.minY + clear + 30 + 4, bounds = picture)
         }
         // Inside the pane that was touched (its window, tabs, zoom and pan stay as they are).
         if (activeRect != null && promptKind != null) {
@@ -524,35 +559,65 @@ private fun labelText(controller: WorkspaceController, ui: WorkspaceUi, s: WSour
     return app.ifEmpty { w?.title ?: "Window" }
 }
 
+/**
+ * `compact`: the menu bar shares this row, so the tabs shrink to the shown tab's app icon and "+N"
+ * until the person taps, scrolls or drags them ([onTabsUsed]): then full names, scrolling when they
+ * don't fit. [onEnd] reports where the strip ends (window dp), where the menu bar starts.
+ */
 @Composable
 private fun LabelStrip(
     controller: WorkspaceController, ui: WorkspaceUi, id: String, tile: WTile, r: CGRect, active: Boolean,
     icons: Map<String, ImageBitmap>, top: Double, onMenu: (Int?) -> Unit,
+    compact: Boolean = false, onTabsUsed: () -> Unit = {}, onEnd: (Double) -> Unit = {},
 ) {
     val windows = tile.windows
     val available = maxOf(r.width - 12, 60.0)
     // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
     val each = if (windows.size <= 1) minOf(180.0, available) else maxOf(76.0, minOf(150.0, available / windows.size - 6))
     val dragging = ui.drag != null
+    val density = LocalDensity.current.density
+    val scroll = rememberScrollState()
+    LaunchedEffect(scroll.isScrollInProgress) { if (scroll.isScrollInProgress) onTabsUsed() }
     Row(
         Modifier.padding(top = top.dp).padding(6.dp).widthIn(max = available.dp)
-            .horizontalScroll(rememberScrollState(), enabled = !dragging),
+            .onGloballyPositioned { c -> onEnd((c.positionInWindow().x + c.size.width) / density.toDouble()) }
+            .horizontalScroll(scroll, enabled = !dragging && !compact),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (windows.isEmpty()) PaneLabel(controller, id, null, "Empty", null, shown = true, active = active, width = each, onMenu = onMenu)
-        windows.forEachIndexed { i, s ->
+        else if (compact && !dragging) {
+            val shownIndex = windows.indexOfFirst { it == tile.source }.coerceAtLeast(0)
+            val s = windows[shownIndex]
+            PaneLabel(
+                controller, id, if (windows.size > 1) shownIndex else null, labelText(controller, ui, s, tile, id),
+                s.bundleID?.let { icons[it] }, shown = true, active = active, width = 64.0, onMenu = onMenu,
+                iconOnly = true, onTap = onTabsUsed,
+            )
+            if (windows.size > 1) {
+                val more = windows.size - 1
+                Text(
+                    "+$more", color = Color.White.copy(alpha = 0.9f), style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.background(Chip.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
+                        .clickable(role = Role.Button, onClickLabel = "Show every tab in this pane") { onTabsUsed() }
+                        .semantics { contentDescription = if (more == 1) "1 more tab" else "$more more tabs" }
+                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                )
+            }
+        } else windows.forEachIndexed { i, s ->
             PaneLabel(
                 controller, id, if (windows.size > 1) i else null, labelText(controller, ui, s, tile, id),
                 s.bundleID?.let { icons[it] }, shown = s == tile.source, active = active, width = each, onMenu = onMenu,
+                onTap = if (windows.size > 1) onTabsUsed else ({}),
             )
         }
     }
 }
 
+/** `iconOnly`: just the app's icon (its name when there is no icon), beside the menu bar. [onTap] follows any tap. */
 @Composable
 private fun PaneLabel(
     controller: WorkspaceController, id: String, tab: Int?, text: String, icon: ImageBitmap?, shown: Boolean, active: Boolean,
-    width: Double, onMenu: (Int?) -> Unit,
+    width: Double, onMenu: (Int?) -> Unit, iconOnly: Boolean = false, onTap: () -> Unit = {},
 ) {
     val density = LocalDensity.current.density
     val view = androidx.compose.ui.platform.LocalView.current
@@ -583,7 +648,7 @@ private fun PaneLabel(
                         @Suppress("UNREACHABLE_CODE") false
                     }
                     when (early) {
-                        true -> if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id)
+                        true -> { if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id); onTap() }
                         false -> Unit
                         null -> {
                             view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -616,6 +681,7 @@ private fun PaneLabel(
                 if (shown) stateDescription = if (active) "Showing, typing goes here" else "Showing"
                 onClick(label = if (tab != null && !shown) "Show this window" else "Type in this pane") {
                     if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id)
+                    onTap()
                     true
                 }
                 onLongClick(label = "Pane options") { onMenu(tab); true }
@@ -623,8 +689,11 @@ private fun PaneLabel(
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        icon?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
-        Text(text, color = if (highlighted) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (iconOnly && icon != null) Image(icon, null, Modifier.size(16.dp))
+        else {
+            icon?.let { Image(it, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)) }
+            Text(text, color = if (highlighted) Color.Black else Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -669,7 +738,10 @@ private fun PaneMenu(
             row("Minimize on Mac", enabled = inputAllowed) { controller.minimizeRemoteWindow(m.tile) }
             row("Close Window on Mac…", enabled = inputAllowed, destructive = true, action = onCloseWindow)
             if (!inputAllowed) RequestControlInline(compact = true)
-            if (!inputAllowed) Text("Minimize and Close need control of the Mac.", color = Color.White.copy(alpha = 0.65f),
+            if (!inputAllowed) Text(
+                if (menus.available) "Request Control for more actions, like Minimize, Close and the Mac's menu bar."
+                else "Request Control for more actions, like Minimize and Close.",
+                color = Color.White.copy(alpha = 0.65f),
                 style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         }
     }
@@ -1015,7 +1087,7 @@ fun LayoutPresets(capacity: Int, tileCount: Int, onPick: (WPreset) -> Unit) {
 
 // MARK: - Pane menu bar (PROTOCOL.md 6.13)
 
-/** The focused pane's app menus (File, Edit, …) as a slim bar across the pane under its label; a title opens its drop-down. */
+/** The focused pane's app menus (File, Edit, …) as a slim bar in the pane's top row, after its labels; a title opens its drop-down. */
 @Composable
 private fun PaneMenuBar(controller: WorkspaceController, pane: CGRect, top: Double, bounds: CGRect) {
     val m by controller.menus.ui.collectAsState()

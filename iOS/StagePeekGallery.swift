@@ -442,6 +442,12 @@ struct StagePeekGallery: View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 18) {
                 Color.clear.frame(height: topInset)
+                // Close buttons on the cards need control and are hidden without it. An app with no
+                // windows offers its own Request Control (Open on Mac).
+                if !inputAllowed, model.canCloseWindows,
+                   !(appFilter.map { a in !allWindows.contains { $0.bundleID == a.bundleID } } ?? false) {
+                    MoreActionsNeedControl(detail: String(localized: "Request Control for more actions, like closing windows."))
+                }
                 if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                     if !results.apps.isEmpty {
                         sectionTitle(String(localized: "Applications"))
@@ -837,6 +843,7 @@ struct StagePeekLaunchpad: View {
     @State private var query = ""
     @FocusState private var searchFocused: Bool
     @AppStorage("stagePeek.favorites") private var favoritesRaw = ""
+    @Environment(\.controlRequest) private var controlRequest
 
     private var favorites: [String] { favoritesRaw.split(separator: "\n").map(String.init) }
 
@@ -860,6 +867,11 @@ struct StagePeekLaunchpad: View {
                 .accessibilityLabel("Close All Apps")
             }
             .frame(maxWidth: 560)
+            if !inputAllowed {
+                // Open on Mac (in each app's menu) needs control and is hidden without it.
+                MoreActionsNeedControl(detail: String(localized: "Request Control for more actions, like opening apps on the Mac."))
+                    .frame(maxWidth: 560)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     if apps.isEmpty {
@@ -914,6 +926,11 @@ struct StagePeekLaunchpad: View {
                         Button { onPick(app) } label: { Label("Show Windows", systemImage: "macwindow.on.rectangle") }
                         if inputAllowed {
                             Button { model.launch(app.bundleID) } label: { Label("Open on Mac", systemImage: "arrow.up.forward.app") }
+                        } else if let controlRequest, controlRequest.state != .requestsDisabled {
+                            // Never opens after a grant by itself; the person chooses Open on Mac again.
+                            Button { controlRequest.request() } label: {
+                                Label(String(localized: "Request Control to Open on Mac"), systemImage: "hand.raised")
+                            }
                         }
                     }
                     .accessibilityLabel(app.name)

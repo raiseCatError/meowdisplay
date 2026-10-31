@@ -1151,7 +1151,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         case "activate":
             guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            Self.raise(pid: entry.pid, frame: entry.frame)
+            if entry.availability == .offscreen {
+                // Show on Mac for a minimized or hidden window: bring it back first, then forward.
+                let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
+                DispatchQueue.main.async {
+                    Self.restoreQuietly(pid: pid, frame: frame, title: title)
+                    Self.raise(pid: pid, frame: frame)
+                }
+                refreshSoon()
+            } else {
+                Self.raise(pid: entry.pid, frame: entry.frame)
+            }
         case "launch":
             guard let bundle = obj["bundle"] as? String else { return }
             AppCatalog.shared.launch(bundle) { _ in }   // without activating: no focus steal

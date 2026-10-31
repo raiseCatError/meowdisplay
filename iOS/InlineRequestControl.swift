@@ -18,6 +18,21 @@ extension EnvironmentValues {
     }
 }
 
+/// Where actions that need control are hidden: says so, with Request Control in place.
+/// The caller shows it only while this device can't control the Mac.
+struct MoreActionsNeedControl: View {
+    var detail: String?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(detail ?? String(localized: "Request Control for more actions."))
+                .font(.caption).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+            RequestControlInline(compact: true)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 /// "Control required · Request Control" in place: asks the Mac, shows Awaiting Approval, then
 /// the answer. Never repeats the action that needed control; the person does that.
 struct RequestControlInline: View {
