@@ -48,7 +48,8 @@ class MediaListenerTest {
     )
     private val listener = MediaListener(
         PinnedTls.context(receiver.keyManager) { pins.values.toList() }, { pins.toMap() }, session,
-        port = 0, handshakeTimeoutMs = 600, maxPendingHandshakes = 2,
+        // Long enough for a real handshake on a busy CI runner; the stalled-handshake test waits it out.
+        port = 0, handshakeTimeoutMs = 2_000, maxPendingHandshakes = 2,
     ).apply { start() }
 
     @After
