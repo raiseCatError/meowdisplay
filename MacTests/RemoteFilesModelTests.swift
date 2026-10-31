@@ -94,7 +94,12 @@ final class RemoteFilesModelTests: XCTestCase {
         m.apply(reply(["op": "state", "state": "ready", "roots": [["id": "r1", "name": "Projects"], ["id": "r2", "name": "Photos"]]]))
         m.query = "rea"
         m.query = "readme"
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // The debounce fires once; a busy runner may take longer than its delay to run it.
+        let by = Date().addingTimeInterval(3)
+        while Date() < by, !sent.contains(where: { $0["op"] as? String == "search" }) {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)   // and nothing else follows
         let searches = sent.filter { $0["op"] as? String == "search" }
         XCTAssertEqual(searches.count, 1, "typing is debounced")
         XCTAssertEqual(searches[0]["root"] as? String, "r1")
