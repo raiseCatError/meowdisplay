@@ -38,7 +38,18 @@ struct SettingsView: View {
         #endif
     }
 
+    /// Narrower than this, a regular-width window (iPhone Duo, a small Stage Manager or
+    /// Split View window) can't show the list beside a page, and the system shows the page
+    /// alone; the sidebar button is then the only way back to the list, so it must stay.
+    static let twoColumnMinimumWidth: CGFloat = 700
+
     var body: some View {
+        GeometryReader { geo in
+            splitView(showsBothColumns: geo.size.width >= Self.twoColumnMinimumWidth)
+        }
+    }
+
+    private func splitView(showsBothColumns: Bool) -> some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $selection) {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -63,7 +74,7 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .modifier(HidesSidebarToggle())
+            .modifier(HidesSidebarToggle(enabled: showsBothColumns))
         } detail: {
             NavigationStack {
                 if let selection {
@@ -238,8 +249,9 @@ extension View {
 
 /// Settings' sidebar is its navigation, so it never collapses away.
 private struct HidesSidebarToggle: ViewModifier {
+    var enabled: Bool
     func body(content: Content) -> some View {
-        if #available(iOS 17.0, *) {
+        if enabled, #available(iOS 17.0, *) {
             content.toolbar(removing: .sidebarToggle)
         } else {
             content

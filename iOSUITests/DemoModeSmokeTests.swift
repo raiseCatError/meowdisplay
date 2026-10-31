@@ -62,10 +62,14 @@ final class DemoModeSmokeTests: XCTestCase {
             }
             // Back to the list, when the page was pushed over it. The bar's back button is
             // titled after the list; its first button may be another control (Done).
+            // A narrow regular-width window (iPhone Duo) shows the page alone and keeps the
+            // sidebar button, which is then the bar's only button.
             let back = app.navigationBars[category].buttons["Settings"]
-            if !(cell.exists && cell.isHittable), back.exists {
-                back.tap()
-                XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3), category)
+            let bar = app.navigationBars[category].buttons.firstMatch
+            if !(cell.exists && cell.isHittable), back.exists || bar.exists {
+                (back.exists ? back : bar).tap()
+                XCTAssertTrue(app.buttons[categories[0]].firstMatch.waitForExistence(timeout: 3),
+                              "the list is reachable again from \(category)")
             }
         }
         XCTAssertFalse(app.buttons["Developer"].exists && !isDebug)
