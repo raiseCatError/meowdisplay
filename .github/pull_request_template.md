@@ -5,7 +5,7 @@
 
 What changed, and why? Link the related issue if one exists.
 
-Closes #
+Related issue (if any):
 
 ## Scope and compatibility
 
