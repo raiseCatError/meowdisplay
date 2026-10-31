@@ -601,9 +601,9 @@ extension ControlTrayGeometry {
             }
         } else if bottomRow, groupSizes.count > 1 {
             // Landscape with `bottomRow`: the first group keeps the top corner and every other
-            // group sits side by side along the bottom edge, starting in the corner (Edit, then
-            // Return). Nothing is left in the middle of the side, where the camera housing is.
-            // The caller sizes those groups as rows.
+            // group sits side by side along the bottom edge, bottoms aligned, starting in the
+            // corner (the Edit column, then Return beside it). Nothing is left in the middle of
+            // the side, where the camera housing is.
             let side = position == .sameSide ? mainSide : mainSide.opposite
             let topBound = position == .sameSide ? mainTrayFrame.minY - spacing : visible.maxY - margin
             let first = bounded(groupSizes[0])

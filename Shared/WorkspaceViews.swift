@@ -48,6 +48,12 @@ struct WorkspaceChromeView: View {
     @State private var heldLabel: PaneMenuTarget?
     @State private var stripVisible = true
     @State private var stripHideTask: Task<Void, Never>?
+    /// The pane whose tabs are all shown while the menu bar shares their row; the others show
+    /// only the shown tab and "+N" (see `labelStrip`).
+    @State private var tabsExpanded: String?
+    @State private var tabsCollapseTask: Task<Void, Never>?
+    /// Where each pane's label strip ends (workspace coordinates): the menu bar starts there.
+    @State private var labelStripEnd: [String: CGFloat] = [:]
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -105,11 +111,17 @@ struct WorkspaceChromeView: View {
                 }
                 if let id = model.active, let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
                    multi || model.localFullscreen == id {
-                    // The focused pane's app menus, as a bar under its label (control only).
+                    // The focused pane's app menus (control only), in its label row right after the labels.
+                    // While all its tabs are shown and leave too little room, the bar steps aside.
                     let e = unsafeInsets(of: rect)
                     let pane = CGRect(x: rect.minX + e.leading, y: rect.minY + e.top,
                                       width: rect.width - e.leading - e.trailing, height: rect.height - e.top - e.bottom)
-                    PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
+                    if let end = labelStripEnd[id], end > pane.minX, end < pane.maxX {
+                        PaneMenuBar(menus: model.menus, pane: CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height),
+                                    top: pane.minY + 5, bounds: picture)
+                    } else {
+                        PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
+                    }
                 }
                 WorkspaceDropOverlay(model: model, picture: picture)
                 if model.arranging {
@@ -371,7 +383,18 @@ struct WorkspaceChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if multi || model.arranging || tile.tabs.count > 1 || model.localFullscreen == id {
-                labelStrip(id: id, tile: tile, rect: rect, active: active)
+                AppMenuObserver(menus: model.menus) { menus in
+                    // The menu bar shares this row (see `chrome`): its tabs fold to the shown one and "+N".
+                    let barHere = active && menus.barShown && menus.tile == id && !model.arranging && model.drag == nil
+                        && (multi || model.localFullscreen == id)
+                    labelStrip(id: id, tile: tile, rect: rect, active: active, sharesRow: barHere)
+                }
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { labelStripEnd[id] = g.frame(in: .named("workspace")).maxX }
+                        .onChange(of: g.frame(in: .named("workspace"))) { labelStripEnd[id] = $0.maxX }
+                })
+                .onDisappear { labelStripEnd[id] = nil }
             }
             if active, model.remote?.hostFocus.isMismatch == true {
                 Button { model.focus(id) } label: {
@@ -403,33 +426,59 @@ struct WorkspaceChromeView: View {
         return app.isEmpty ? (w?.title ?? "Window") : app
     }
 
+    /// `sharesRow`: the menu bar sits in this row, so several tabs fold to the shown one and
+    /// "+N" until the person taps, holds or scrolls them (`expandTabs`).
     @ViewBuilder
-    private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool) -> some View {
+    private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, sharesRow: Bool) -> some View {
         let windows = tile.windows
         let available = max(rect.width - 12, 60)
         // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
-        let each = windows.count <= 1 ? min(180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
-        let row = HStack(spacing: 4) {
-            if windows.isEmpty {
-                label(id: id, tab: nil, text: String(localized: "Empty"), icon: nil, shown: true, active: active, width: each)
+        let each = windows.count <= 1 ? min(sharesRow ? 150 : 180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
+        let folded = sharesRow && windows.count > 1 && tabsExpanded != id && heldLabel?.tile != id && model.drag == nil
+        if folded {
+            let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
+            let s = windows[shownIndex]
+            HStack(spacing: 4) {
+                label(id: id, tab: shownIndex, text: labelText(s, in: tile, id: id),
+                      icon: s.bundleID.flatMap { model.icons[$0] }, shown: true, active: active, width: min(each, 130))
+                Button { expandTabs(id) } label: {
+                    Text("+\(windows.count - 1)").font(.caption.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(Color(white: 0.2, opacity: 0.6), in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(windows.count == 2 ? "1 more tab" : "\(windows.count - 1) more tabs"))
+                .accessibilityHint(Text("Shows every tab in this pane."))
             }
-            ForEach(Array(windows.enumerated()), id: \.offset) { i, s in
-                label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(s, in: tile, id: id),
-                      icon: s.bundleID.flatMap { model.icons[$0] }, shown: s == tile.source, active: active, width: each)
+            .padding(6)
+            .fixedSize()
+        } else {
+            let row = HStack(spacing: 4) {
+                if windows.isEmpty {
+                    label(id: id, tab: nil, text: String(localized: "Empty"), icon: nil, shown: true, active: active, width: each)
+                }
+                ForEach(Array(windows.enumerated()), id: \.offset) { i, s in
+                    label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(s, in: tile, id: id),
+                          icon: s.bundleID.flatMap { model.icons[$0] }, shown: s == tile.source, active: active, width: each)
+                }
             }
-        }
-        .padding(6)
-        if #available(macOS 13.0, iOS 16.0, *) {
-            ViewThatFits(in: .horizontal) {
-                row.fixedSize()
+            .padding(6)
+            if #available(macOS 13.0, iOS 16.0, *) {
+                ViewThatFits(in: .horizontal) {
+                    row.fixedSize()
+                    ScrollView(.horizontal, showsIndicators: false) { row }
+                        .scrollDisabled(heldLabel != nil || model.drag != nil)
+                        .frame(width: available + 12)
+                        // Scrolling the tabs keeps them all shown while the menu bar waits.
+                        .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in if sharesRow { expandTabs(id) } })
+                }
+            } else {
+                // macOS 12 receiver: always a scrolling strip.
                 ScrollView(.horizontal, showsIndicators: false) { row }
-                    .scrollDisabled(heldLabel != nil || model.drag != nil)
                     .frame(width: available + 12)
             }
-        } else {
-            // macOS 12 receiver: always a scrolling strip.
-            ScrollView(.horizontal, showsIndicators: false) { row }
-                .frame(width: available + 12)
         }
     }
 
@@ -458,6 +507,8 @@ struct WorkspaceChromeView: View {
             // A tap selects the pane (typing goes there) or shows that tab. Never a click on the Mac.
             guard heldLabel == nil else { return }
             if let tab, !shown { model.switchTab(id, to: tab) } else { model.focus(id) }
+            // Working with tabs: keep them all shown for a while (only matters beside the menu bar).
+            if tab != nil { expandTabs(id) }
         }
         // Hold: lift the label. Move = drag it to another pane (merge as a tab, split, swap);
         // release without moving = the label's menu.
@@ -613,6 +664,19 @@ struct WorkspaceChromeView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(title))
+    }
+
+    /// Shows every tab of the pane for a while (tapping, holding or scrolling its labels), then
+    /// back to the shown tab and "+N" so the menu bar keeps the row.
+    private func expandTabs(_ id: String) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { tabsExpanded = id }
+        tabsCollapseTask?.cancel()
+        tabsCollapseTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            if heldLabel?.tile == id || model.drag != nil || menu?.tile == id { expandTabs(id); return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { if tabsExpanded == id { tabsExpanded = nil } }
+        }
     }
 
     private func revealStrip() {
@@ -1239,8 +1303,21 @@ struct PaneOutlineShape: InsettableShape {
 
 // MARK: - Pane menu bar (PROTOCOL.md 6.13)
 
-/// The focused pane's app menus (File, Edit, …) as a slim bar across the top of the pane, under
-/// its label; a title opens its menu as a drop-down here. Pressing an item presses it on the Mac.
+/// Redraws `content` when the menu bar's own state changes (`WorkspaceModel` doesn't republish it).
+struct AppMenuObserver<Content: View>: View {
+    @ObservedObject var menus: AppMenuModel
+    let content: (AppMenuModel) -> Content
+
+    init(menus: AppMenuModel, @ViewBuilder content: @escaping (AppMenuModel) -> Content) {
+        self.menus = menus
+        self.content = content
+    }
+
+    var body: some View { content(menus) }
+}
+
+/// The focused pane's app menus (File, Edit, …) as a slim bar in the pane's top row, after its
+/// labels; a title opens its menu as a drop-down here. Pressing an item presses it on the Mac.
 struct PaneMenuBar: View {
     @ObservedObject var menus: AppMenuModel
     /// The pane, clear of the screen's unsafe edges.

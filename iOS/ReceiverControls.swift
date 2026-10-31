@@ -579,11 +579,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // gate it (see `functionGroups`). One frame per visual group (see
         // `ControlTrayGeometry.functionTrayLayout`), displaced only while a
         // temporary shortcut palette would actually collide with it.
-        // Landscape: every group after the first sits in a row along the bottom
-        // (`bottomRow`), so it is sized as a row too.
-        let functionGroupSizes = functionGroups.enumerated().map {
-            calculatedFunctionGroupSize($0.element, portrait: portrait || $0.offset > 0)
-        }
+        let functionGroupSizes = functionGroups.map { calculatedFunctionGroupSize($0, portrait: portrait) }
         // A SwiftUI stack keeps drawing at its intrinsic size when its
         // enclosing frame is smaller. Geometry clamps `layout.trayFrame`
         // to the visible screen, so reconstruct the actual rendered
@@ -670,7 +666,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
                 if index < functionFrames.count {
                     let frame = functionFrames[index]
-                    functionGroupCluster(group, axis: layout.axis == .horizontal || index > 0 ? .horizontal : .vertical)
+                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
                         .frame(width: frame.width, height: frame.height)
                         .position(x: frame.midX, y: frame.midY)
                         .opacity(autoHideOpacity)

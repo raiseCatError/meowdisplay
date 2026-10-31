@@ -1488,13 +1488,13 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(frames[0].minX, insets.leading)
     }
 
-    /// Landscape `bottomRow` (iPhone): Zoom keeps the top corner; Edit sits in the bottom corner
-    /// and Return to its right along the bottom edge, so nothing is left beside the notch.
+    /// Landscape `bottomRow` (iPhone): Zoom keeps the top corner; the Edit column sits in the
+    /// bottom corner and Return to its right, bottoms aligned, so nothing is left beside the notch.
     func testLandscapeBottomRowPutsEditInTheCornerAndReturnBesideIt() {
         let container = CGRect(x: 0, y: 0, width: 932, height: 430)
         let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 59)
         let mainFrame = CGRect(x: 932 - 59 - 12 - 44, y: 40, width: 44, height: 350)
-        let zoom = CGSize(width: 44, height: 84), edit = CGSize(width: 84, height: 44), enter = CGSize(width: 44, height: 44)
+        let zoom = CGSize(width: 44, height: 84), edit = CGSize(width: 44, height: 84), enter = CGSize(width: 44, height: 44)
         let frames = ControlTrayGeometry.functionTrayLayout(
             container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
             mainSide: .trailing, position: .oppositeSide,
