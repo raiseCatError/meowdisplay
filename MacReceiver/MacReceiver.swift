@@ -30,6 +30,8 @@ final class ReceiverController: ObservableObject {
     // Summaries for views that don't observe the receiver itself (menu bar
     // icon, status bar): a sender is connected / frames are on screen.
     @Published private(set) var connected = false
+    /// What the connected Mac last said about control for this session; Off when none.
+    private(set) var sessionInputState: SessionInputWireState = .off
     @Published private(set) var streaming = false
     // The one canonical status presentation — republished from the
     // receiver's `session` (phase/interruption), the same state iOS's
@@ -170,12 +172,22 @@ final class ReceiverController: ObservableObject {
         windowWorkspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
         windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        // The Mac's confirmed decision on control (Request Control), never assumed: Window mode's
+        // control-only actions (Stage Manager, Lock Mac, …) are offered only once the Mac allowed
+        // them, and not after the session ends. It was left at its default, `.allowed`, so in
+        // View Only those buttons looked available and the Mac dropped what they sent.
+        receiver.onAllowInputStateChange = { [weak self, weak windowWorkspace] state in
+            self?.sessionInputState = state
+            windowWorkspace?.objectWillChange.send()
+        }
+        windowWorkspace.controlState = { [weak self] in self?.sessionInputState ?? .off }
         input?.localOverlayActive = { windowWorkspace.overviewOpen || windowWorkspace.arranging }
         input?.onOpenWindowOverview = { if windowWorkspace.available { windowWorkspace.openOverview() } }
         receiver.$connected
             .removeDuplicates()
             .filter { !$0 }
-            .sink { [weak receiver] _ in
+            .sink { [weak receiver, weak self] _ in
+                self?.sessionInputState = .off
                 windowWorkspace.apply(.disconnected)
                 receiver?.noteWorkspaceEvent(.disconnected)
             }

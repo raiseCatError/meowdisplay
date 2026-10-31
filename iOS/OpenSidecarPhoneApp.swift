@@ -770,6 +770,9 @@ struct ReceiverScreen: View {
             model.receiver.onAllowInputStateChange = { state in
                 controlStore.applySessionInputState(state)
             }
+            // Control is the Mac's decision for one session: never restored from a previous
+            // launch (the stored preference said Allowed while the Mac would drop the input).
+            controlStore.applySessionInputState(.off)
             model.receiver.setReceiverUIPreferencesForHello(
                 trayEnabled: controlStore.preferences.trayEnabled,
                 keyboardButtonEnabled: controlStore.preferences.keyboardButtonEnabled)
@@ -781,6 +784,10 @@ struct ReceiverScreen: View {
             if !hasConnectedBefore && !onboardingDismissed {
                 showOnboarding = true
             }
+        }
+        // Nor kept after the session ends: the next Mac says for itself.
+        .onChange(of: model.receiver.connected) { connected in
+            if !connected { controlStore.applySessionInputState(.off) }
         }
         .onChange(of: controlStore.preferences) { preferences in
             model.receiver.setReceiverUIPreferencesForHello(
