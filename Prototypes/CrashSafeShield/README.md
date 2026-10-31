@@ -19,4 +19,5 @@ Scenarios (cover the screens for about a minute in total, each releasing on its 
 
 Test-only flags (`--test-mode`, `--test-autorelease`, `--no-lock`) exist only to run the
 scenarios unattended without locking the Mac. A production keeper has none of them.
-Results and the security model: `DESIGN-2026-10-30-crash-safe-shield.md` in the integration folder.
+Results, the security model and the owner-facing assessment (threat model, feasibility on macOS
+14–27, failure behaviour, maintenance cost, review plan): `ASSESSMENT.md` in this folder.
