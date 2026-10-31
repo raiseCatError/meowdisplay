@@ -8,6 +8,10 @@ import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.android.trust.PinStore
 import com.raisecaterror.meowdisplay.core.remote.AutomaticRemoteEndpointStore
+import com.raisecaterror.meowdisplay.core.remote.AutomaticRemoteRoutes
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpoint
+import com.raisecaterror.meowdisplay.core.remote.RemotePorts
+import com.raisecaterror.meowdisplay.core.remote.TailnetFamilies
 import com.raisecaterror.meowdisplay.core.remote.RemoteConnectCoordinator
 import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsWire
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnockClient
@@ -73,7 +77,19 @@ class RemoteAccess(
         store = store,
         knocker = RemoteKnocker(RemoteKnockClient(identity.keyManager, pins::pinnedPeers), scope),
         host = host,
+        automaticEndpoint = ::automaticEndpoint,
     )
+
+    /**
+     * What [peerID] reported about itself, as a knock address: only while automatic Remote Access is
+     * on, for the pin it was learned under, and only families verified on this path.
+     */
+    fun automaticEndpoint(peerID: String): RemoteEndpoint? {
+        if (!automaticEnabled) return null
+        val entry = automaticEndpoints.entry(peerID, pins.pin(peerID), System.currentTimeMillis()) ?: return null
+        val host = AutomaticRemoteRoutes.host(entry.names, entry.ips, TailnetFamilies.ANDROID) ?: return null
+        return RemoteEndpoint(host, RemotePorts.CONNECT_REQUEST)
+    }
 
     init {
         media.routeOf = { peer, local, peerID -> routes.classify(peer, local, startedByKnock = coordinator.isKnockPending(peerID)) }
@@ -123,7 +139,7 @@ class RemoteAccess(
      * before (the Mac may show up).
      */
     fun connect(peerID: String, mode: DisplayMode? = null) {
-        if (!nearby(peerID) && store.endpoint(peerID) != null) {
+        if (!nearby(peerID) && coordinator.knockEndpoint(peerID) != null) {
             coordinator.connect(peerID, mode)
         } else {
             media.requestConnect(peerID, mode)

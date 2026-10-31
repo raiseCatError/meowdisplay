@@ -58,8 +58,10 @@ class RemoteConnectCoordinatorTest {
         val host = FakeHost()
         val store = RemoteMacStore(InMemoryRemoteMacStorage())
         val transport = FakeTransport { scope.currentTime }
+        val reported = mutableMapOf<String, RemoteEndpoint>()
         val coordinator = RemoteConnectCoordinator(
             scope.backgroundScope, { scope.currentTime }, store, RemoteKnocker(transport, scope.backgroundScope), host,
+            automaticEndpoint = { reported[it] },
         )
         fun attempt(peerID: String = "A") = coordinator.attempts.value[peerID]
     }
@@ -67,6 +69,22 @@ class RemoteConnectCoordinatorTest {
     private fun TestScope.rig(save: Boolean = true) = Rig(this).also { if (save) it.store.save("A", endpointA) }
 
     // MARK: - Connect
+
+    @Test
+    fun aReportedAddressIsUsedOnlyWhenNoneWasTyped() = runTest {
+        val rig = rig(save = false)
+        assertEquals(RemoteConnectCoordinator.ConnectOutcome.NoSavedAddress, rig.coordinator.connect("A"))
+        val reported = RemoteEndpoint("100.101.1.5", RemotePorts.CONNECT_REQUEST)
+        rig.reported["A"] = reported
+        assertEquals(RemoteConnectCoordinator.ConnectOutcome.Started, rig.coordinator.connect("A"))
+        runCurrent()
+        assertEquals(reported, rig.transport.calls.last().endpoint)
+        advanceTimeBy(150)
+        rig.store.save("A", endpointA)
+        rig.coordinator.connect("A")
+        runCurrent()
+        assertEquals("the typed address wins", endpointA, rig.transport.calls.last().endpoint)
+    }
 
     @Test
     fun connectSendsOneManualKnockAndMarksTheExistingConnectPending() = runTest {

@@ -19,6 +19,9 @@ struct AutomaticRemoteEndpointStore {
         var names: [String]
         var ips: [String]
         var updatedAt: Date
+        /// The Mac's record of a receiver: what its hello said it is (`Android`, `iPhone`, ...),
+        /// which decides the verified families (`TailnetFamilies.macDialing`). Nil on receivers.
+        var device: String?
     }
 
     let role: RolePreferences
@@ -53,13 +56,14 @@ struct AutomaticRemoteEndpointStore {
 
     /// Records a report from the authenticated, admitted `peerID` whose pin is `pin`. An empty
     /// report removes the entry.
-    func record(_ report: RemoteEndpointsWire.Report, forPeerID peerID: String, pin: Data, now: Date = Date()) {
+    func record(_ report: RemoteEndpointsWire.Report, forPeerID peerID: String, pin: Data, device: String? = nil,
+                now: Date = Date()) {
         var entries = load()
         if report.isEmpty {
             guard entries.removeValue(forKey: peerID) != nil else { return }
         } else {
             entries[peerID] = Entry(pin: RemoteEndpointsWire.pinDigest(pin), names: report.names,
-                                    ips: report.ips, updatedAt: now)
+                                    ips: report.ips, updatedAt: now, device: device.map { String($0.prefix(16)) })
         }
         save(entries)
     }
@@ -71,6 +75,9 @@ struct AutomaticRemoteEndpointStore {
     }
 
     func removeAll() { defaults.removeObject(forKey: key) }
+
+    /// Every peer with a stored entry (fresh or not; `entry` decides).
+    func peerIDs() -> [String] { Array(load().keys) }
 
     /// Drops entries for peers no longer paired (forgotten while this app wasn't running) and
     /// expired ones.

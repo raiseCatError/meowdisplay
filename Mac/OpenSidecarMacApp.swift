@@ -1721,7 +1721,7 @@ final class SenderController: ObservableObject {
                 if let localResult = discovered.first(where: { txtID(of: $0) == peerID }),
                    dial(.wifi(localResult), via: "local Bonjour") { return }
             case .savedHint:
-                if RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil,
+                if remoteRouteAvailable(peerID),
                    dial(.remote(peerID: peerID), via: "persisted Remote hint") { return }
             case .observedSource:
                 if let observedHost,
@@ -1817,8 +1817,7 @@ final class SenderController: ObservableObject {
             if localStarted { continue }
             // A present-but-blocked/unusable local record must not end
             // route evaluation: fall through to a configured Remote hint.
-            let endpointFound = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
-            guard endpointFound else { continue }
+            guard remoteRouteAvailable(peerID) else { continue }
             connect(to: .remote(peerID: peerID), userInitiated: true, initiator: .receiver,
                     needsSenderApproval: needsApproval)
         }
@@ -1833,6 +1832,11 @@ final class SenderController: ObservableObject {
                     tls: TLSSessionConfig(identity: SendableSecIdentity(value: identity),
                                           pinnedPeerSPKI: pin,
                                           peerID: peerID))
+    }
+
+    /// A typed Remote address, or a reported one on a verified path (`AutomaticRemoteRoutes`).
+    private func remoteRouteAvailable(_ peerID: String) -> Bool {
+        AutomaticRemoteRoutes.macMediaEndpoint(forPeerID: peerID, pin: TrustStore.shared.pin(peerID: peerID)) != nil
     }
 
     /// Same pinned-mutual-TLS construction as `secureWiFiTransport`, dialing
@@ -1850,9 +1854,13 @@ final class SenderController: ObservableObject {
         if let hostOverride, let portOverride {
             resolvedHost = hostOverride
             resolvedPort = portOverride
-        } else if let hint = RemoteEndpointStore.mediaEndpoint(forPeerID: peerID, role: .sender) {
+        } else if let hint = AutomaticRemoteRoutes.macMediaEndpoint(forPeerID: peerID,
+                                                                    pin: TrustStore.shared.pin(peerID: peerID)) {
+            // A typed address first; else what the device reported about itself (PROTOCOL.md
+            // 6.17), on a verified path only. Either way only a hint: the pin decides below.
             resolvedHost = hint.host
             resolvedPort = hint.port
+            if hint.automatic { Log.info("routeDebug: Remote for peer=\(peerID) uses its reported address") }
         } else {
             Log.info("routeDebug: Remote unavailable for peer=\(peerID) — no persisted endpoint hint")
             return nil
@@ -2203,8 +2211,10 @@ final class SenderController: ObservableObject {
         // hint for, and only when no better local candidate for the same
         // logical device exists (the priority sort + de-dupe in autoConnect()
         // handles that).
-        candidates += RemoteEndpointStore.allPeerIDs(role: .sender).compactMap { peerID -> AutoConnectCandidate? in
-            guard TrustStore.shared.hasPin(peerID: peerID) else { return nil }
+        let remotePeerIDs = Set(RemoteEndpointStore.allPeerIDs(role: .sender))
+            .union(AutomaticRemoteEndpointStore(role: .sender).peerIDs())
+        candidates += remotePeerIDs.sorted().compactMap { peerID -> AutoConnectCandidate? in
+            guard TrustStore.shared.hasPin(peerID: peerID), remoteRouteAvailable(peerID) else { return nil }
             let target = ConnectionTarget.remote(peerID: peerID)
             let logicalID = logicalID(for: target)
             return AutoConnectCandidate(target: target, logicalID: logicalID,

@@ -5949,7 +5949,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
               let report = RemoteEndpointsWire.decode(frame: payload),
               remoteEndpointsInbound.admit(now: ProcessInfo.processInfo.systemUptime),
               let pin = TrustStore.shared.pin(peerID: peerID) else { return }
-        AutomaticRemoteEndpointStore(role: .sender).record(report, forPeerID: peerID, pin: pin)
+        AutomaticRemoteEndpointStore(role: .sender).record(report, forPeerID: peerID, pin: pin, device: lastHello?.device)
         Log.info("remoteEndpoints: receiver reported \(report.ips.count) address(es), \(report.names.count) name(s)")
     }
 
