@@ -300,6 +300,32 @@ class MediaListenerTest {
         Mac(macA).use { it.admit() }
     }
 
+    /** Audit F-3: one address can't hold every handshake slot. */
+    @Test
+    fun oneHostCannotTakeEveryHandshakeSlot() {
+        val wide = MediaListener(
+            PinnedTls.context(receiver.keyManager) { pins.values.toList() }, { pins.toMap() }, session,
+            port = 0, handshakeTimeoutMs = 5_000, maxPendingHandshakes = 4, maxPendingPerHost = 2,
+        ).apply { start() }
+        try {
+            val one = InetAddress.getByName("127.0.0.1")
+            val other = InetAddress.getByName("127.0.0.2")
+            fun from(local: InetAddress) = Socket(InetAddress.getLoopbackAddress(), wide.localPort, local, 0)
+            val held = (1..2).map { from(one) }
+            eventually("both held") { wide.pendingHandshakes == 2 }
+            from(one).use { third ->
+                third.soTimeout = 5_000
+                assertTrue("a third from the same address is closed at once", endsWithoutTls(third))
+            }
+            from(other).use { elsewhere ->
+                eventually("another address still gets a slot") { wide.pendingHandshakes == 3 }
+            }
+            held.forEach { it.close() }
+        } finally {
+            wide.close()
+        }
+    }
+
     private companion object {
         const val RECEIVER_ID = "11111111-2222-3333-4444-555555555555"
         const val MAC_A = "AAAAAAAA-0000-0000-0000-000000000001"
