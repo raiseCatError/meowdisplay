@@ -507,6 +507,15 @@ Human-written translations only, please — no AI or machine-generated
 localization. See [Translations in CONTRIBUTING.md](CONTRIBUTING.md#translations)
 for how to get started.
 
+## Support development
+
+MeowDisplay is free, open source, and built with care. If the app helps you,
+you're welcome to support continued work through
+[Ko-fi](https://ko-fi.com/raisecaterror) or
+[GitHub Sponsors](https://github.com/sponsors/raiseCatError).
+Donations are entirely optional—using and sharing the project helps too.
+Every contribution is genuinely appreciated. ♥️
+
 ## Built on OpenDisplay
 
 MeowDisplay started as a fork of
