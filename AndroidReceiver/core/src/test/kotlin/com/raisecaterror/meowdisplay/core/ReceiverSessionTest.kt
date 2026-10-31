@@ -644,6 +644,22 @@ class ReceiverSessionTest {
         assertTrue(events.filterIsInstance<SessionEvent.SenderApproval>().isEmpty())
     }
 
+    /** A large message arriving in parts: what a Mac sends as `chunk` messages. */
+    private fun chunked(json: String) =
+        com.raisecaterror.meowdisplay.core.wire.ControlChunkWire.split(json.toByteArray(), id = 7, partBytes = 16).map { it.toString() }
+
+    @Test
+    fun onlyTheAdmittedSessionsChunkedMessagesAreAssembled() {
+        val notice = "{\"type\":\"updateRequired\",\"message\":\"chunked notice\"}"
+        val a = connect(MAC_A)
+        chunked(notice).forEach { session.say(a, it) }
+        assertTrue("nothing assembled before admission", events.none { it is SessionEvent.UpdateRequired })
+        session.say(a, invite("s1"))
+        assertTrue(session.isAdmitted)
+        chunked(notice).forEach { session.say(a, it) }
+        assertEquals("chunked notice", (events.last { it is SessionEvent.UpdateRequired } as SessionEvent.UpdateRequired).message)
+    }
+
     private companion object {
         const val MAC_A = "AAAAAAAA-0000-0000-0000-000000000001"
         const val MAC_B = "BBBBBBBB-0000-0000-0000-000000000002"

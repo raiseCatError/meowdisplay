@@ -2696,7 +2696,10 @@ final class StreamReceiver: ObservableObject {
         let pipeline = self.pipeline
         switch type {
         case ControlChunkWire.type:
-            // A message too long for one control frame, in parts (PROTOCOL.md 6.14).
+            // A message too long for one control frame, in parts (PROTOCOL.md 6.14). Only an
+            // admitted session sends these (previews, stills): a Mac that isn't admitted can't
+            // make this device hold partial messages for it.
+            guard sessionAdmission.admitted else { return }
             switch chunkAssembler.add(obj, now: CACurrentMediaTime()) {
             case .pending: break
             case .complete(let whole):
