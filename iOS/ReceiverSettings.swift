@@ -38,89 +38,38 @@ struct SettingsView: View {
         #endif
     }
 
-    /// Narrower than this, a regular-width window (iPhone Duo, a small Stage Manager or
-    /// Split View window) has no room for the list beside a page. A split view there shows
-    /// the page alone with no way back to the list (no sidebar button, no Done), so Settings
-    /// becomes a stack instead: the list, with each page pushed over it and a Back button.
-    static let twoColumnMinimumWidth: CGFloat = 700
-    @State private var stackPath: [MobileSettingsCategory] = []
-
     var body: some View {
-        GeometryReader { geo in
-            if horizontalSizeClass == .regular, geo.size.width < Self.twoColumnMinimumWidth {
-                stacked
-            } else {
-                // Wide: list and page side by side. Compact (iPhone): the split view collapses
-                // to a stack by itself, as it always has.
-                split
-            }
-        }
-        // Settings owns its system chrome: the receiver surface behind it
-        // hides the status bar and home indicator, and a presentation that
-        // inherited that would lay its navigation bar out under the top
-        // system region. With the status bar shown here, the split view's
-        // own safe area keeps every header and toolbar below it — through
-        // rotation and re-presentation alike.
-        .statusBarHidden(false)
-        .persistentSystemOverlays(.automatic)
-        .task(id: highlight) {
-            guard highlight != nil else { return }
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            withAnimation(.easeOut(duration: 0.4)) { highlight = nil }
-        }
-    }
-
-    /// The categories, or search results while searching.
-    @ViewBuilder
-    private var categoryRows: some View {
-        if query.trimmingCharacters(in: .whitespaces).isEmpty {
-            ForEach(MobileSettingsCategory.Group.allCases, id: \.self) { group in
-                Section {
-                    ForEach(MobileSettingsCategory.visibleInThisBuild.filter { $0.group == group }) { category in
-                        NavigationLink(value: category) {
-                            Label(category.title, systemImage: category.systemImage)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            List(selection: $selection) {
+                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    ForEach(MobileSettingsCategory.Group.allCases, id: \.self) { group in
+                        Section {
+                            ForEach(MobileSettingsCategory.visibleInThisBuild.filter { $0.group == group }) { category in
+                                NavigationLink(value: category) {
+                                    Label(category.title, systemImage: category.systemImage)
+                                }
+                            }
                         }
                     }
+                } else {
+                    searchResults
                 }
             }
-        } else {
-            searchResults
-        }
-    }
-
-    private func listChrome<Content: View>(_ list: Content, searchPlacement: SearchFieldPlacement) -> some View {
-        list
             .modifier(DemoSettingsBannerInset(active: demo != nil))
             .navigationTitle("Settings")
-            .searchable(text: $query, placement: searchPlacement, prompt: Text("Search Settings"))
+            .searchable(text: $query, placement: .sidebar, prompt: Text("Search Settings"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
-    }
-
-    private func pageChrome(_ category: MobileSettingsCategory) -> some View {
-        page(for: category)
-            .environment(\.settingsHighlight, highlight)
-            .modifier(DemoSettingsBannerInset(active: demo != nil))
-    }
-
-    private var stacked: some View {
-        NavigationStack(path: $stackPath) {
-            listChrome(List { categoryRows }, searchPlacement: .automatic)
-                .navigationDestination(for: MobileSettingsCategory.self) { pageChrome($0) }
-        }
-    }
-
-    private var split: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            listChrome(List(selection: $selection) { categoryRows }, searchPlacement: .sidebar)
-                .modifier(HidesSidebarToggle())
+            .modifier(HidesSidebarToggle())
         } detail: {
             NavigationStack {
                 if let selection {
-                    pageChrome(selection)
+                    page(for: selection)
+                        .environment(\.settingsHighlight, highlight)
+                        .modifier(DemoSettingsBannerInset(active: demo != nil))
                 } else {
                     Text("Select a category")
                         .foregroundStyle(.secondary)
@@ -131,10 +80,23 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
+        // Settings owns its system chrome: the receiver surface behind it
+        // hides the status bar and home indicator, and a presentation that
+        // inherited that would lay its navigation bar out under the top
+        // system region. With the status bar shown here, the split view's
+        // own safe area keeps every header and toolbar below it — through
+        // rotation and re-presentation alike.
+        .statusBarHidden(false)
+        .persistentSystemOverlays(.automatic)
         .onAppear {
             if selection == nil {
                 selection = MobileSettingsCategory.initialSelection(regularWidth: horizontalSizeClass == .regular)
             }
+        }
+        .task(id: highlight) {
+            guard highlight != nil else { return }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            withAnimation(.easeOut(duration: 0.4)) { highlight = nil }
         }
     }
 
@@ -147,8 +109,7 @@ struct SettingsView: View {
             ForEach(results) { item in
                 Button {
                     highlight = item.isCategory ? nil : item.id
-                    selection = item.category      // the split view's page
-                    stackPath = [item.category]    // the stack's page
+                    selection = item.category
                 } label: {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
