@@ -10,6 +10,7 @@ name: Reference sync (OpenDisplay)
 #
 # Scheduled runs happen only while the repository variable REFERENCE_SYNC is
 # `enabled`; until then it runs only when dispatched.
+# GitHub runs schedules only from the default branch (dev); see RELEASE.md.
 on:
   schedule:
     - cron: '23 5 * * *'

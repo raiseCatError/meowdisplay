@@ -78,6 +78,16 @@ Mac and iOS always; Android once `crossPlatformReady` is `true`. Until then
 an Android candidate is built, uploaded and reported, but doesn't hold the
 release.
 
+**Scheduled workflows** (`release-monitor`, `repository-guard`, `reference-sync`)
+run only from the default branch, `dev`, and only while their repository
+variable is `enabled` (`RELEASE_AUTOMATION`, `REPOSITORY_GUARD`,
+`REFERENCE_SYNC`). GitHub registers a schedule when a commit that changes the
+workflow file lands on the default branch. After the default branch changes,
+the old schedules can stay unregistered until that happens: Actions then
+shows no scheduled runs at all, not even skipped ones. Merging any change to
+the workflow file into `dev` registers it again. Running a workflow by hand
+(`workflow_dispatch`) works at any time but does not register its schedule.
+
 ## The publication gate
 
 `release-publish.yml` starts only when every required platform is

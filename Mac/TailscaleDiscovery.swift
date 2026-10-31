@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 
 /// Tailscale peer discovery for Remote Access, through Tailscale's own
 /// documented CLI (`tailscale status --json`) — no API keys, no private
@@ -87,9 +88,24 @@ struct TailscaleStatus: Equatable {
     static let maximumPeers = 500
 }
 
-/// Finds and runs the Tailscale CLI: the one inside the Mac app (App Store or
-/// standalone), or a Homebrew/manual install. Bounded: 3 s, 4 MB of output.
+/// Finds and runs the Tailscale CLI, only when Tailscale signed it: the Mac app
+/// (App Store or standalone), or a command-line install that links to it.
+/// Bounded: 3 s, 4 MB of output.
+///
+/// Two of the places a CLI can live (`/opt/homebrew/bin`, `/usr/local/bin`) are
+/// often writable by the signed-in user, so a file there could be anything. Before
+/// running one, symlinks are resolved, the app bundle holding the binary (or the
+/// binary itself) must pass a code-signature check for Tailscale's team ID, and the
+/// resolved path that was checked is the one run. A Homebrew build isn't signed by
+/// Tailscale, so it is refused (`.untrusted`); typing an address still works.
 enum TailscaleCLI {
+    /// Tailscale Inc.'s Apple Developer Team ID, read from the owner's install
+    /// (`codesign -dv /Applications/Tailscale.app`).
+    static let teamID = "W5364U7YZB"
+
+    /// Apple-anchored (Developer ID or Mac App Store) and signed by `teamID`.
+    static let signingRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
+
     static let candidatePaths = [
         "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
         "/opt/homebrew/bin/tailscale",
@@ -101,17 +117,65 @@ enum TailscaleCLI {
         case notInstalled
         /// Installed but signed out, stopped, or its output wasn't readable.
         case unavailable
+        /// A `tailscale` command exists, but Tailscale didn't sign it: not run.
+        case untrusted
     }
 
-    static func executable(fileManager: FileManager = .default) -> String? {
-        candidatePaths.first { fileManager.isExecutableFile(atPath: $0) }
+    enum Resolution: Equatable {
+        /// The resolved executable to run; it passed the signature check.
+        case trusted(String)
+        case untrusted
+        case notInstalled
+    }
+
+    /// The first installed candidate that Tailscale signed. `isSigned` is the
+    /// signature check (replaced in tests).
+    static func resolve(fileManager: FileManager = .default,
+                        isSigned: (URL) -> Bool = isSignedByTailscale) -> Resolution {
+        var found = false
+        for candidate in candidatePaths where fileManager.isExecutableFile(atPath: candidate) {
+            found = true
+            let resolved = URL(fileURLWithPath: candidate).resolvingSymlinksInPath()
+            guard fileManager.isExecutableFile(atPath: resolved.path) else { continue }
+            if isSigned(signedCodeRoot(forExecutable: resolved)) { return .trusted(resolved.path) }
+        }
+        return found ? .untrusted : .notInstalled
+    }
+
+    /// What carries the signature for `executable`: the `.app` bundle it is the
+    /// main executable of (`X.app/Contents/MacOS/Y`), otherwise the file itself.
+    static func signedCodeRoot(forExecutable executable: URL) -> URL {
+        let parts = executable.standardizedFileURL.pathComponents
+        if parts.count >= 4, parts[parts.count - 2] == "MacOS", parts[parts.count - 3] == "Contents",
+           parts[parts.count - 4].hasSuffix(".app") {
+            return executable.standardizedFileURL
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        }
+        return executable.standardizedFileURL
+    }
+
+    /// Static code-signature check (all architectures, strict) against
+    /// `signingRequirement`. Anything unsigned, ad-hoc, damaged or signed by
+    /// another team fails.
+    static func isSignedByTailscale(_ url: URL) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, SecCSFlags(), &code) == errSecSuccess, let code else { return false }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(signingRequirement as CFString, SecCSFlags(), &requirement) == errSecSuccess,
+              let requirement else { return false }
+        let flags = SecCSFlags(rawValue: UInt32(kSecCSCheckAllArchitectures) | UInt32(kSecCSStrictValidate))
+        return SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess
     }
 
     static func status(timeout: TimeInterval = 3) async -> Outcome {
-        guard let path = executable() else { return .notInstalled }
-        return await withCheckedContinuation { continuation in
+        await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: run(path, timeout: timeout))
+                // The signature check hashes the bundle, so it runs off the main thread too.
+                switch resolve() {
+                case .notInstalled: continuation.resume(returning: .notInstalled)
+                case .untrusted: continuation.resume(returning: .untrusted)
+                case .trusted(let path): continuation.resume(returning: run(path, timeout: timeout))
+                }
             }
         }
     }

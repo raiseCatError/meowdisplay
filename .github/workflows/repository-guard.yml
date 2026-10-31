@@ -6,6 +6,7 @@ name: Repository guard
 # setting; an admin fixes drift deliberately (apply-rulesets.sh, BRANCHING.md).
 # Scheduled runs happen only while the repository variable REPOSITORY_GUARD
 # is `enabled`.
+# GitHub runs schedules only from the default branch (dev); see RELEASE.md.
 on:
   schedule:
     - cron: '41 6 * * 1'

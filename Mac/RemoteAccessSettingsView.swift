@@ -232,6 +232,8 @@ private struct TailscaleThisMacView: View {
             Text("Tailscale isn't installed on this Mac. You can still enter any private-network address by hand.").font(.caption).foregroundStyle(.secondary)
         case .unavailable:
             Text("Tailscale isn't running or is signed out. Start it, then check again.").font(.caption).foregroundStyle(.secondary)
+        case .untrusted:
+            Text("The tailscale command on this Mac isn't signed by Tailscale, so MeowDisplay doesn't run it. Install the Tailscale app from tailscale.com or the App Store, or enter the address by hand.").font(.caption).foregroundStyle(.secondary)
         case nil:
             EmptyView()
         }
@@ -300,6 +302,8 @@ private struct TailscaleSuggestionsView: View {
             Text("Tailscale isn't installed on this Mac.").font(.caption).foregroundStyle(.secondary)
         case .unavailable:
             Text("Tailscale isn't running or is signed out.").font(.caption).foregroundStyle(.secondary)
+        case .untrusted:
+            Text("The tailscale command on this Mac isn't signed by Tailscale, so MeowDisplay doesn't run it.").font(.caption).foregroundStyle(.secondary)
         case nil:
             EmptyView()
         }
