@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/Github Readme Icon.png" alt="MeowDisplay icon" width="128">
+<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mark.png" alt="MeowDisplay logo used on the website" width="128">
 
 # MeowDisplay
 
