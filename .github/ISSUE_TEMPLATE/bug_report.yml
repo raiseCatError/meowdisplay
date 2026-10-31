@@ -1,103 +1,127 @@
 name: Bug report
-description: Report something in MeowDisplay that isn't working. Not for security vulnerabilities.
+description: Report a reproducible problem with the Mac, iPhone/iPad, Android or Mac Receiver app.
+title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        > [!CAUTION]
-        > **Security or privacy vulnerability? STOP.** Do not file it here. Use this repository's **Security** tab → **Report a vulnerability** to report it privately. See the [security policy](https://github.com/raiseCatError/meowdisplay/security/policy).
+        Please search for an existing issue first. For **security or privacy vulnerabilities**, use the repository's private **Security → Report a vulnerability** flow, not this public form.
 
-        This issue is public. Do not paste passwords, private keys, pairing codes or secrets, private endpoints/IP addresses, or personal content. For setup help, see the [setup guide](https://meowdisplay.app/docs.html) and [support page](https://meowdisplay.app/support.html).
+        **Privacy:** Do not include real pairing codes, device IDs, IP addresses, Tailscale names, secrets, personal files, notifications or identifiable screenshots. Sanitize all logs and recordings before attaching them.
   - type: checkboxes
-    id: not-security
+    id: confirmations
     attributes:
-      label: Confirmation
+      label: Before submitting
       options:
-        - label: I confirm this is not a security vulnerability.
+        - label: I searched existing issues and pull requests for this problem.
           required: true
-        - label: I searched existing issues and this hasn't been reported.
+        - label: This is not a security or privacy vulnerability.
           required: true
-  - type: textarea
-    id: description
+        - label: I have removed private details from anything I am sharing.
+          required: true
+  - type: dropdown
+    id: affected-app
     attributes:
-      label: What happened?
-      description: A concise description of the bug.
+      label: Affected app
+      options:
+        - Mac app (sender)
+        - iPhone / iPad receiver
+        - Android receiver
+        - Mac Receiver
+        - More than one / unsure
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: MeowDisplay version or commit
-      placeholder: e.g. 1.4.0 or a1b2c3d (if known)
+      label: Version, build or commit
+      placeholder: "For example: 2.0.0 (build number), or a short commit SHA"
   - type: input
-    id: mac
+    id: sending-mac
     attributes:
-      label: Mac model and macOS version
-      placeholder: e.g. MacBook Air M2, macOS 26.1
-    validations:
-      required: true
+      label: Sending Mac model and macOS version
+      placeholder: "For example: MacBook Air M2, macOS 27"
   - type: input
-    id: receiver
+    id: receiving-device
     attributes:
-      label: Receiver device and iOS/iPadOS version
-      placeholder: e.g. iPad Pro 11" (M4), iPadOS 26.1
-    validations:
-      required: true
+      label: Receiving device and OS version
+      description: If the problem happens before connecting, state that.
+      placeholder: "For example: Pixel 8, Android 16; or MacBook Pro, macOS 27"
   - type: dropdown
-    id: connection
+    id: route
     attributes:
-      label: Connection type
+      label: Connection
       options:
         - USB
-        - Wi-Fi
-        - Remote
+        - Local Wi-Fi / Bonjour
+        - Remote / private network (for example Tailscale)
+        - Not connected / discovery / pairing
+        - Not relevant / unsure
     validations:
       required: true
   - type: dropdown
-    id: mode
+    id: display
     attributes:
       label: Display mode
       options:
         - Mirror
         - Extend
-        - Not applicable
+        - Window view (Mac windows)
+        - More than one
+        - Not applicable / unsure
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: What is the user-visible impact? Include any error message (without sensitive details).
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
-      label: Steps to reproduce
+      label: How can we reproduce it?
       placeholder: |
-        1.
-        2.
-        3.
+        1. Start MeowDisplay on...
+        2. Connect using...
+        3. Open...
+        4. Observe...
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected behaviour
+      label: Expected behavior
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: Actual behaviour
+      label: Actual behavior
     validations:
       required: true
   - type: dropdown
-    id: reproducible
+    id: frequency
     attributes:
-      label: Is it reproducible?
+      label: Frequency
       options:
         - Every time
         - Sometimes
-        - Happened once
+        - Once
+        - Unknown
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: How was this verified?
+      options:
+        - Physical device(s)
+        - Simulator / emulator
+        - Automated tests
+        - Not reproduced yet
     validations:
       required: true
   - type: textarea
-    id: logs
+    id: attachments
     attributes:
-      label: Logs and screenshots
-      description: Mac Logs or the iOS Connection Log help a lot. Remove private endpoints, identifiers, device names and personal content first.
+      label: Sanitized logs, screenshots or additional context (optional)
+      description: Describe the evidence, or attach it only if you have checked it for private information.

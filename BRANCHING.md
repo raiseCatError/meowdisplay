@@ -20,7 +20,41 @@ stay exactly as they are.
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).
 
-## The repository today (2026-10-30)
+## Current working state (2026-10-31)
+
+- The default branch is **`dev`**, the active integration branch. The
+  MeowDisplay 2.0 development line was incorporated in [PR #33](https://github.com/raiseCatError/meowdisplay/pull/33),
+  and the latest iOS QA adjustments in [PR #83](https://github.com/raiseCatError/meowdisplay/pull/83).
+  PR #83's merge commit was `da8d4c6`. Confirm the branch head again
+  before preparing any release candidate.
+- **`main` is not the 2.0 development branch.** It is reserved for the
+  published-release promotion flow; don't merge ordinary documentation
+  contributions into it merely to make the default README appear newer.
+- **`release/2.0.0` is maintained separately by the release operator.**
+  A candidate branch or App Store / Play upload may change after this
+  document was edited; consult the actual GitHub Actions and store records
+  rather than assuming its status.
+- **`infra/community-contribution-forms`** is a documentation-only PR
+  branch targeting `dev`. It is **not** a release candidate and must not
+  change release-branch history, signing, store uploads or the public tag.
+- Windows/Linux senders/receivers are unplanned ideas (#84, #85), not
+  release branches, development targets or milestones. The enterprise
+  remote-administration direction (#86) and hosted relay/accounts (#87)
+  are similarly not planned. Professional/commercial **use** is welcome.
+
+### Documentation versus release snapshots
+
+The published GitHub tag and `main` must continue to represent the exact
+published product source. A later documentation-only PR merged to `dev`
+doesn't retroactively modify a release tag. During 2.0 preparation, let
+the release operator decide whether a docs-only change can be safely
+included **before** candidate builds are frozen. If builds are already
+uploaded, do not alter the candidate SHA merely to include docs: reconcile
+documentation on `dev` and the public website after verifying actual
+store status, and include the updated docs in the next normal release.
+
+## Historical migration checkpoint (2026-10-30)
+
 
 - `raiseCatError/meowdisplay` is public and a GitHub **network fork** of `peetzweg/opendisplay`.
 - **Default branch: `legacy/dev-opendisplay-next`** (`3f24b51`), the former `dev/opendisplay-next`, renamed so `dev` could exist (Git can't hold `dev` beside `dev/…`). It becomes `dev` once the release workflows' resume and store-safety fixes are on `dev` and the scheduled workflows are confirmed inert.

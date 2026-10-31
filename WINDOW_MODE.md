@@ -1,9 +1,13 @@
 # Window mode
 
 Besides **Mirror** (show a Mac display) and **Extend** (add a separate
-desktop), a device can choose **Windows**: Mac windows you pick, shown side by
-side on that device. Each device chooses on its own; nothing changes for the
-others.
+desktop), a device can choose **Windows** in the app to open **Window view**:
+the individual **Mac windows** you pick, arranged side by side on that
+device. The in-app label is **Windows**, but on the website and in public
+marketing we say **Mac windows** or **Window view** so it cannot be
+confused with the Windows operating system (a separate unplanned idea,
+[#84](https://github.com/raiseCatError/meowdisplay/issues/84)).
+Each receiver makes its own choice; another receiver's mode does not change.
 
 - iPhone and compact Android phones: up to **3** windows.
 - iPad, unfolded foldables and large Mac Receiver windows: up to **9**.

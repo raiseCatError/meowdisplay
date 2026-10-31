@@ -1,10 +1,17 @@
 # Multiple devices: per-device Mirror/Extend
 
-Each connected iPhone, iPad or receiving Mac chooses its own display mode
-([issue #20](https://github.com/raiseCatError/meowdisplay/issues/20)). One
-device can mirror the Mac's built-in display while two iPads extend it as two
-separate desktops, and changing one device never changes or restarts the
-others.
+Each connected iPhone, iPad, Android device or receiving Mac can have
+its own Mirror/Extend selection ([completed issue #20](https://github.com/raiseCatError/meowdisplay/issues/20)).
+One device can mirror the Mac's built-in display while other receivers
+extend it as separate desktops, and changing one device doesn't reset
+another receiver's mode.
+
+**Verification update (2026-10-31):** The maintainer confirms working
+multi-device behavior was physically verified; issue #20 is closed. The
+scenario checklist below remains a useful reproducible regression checklist,
+not a record proving that every individual edge case was exercised.
+Mac-to-Mac *input forwarding* is a separate, still physically unverified
+feature ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
 
 ## How it works
 

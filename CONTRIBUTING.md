@@ -1,52 +1,69 @@
 # Contributing to MeowDisplay
 
-Thanks for your interest in MeowDisplay. Bug reports, testing on different
-Macs, iPhones, iPads and networks, documentation fixes and code changes are all
-welcome.
+Thanks for helping make MeowDisplay better. Bug reports, carefully described ideas, documentation, physical-device testing, translations, and focused code changes are welcome. You do not need to write code to contribute.
 
-Please read and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+MeowDisplay is currently **Mac-first**: a Mac sends its screen to iPhone, iPad, Android, or another Mac. Mac-to-Mac input is implemented, though **two-Mac physical testing is still outstanding** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
 
-## Security vulnerabilities
+**Personal-first doesn't mean non-commercial.** You're welcome to use MeowDisplay for your own work, professionally or commercially. We're not currently building an enterprise remote-desktop or IT administration suite. That is a **separate, unplanned product direction** ([#86](https://github.com/raiseCatError/meowdisplay/issues/86)), not a restriction on your use.
 
-**Do not file security or privacy vulnerabilities as public issues, Discussions
-or pull requests.** Use GitHub's private **Report a vulnerability** feature
-instead (repository → **Security** → **Report a vulnerability**). See
-[SECURITY.md](SECURITY.md).
+Windows ([#84](https://github.com/raiseCatError/meowdisplay/issues/84)), Linux ([#85](https://github.com/raiseCatError/meowdisplay/issues/85)), and hosted-account/relay services ([#87](https://github.com/raiseCatError/meowdisplay/issues/87)) are **ideas only, not planned features**. These issue threads exist for thoughtful discussion, not delivery promises; even consideration or prioritization is not guaranteed.
 
-## Issues
+A fuller explanation lives in [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md).
 
-- Search [existing issues](https://github.com/raiseCatError/meowdisplay/issues)
-  first; add detail to a matching one rather than opening a duplicate.
-- Report bugs with the **Bug report** form.
-- Suggest ideas with the **Feature request** form.
-- For setup help, see [SUPPORT.md](SUPPORT.md).
-- Please open an issue before starting large or architectural work.
+Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Pull requests
+## Before opening anything
 
-1. Fork the repository and create a branch from `dev` (or from
-   `release/<version>` for a fix to a release being prepared). Branch names:
-   `feature/*`, `fix/*`, `infra/*`. See [BRANCHING.md](BRANCHING.md).
-2. Make a focused change — one fix or feature per PR, without unrelated
-   refactors or formatting churn.
-3. Follow the existing Swift and project style (see [AGENTS.md](AGENTS.md) and
-   [SETUP.md](SETUP.md) for building).
-4. Verify your change: run the relevant tests and/or describe how you tested
-   it on real devices.
-5. Open a PR describing what changed, why, and how you verified it. PR titles
-   must be [Conventional Commits](https://www.conventionalcommits.org/)
-   (for example `fix: reconnect after Wi-Fi drop`), because they become the
-   squash-merge commit and changelog entry.
+- Search [issues](https://github.com/raiseCatError/meowdisplay/issues) and [pull requests](https://github.com/raiseCatError/meowdisplay/pulls), including closed items, to avoid duplicates.
+- Check the current [features](https://meowdisplay.app/features.html), [receiver parity](PARITY.md), [setup guide](https://meowdisplay.app/docs.html), and [support page](SUPPORT.md).
+- Keep one problem or proposal per issue. State what you observed and what you tested; avoid assuming a feature exists or is scheduled.
+- Every issue and attachment is public. Remove personal content, device identifiers, private network/Tailscale addresses and hostnames, pairing codes, security keys, access tokens, logs containing secrets, and notifications **before** attaching captures or logs. If redaction cannot be verified, do not attach them.
 
-Do not commit secrets, credentials, signing identities, provisioning profiles,
-private endpoints or personal logs. Keep local signing overrides out of tracked
-files.
+### Where to go
 
-Releases are cut from `release/<version>` branches by the maintainers and
-published only after review and approval ([RELEASE.md](RELEASE.md)); a PR
-never needs to bump versions or edit `CHANGELOG.md`. Changes inspired by the
-OpenDisplay project are welcome as ordinary PRs that follow
-[REFERENCE.md](REFERENCE.md).
+| You want to… | Use |
+| --- | --- |
+| Report behavior that is broken or regressed | [Bug report](https://github.com/raiseCatError/meowdisplay/issues/new?template=bug_report.yml) |
+| Request a concrete change to the supported product | [Feature request](https://github.com/raiseCatError/meowdisplay/issues/new?template=feature_request.yml) |
+| Share an early thought, including an unplanned platform idea | [Idea / exploration](https://github.com/raiseCatError/meowdisplay/issues/new?template=idea.yml) |
+| Correct confusing, missing, or outdated documentation | [Documentation issue](https://github.com/raiseCatError/meowdisplay/issues/new?template=documentation.yml) |
+| Report real-hardware compatibility findings or volunteer device QA | [Device testing / compatibility report](https://github.com/raiseCatError/meowdisplay/issues/new?template=device_testing.yml) |
+| Get help installing or pairing | [Support and setup](SUPPORT.md) |
+| Privately report a security or privacy vulnerability | **Security tab → Report a vulnerability**, as described in [SECURITY.md](SECURITY.md) |
+
+**Security vulnerabilities never belong in public issues, discussions, PR descriptions, or logs.** Please use the private vulnerability-reporting flow.
+
+### Bugs and testing reports
+
+Include the app version/build (or source commit), sender Mac and macOS version, receiving device and OS, relevant connection type (USB, Wi-Fi, Remote/Tailscale), display mode (Mirror, Extend or Window view), reproducible steps and expected/actual results. Say **physical device**, **simulator/emulator**, **automated test**, or **not tested** rather than treating them as equivalent. You can report a problem without attaching a log if the log is sensitive.
+
+Hardware results are especially helpful for different Android models, Mac-to-Mac input, multi-monitor configurations, accessibility features, and reconnect/permission behavior. Reporting an observed result does not automatically become a release requirement.
+
+### Features versus ideas
+
+A **feature request** describes a specific user problem and an implementable change for an existing supported platform. An **idea** can be speculative, wide in scope, or require a new platform or architecture; it carries **no priority, ETA, or commitment**. The maintainer may discuss, defer, or close proposals based on scope and capacity. Do not interpret a tracking issue as an announcement.
+
+Rather than repeatedly opening duplicate tickets for major out-of-scope directions, discuss them in the existing threads: [Windows #84](https://github.com/raiseCatError/meowdisplay/issues/84), [Linux #85](https://github.com/raiseCatError/meowdisplay/issues/85), [enterprise remote administration #86](https://github.com/raiseCatError/meowdisplay/issues/86), and [hosted accounts/relays #87](https://github.com/raiseCatError/meowdisplay/issues/87).
+
+GitHub Discussions is not enabled in this repository. For now, the linked **issues are the discussion venues**; opening an issue for an idea does not turn it into planned work.
+
+## Contributing code or docs
+
+1. For large features, architecture changes, new dependencies or new platforms, open an issue before implementation to discuss scope. Small bug fixes and clear documentation corrections can be proposed directly.
+2. Fork the repository and base your branch on **`dev`**, the active development branch. Use a short descriptive name such as `fix/...`, `feature/...` or `infra/...`. See [BRANCHING.md](BRANCHING.md).
+3. Keep the change focused. Do not alter protocol identifiers, bundle IDs, Keychain names, signing, release workflows or public compatibility guarantees casually. Follow the [terminology guide](TERMINOLOGY.md).
+4. Read [SETUP.md](SETUP.md) and the relevant platform documentation. Run appropriate automated checks and, if possible, test the behavior on physical hardware. Tell us explicitly which platforms you **did not** test.
+5. Open a PR against `dev` with a **Conventional Commit-style title** such as `fix(android): restore video after reconnect`, `docs: clarify pairing` or `feat(ios): improve window switching`. Use the PR template's testing, compatibility and privacy sections.
+
+Maintainers coordinate `release/<version>` branches; **please don't open routine contributions against release branches** or edit version numbers, tags, release manifests or `CHANGELOG.md` for an ordinary PR. [RELEASE.md](RELEASE.md) describes the separate signed-build and publication gates.
+
+Relevant platform checks include the Mac Xcode schemes and tests described in [SETUP.md](SETUP.md), and Android's `./gradlew :core:test :app:testDebugUnitTest :app:lintRelease` from `AndroidReceiver/`. If a test requires hardware you do not have, document that fact instead of marking it passed. CI is not a substitute for physical QA.
+
+Never commit signing certificates, provisioning profiles, secrets, local overrides, private logs or personal screenshots. Use synthetic data in tests and examples. Do not modify unrelated branches or generated outputs. Contributions influenced by the external OpenDisplay project should retain applicable attribution and follow [REFERENCE.md](REFERENCE.md).
+
+## Review expectations
+
+Reviews depend on volunteer/maintainer capacity; a report or PR may not be acted on quickly. Keep discussions respectful and focused on reproducible evidence. A proposed change being technically possible does not mean it belongs on the roadmap. Revisions and small follow-up PRs are welcome.
 
 ## Translations
 

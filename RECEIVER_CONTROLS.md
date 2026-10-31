@@ -5,8 +5,10 @@ Mac Receiver. [PARITY.md](PARITY.md) covers whole-app parity (pairing,
 transports, diagnostics); this page covers **controls**: input, gestures, trays,
 keyboard, Window mode, display modes, audio and where each setting lives.
 
-Derived from the code on `feature/android-secure-core` (2026-10-29), not from
-memory. Sources: `iOS/ReceiverSettings.swift`, `Shared/ControlProfile.swift`
+Initially audited on `feature/android-secure-core` (2026-10-29), since
+integrated into `dev` (#33). Source references below describe implemented
+app controls; see [PARITY.md](PARITY.md) for current verification evidence
+and distinctions. Sources: `iOS/ReceiverSettings.swift`, `Shared/ControlProfile.swift`
 (`ReceiverControlPreferences`), `Shared/PointerGestureEngine.swift`,
 `Shared/StagePeek.swift`, `Shared/WorkspaceViews.swift`;
 `AndroidReceiver/app/.../receiver/ReceiverSettings.kt`,
