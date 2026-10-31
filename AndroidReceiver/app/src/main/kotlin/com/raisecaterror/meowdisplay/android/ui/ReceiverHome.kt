@@ -184,7 +184,8 @@ fun ReceiverHome(
                         val awaiting = mediaUi.peerID == mac.peerID && mediaUi.awaitingMacApproval
                         val live = mediaUi.peerID == mac.peerID && mediaUi.admitted && !awaiting
                         val isNearby = remote.nearby(mac.peerID)
-                        val saved = remoteMacs[mac.peerID]?.endpoint
+                        // A typed address, else one the Mac reported about itself (automatic Remote Access).
+                        val saved = remoteMacs[mac.peerID]?.endpoint ?: remote.automaticEndpoint(mac.peerID)
                         val status = MacStatusReducer.reduce(
                             MacFacts(
                                 peerID = mac.peerID, name = mac.name, nearby = isNearby, remote = saved, connected = live,

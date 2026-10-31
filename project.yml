@@ -340,6 +340,7 @@ targets:
       - Shared/TailnetInterfaces.swift
       - Shared/RemoteEndpointsWire.swift
       - Shared/AutomaticRemoteEndpointStore.swift
+      - Shared/AutomaticRemoteRoutes.swift
       - Shared/PairingNetwork.swift
       - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift

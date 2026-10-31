@@ -31,7 +31,15 @@ class RemoteConnectCoordinator(
     private val knocker: RemoteKnocker,
     private val host: Host,
     private val policy: RemoteRecoveryPolicy = RemoteRecoveryPolicy(),
+    /**
+     * Where a Mac with no typed address can be knocked: what it reported about itself (PROTOCOL.md
+     * 6.17), on a verified path only. Null: none.
+     */
+    private val automaticEndpoint: (String) -> RemoteEndpoint? = { null },
 ) {
+    /** The typed address first; a reported one only when none was typed. */
+    fun knockEndpoint(peerID: String): RemoteEndpoint? = store.endpoint(peerID) ?: automaticEndpoint(peerID)
+
     /** What the coordinator needs to know about the rest of the app. */
     interface Host {
         fun isPaired(peerID: String): Boolean
@@ -81,7 +89,7 @@ class RemoteConnectCoordinator(
      */
     fun connect(peerID: String, mode: DisplayMode? = null): ConnectOutcome {
         if (!host.isPaired(peerID)) return ConnectOutcome.NotPaired
-        val endpoint = store.endpoint(peerID) ?: return ConnectOutcome.NoSavedAddress
+        val endpoint = knockEndpoint(peerID) ?: return ConnectOutcome.NoSavedAddress
         val generation: Long
         synchronized(lock) {
             generation = bump(peerID)
@@ -215,7 +223,7 @@ class RemoteConnectCoordinator(
             }
             context = RemoteRecoveryPolicy.DropContext(
                 reason = reason, wasRemote = wasRemote, autoReconnectEnabled = host.autoReconnectEnabled(),
-                foreground = foreground, hasSavedAddress = store.endpoint(peerID) != null, stillPaired = host.isPaired(peerID),
+                foreground = foreground, hasSavedAddress = knockEndpoint(peerID) != null, stillPaired = host.isPaired(peerID),
                 nearby = host.isNearby(peerID), otherSessionLive = host.liveSessionPeer()?.let { it != peerID } == true,
             )
             if (!policy.shouldStart(context)) return
@@ -245,7 +253,7 @@ class RemoteConnectCoordinator(
             if (nowMs() - since > RESUME_WINDOW_MS || host.liveSessionPeer() != null) return
             val context = RemoteRecoveryPolicy.DropContext(
                 reason = SessionLossReason.TransportLost, wasRemote = true, autoReconnectEnabled = host.autoReconnectEnabled(),
-                foreground = true, hasSavedAddress = store.endpoint(peerID) != null, stillPaired = host.isPaired(peerID),
+                foreground = true, hasSavedAddress = knockEndpoint(peerID) != null, stillPaired = host.isPaired(peerID),
                 nearby = host.isNearby(peerID), otherSessionLive = false,
             )
             if (policy.shouldStart(context)) startRecoveryLocked(peerID)
@@ -334,7 +342,7 @@ class RemoteConnectCoordinator(
         val endpoint: RemoteEndpoint
         synchronized(lock) {
             if (recoveryGeneration != mine) return false
-            val saved = store.endpoint(peerID)
+            val saved = knockEndpoint(peerID)
             val nearby = host.isNearby(peerID)
             if (saved == null || !host.isPaired(peerID) || !foreground || !host.autoReconnectEnabled() ||
                 (nearby && policy.run?.fromLocal != true) || host.liveSessionPeer() != null
