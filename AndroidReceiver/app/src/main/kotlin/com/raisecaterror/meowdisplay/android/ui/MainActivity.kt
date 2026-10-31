@@ -54,16 +54,14 @@ class MainActivity : ComponentActivity() {
                 val demo by app.demo.collectAsState()
                 // Android 12+: leaving the app during a session slides the picture into a small window.
                 LaunchedEffect(mediaUi.admitted, prefs.pictureInPictureEnabled) { updatePictureInPicture() }
-                if (pip) {
-                    if (mediaUi.admitted) ReceiverScreen(app.receiver, app.pipeline, overlay = { _, _, _ -> }, onOpenSettings = {},
-                        workspace = app.workspace, pictureInPicture = true)
-                    else PictureInPictureEnded()
+                if (pip && !mediaUi.admitted) {
+                    PictureInPictureEnded()
                     return@MeowTheme
                 }
                 var settingsOpen by remember { mutableStateOf(false) }
-                UpdateRequiredNotice(app.media)
+                if (!pip) UpdateRequiredNotice(app.media)
                 // Explore Demo: its own session and controls. A real Mac that connects ends it.
-                demo?.let { run ->
+                if (!pip) demo?.let { run ->
                     val demoUi by run.host.ui.collectAsState()
                     var wasAdmitted by remember(run) { mutableStateOf(false) }
                     LaunchedEffect(demoUi.admitted) { if (demoUi.admitted) wasAdmitted = true else if (wasAdmitted) app.endDemo() }
@@ -82,17 +80,23 @@ class MainActivity : ComponentActivity() {
                     // Our Connect was accepted but the Mac's own user hasn't approved it: there is no picture
                     // to show yet, so Home stays up and says so.
                     val homeUp = homeShown || mediaUi.awaitingMacApproval
+                    // One call site in and out of picture-in-picture: the picture's SurfaceView and
+                    // the decoder bound to it stay, so the window shrinks and grows without a black
+                    // frame or a keyframe request (it was a second ReceiverScreen, rebuilt each time).
                     ReceiverScreen(
                         app.receiver, app.pipeline,
-                        overlay = { window, actions, generation -> ReceiverOverlayHost(app.receiver, window, actions, generation) },
-                        onOpenSettings = { settingsOpen = true },
+                        overlay = if (pip) ({ _, _, _ -> })
+                            else ({ window, actions, generation -> ReceiverOverlayHost(app.receiver, window, actions, generation) }),
+                        onOpenSettings = { if (!pip) settingsOpen = true },
                         onBack = { app.receiver.releaseHeldInput(); homeShown = true },
                         workspace = app.workspace, macName = macName,
                         onMode = { app.media.session.requestDisplayMode(it) },
-                        immersive = !homeUp,
-                        showPerformance = perf, rttMs = { app.media.session.rttMs },
+                        immersive = pip || !homeUp,
+                        pictureInPicture = pip,
+                        showPerformance = perf && !pip, rttMs = { app.media.session.rttMs },
                         routeLabel = mediaUi.route?.overlayLabel,
                     )
+                    if (pip) return@MeowTheme
                     if (homeUp) {
                         BackHandler { moveTaskToBack(true) }
                         ReceiverHome(app.identity, app.pins, app.bonjour, app.pairing, app.media, app.remote,
