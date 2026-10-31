@@ -1023,6 +1023,8 @@ final class SenderController: ObservableObject {
     /// connect-request "knock" arrives on — see `WireCrypto.remoteRequestPort`
     /// and `handleRemoteConnectRequest`.
     private var remoteConnectRequestListener: NWListener?
+    private var remoteConnectRequestRetry = ListenerRetryBackoff()
+    private var remoteConnectRequestRetryPending = false
     /// Last time an accepted knock from each peer triggered a dial-back —
     /// `RemoteConnectRequestPolicy`'s rate-limit input.
     private var remoteConnectRequestAccepted: [String: Date] = [:]
@@ -1507,20 +1509,35 @@ final class SenderController: ObservableObject {
                     switch state {
                     case .ready:
                         Log.info("remote connect-request listener ready: port=\(WireCrypto.remoteRequestPort)")
+                        self?.remoteConnectRequestRetry.ready()
                     case .failed(let error):
-                        Log.info("remote connect-request listener failed: \(error)")
                         guard let self, self.remoteConnectRequestListener === listener else { return }
                         self.remoteConnectRequestListener = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                            self?.startRemoteConnectRequestListener()
-                        }
+                        listener?.cancel()
+                        self.retryRemoteConnectRequestListener(after: "failed: \(error)")
                     default: break
                     }
                 }
             }
             listener.start(queue: .main)
         } catch {
-            Log.info("remote connect-request listener could not be created: \(error)")
+            retryRemoteConnectRequestListener(after: "could not be created: \(error)")
+        }
+    }
+
+    /// A failed knock listener (usually the port held by another process) is rebuilt after a
+    /// growing delay, one retry pending at a time.
+    private func retryRemoteConnectRequestListener(after problem: String) {
+        guard !remoteConnectRequestRetryPending else { return }
+        let delay = remoteConnectRequestRetry.nextDelay()
+        if remoteConnectRequestRetry.shouldLog {
+            Log.info("remote connect-request listener \(problem); retry \(remoteConnectRequestRetry.failures) in \(Int(delay)) s")
+        }
+        remoteConnectRequestRetryPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.remoteConnectRequestRetryPending = false
+            self.startRemoteConnectRequestListener()
         }
     }
 
