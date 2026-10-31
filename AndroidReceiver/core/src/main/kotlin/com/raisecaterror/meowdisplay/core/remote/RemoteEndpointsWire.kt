@@ -99,10 +99,41 @@ class RemoteEndpointsRateGate {
 object TailnetInterfaces {
     data class Candidate(val isVpn: Boolean, val address: String)
 
+    /** This device's addresses on the system's networks ([NetworkFacts], as RouteMonitor reads them). */
+    fun fromNetworks(networks: List<NetworkFacts>): List<String> = select(
+        networks.flatMap { network ->
+            network.addresses.mapNotNull { bytes -> format(bytes)?.let { Candidate(network.transport == Transport.Vpn, it) } }
+        },
+    )
+
+    private fun format(bytes: ByteArray): String? = when (bytes.size) {
+        4 -> bytes.joinToString(".") { (it.toInt() and 0xFF).toString() }
+        16 -> TailnetEndpointFilter.formatIPv6(bytes)
+        else -> null
+    }
+
     /** IPv4 first, normalized and capped as a report is. */
     fun select(candidates: List<Candidate>): List<String> {
         val tunnel = candidates.filter { it.isVpn }.map { it.address.substringBefore('%') }
         val ordered = tunnel.filter { ':' !in it } + tunnel.filter { ':' in it }
         return TailnetEndpointFilter.filter(emptyList(), ordered).addresses
+    }
+}
+
+/**
+ * This side's own reports: once per connection, and never two within the peer's rate limit (a
+ * report the limit would drop is not sent; the next connection sends it).
+ */
+class RemoteEndpointsOutbox {
+    private var lastSentMs: Long? = null
+    private var lastConnection: Long? = null
+
+    fun shouldSend(connection: Long, nowMs: Long): Boolean {
+        if (lastConnection == connection) return false
+        val last = lastSentMs
+        if (last != null && nowMs >= last && nowMs - last < RemoteEndpointsWire.MIN_INTERVAL_MS) return false
+        lastConnection = connection
+        lastSentMs = nowMs
+        return true
     }
 }

@@ -70,11 +70,29 @@ struct AutomaticRemoteEndpointStore {
         save(entries)
     }
 
+    func removeAll() { defaults.removeObject(forKey: key) }
+
     /// Drops entries for peers no longer paired (forgotten while this app wasn't running) and
     /// expired ones.
     func prune(pairedPeerIDs: Set<String>, now: Date = Date()) {
         let entries = load()
         let kept = entries.filter { pairedPeerIDs.contains($0.key) && now.timeIntervalSince($0.value.updatedAt) < Self.lifetime }
         if kept != entries { save(kept) }
+    }
+}
+
+/// Automatic Remote Access: report this device's Tailscale addresses to paired peers and keep
+/// theirs. On unless the person turned it off (each side has its own switch); turning it off
+/// forgets what was learned, and the next session tells the peer to forget this side's.
+enum AutomaticRemoteAccessPreference {
+    static func key(_ role: RolePreferences) -> String { role.key("automaticRemoteAccess.enabled") }
+
+    static func isEnabled(_ role: RolePreferences, defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key(role)) as? Bool ?? true
+    }
+
+    static func set(_ enabled: Bool, _ role: RolePreferences, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: key(role))
+        if !enabled { AutomaticRemoteEndpointStore(role: role, defaults: defaults).removeAll() }
     }
 }

@@ -1,5 +1,7 @@
 package com.raisecaterror.meowdisplay.android.session
 
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsWire
+import com.raisecaterror.meowdisplay.core.session.RemoteEndpointsHost
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
@@ -138,7 +140,18 @@ class MediaController(
     /** A paired Mac's name for the UI ("your Mac" when unknown). */
     override fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
 
-    override val session = ReceiverSession(policies, pins::pinnedPeers, ::hello, ::onEvent)
+    /** Automatic Remote Access (PROTOCOL.md 6.17), set by Remote Access; until then nothing is reported or kept. */
+    @Volatile var remoteEndpointsHost: RemoteEndpointsHost? = null
+
+    override val session = ReceiverSession(
+        policies, pins::pinnedPeers, ::hello, ::onEvent,
+        remoteEndpoints = object : RemoteEndpointsHost {
+            override fun ownReport() = remoteEndpointsHost?.ownReport() ?: RemoteEndpointsWire.Report()
+            override fun received(peerID: String, report: RemoteEndpointsWire.Report) {
+                remoteEndpointsHost?.received(peerID, report)
+            }
+        },
+    )
     private var listener: MediaListener? = null
     private val connectRequests = ConnectRequestState()
     private val main = Handler(Looper.getMainLooper())

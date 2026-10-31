@@ -75,3 +75,25 @@ struct RemoteEndpointsRateGate: Equatable {
         return true
     }
 }
+
+extension RemoteEndpointsWire {
+    /// What this side reports: its tunnel addresses, or nothing when automatic Remote Access is off.
+    static func ownReport(_ role: RolePreferences) -> Report {
+        AutomaticRemoteAccessPreference.isEnabled(role) ? Report(ips: TailnetInterfaces.current()) : Report()
+    }
+}
+
+/// This side's own reports: once per connection, and never two within the peer's rate limit (a
+/// report the limit would drop is not sent; the next connection sends it).
+struct RemoteEndpointsOutbox: Equatable {
+    private(set) var lastSentAt: TimeInterval?
+    private(set) var lastConnection: UInt64?
+
+    mutating func shouldSend(connection: UInt64, now: TimeInterval) -> Bool {
+        if lastConnection == connection { return false }
+        if let lastSentAt, now >= lastSentAt, now - lastSentAt < RemoteEndpointsWire.minInterval { return false }
+        lastConnection = connection
+        lastSentAt = now
+        return true
+    }
+}

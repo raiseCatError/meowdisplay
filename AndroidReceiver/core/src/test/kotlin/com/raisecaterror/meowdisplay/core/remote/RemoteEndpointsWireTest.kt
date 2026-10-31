@@ -71,6 +71,19 @@ class RemoteEndpointsWireTest {
     }
 
     @Test
+    fun ownAddressesComeFromTheVpnNetworkOnly() {
+        fun bytes(text: String) = requireNotNull(IpLiteral.parse(text))
+        val found = TailnetInterfaces.fromNetworks(
+            listOf(
+                NetworkFacts(Transport.Cellular, listOf(bytes("100.70.1.2")), null, isDefault = true),
+                NetworkFacts(Transport.WiFi, listOf(bytes("192.168.1.5")), null),
+                NetworkFacts(Transport.Vpn, listOf(bytes("fd7a:115c:a1e0:0:0:0:0:5"), bytes("100.101.1.5"), byteArrayOf(1, 2)), null),
+            ),
+        )
+        assertEquals(listOf("100.101.1.5", "fd7a:115c:a1e0::5"), found)
+    }
+
+    @Test
     fun onlyTailnetAddressesOnTheVpn() {
         val found = TailnetInterfaces.select(
             listOf(

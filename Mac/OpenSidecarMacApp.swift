@@ -2007,7 +2007,10 @@ final class SenderController: ObservableObject {
         ForgetDeviceAction.perform(
             peerID: peerID,
             forgetTrust: { TrustStore.shared.forget(peerID: $0) },
-            removeRemoteEndpoint: { RemoteEndpointStore.removeEndpoint(forPeerID: $0, role: .sender) },
+            removeRemoteEndpoint: {
+                RemoteEndpointStore.removeEndpoint(forPeerID: $0, role: .sender)
+                AutomaticRemoteEndpointStore(role: .sender).remove(forPeerID: $0)
+            },
             removeWakeMetadata: { WakeMetadataStore.removeMetadata(forPeerID: $0, role: .sender) },
             removeInputAuthorization: {
                 ReceiverInputAuthorizationStore.removePolicy(peerID: $0)

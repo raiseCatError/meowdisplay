@@ -98,6 +98,8 @@ struct PhoneInfo: Decodable {
     /// Reassembles control messages sent in parts (PROTOCOL.md 6.14); absent = not supported.
     let chunks: Int?
     var supportsControlChunks: Bool { (chunks ?? 0) >= ControlChunkWire.version }
+    /// Takes `remoteEndpoints` reports (PROTOCOL.md 6.17); absent = not supported.
+    let remoteEndpoints: Int?
     let addrs: [String]?  // every address the receiver is reachable on
                           // (PROTOCOL.md 6.4); probed for a cable upgrade
     let maxEncodeWide: Int?  // receiver's LEGACY decode ceiling in pixels
@@ -767,6 +769,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var capturePixelsHigh = 0
     private let authenticatedSession = AuthenticatedSessionState()
     private var activeConnectionGeneration: UInt64 = 0
+    /// `remoteEndpoints` (PROTOCOL.md 6.17), `queue` only.
+    private var remoteEndpointsOutbox = RemoteEndpointsOutbox()
+    private var remoteEndpointsInbound = RemoteEndpointsRateGate()
     /// Written only on `queue`, together with `captureOwnership` (see
     /// `haltCaptureLifecycle`/`beginStart`); this lock-guarded mirror is how
     /// capture-start tasks and main-thread display checks observe a stop
@@ -5181,6 +5186,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         switch type {
+        case RemoteEndpointsWire.type:
+            receiveRemoteEndpoints(payload)
         case "ping":
             // Echo with our clock so the phone can estimate the offset
             // (NTP-style) and compute true end-to-end frame latency.
@@ -5922,6 +5929,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let promote = pendingPromoteGeneration == generation
         pendingPromoteGeneration = nil
         if promote { performInteractiveWakePromotion() }
+        sendRemoteEndpointsIfSupported(generation: generation)
+    }
+
+    /// On `queue`, admitted connections only: this Mac's Tailscale addresses (PROTOCOL.md 6.17),
+    /// or an empty report when automatic Remote Access is off here.
+    private func sendRemoteEndpointsIfSupported(generation: UInt64) {
+        guard (lastHello?.remoteEndpoints ?? 0) >= RemoteEndpointsWire.helloVersion,
+              remoteEndpointsOutbox.shouldSend(connection: generation, now: ProcessInfo.processInfo.systemUptime)
+        else { return }
+        sendJSONObject(RemoteEndpointsWire.message(RemoteEndpointsWire.ownReport(.sender)))
+    }
+
+    /// On `queue`, admitted connections only (`SenderControlAuthority`): what the receiver says
+    /// about its own Tailscale addresses, kept for this pinned peer apart from any typed address.
+    private func receiveRemoteEndpoints(_ payload: Data) {
+        let peerID = transport.tls.peerID
+        guard AutomaticRemoteAccessPreference.isEnabled(.sender),
+              let report = RemoteEndpointsWire.decode(frame: payload),
+              remoteEndpointsInbound.admit(now: ProcessInfo.processInfo.systemUptime),
+              let pin = TrustStore.shared.pin(peerID: peerID) else { return }
+        AutomaticRemoteEndpointStore(role: .sender).record(report, forPeerID: peerID, pin: pin)
+        Log.info("remoteEndpoints: receiver reported \(report.ips.count) address(es), \(report.names.count) name(s)")
     }
 
     /// On `queue`: capture that could not start while the connection was
@@ -6763,6 +6792,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
         }
+        features.append(RemoteEndpointsWire.welcomeFeature)
         welcome["features"] = features
         sendJSONObject(welcome)
     }

@@ -1716,6 +1716,7 @@ final class StreamReceiver: ObservableObject {
         // Its saved Remote address and wake target go too: a later re-pair of the same ID
         // starts without them (the Mac sender and Android already did this).
         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
+        AutomaticRemoteEndpointStore(role: .receiverRole).remove(forPeerID: peerID)
         WakeMetadataStore.removeMetadata(forPeerID: peerID, role: .receiverRole)
     }
 
@@ -2681,6 +2682,12 @@ final class StreamReceiver: ObservableObject {
     /// JSON on the video channel (pong, ping liveness) — payloads starting '{'.
     /// `queue` only: large control messages arriving in parts (PROTOCOL.md 6.14).
     private var chunkAssembler = ControlChunkAssembler()
+    /// `remoteEndpoints` (PROTOCOL.md 6.17), `queue` only: the Mac's welcome offered it, this
+    /// connection's number (bumped per connection) and both directions' rate limits.
+    private var macTakesRemoteEndpoints = false
+    private var remoteEndpointsConnection: UInt64 = 0
+    private var remoteEndpointsOutbox = RemoteEndpointsOutbox()
+    private var remoteEndpointsInbound = RemoteEndpointsRateGate()
 
     private func handleVideoChannelJSON(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -2809,7 +2816,10 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
-            workspaceEvents.emit(.features(Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })))
+            let macFeatures = Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })
+            workspaceEvents.emit(.features(macFeatures))
+            macTakesRemoteEndpoints = macFeatures.contains(RemoteEndpointsWire.welcomeFeature)
+            sendRemoteEndpointsIfSupported()
             if let shield = obj["privacyShield"] as? Bool { workspaceEvents.emit(.privacyShield(shield)) }
             // Who uses this Mac, for the peer that completed mutual TLS only (absent: hidden on the Mac).
             PairedMacUserName.record(obj["user"] as? String, peerID: reconnectContext.current().authenticatedPeerIDHint)
@@ -2850,6 +2860,8 @@ final class StreamReceiver: ObservableObject {
             // The Mac explicitly ended this session. Do not treat it as a transport failure.
             Log.info("Mac explicitly closed the session")
             Task { await pipeline.disconnectCurrentConnection(reason: .peerClosed) }
+        case RemoteEndpointsWire.type:
+            receiveRemoteEndpoints(data)
         case WireMessage.wakeInfo:
             // The Mac self-labels this with its own install ID purely as a
             // cache key — this is a network hint only (Remote Wake-on-LAN
@@ -3082,6 +3094,8 @@ final class StreamReceiver: ObservableObject {
             WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
             // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
             ControlChunkWire.helloField: ControlChunkWire.version,
+            // This receiver takes the Mac's Tailscale addresses (PROTOCOL.md 6.17).
+            RemoteEndpointsWire.helloField: RemoteEndpointsWire.helloVersion,
         ]
         // Sent only inside the authenticated session, never in Bonjour TXT:
         // the mode this device asked for with its own Connect (pv 21). The
@@ -4761,6 +4775,7 @@ final class StreamReceiver: ObservableObject {
         guard !wasAdmitted else { return }
         sendControl(["type": "kf"])
         workspaceEvents.emit(.connected(peerID: peerID))
+        sendRemoteEndpointsIfSupported()
         // This device's own request, if it covered this Mac, is answered by
         // the session now admitted: its "asked for exactly this" window and
         // requested mode must not outlive it into a later reconnect.
@@ -4812,10 +4827,33 @@ final class StreamReceiver: ObservableObject {
         Log.info("connectDebug: connect request withdrawn peer=\(peerID)")
     }
 
+    /// `queue` only, once the session is admitted and the Mac's welcome offered it: this device's
+    /// Tailscale addresses, or an empty report when automatic Remote Access is off here.
+    private func sendRemoteEndpointsIfSupported() {
+        guard sessionAdmission.admitted, macTakesRemoteEndpoints,
+              remoteEndpointsOutbox.shouldSend(connection: remoteEndpointsConnection, now: CACurrentMediaTime())
+        else { return }
+        sendControl(RemoteEndpointsWire.message(RemoteEndpointsWire.ownReport(.receiverRole)))
+    }
+
+    /// `queue` only: what the authenticated, admitted Mac says about its own Tailscale addresses,
+    /// kept for its pin apart from any typed address.
+    private func receiveRemoteEndpoints(_ frame: Data) {
+        guard sessionAdmission.admitted, AutomaticRemoteAccessPreference.isEnabled(.receiverRole),
+              let peerID = reconnectContext.current().authenticatedPeerIDHint,
+              let report = RemoteEndpointsWire.decode(frame: frame),
+              remoteEndpointsInbound.admit(now: CACurrentMediaTime()),
+              let pin = TrustStore.receiverRole.pin(peerID: peerID) else { return }
+        AutomaticRemoteEndpointStore(role: .receiverRole).record(report, forPeerID: peerID, pin: pin)
+        Log.info("remoteEndpoints: Mac reported \(report.ips.count) address(es), \(report.names.count) name(s)")
+    }
+
     /// New connection: nothing on it is admitted yet, and prompts raised by
     /// the previous connection can no longer be answered.
     private func resetSessionNegotiation() {
         sessionAdmission.beginConnection()
+        macTakesRemoteEndpoints = false
+        remoteEndpointsConnection &+= 1
         mediaAdmissionGate.set(admitted: sessionAdmission.admitted)
         incomingSessionApprovals = PendingSessionApprovals()
         currentSessionInvitationID = nil

@@ -39,6 +39,28 @@ final class RemoteEndpointsWireTests: XCTestCase {
         XCTAssertTrue(gate.admit(now: 50), "a clock that went back doesn't lock reports out")
     }
 
+    func testOwnReportsGoOncePerConnectionAndNeverInsideTheLimit() {
+        var outbox = RemoteEndpointsOutbox()
+        XCTAssertTrue(outbox.shouldSend(connection: 1, now: 100))
+        XCTAssertFalse(outbox.shouldSend(connection: 1, now: 200), "once per connection")
+        XCTAssertFalse(outbox.shouldSend(connection: 2, now: 105), "the peer would drop it")
+        XCTAssertTrue(outbox.shouldSend(connection: 2, now: 110))
+    }
+
+    func testTheSwitchIsOnUntilTurnedOffAndOffForgetsWhatWasLearned() throws {
+        let suite = "AutomaticRemoteAccessPreference-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        XCTAssertTrue(AutomaticRemoteAccessPreference.isEnabled(.sender, defaults: defaults))
+        let store = AutomaticRemoteEndpointStore(role: .sender, defaults: defaults)
+        store.record(.init(ips: ["100.64.0.1"]), forPeerID: "A", pin: Data([1]))
+        AutomaticRemoteAccessPreference.set(false, .sender, defaults: defaults)
+        XCTAssertFalse(AutomaticRemoteAccessPreference.isEnabled(.sender, defaults: defaults))
+        XCTAssertNil(store.entry(forPeerID: "A", currentPin: Data([1])))
+        AutomaticRemoteAccessPreference.set(true, .sender, defaults: defaults)
+        XCTAssertTrue(AutomaticRemoteAccessPreference.isEnabled(.sender, defaults: defaults))
+    }
+
     func testThePinDigestIsSHA256Hex() {
         XCTAssertEqual(RemoteEndpointsWire.pinDigest(Data("abc".utf8)),
                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
