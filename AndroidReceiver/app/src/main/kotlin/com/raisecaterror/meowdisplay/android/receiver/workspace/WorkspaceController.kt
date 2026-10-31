@@ -828,10 +828,15 @@ class WorkspaceController(
         if (state.value.hovered != tile) state.update { it.copy(hovered = tile) }
     }
 
-    /** The first touch in a pane selects it (typing goes there), also in View Only. */
-    fun selectTile(at: WPoint) {
-        val id = frames().tiles.entries.firstOrNull { it.value.contains(at) }?.key ?: return
-        if (state.value.layout.tiles[id]?.source != null && state.value.active != id) focus(id)
+    /**
+     * The first touch in a pane selects it (typing goes there), also in View Only. True when the
+     * touch chose another pane (selection only; nothing goes to the Mac).
+     */
+    fun selectTile(at: WPoint): Boolean {
+        val id = frames().tiles.entries.firstOrNull { it.value.contains(at) }?.key ?: return false
+        if (state.value.layout.tiles[id]?.source == null || state.value.active == id) return false
+        focus(id)
+        return true
     }
 
     // MARK: Per-pane zoom

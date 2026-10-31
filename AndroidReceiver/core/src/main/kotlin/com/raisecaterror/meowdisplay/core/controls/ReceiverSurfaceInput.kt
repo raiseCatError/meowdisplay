@@ -56,6 +56,13 @@ interface ReceiverSurfaceEffects {
 
     /** Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture). Never a click. */
     fun workspaceViewReset(at: CGPoint) {}
+
+    /**
+     * Window mode: the first touch of a sequence selects the pane under it (normalized to the
+     * picture), also in View Only, so typing and zoom go there. True when it chose another pane:
+     * a selection only, never input for the Mac (WorkspaceModel.selectTile on iOS).
+     */
+    fun workspaceTouch(at: CGPoint): Boolean = false
 }
 
 /** Everything the dispatcher reads from preferences and the session, refreshed by the host. */
@@ -104,6 +111,8 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     private val ownedBySystemGesture = mutableSetOf<Int>()
     private var maximumFingerCount = 0
     private var blockedSequence = false
+    /** This touch sequence chose another Window-mode pane: never a reason to ask for control. */
+    private var sequenceSelectedPane = false
 
     // R1: two-finger scroll / viewport / App Gesture Commands.
     private var twoFinger: TwoFingerState? = null
@@ -269,6 +278,12 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
             if (phase.isEnd && navigationTouches.isEmpty()) effects.activityEnded()
             return
         }
+        if (phase == SurfaceTouchPhase.Began && fingers.isEmpty()) {
+            val base = baseTransform.displayedRect
+            val first = changed.firstOrNull()
+            sequenceSelectedPane = first != null && base.width > 0 && base.height > 0 &&
+                effects.workspaceTouch(CGPoint((first.point.x - base.minX) / base.width, (first.point.y - base.minY) / base.height))
+        }
         trackBlockedSequence(phase, changed)
         val ended = phase.isEnd
         for (touch in changed) {
@@ -326,7 +341,9 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         }
         if (phase.isEnd && blockedSequence && fingers.size <= changed.size) {
             blockedSequence = false
-            if (BlockedInputAttemptPolicy.isRemoteIntent(maximumFingerCount, config.moveViewActive)) effects.blockedAttempt(maximumFingerCount)
+            if (BlockedInputAttemptPolicy.isRemoteIntent(maximumFingerCount, config.moveViewActive, sequenceSelectedPane)) {
+                effects.blockedAttempt(maximumFingerCount)
+            }
         }
     }
 

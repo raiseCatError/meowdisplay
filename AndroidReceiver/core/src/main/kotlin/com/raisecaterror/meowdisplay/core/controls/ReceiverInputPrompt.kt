@@ -138,8 +138,9 @@ class ReceiverInputPrompt {
  * input; nor is anything in Move View.
  */
 object BlockedInputAttemptPolicy {
-    fun isRemoteIntent(maximumTouchCount: Int, moveViewActive: Boolean): Boolean {
-        if (moveViewActive || maximumTouchCount <= 0) return false
+    /** [selectedPane]: the touch only chose another Window-mode pane (local, never for the Mac). */
+    fun isRemoteIntent(maximumTouchCount: Int, moveViewActive: Boolean, selectedPane: Boolean = false): Boolean {
+        if (moveViewActive || selectedPane || maximumTouchCount <= 0) return false
         return maximumTouchCount != 2
     }
 }
