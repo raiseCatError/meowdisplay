@@ -13,6 +13,7 @@ name: Release monitor
 #    publishing click, the website), it resumes it.
 # Scheduled runs only happen while the repository variable
 # RELEASE_AUTOMATION is `enabled`; until then it runs only when dispatched.
+# GitHub runs schedules only from the default branch (dev); see RELEASE.md.
 on:
   schedule:
     - cron: '7,37 * * * *'
