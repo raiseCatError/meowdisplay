@@ -1154,10 +1154,14 @@ struct ReceiverControlPreferencesRepository {
 
     /// `initial` is what a device starts with while nothing usable is saved
     /// (see `ReceiverControlPreferences.initial(isPad:)`).
+    ///
+    /// Settings saved by a newer build (after a downgrade, or a TestFlight build followed by the
+    /// App Store one) are read for every field this build knows instead of being reset to
+    /// `initial`: the decoder tolerates keys it doesn't know, and no migration below applies to a
+    /// newer schema. `save` then keeps the newer build's own fields (see there).
     func load(initial: ReceiverControlPreferences = ReceiverControlPreferences()) -> ReceiverControlPreferences {
         guard let data = defaults.data(forKey: Self.defaultsKey),
-              var value = try? JSONDecoder().decode(ReceiverControlPreferences.self, from: data),
-              value.version <= ReceiverControlPreferences.schemaVersion else {
+              var value = try? JSONDecoder().decode(ReceiverControlPreferences.self, from: data) else {
             return initial
         }
         if value.version < 2 {
@@ -1316,7 +1320,23 @@ struct ReceiverControlPreferencesRepository {
 
     func save(_ preferences: ReceiverControlPreferences) {
         guard let data = try? JSONEncoder().encode(preferences) else { return }
-        defaults.set(data, forKey: Self.defaultsKey)
+        defaults.set(Self.keepingNewerFields(data, over: defaults.data(forKey: Self.defaultsKey)), forKey: Self.defaultsKey)
+    }
+
+    /// When what's stored came from a newer schema, the fields this build doesn't know are kept
+    /// (and so is the newer version number, so that build doesn't migrate its own data again);
+    /// every field this build does know is written as now. Otherwise `data` as it is.
+    static func keepingNewerFields(_ data: Data, over stored: Data?) -> Data {
+        guard let stored,
+              let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any],
+              let storedVersion = old["version"] as? Int, storedVersion > ReceiverControlPreferences.schemaVersion,
+              var new = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return data }
+        let everyDefault = (try? JSONEncoder().encode(ReceiverControlPreferences()))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let known = Set(everyDefault.keys).union(new.keys)
+        for (key, value) in old where !known.contains(key) { new[key] = value }
+        new["version"] = storedVersion
+        return (try? JSONSerialization.data(withJSONObject: new)) ?? data
     }
 }
 
