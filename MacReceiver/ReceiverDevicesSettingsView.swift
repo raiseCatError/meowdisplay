@@ -144,7 +144,6 @@ private struct ReceiverRemoteAccessPage: View {
 private struct ReceiverRemoteEndpointEditor: View {
     @State private var peerID = ""
     @State private var host = ""
-    @State private var port = String(WireCrypto.remoteRequestPort)
     @State private var errorMessage: String?
     @State private var savedConfirmation = false
 
@@ -174,8 +173,8 @@ private struct ReceiverRemoteEndpointEditor: View {
                 TextField("Host", text: $host, prompt: Text("Tailscale IP or MagicDNS name"))
                     .disableAutocorrection(true)
                     .onChange(of: host) { _ in errorMessage = nil; savedConfirmation = false }
-                TextField("Port", text: $port)
-                    .onChange(of: port) { _ in errorMessage = nil; savedConfirmation = false }
+                // No port: this receiver always knocks on the Mac's connect-request port
+                // (WireCrypto.remoteRequestPort); a field here changed nothing.
 
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(.red)
@@ -200,15 +199,13 @@ private struct ReceiverRemoteEndpointEditor: View {
         savedConfirmation = false
         guard let hint = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole) else {
             host = ""
-            port = String(WireCrypto.remoteRequestPort)
             return
         }
         host = hint.host
-        port = String(hint.port)
     }
 
     private func save() {
-        switch RemoteEndpointValidation.validate(host: host, port: port) {
+        switch RemoteEndpointValidation.validate(host: host, port: String(WireCrypto.remoteRequestPort)) {
         case .success(let value):
             RemoteEndpointStore.setEndpoint(value.host, port: value.port, forPeerID: peerID, role: .receiverRole)
             guard let readBack = RemoteEndpointStore.endpoint(forPeerID: peerID, role: .receiverRole),
@@ -217,7 +214,6 @@ private struct ReceiverRemoteEndpointEditor: View {
                 return
             }
             host = readBack.host
-            port = String(readBack.port)
             errorMessage = nil
             savedConfirmation = true
         case .failure(let error):
@@ -234,7 +230,6 @@ private struct ReceiverRemoteEndpointEditor: View {
     private func remove() {
         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
         host = ""
-        port = String(WireCrypto.remoteRequestPort)
         errorMessage = nil
         savedConfirmation = false
     }
