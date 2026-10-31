@@ -4997,6 +4997,7 @@ final class StreamReceiver: ObservableObject {
               let pin = TrustStore.receiverRole.pin(peerID: peerID),
               let identity = TrustStore.receiverRole.ownIdentity() else {
             Log.info("routeDebug: remote connect-request not sent for peer=\(peerID) — no endpoint/trust available")
+            completion?(.failed)
             return
         }
         let frame = RemoteConnectRequestIntent.frame(for: intent)
@@ -5562,6 +5563,15 @@ final class StreamReceiver: ObservableObject {
             },
             requestRemoteConnect: { peerID, intent in
                 queue.async { Self.requestRemoteConnect(peerID: peerID, intent: intent, queue: queue) }
+            },
+            remoteRecoveryEligible: { peerID in
+                RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID, role: .receiverRole) != nil
+                    && TrustStore.receiverRole.pin(peerID: peerID) != nil
+            },
+            remoteRecoveryKnock: { peerID, completion in
+                queue.async {
+                    Self.requestRemoteConnect(peerID: peerID, intent: .automatic, queue: queue, completion: completion)
+                }
             },
             resolvePinnedPeerID: { connection in
                 Self.resolveAuthenticatedPeerID(from: connection)

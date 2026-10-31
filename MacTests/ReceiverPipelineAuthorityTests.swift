@@ -200,6 +200,40 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
 
     // MARK: - Parked candidates (F5)
 
+    // MARK: - Extended Remote recovery (F8)
+
+    /// After the quick attempts give up (about 23.5 s), a Mac with a saved Remote address is
+    /// still knocked on the backoff schedule, and a session coming back ends that at once.
+    func testRecoveryKeepsKnockingOverRemoteAfterTheQuickAttemptsUntilReconnected() async throws {
+        let host = PipelineTestHost()
+        host.remoteEligible.withLock { $0 = true }
+        let pipeline = host.makePipeline()
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        await pipeline.setConnected(false)
+        let extended = await eventually(timeout: 40) { await pipeline.remoteRecoveryActive }
+        XCTAssertTrue(extended, "the extended recovery starts when the quick attempts give up")
+        let knocked = await eventually(timeout: 10) { !host.recoveryKnocks.isEmpty }
+        XCTAssertTrue(knocked, "and knocks on its schedule")
+        XCTAssertEqual(host.recoveryKnocks.first, "mac-A")
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        let stopped = await pipeline.remoteRecoveryActive
+        XCTAssertFalse(stopped, "a session coming back ends it")
+        await stopRecovery(pipeline)
+    }
+
+    func testNoExtendedRecoveryWithoutASavedRemoteAddress() async throws {
+        let host = PipelineTestHost()
+        let pipeline = host.makePipeline()
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        await pipeline.setConnected(false)
+        let exhausted = await eventually(timeout: 40) { await pipeline.currentPhase != .reconnecting }
+        XCTAssertTrue(exhausted)
+        let active = await pipeline.remoteRecoveryActive
+        XCTAssertFalse(active)
+        XCTAssertTrue(host.recoveryKnocks.isEmpty)
+        await stopRecovery(pipeline)
+    }
+
     // MARK: - Unauthenticated newcomers (L1)
 
     /// A TLS client against a listener that accepts the socket and never answers: its
@@ -505,6 +539,10 @@ private final class PipelineTestHost: Sendable {
     let queue = DispatchQueue(label: "receiver.pipeline.authority.tests")
     let context = ReconnectContext()
     private let recordedKnocks = OSAllocatedUnfairLock<[PipelineTestKnock]>(initialState: [])
+    private let recordedRecoveryKnocks = OSAllocatedUnfairLock<[String]>(initialState: [])
+    /// Whether the extended Remote recovery may knock (a saved address and a pin).
+    let remoteEligible = OSAllocatedUnfairLock(initialState: false)
+    var recoveryKnocks: [String] { recordedRecoveryKnocks.withLock { $0 } }
     private let pins = OSAllocatedUnfairLock<[ObjectIdentifier: String]>(initialState: [:])
     private let admittedState = OSAllocatedUnfairLock(initialState: false)
     private let judgedState = OSAllocatedUnfairLock<[String]>(initialState: [])
@@ -569,6 +607,11 @@ private final class PipelineTestHost: Sendable {
             requestRemoteConnect: { [self] peerID, intent in
                 let knock = PipelineTestKnock(peerID: peerID, intent: intent)
                 recordedKnocks.withLock { $0.append(knock) }
+            },
+            remoteRecoveryEligible: { [self] _ in remoteEligible.withLock { $0 } },
+            remoteRecoveryKnock: { [self] peerID, completion in
+                recordedRecoveryKnocks.withLock { $0.append(peerID) }
+                completion(.timedOut)
             },
             resolvePinnedPeerID: { [self] connection in pinnedPeer(of: connection) },
             getReceiveLiveness: { (generation: 0, lastDataReceived: Date()) },

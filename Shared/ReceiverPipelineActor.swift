@@ -124,6 +124,14 @@ actor ReceiverPipelineActor {
     /// cleared. Moved verbatim from `StreamReceiver` — it exists only to
     /// serve this cluster's own reconnect targeting.
     private var recoveryPeerID: String?
+
+    // Extended Remote recovery (F8): after the quick attempts give up, keep knocking on
+    // Android's schedule (RemoteRecoveryPolicy) and on network changes.
+    private let remoteRecovery = RemoteRecoveryPolicy()
+    private var remoteRecoveryTimer: DispatchSourceTimer?
+    private var remoteRecoveryPathMonitor: NWPathMonitor?
+    private var remoteRecoveryPathSignature: String?
+    private var remoteRecoveryGeneration = 0
     /// The explicit user request (`ManualConnectRequest.id`) behind the
     /// current recovery run, bound to that run by generation: any adoption
     /// or loss bumps the generation and so ends the binding, which is what
@@ -221,6 +229,11 @@ actor ReceiverPipelineActor {
         /// One authenticated knock at `peerID`, declaring `intent` — see
         /// `knockIntent(for:request:)` for when that may be `.manual`.
         var requestRemoteConnect: @Sendable (_ peerID: String, _ intent: SessionInvitationIntent) -> Void
+        /// Whether `peerID` can be knocked at all: a saved Remote address and a current pin.
+        var remoteRecoveryEligible: @Sendable (_ peerID: String) -> Bool = { _ in false }
+        /// One `.automatic` knock for the extended recovery, reporting how it ended.
+        var remoteRecoveryKnock: @Sendable (_ peerID: String,
+                                            _ completion: @escaping @Sendable (RemoteKnockResult) -> Void) -> Void = { _, _ in }
         /// The pinned peer a connection's own certificate resolves to NOW
         /// (`TrustStore.peerID(forSPKI:)`), or nil — its pin was removed
         /// after the handshake, or it has not finished TLS yet. Read-only
@@ -326,6 +339,7 @@ actor ReceiverPipelineActor {
     /// `disconnectCurrentConnection`), exactly as today's `stop()` defers
     /// to `closeSession` for that half of the teardown.
     func teardownForStop() {
+        stopRemoteRecovery(reason: "stopped")
         pingTimer?.cancel(); pingTimer = nil
         watchdogTimer?.cancel(); watchdogTimer = nil
         addrWatchTimer?.cancel(); addrWatchTimer = nil
@@ -400,6 +414,7 @@ actor ReceiverPipelineActor {
             Log.info("reconnectDebug: cancelled \(revoked.count) parked candidate(s) for revoked peer=\(peerID)")
         }
         if recoveryPeerID == peerID { recoveryPeerID = nil }
+        if remoteRecovery.run?.peerID == peerID { stopRemoteRecovery(reason: "Mac forgotten or blocked") }
         let currentIsPeer = connection.map { hostEffects.resolvePinnedPeerID($0) == peerID } ?? false
         if trustRemoved || currentIsPeer {
             disconnectCurrentConnection(reason: .explicitDisconnect)
@@ -846,6 +861,7 @@ actor ReceiverPipelineActor {
             mutateSession { $0.exhaustRecovery() }
             Log.info("reconnectDebug: retryExhausted generation=\(sessionState.generation)")
             uiEffects.setStatus("Connection lost")
+            startRemoteRecoveryIfEligible()
             return
         }
         let generation = sessionState.generation
@@ -903,6 +919,7 @@ actor ReceiverPipelineActor {
             Log.info("connectDebug: manual connect request withdrawn before it started")
             return
         }
+        stopRemoteRecovery(reason: "a Connect request starts over")
         mutateSession { state in
             let started = state.requestManualReconnect()
             // Bound before `mutateSession` arms the run's first attempt:
@@ -944,6 +961,8 @@ actor ReceiverPipelineActor {
 
     func suspendReconnectForBackground() {
         cancelReconnect()
+        // Foreground only, as on Android: the extended Remote recovery ends with the app in the back.
+        stopRemoteRecovery(reason: "background")
         // Deliberately not through `mutateSession`: the phase is unchanged
         // (still reconnecting), and its reactive arm would immediately
         // schedule the very attempt this is parking.
@@ -1006,6 +1025,7 @@ actor ReceiverPipelineActor {
             } else if classified == .explicitDisconnect {
                 Log.info("connectDebug: localExplicitDisconnect generation=\(oldGeneration)")
                 recoveryPeerID = nil
+                stopRemoteRecovery(reason: "disconnected here")
             } else {
                 recoveryPeerID = peerID
             }
@@ -1022,6 +1042,7 @@ actor ReceiverPipelineActor {
             if !staleAfterIntent { promoteHeldNewcomerAfterLoss(reason: classified) }
         } else {
             recoveryPeerID = nil
+            stopRemoteRecovery(reason: "connected")
             // The box, not `StreamReceiver` directly — this actor is one of
             // its true owners for this one field (the other is the host
             // write sites below `StreamReceiver.reconnectContext`).
@@ -1034,6 +1055,123 @@ actor ReceiverPipelineActor {
             }
         }
     }
+
+    // MARK: - Extended Remote recovery (F8)
+
+    private static func nowMs() -> Int64 { Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000) }
+
+    /// The quick attempts gave up. If this Mac can be knocked over Remote Access, keep knocking
+    /// on `RemoteRecoveryPolicy`'s schedule (about three minutes, plus immediate attempts on
+    /// network changes for ten), instead of stopping at about 23.5 s.
+    private func startRemoteRecoveryIfEligible() {
+        let reconnect = reconnectContext.current()
+        guard remoteRecovery.run == nil,
+              let peerID = reconnect.authenticatedPeerIDHint ?? recoveryPeerID else { return }
+        let context = RemoteRecoveryPolicy.DropContext(
+            automaticallyRecoverable: sessionState.lossReason?.isAutomaticallyRecoverable ?? false,
+            wasRemote: true,
+            autoReconnectEnabled: reconnect.autoReconnectPreferenceEnabled,
+            foreground: true,   // recovery is parked (and this run stopped) in the background
+            hasSavedAddress: hostEffects.remoteRecoveryEligible(peerID),
+            stillPaired: true,  // `remoteRecoveryEligible` requires the current pin
+            nearby: false,      // this device can't see Macs on the local network
+            otherSessionLive: connection != nil)
+        guard remoteRecovery.shouldStart(context) else { return }
+        remoteRecovery.start(peerID: peerID, now: Self.nowMs())
+        remoteRecoveryGeneration &+= 1
+        startRemoteRecoveryPathMonitor()
+        Log.info("remoteRecovery: started peer=\(peerID) after the quick attempts")
+        uiEffects.setStatus("Reconnecting over Remote Access…")
+        driveRemoteRecovery()
+    }
+
+    private func driveRemoteRecovery() {
+        remoteRecoveryTimer?.cancel()
+        remoteRecoveryTimer = nil
+        let now = Self.nowMs()
+        switch remoteRecovery.next(now: now) {
+        case .idle:
+            stopRemoteRecovery(reason: "schedule over")
+        case .dormant:
+            break   // a network change may still bring one more attempt
+        case .wait(let at) where at > now:
+            let generation = remoteRecoveryGeneration
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + .milliseconds(Int(at - now)))
+            timer.setEventHandler { [weak self] in
+                Task { await self?.driveRemoteRecovery(ifCurrent: generation) }
+            }
+            timer.resume()
+            remoteRecoveryTimer = timer
+        case .wait:
+            guard let run = remoteRecovery.run else { return }
+            remoteRecovery.knockStarted(now: now)
+            let generation = remoteRecoveryGeneration
+            Log.info("remoteRecovery: knock peer=\(run.peerID) attempt=\(run.attempts)")
+            hostEffects.remoteRecoveryKnock(run.peerID) { [weak self] result in
+                Task { await self?.remoteRecoveryKnockFinished(result, generation: generation) }
+            }
+        }
+    }
+
+    private func driveRemoteRecovery(ifCurrent generation: Int) {
+        guard generation == remoteRecoveryGeneration else { return }
+        driveRemoteRecovery()
+    }
+
+    private func remoteRecoveryKnockFinished(_ result: RemoteKnockResult, generation: Int) {
+        guard generation == remoteRecoveryGeneration else { return }
+        remoteRecovery.knockFinished(now: Self.nowMs(), result: result)
+        if result.isSecurityFailure {
+            Log.info("SECURITY: remote recovery stopped, the saved address answered with \(result)")
+        } else {
+            Log.info("remoteRecovery: knock result=\(result)")
+        }
+        driveRemoteRecovery()
+    }
+
+    /// Network changes (Wi-Fi to cellular, Tailscale coming up) bring the next attempt forward.
+    private func startRemoteRecoveryPathMonitor() {
+        remoteRecoveryPathMonitor?.cancel()
+        remoteRecoveryPathSignature = nil
+        let monitor = NWPathMonitor()
+        let generation = remoteRecoveryGeneration
+        monitor.pathUpdateHandler = { [weak self] path in
+            let signature = "\(path.status)|" + path.availableInterfaces.map(\.name).joined(separator: ",")
+            Task { await self?.remoteRecoveryPathChanged(signature, generation: generation) }
+        }
+        monitor.start(queue: queue)
+        remoteRecoveryPathMonitor = monitor
+    }
+
+    private func remoteRecoveryPathChanged(_ signature: String, generation: Int) {
+        guard generation == remoteRecoveryGeneration else { return }
+        defer { remoteRecoveryPathSignature = signature }
+        // The first report is the network as it is now, not a change.
+        guard let previous = remoteRecoveryPathSignature, previous != signature,
+              signature.hasPrefix("satisfied") else { return }
+        if remoteRecovery.networkChanged(now: Self.nowMs()) {
+            Log.info("remoteRecovery: network changed — trying again")
+            driveRemoteRecovery()
+        }
+    }
+
+    private func stopRemoteRecovery(reason: String) {
+        remoteRecoveryTimer?.cancel()
+        remoteRecoveryTimer = nil
+        remoteRecoveryPathMonitor?.cancel()
+        remoteRecoveryPathMonitor = nil
+        guard remoteRecovery.run != nil else { return }
+        remoteRecovery.stop()
+        remoteRecoveryGeneration &+= 1
+        Log.info("remoteRecovery: stopped (\(reason))")
+        if connection == nil, sessionState.phase != .reconnecting, reason == "schedule over" {
+            uiEffects.setStatus("Connection lost")
+        }
+    }
+
+    /// For tests: the extended Remote recovery is running.
+    var remoteRecoveryActive: Bool { remoteRecovery.run != nil }
 
     /// Explicit teardown of the live connection (Forget, Disconnect,
     /// explicit-pairing suppression, the Mac's own `closing` message, the
