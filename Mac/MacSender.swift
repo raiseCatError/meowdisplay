@@ -463,7 +463,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `queue` (both `setupEncoder` and the capture callback run there), so
     /// this needs no lock of its own.
     private var frameRateLimiter = FrameRateLimiter(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
-    private var virtualDisplay: VirtualDisplay?
+    /// Set by Extend setup and reconfiguration (this class's nonisolated `async` methods), cleared by
+    /// `stop()` on the main thread, read on `queue` and by `SenderController`: locked (audit C8). The
+    /// display a write replaces is released after the lock, since releasing it removes the display.
+    private let virtualDisplayState = OSAllocatedUnfairLock<VirtualDisplay?>(uncheckedState: nil)
+    private var virtualDisplay: VirtualDisplay? {
+        get { virtualDisplayState.withLockUnchecked { $0 } }
+        set {
+            let replaced = virtualDisplayState.withLockUnchecked { state -> VirtualDisplay? in
+                let old = state
+                state = newValue
+                return old
+            }
+            withExtendedLifetime(replaced) {}
+        }
+    }
     /// The MEOW virtual display's CoreGraphics ID, if Extend currently has
     /// one — exposed only so `SenderController` can exclude it when
     /// deciding whether a genuinely usable PHYSICAL display exists
@@ -659,7 +673,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // misleading on a long-running stream. This makes the HUD counter answer
     // "how many drops in roughly the last couple seconds", the same
     // per-window shape `capFps` already uses.
-    private var needsKeyframe = true
+    /// Set from `queue` and from this class's nonisolated `async` methods (reconfigure, resume),
+    /// taken on `queue` by `encode`: locked, and taken with one exchange (audit C8).
+    private let needsKeyframeState = OSAllocatedUnfairLock(initialState: true)
+    private var needsKeyframe: Bool {
+        get { needsKeyframeState.withLock { $0 } }
+        set { needsKeyframeState.withLock { $0 = newValue } }
+    }
     #if DEBUG
     // Rolling ~1s sender-pipeline instrumentation (LAN FPS-collapse
     // diagnosis). All `queue`-confined except the VT submitted/completed
@@ -1051,8 +1071,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // ScreenCaptureKit emits frames only when content changes. After a
     // reconnect on a static screen there is nothing to hang the forced
     // keyframe on — so keep the last frame around and re-encode it.
-    private var lastPixelBuffer: CVPixelBuffer?
-    private var lastCaptureAt = Date.distantPast
+    /// Written by the capture callback on `queue` and cleared by `invalidateCapturePipeline`, which
+    /// also runs from this class's nonisolated `async` methods: locked (audit C8).
+    private struct LastFrame {
+        var pixelBuffer: CVPixelBuffer?
+        var capturedAt = Date.distantPast
+    }
+    private let lastFrameState = OSAllocatedUnfairLock(uncheckedState: LastFrame())
+    private var lastPixelBuffer: CVPixelBuffer? {
+        get { lastFrameState.withLockUnchecked { $0.pixelBuffer } }
+        set { lastFrameState.withLockUnchecked { $0.pixelBuffer = newValue } }
+    }
+    private var lastCaptureAt: Date {
+        get { lastFrameState.withLockUnchecked { $0.capturedAt } }
+        set { lastFrameState.withLockUnchecked { $0.capturedAt = newValue } }
+    }
     /// Debounced replay after encoder/send backpressure drops a frame.
     /// At most one timer is active; each new drop resets the 30ms deadline.
     private var dropReplayTimer: DispatchSourceTimer?
@@ -6434,8 +6467,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // POLICY (reconnect, codec/FPS change, capture restart, recovery, an
         // explicit phone "kf" request), not encoder mechanism, so it stays
         // owned by this class.
-        let forceKeyframe = needsKeyframe
-        if forceKeyframe { needsKeyframe = false }
+        let forceKeyframe = needsKeyframeState.withLock { pending in
+            defer { pending = false }
+            return pending
+        }
         // The completion below runs on VideoToolbox's own callback thread,
         // not `queue` ("sender.video"), so it must not capture non-Sendable
         // `self` directly. Everything it needs off-queue is either an
