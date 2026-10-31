@@ -11,7 +11,7 @@ enum TailnetEndpointFilter {
     static let maxNames = 2
     static let maxAddresses = 4
 
-    enum Reason: String, Equatable, Sendable {
+    enum Reason: String, Error, Equatable, Sendable {
         /// Not a well-formed name or address.
         case invalid
         /// Well-formed, but not a Tailscale address or MagicDNS name.
