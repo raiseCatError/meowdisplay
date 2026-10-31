@@ -133,6 +133,9 @@ private struct ReceiverRemoteAccessPage: View {
             Section {
                 ReceiverCaption("Use Connect on the Devices page to reach a Mac through its saved address. The other Mac must have Remote Access turned on. Wake & Connect can only wake a Mac on this local network.")
             }
+            Section("Automatic") {
+                AutomaticRemoteAccessToggle(role: .receiverRole, peers: .macs)
+            }
         }
     }
 }

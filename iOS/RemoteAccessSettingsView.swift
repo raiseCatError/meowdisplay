@@ -25,6 +25,9 @@ struct RemoteAccessSettingsView: View {
             Section("Remote Access") {
                 RemoteEndpointEditorView(receiver: receiver, initialPeerID: initialPeerID)
             }
+            Section("Automatic") {
+                AutomaticRemoteAccessToggle(role: .receiverRole, peers: .macs)
+            }
         }
         .navigationTitle("Remote Access")
     }

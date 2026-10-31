@@ -1,5 +1,7 @@
 package com.raisecaterror.meowdisplay.android.ui
 
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Switch
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.OutlinedTextField
@@ -289,7 +291,7 @@ fun ReceiverHome(
         )
     }
 
-    if (showDetails) DeviceDetails(identity.fingerprint) { showDetails = false }
+    if (showDetails) DeviceDetails(identity.fingerprint, remote) { showDetails = false }
 
     if (showAddRemote) AddRemoteMacDialog(pairing, ui, paired, remote) { showAddRemote = false }
 
@@ -454,7 +456,7 @@ private fun Steps() {
 
 /** This device's identity. The key fingerprint isn't secret, but it stays hidden until asked for (C4 F-03). */
 @Composable
-private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
+private fun DeviceDetails(fingerprint: String, remote: RemoteAccess, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var revealed by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
@@ -481,6 +483,23 @@ private fun DeviceDetails(fingerprint: String, onDismiss: () -> Unit) {
                     modifier = Modifier.semantics { contentDescription = if (revealed) "Security key fingerprint $fingerprint" else "Security key hidden" },
                 )
                 Text("Macs pin this key when you pair. You only need it to check a pairing by hand.", style = MaterialTheme.typography.bodySmall)
+                var automatic by remember { mutableStateOf(remote.automaticEnabled) }
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                        value = automatic, role = Role.Switch,
+                        onValueChange = { on -> remote.automaticEnabled = on; automatic = on },
+                    ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Share Tailscale Addresses with Paired Macs", Modifier.weight(1f))
+                    Switch(checked = automatic, onCheckedChange = null)
+                }
+                Text(
+                    "After a connection, this device and the Mac tell each other their Tailscale addresses, so Remote Access " +
+                        "can reach the Mac later without typing one. Only addresses are shared. They never grant trust: every " +
+                        "connection still needs the existing secure pairing. Turning this off forgets the addresses Macs shared.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 if (copied) Text("Copied.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }
         },
