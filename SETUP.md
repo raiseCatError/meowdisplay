@@ -1,14 +1,18 @@
 # MeowDisplay setup guide
 
 This covers building MeowDisplay from source, connecting your devices, and
-day-to-day use. See the [README](README.md) for what the project is and its
-current capabilities.
+day-to-day use. Supported receivers are iPhone, iPad, Android and Mac; the
+sending computer must be a Mac. See the [README](README.md) for what the
+project is and its current capabilities, and [PARITY.md](PARITY.md) for
+differences between receiver platforms.
 
 ## Requirements
 
-- **Xcode 16+** (the project builds in Swift 6 language mode; CI uses the
-  `macos-26` runner). The Mac sender target's deployment target is macOS 14;
-  the Mac Receiver target is macOS 12; the iOS target is iOS/iPadOS 16.4.
+- **Xcode**: use the version pinned by `.xcode-version` for reproducible
+  Mac/iOS builds. The Mac sender target supports macOS 14+, the standalone
+  Mac Receiver macOS 12+, and iPhone/iPad iOS/iPadOS 16.4+.
+- **Android source builds** need JDK 17 and Android SDK platform 36;
+  they use Gradle in `AndroidReceiver/` instead of Xcode.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
 - A free or paid Apple Developer account, to sign the Mac build and, if you
   build it yourself, the iOS build for your device (a free account is enough
@@ -20,7 +24,7 @@ current capabilities.
 
 ```sh
 git clone <your fork URL>
-cd MeowDisplay
+cd meowdisplay
 ```
 
 ## Project generation
@@ -55,7 +59,8 @@ signing team empty unless `DEVELOPMENT_TEAM` is set in your environment.
 
 ## Opening the project
 
-Open `MeowDisplay.xcodeproj` in Xcode. Three schemes are relevant:
+Open `MeowDisplay.xcodeproj` in Xcode. Three Apple-platform schemes
+are relevant (Android builds separately with Gradle):
 
 | Scheme | Builds | Platform |
 |---|---|---|
@@ -104,6 +109,26 @@ xcodebuild -project MeowDisplay.xcodeproj -scheme OpenSidecariOS \
 For installing on a physical device, build and run the `OpenSidecariOS`
 scheme directly from Xcode with your device selected and your Apple ID under
 Signing — this handles on-device provisioning for you.
+
+### Android receiver
+
+Android is a native receiver app (not a sender). From the repository root:
+
+```sh
+cd AndroidReceiver
+./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:lintRelease :app:bundleRelease
+```
+
+Use JDK 17 with Android SDK platform 36. The debug app has a separate
+application ID; release bundles are signed only with the configured upload
+key. See [AndroidReceiver/README.md](AndroidReceiver/README.md) for Android
+build flags, emulator tests and signing notes.
+
+**Android USB is not implemented.** Connect Android over local Wi-Fi or
+a private-network Remote route (for example Tailscale) after pairing.
+No Windows or Linux sending/receiving apps currently exist; those are
+[unplanned idea discussions](CONTRIBUTING.md#features-versus-ideas).
 
 ## Required permissions
 
@@ -257,6 +282,20 @@ that device will require pairing again, including a fresh SAS confirmation
 
 Toggle **Start at Login** in the Mac app's settings to have it launch
 automatically after you log in.
+
+## Testing status and support expectations
+
+Per-device Mirror/Extend is implemented and has been confirmed working
+on real multi-device setups by the maintainer ([#20](https://github.com/raiseCatError/meowdisplay/issues/20)).
+Mac-to-Mac input forwarding is implemented with automated tests, but has
+**not yet had physical two-Mac verification** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
+The Android 2.0 release preparation proceeds with additional physical QA
+waived by the maintainer; this is not a claim of unperformed tests.
+
+MeowDisplay is designed primarily for using your own Mac on another display,
+including for professional or commercial work. An enterprise IT administration
+suite, cloud accounts/relay service, and Windows/Linux apps are not current
+roadmap commitments; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Troubleshooting
 
