@@ -146,15 +146,8 @@ final class RemoteKnockLoopbackTests: XCTestCase {
 
     func testNothingListeningIsRefused() throws {
         let phone = try keychain.makeIdentity(), macA = try keychain.makeIdentity()
-        // A port that was just free.
-        let probe = try NWListener(using: .tcp, on: .any)
-        let ready = expectation(description: "probe")
-        probe.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
-        probe.start(queue: queue)
-        wait(for: [ready], timeout: 5)
-        let port = try XCTUnwrap(probe.port?.rawValue)
-        probe.cancel()
-        let result = knock(port: port, phone: phone, expecting: macA.spki)
+        // TCP port 1 (tcpmux) has no listener on macOS: the connection is refused at once.
+        let result = knock(port: 1, phone: phone, expecting: macA.spki)
         XCTAssertTrue(result == .refused || result == .unreachable, "\(result)")
         XCTAssertFalse(result.isSecurityFailure)
     }
