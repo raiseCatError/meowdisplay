@@ -478,9 +478,20 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 
 Source, issues and releases live at
 [github.com/raiseCatError/meowdisplay](https://github.com/raiseCatError/meowdisplay).
-Issues and pull requests are welcome, especially testing on iPad, different
-Mac models, external-display setups and networks. Please open an issue before
-starting large architecture work.
+Bug reports, suggestions, documentation updates and pull requests are
+welcome, especially testing on different devices, Mac models, external-display
+setups and networks. Our [contribution guide](CONTRIBUTING.md) has separate
+forms for bugs, feature requests, exploratory ideas, documentation, and
+hardware compatibility reports.
+
+MeowDisplay is **personal-first, not non-commercial**: using it for your own
+professional or commercial work is welcome. We are **not currently planning an
+enterprise remote-desktop/IT administration suite** ([discussion #86](https://github.com/raiseCatError/meowdisplay/issues/86)).
+[Windows](https://github.com/raiseCatError/meowdisplay/issues/84),
+[Linux](https://github.com/raiseCatError/meowdisplay/issues/85), and
+[hosted account/relay services](https://github.com/raiseCatError/meowdisplay/issues/87)
+are separate **unplanned ideas**, not roadmap commitments.
+Discussion does not guarantee consideration or implementation.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities
