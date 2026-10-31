@@ -24,7 +24,9 @@ Discuss those directions in the appropriate existing threads:
 [hosted services #87](https://github.com/raiseCatError/meowdisplay/issues/87).
 Discussion does not guarantee consideration or implementation.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a public issue. Never
+See [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md) for the complete distinction
+between commercial usage, personal-first design and unplanned product
+directions. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a public issue. Never
 share unredacted diagnostic logs, network addresses, private device names,
 pairing codes or personal screen content.
 
