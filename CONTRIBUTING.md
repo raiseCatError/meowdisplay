@@ -8,6 +8,8 @@ MeowDisplay is currently **Mac-first**: a Mac sends its screen to iPhone, iPad, 
 
 Windows ([#84](https://github.com/raiseCatError/meowdisplay/issues/84)), Linux ([#85](https://github.com/raiseCatError/meowdisplay/issues/85)), and hosted-account/relay services ([#87](https://github.com/raiseCatError/meowdisplay/issues/87)) are **ideas only, not planned features**. These issue threads exist for thoughtful discussion, not delivery promises; even consideration or prioritization is not guaranteed.
 
+A fuller explanation lives in [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md).
+
 Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before opening anything
