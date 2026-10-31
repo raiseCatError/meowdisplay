@@ -27,7 +27,9 @@ final class USBTLSBridgeTests: XCTestCase {
         listener.start(queue: queue)
         wait(for: [ready], timeout: 5)
         let port = try XCTUnwrap(listener.port)
-        return (port, { await box.next() })
+        // The accept closure holds the listener: as a local it could be released before the
+        // bridge dialed it, and the test then waited forever for a connection (a CI hang).
+        return (port, { withExtendedLifetime(listener) {}; return await box.next() })
     }
 
     private static func dialTunnel(to port: NWEndpoint.Port) -> (String?, UInt16, DispatchQueue) async throws -> NWConnection {
