@@ -1,6 +1,7 @@
 package com.raisecaterror.meowdisplay.android.receiver.workspace
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
@@ -17,6 +18,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.raisecaterror.meowdisplay.core.session.InputWireState
@@ -56,6 +58,17 @@ fun RequestControlInline(compact: Boolean = false, modifier: Modifier = Modifier
                 SmallRequestButton("Request Control", control.request)
             }
         }
+    }
+}
+
+/** Where actions that need control are hidden: says so, with Request Control in place. Shown only without control. */
+@Composable
+fun MoreActionsNeedControl(detail: String = "Request Control for more actions.", modifier: Modifier = Modifier) {
+    val control = LocalControlRequest.current ?: return
+    if (control.state == InputWireState.Allowed) return
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(detail, color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, textAlign = TextAlign.Center)
+        RequestControlInline(compact = true)
     }
 }
 
