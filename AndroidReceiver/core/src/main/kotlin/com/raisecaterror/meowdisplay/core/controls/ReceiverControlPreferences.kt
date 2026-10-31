@@ -296,8 +296,10 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
     fun load(initial: ReceiverControlPreferences = ReceiverControlPreferences()): ReceiverControlPreferences {
         val text = store.read(DEFAULTS_KEY) ?: return initial
         val raw = parseJson(text).obj() ?: return initial
+        // A newer build's settings (after a downgrade) are read for every field this build
+        // knows instead of being reset: no migration below applies to a newer schema, and
+        // [save] keeps the newer build's own fields (Swift: ReceiverControlPreferencesRepository).
         val value = ReceiverControlPreferences.decode(raw) ?: return initial
-        if (value.version > ReceiverControlPreferences.SCHEMA_VERSION) return initial
         if (value.version < 2) {
             value.profiles = value.profiles.map { profile ->
                 if (profile.trayItems.any { it.item == ControlTrayItem.Tab }) return@map profile
@@ -359,11 +361,24 @@ class ReceiverControlPreferencesRepository(private val store: PreferenceBlobStor
     }
 
     fun save(preferences: ReceiverControlPreferences) {
-        store.write(DEFAULTS_KEY, preferences.toJson().toString())
+        store.write(DEFAULTS_KEY, keepingNewerFields(preferences.toJson(), store.read(DEFAULTS_KEY)).toString())
     }
 
     companion object {
         const val DEFAULTS_KEY = "receiverControlPreferences.v1"
+
+        /**
+         * When what's stored came from a newer schema, the fields this build doesn't know are
+         * kept, and so is the newer version number; every field this build knows is written as
+         * now. Otherwise [json] as it is.
+         */
+        fun keepingNewerFields(json: JsonObject, stored: String?): JsonObject {
+            val old = stored?.let { runCatching { parseJson(it).obj() }.getOrNull() } ?: return json
+            val storedVersion = old["version"].int() ?: return json
+            if (storedVersion <= ReceiverControlPreferences.SCHEMA_VERSION) return json
+            val known = ReceiverControlPreferences().toJson().keys + json.keys
+            return JsonObject(json + old.filterKeys { it !in known } + ("version" to kotlinx.serialization.json.JsonPrimitive(storedVersion)))
+        }
     }
 }
 

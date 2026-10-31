@@ -16,6 +16,34 @@ class ControlPreferencesJsonTest {
         }
     }
 
+    /** Audit O6: a newer build's settings survive running this one. */
+    @Test
+    fun aNewerBuildsSettingsAreReadAndItsOwnFieldsKept() {
+        val newer = ReceiverControlPreferences.SCHEMA_VERSION + 3
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] =
+            """{"version":$newer,"trayEnabled":false,"futureSetting":"kept"}"""
+        val repository = ReceiverControlPreferencesRepository(store)
+        val loaded = repository.load(ReceiverControlPreferences().also { it.trayEnabled = true })
+        assertFalse("the newer build's choice, not the initial default", loaded.trayEnabled)
+        loaded.trayEnabled = true
+        repository.save(loaded)
+        val after = store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY]!!
+        assertTrue("a field this build doesn't know survives", after.contains("\"futureSetting\":\"kept\""))
+        assertTrue("the newer version is kept", after.contains("\"version\":$newer"))
+        assertTrue(after.contains("\"trayEnabled\":true"))
+    }
+
+    @Test
+    fun settingsFromThisSchemaAreSavedAsBefore() {
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] =
+            """{"version":${ReceiverControlPreferences.SCHEMA_VERSION},"futureSetting":"dropped"}"""
+        val repository = ReceiverControlPreferencesRepository(store)
+        repository.save(repository.load())
+        assertFalse(store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY]!!.contains("futureSetting"))
+    }
+
     @Test
     fun freshPreferencesRoundTripExactly() {
         val preferences = ReceiverControlPreferences()
@@ -66,7 +94,7 @@ class ControlPreferencesJsonTest {
     }
 
     @Test
-    fun schemaSixteenMigrationAndNewerSchemasFallBack() {
+    fun schemaSixteenMigrationAndNewerSchemasAreRead() {
         val store = MapStore()
         store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] =
             """{"version":15,"smartTouchEnabled":false,"autoHideEnabled":false,"pinchTarget":"app","rotateTarget":"viewport","padShowControlHints":true}"""
@@ -78,8 +106,11 @@ class ControlPreferencesJsonTest {
         assertFalse(loaded.padShowControlHints)
 
         val initial = ReceiverControlPreferences(trayEnabled = false)
+        // A newer schema is read for what this build knows (audit O6), not reset to [initial].
         store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = """{"version":99}"""
-        assertEquals(initial, ReceiverControlPreferencesRepository(store).load(initial))
+        val newer = ReceiverControlPreferencesRepository(store).load(initial)
+        assertEquals(99, newer.version)
+        assertTrue("absent keys take this build's defaults", newer.trayEnabled)
         store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = """{"trayEnabled":"yes"}"""
         assertEquals(initial, ReceiverControlPreferencesRepository(store).load(initial))
         assertNull(ReceiverControlPreferences.decode(parseJson("[]")))
