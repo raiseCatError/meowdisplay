@@ -153,9 +153,11 @@ connection arriving from loopback as "USB" purely for its stats display;
 this has no protocol significance.
 
 USB is only a route: the same pinned mutual TLS runs inside the usbmux pipe,
-and there is no plaintext USB path. Port 9002 can be
-reached through the same tunnel to create exactly the same peer pins without
-manual SAS comparison. There is no separate USB trust record. A USB `hello`
+and there is no plaintext USB path. The Mac can also start pairing over the
+cable, by dialing port 9002 through the same tunnel when a device without a
+pin attaches. That is the ordinary pairing ceremony of section 2.3, SAS
+comparison on both screens included; the cable is never treated as proof of
+anything. There is no separate USB trust record. A USB `hello`
 is held to exactly the same identity rule as any other route (section 6.9,
 "Admission is per connection"): its `id` must be the peer the sender dialed
 and its certificate must present that peer's current pin.
@@ -195,7 +197,28 @@ peer ID. Android validates the typed address with the same rules as the Mac
 frames the knock byte-for-byte as `fixtures/remote/knock-frame-vectors.json`
 (both sides test it).
 
-### 2.3 First pairing (pv 11)
+### 2.3 First pairing (pairing version 13)
+
+The pairing listener (port 9002) is reachable by anyone on the network, so
+before any code is shown the initiator commits to its hello:
+
+1. The initiator sends `helloCommit`: the SHA-256 of its hello's canonical
+   encoding under the domain `MeowDisplay-Pairing-HelloCommit-v13` (role,
+   version, device ID, name, identity SPKI, ephemeral key, nonce, each
+   length-prefixed), 32 bytes. It must arrive within 10 seconds of the
+   connection; a responder holds only a few connections that haven't sent one
+   (4 on Apple and Android) and closes the rest at once.
+2. The responder admits at most one commitment at a time; three failed
+   attempts in a row (a missing or mismatched reveal, or a code that was shown
+   and then declined, timed out or aborted) cool its listener down for 30
+   seconds. Only then does it send its own hello.
+3. The initiator sends `helloReveal`, its hello, within 5 seconds. The
+   responder checks it against the commitment; a mismatch ends the attempt.
+
+Because the initiator is bound to its hello before it sees the responder's,
+it can't search for hellos that produce a chosen SAS. The exchange then
+continues as below. Both sides must speak exactly this version; there is no
+downgrade.
 
 Each side generates a fresh P-256 ECDH key and 32-byte nonce. Pairing hello
 messages contain the protocol version, stable device ID, display name,
@@ -351,9 +374,11 @@ Every message in **both directions** is length-prefixed:
 * **Receiver to sender**, the payload MUST be `1` to `2^20 - 1` bytes. The
   official sender treats a length of 0 or `>= 2^20` as a protocol error and
   stops reading control messages on that connection.
-* **Sender to receiver**, no hard maximum is enforced, but control messages
-  are constrained by the demux rule below and video frames SHOULD stay in
-  the low megabytes (a keyframe of a large panel).
+* **Sender to receiver**, the payload MUST be under `32 MiB`
+  (`2^25` bytes). The official receivers end the connection when a frame
+  declares more, before buffering any of it. Control messages are further
+  constrained by the demux rule below, and video frames SHOULD stay in the
+  low megabytes (a keyframe of a large panel).
 * TCP gives no message boundaries: receivers of either role MUST buffer and
   reassemble; a frame MAY arrive split across many socket reads or packed
   together with others in one read.

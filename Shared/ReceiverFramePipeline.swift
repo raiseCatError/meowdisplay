@@ -219,6 +219,7 @@ actor ReceiverFramePipeline {
     func beginAdoption(generation: Int) {
         guard generation >= self.generation else { return }
         buffer.removeAll(keepingCapacity: true)
+        tcpFrameTooLarge = false   // a new connection starts clean
         formatDesc = nil
         sps = nil
         pps = nil
@@ -278,6 +279,14 @@ actor ReceiverFramePipeline {
     ) async {
         ingest(data, generation: generation)
         guard generation == self.generation else { return }
+        if tcpFrameTooLarge {
+            // The Mac declared a frame no receiver should buffer: end this connection rather
+            // than hold up to 4 GiB waiting for it (the Android receiver has the same bound).
+            tcpFrameTooLarge = false
+            connection.cancel()
+            outputEffects.connectionClosedByPeer(generation)
+            return
+        }
         // A QUIC protocol violation already closed the connection: stop.
         if let quicConnection, quicConnection.isClosed { return }
         if let error {
@@ -305,7 +314,18 @@ actor ReceiverFramePipeline {
 
     // MARK: - Deframe + Annex-B parse (unchanged wire contract)
 
+    /// The largest frame a receiver buffers over TCP (PROTOCOL.md 3): a keyframe of a large
+    /// panel is a few MiB. Same bound as Android's `WireFraming.MAX_INCOMING_BYTES`.
+    static let maxTCPFrameBytes = 32 << 20
+    /// Set when the declared length exceeded `maxTCPFrameBytes`; the receive path then ends the
+    /// connection.
+    private var tcpFrameTooLarge = false
+    /// For tests: an oversized frame was declared and the connection is to be closed.
+    var oversizedFramePending: Bool { tcpFrameTooLarge }
+
     private func drainFrames() {
+        // After an oversized declaration nothing more on this connection is read.
+        guard !tcpFrameTooLarge else { buffer.removeAll(); return }
         // Cursor-based drain so we only compact the buffer once per batch.
         var cursor = buffer.startIndex
         while buffer.distance(from: cursor, to: buffer.endIndex) >= 4 {
@@ -315,6 +335,12 @@ actor ReceiverFramePipeline {
                 // QUIC Control: the declared length is refused BEFORE any
                 // buffering toward it.
                 failQUIC(quicConnection, .protocolViolation, "control frame length \(len)")
+                return
+            }
+            if quicConnection == nil, len > Self.maxTCPFrameBytes {
+                Log.info("receiver: frame length \(len) over the \(Self.maxTCPFrameBytes)-byte bound — closing")
+                buffer.removeAll()
+                tcpFrameTooLarge = true
                 return
             }
             guard buffer.distance(from: cursor, to: buffer.endIndex) >= 4 + len else { break }
