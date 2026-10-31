@@ -426,31 +426,38 @@ struct WorkspaceChromeView: View {
         return app.isEmpty ? (w?.title ?? "Window") : app
     }
 
-    /// `sharesRow`: the menu bar sits in this row, so several tabs fold to the shown one and
-    /// "+N" until the person taps, holds or scrolls them (`expandTabs`).
+    /// `sharesRow`: the menu bar sits in this row, so the tabs shrink to the shown tab's app icon
+    /// and "+N" until the person taps, holds or scrolls them (`expandTabs`): then full names,
+    /// scrolling when they don't fit.
     @ViewBuilder
     private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, sharesRow: Bool) -> some View {
         let windows = tile.windows
         let available = max(rect.width - 12, 60)
         // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
-        let each = windows.count <= 1 ? min(sharesRow ? 150 : 180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
-        let folded = sharesRow && windows.count > 1 && tabsExpanded != id && heldLabel?.tile != id && model.drag == nil
-        if folded {
+        let each = windows.count <= 1 ? min(180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
+        let compact = sharesRow && !windows.isEmpty && tabsExpanded != id && heldLabel?.tile != id && model.drag == nil
+        if compact {
             let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
-            let s = windows[shownIndex]
+            let visible = [shownIndex]
+            let hidden = windows.count - 1
             HStack(spacing: 4) {
-                label(id: id, tab: shownIndex, text: labelText(s, in: tile, id: id),
-                      icon: s.bundleID.flatMap { model.icons[$0] }, shown: true, active: active, width: min(each, 130))
-                Button { expandTabs(id) } label: {
-                    Text("+\(windows.count - 1)").font(.caption.weight(.semibold)).monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(Color(white: 0.2, opacity: 0.6), in: Capsule())
-                        .contentShape(Capsule())
+                ForEach(visible, id: \.self) { i in
+                    label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(windows[i], in: tile, id: id),
+                          icon: windows[i].bundleID.flatMap { model.icons[$0] }, shown: i == shownIndex, active: active,
+                          width: 64, iconOnly: true)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(windows.count == 2 ? "1 more tab" : "\(windows.count - 1) more tabs"))
-                .accessibilityHint(Text("Shows every tab in this pane."))
+                if hidden > 0 {
+                    Button { expandTabs(id) } label: {
+                        Text("+\(hidden)").font(.caption.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(Color(white: 0.2, opacity: 0.6), in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(hidden == 1 ? "1 more tab" : "\(hidden) more tabs"))
+                    .accessibilityHint(Text("Shows every tab in this pane."))
+                }
             }
             .padding(6)
             .fixedSize()
@@ -482,12 +489,16 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    private func label(id: String, tab: Int?, text: String, icon: CGImage?, shown: Bool, active: Bool, width: CGFloat) -> some View {
+    /// `iconOnly`: just the app's icon (its name when there is no icon), beside the menu bar.
+    private func label(id: String, tab: Int?, text: String, icon: CGImage?, shown: Bool, active: Bool, width: CGFloat,
+                       iconOnly: Bool = false) -> some View {
         let highlighted = shown && active
         let target = PaneMenuTarget(tile: id, tab: tab)
         return HStack(spacing: 5) {
             if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 15, height: 15) }
-            Text(text).font(.caption.weight(shown ? .semibold : .regular)).lineLimit(1).truncationMode(.tail)
+            if !iconOnly || icon == nil {
+                Text(text).font(.caption.weight(shown ? .semibold : .regular)).lineLimit(1).truncationMode(.tail)
+            }
         }
         .frame(maxWidth: width, alignment: .leading)
         .fixedSize(horizontal: true, vertical: false)
