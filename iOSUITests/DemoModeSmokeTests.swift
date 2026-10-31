@@ -48,8 +48,11 @@ final class DemoModeSmokeTests: XCTestCase {
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
         for category in categories {
             let cell = app.buttons[category].firstMatch
-            if UIDevice.current.userInterfaceIdiom == .phone, !cell.isHittable { app.swipeUp() }
-            XCTAssertTrue(cell.waitForExistence(timeout: 3), category)
+            // Decided by what is on screen, not the device: a compact window pushes each page
+            // over the list, a regular one (iPad, unfolded iPhone Duo) keeps the list beside it.
+            if !cell.isHittable { app.swipeUp() }
+            if !cell.waitForExistence(timeout: 3) { print(app.debugDescription) }
+            XCTAssertTrue(cell.exists, category)
             cell.tap()
             XCTAssertTrue(app.navigationBars[category].waitForExistence(timeout: 3), category)
             snapshot(app, "settings-\(category)")
@@ -57,10 +60,17 @@ final class DemoModeSmokeTests: XCTestCase {
                 XCTAssertTrue(app.descendants(matching: .any)["Privacy Policy"].firstMatch.exists,
                               "About links the privacy policy in Demo Mode")
             }
-            if app.navigationBars[category].buttons.firstMatch.exists,
-               UIDevice.current.userInterfaceIdiom == .phone {
-                app.navigationBars[category].buttons.firstMatch.tap()
-                XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3), category)
+            // Back to the list, when the page was pushed over it. The bar's back button is
+            // titled after the list; its first button may be another control (Done).
+            // Back to the list when the page was pushed over it. The system Back button is
+            // found by its identifier: on current iOS it isn't a child of the bar's element,
+            // and the bar's first button may be another control.
+            let back = app.buttons["BackButton"].firstMatch
+            if !(cell.exists && cell.isHittable), back.exists {
+                back.tap()
+                // The list's own bar, not a row: rows scrolled off a lazy list aren't in the tree.
+                XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3),
+                              "the list is reachable again from \(category)")
             }
         }
         XCTAssertFalse(app.buttons["Developer"].exists && !isDebug)

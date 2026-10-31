@@ -25,9 +25,12 @@ final class ReceiverControlStore: ObservableObject {
     private static let autoHideDelay: Duration = .seconds(9)
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
-    /// The iPad-only presentation (Strip/Overlay/Custom, Control Size, …)
-    /// applies only when true; the iPhone keeps its compact tray.
-    let isPad: Bool
+    /// The roomy presentation (Strip/Overlay/Custom, Control Size, …)
+    /// applies only when true; otherwise the compact tray. It starts from the
+    /// device and then follows the window (`updateLayoutClass`): a full iPad
+    /// or an unfolded iPhone Duo is roomy, a phone or a narrow iPad window
+    /// (Slide Over, a small Stage Manager window) is compact.
+    @Published private(set) var isPad: Bool
     /// Move View: while true the receiver surface moves the local viewport
     /// instead of controlling the Mac. Transient — never persisted, and
     /// dropped whenever input stops reaching the Mac.
@@ -65,6 +68,16 @@ final class ReceiverControlStore: ObservableObject {
     var effectivePadLayout: PadControlLayoutMode {
         let stored = preferences.padControlLayout
         return stored == .custom && preferences.activeCustomLayout == nil ? .overlay : stored
+    }
+
+    /// The window's size classes changed (rotation, fold, resize): roomy
+    /// only when it is regular in both directions, so a phone in landscape
+    /// stays compact.
+    func updateLayoutClass(horizontalRegular: Bool, verticalRegular: Bool) {
+        let roomy = horizontalRegular && verticalRegular
+        guard roomy != isPad else { return }
+        isPad = roomy
+        beginAutoHideActivity()
     }
 
     func setMoveViewActive(_ active: Bool) {

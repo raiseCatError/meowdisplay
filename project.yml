@@ -339,6 +339,7 @@ targets:
       - Shared/AppStore.swift
       - Shared/ProjectLinks.swift
       - Shared/RemoteViewport.swift
+      - Shared/ReceiverPanelGeometry.swift
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
       - Shared/KeyboardEditPlanner.swift
