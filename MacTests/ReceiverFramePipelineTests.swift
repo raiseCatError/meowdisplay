@@ -191,6 +191,20 @@ final class ReceiverFramePipelineTests: XCTestCase {
         XCTAssertEqual(recorder.presentationFrameCount, 1, "the frame completes once both fragments have arrived")
     }
 
+    /// A declared frame over the TCP bound is never buffered toward: the connection is ended.
+    func testAFrameOverTheTCPBoundIsRefusedBeforeBuffering() async {
+        let (pipeline, recorder) = makePipeline()
+        await pipeline.beginAdoption(generation: 1)
+        var header = UInt32(ReceiverFramePipeline.maxTCPFrameBytes + 1).bigEndian
+        var oversized = Data(bytes: &header, count: 4)
+        oversized.append(Data(repeating: 0x41, count: 1024))
+        await pipeline.ingest(oversized, generation: 1)
+        let pending = await pipeline.oversizedFramePending
+        XCTAssertTrue(pending, "the connection is to be closed")
+        await pipeline.ingest(framed(annexB([sps, pps, idr])), generation: 1)
+        XCTAssertEqual(recorder.presentationFrameCount, 0, "nothing after the bad header is read as a frame")
+    }
+
     func testTwoFramesDeliveredInOneChunkBothDrain() async {
         let (pipeline, recorder) = makePipeline()
         await pipeline.beginAdoption(generation: 1)
