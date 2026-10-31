@@ -1973,6 +1973,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
+| 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 
 ---
 
@@ -2092,6 +2093,32 @@ answer; it never reports `locked` without seeing it. Unlocking needs the Mac's l
 Receivers ask before sending and show the answer; with no answer in 8 s they show it as failed.
 The Mac also locks its screen before quitting while the Privacy Shield covers it (not when
 macOS is logging out, restarting or shutting down).
+
+### 6.17 Tailscale addresses (`remoteEndpoints`)
+
+Optional and additive: no `pv` bump. Lets a paired Mac and device reach each other over
+Tailscale without anyone typing an address.
+
+* **Capability.** The Mac lists `"remoteEndpoints"` in `welcome.features`; a receiver sends
+  `hello.remoteEndpoints: 1`. A side sends the message only when the other side declared it.
+* **Message**, either direction, only on an admitted session (never in demo sessions):
+  `{"type":"remoteEndpoints","names":["mac.tail1234.ts.net"],"ips":["100.101.102.103","fd7a:115c:a1e0::1"]}`.
+  Each side reports only its own addresses. There is no port and no peer field: the session's
+  authenticated peer is the subject, and ports are the protocol's own (9001 media, 9003 knock).
+  Empty or missing lists mean "nothing to report" (no Tailscale, or the person turned automatic
+  Remote Access off), and the other side forgets what it learned from this peer.
+* **Limits.** A frame over 1024 bytes, a list that isn't an array of strings, more than 8 values
+  in a list, or a value over 253 bytes drops the whole message. A side sends at most one report
+  per 10 s and ignores reports closer together.
+* **Acceptance** (`TailnetEndpointFilter`, shared vectors in `fixtures/remote/`): IPv4 in
+  100.64.0.0/10 except 100.100.100.100, IPv6 in fd7a:115c:a1e0::/48, MagicDNS names
+  `<host>.<tailnet>.ts.net`. Names are lowercased, IPv6 written in RFC 5952 form, duplicates
+  dropped, at most 2 names and 4 addresses kept.
+* **Storage.** Kept per paired peer, apart from any typed address, which a report never replaces
+  or changes. An entry is bound to the peer's pin (SHA-256 of its SPKI) and expires 30 days after
+  its last refresh; Forget removes it.
+* **Trust.** An address is only a routing hint. Every connection to it is the usual pinned mutual
+  TLS; a report never creates, changes or approves a pairing.
 
 #### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
 
