@@ -2,7 +2,11 @@
 
 Thanks for helping make MeowDisplay better. Bug reports, carefully described ideas, documentation, physical-device testing, translations, and focused code changes are welcome. You do not need to write code to contribute.
 
-MeowDisplay is currently **Mac-first**: a Mac sends its screen to iPhone, iPad, Android, or another Mac. The Mac Receiver also has an input-forwarding implementation, though **two-Mac physical testing is still outstanding** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)). Windows and Linux senders/receivers are **not planned** ([#84](https://github.com/raiseCatError/meowdisplay/issues/84)); an idea tracker is not a promised roadmap.
+MeowDisplay is currently **Mac-first**: a Mac sends its screen to iPhone, iPad, Android, or another Mac. Mac-to-Mac input is implemented, though **two-Mac physical testing is still outstanding** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
+
+**Personal-first doesn't mean non-commercial.** You're welcome to use MeowDisplay for your own work, professionally or commercially. We're not currently building an enterprise remote-desktop or IT administration suite. That is a **separate, unplanned product direction** ([#86](https://github.com/raiseCatError/meowdisplay/issues/86)), not a restriction on your use.
+
+Windows ([#84](https://github.com/raiseCatError/meowdisplay/issues/84)), Linux ([#85](https://github.com/raiseCatError/meowdisplay/issues/85)), and hosted-account/relay services ([#87](https://github.com/raiseCatError/meowdisplay/issues/87)) are **ideas only, not planned features**. These issue threads exist for thoughtful discussion, not delivery promises; even consideration or prioritization is not guaranteed.
 
 Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
@@ -36,6 +40,10 @@ Hardware results are especially helpful for different Android models, Mac-to-Mac
 ### Features versus ideas
 
 A **feature request** describes a specific user problem and an implementable change for an existing supported platform. An **idea** can be speculative, wide in scope, or require a new platform or architecture; it carries **no priority, ETA, or commitment**. The maintainer may discuss, defer, or close proposals based on scope and capacity. Do not interpret a tracking issue as an announcement.
+
+Rather than repeatedly opening duplicate tickets for major out-of-scope directions, discuss them in the existing threads: [Windows #84](https://github.com/raiseCatError/meowdisplay/issues/84), [Linux #85](https://github.com/raiseCatError/meowdisplay/issues/85), [enterprise remote administration #86](https://github.com/raiseCatError/meowdisplay/issues/86), and [hosted accounts/relays #87](https://github.com/raiseCatError/meowdisplay/issues/87).
+
+GitHub Discussions is not enabled in this repository. For now, the linked **issues are the discussion venues**; opening an issue for an idea does not turn it into planned work.
 
 ## Contributing code or docs
 
