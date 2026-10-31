@@ -4991,39 +4991,29 @@ final class StreamReceiver: ObservableObject {
     // `RemoteEndpointStore`) and never mutates `StreamReceiver` state, so it
     // needs no `self` capture, matching the "static helper + stable owner"
     // idiom used by `startTLSListener` above.
-    private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue) {
+    private static func requestRemoteConnect(peerID: String, intent: SessionInvitationIntent, queue: DispatchQueue,
+                                             completion: (@Sendable (RemoteKnockResult) -> Void)? = nil) {
         guard let hint = RemoteEndpointStore.connectRequestEndpoint(forPeerID: peerID, role: .receiverRole),
-              let port = NWEndpoint.Port(rawValue: hint.port),
               let pin = TrustStore.receiverRole.pin(peerID: peerID),
-              let identity = TrustStore.receiverRole.ownIdentity(),
-              let tls = TLSConfigurator.mutualTLSOptions(
-                identity: identity,
-                pinnedSPKIs: { [pin] },
-                isListener: false, queue: queue) else {
+              let identity = TrustStore.receiverRole.ownIdentity() else {
             Log.info("routeDebug: remote connect-request not sent for peer=\(peerID) — no endpoint/trust available")
             return
         }
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(hint.host), port: port)
-        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-        params.includePeerToPeer = true
-        let connection = NWConnection(to: endpoint, using: params)
         let frame = RemoteConnectRequestIntent.frame(for: intent)
         Log.info("routeDebug: remote connect-request knock peer=\(peerID) endpoint=\(hint.host):\(hint.port) intent=\(intent.rawValue)")
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                // Exactly one frame, then close once it is out.
-                connection.send(content: frame, completion: .contentProcessed { _ in connection.cancel() })
-            case .failed, .cancelled:
-                connection.cancel()
-            default: break
-            }
-        }
-        connection.start(queue: queue)
-        // Bounded: never leave a knock connection open waiting on a Mac that
-        // never answers — the handshake and the one send either complete or
-        // this tears it down itself.
-        queue.asyncAfter(deadline: .now() + 8.0) { connection.cancel() }
+        // Bounded (8 s): the handshake, the one frame and the Mac's close, or this ends it itself.
+        RemoteKnock.start(
+            host: hint.host, port: hint.port, frame: frame, expected: pin,
+            makeTLS: { onPeerKey in
+                TLSConfigurator.mutualTLSOptions(identity: identity, pinnedSPKIs: { [pin] },
+                                                 isListener: false, queue: queue, onPeerKey: onPeerKey)
+            },
+            queue: queue,
+            otherPeer: { TrustStore.receiverRole.peerID(forSPKI: $0) },
+            completion: { result in
+                Log.info("routeDebug: remote connect-request result peer=\(peerID) result=\(result)")
+                completion?(result)
+            })
     }
 
     func reconnectNow() {

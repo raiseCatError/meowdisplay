@@ -20,10 +20,14 @@ enum TLSConfigurator {
     ///                I/O in it is forbidden.
     /// - isListener:  true ⇒ additionally require a client certificate.
     /// - queue:       the connection's serial queue; verify block runs here.
+    /// `onPeerKey` only OBSERVES the key the peer presented (its SPKI; for a key that isn't P-256,
+    /// the certificate's raw public key, which never equals a pin), before the pin check decides.
+    /// It can name who answered a failed dial and never trusts it.
     static func mutualTLSOptions(identity: SecIdentity,
                                   pinnedSPKIs: @escaping () -> [Data],
                                   isListener: Bool,
-                                  queue: DispatchQueue) -> NWProtocolTLS.Options? {
+                                  queue: DispatchQueue,
+                                  onPeerKey: (@Sendable (Data?) -> Void)? = nil) -> NWProtocolTLS.Options? {
         guard let secIdentity = sec_identity_create(identity) else {
             Log.info("ERROR: sec_identity_create failed — identity unusable, refusing TLS setup")
             return nil // no crash, no plaintext fallback
@@ -31,7 +35,7 @@ enum TLSConfigurator {
         let tls = NWProtocolTLS.Options()
         applyPinnedMutualAuthentication(
             to: tls.securityProtocolOptions, identity: secIdentity,
-            pinnedSPKIs: pinnedSPKIs, isListener: isListener, queue: queue)
+            pinnedSPKIs: pinnedSPKIs, isListener: isListener, queue: queue, onPeerKey: onPeerKey)
         return tls
     }
 
@@ -84,7 +88,8 @@ enum TLSConfigurator {
                                                         pinnedSPKIs: @escaping () -> [Data],
                                                         isListener: Bool,
                                                         queue: DispatchQueue,
-                                                        onPeerVerification: (@Sendable (_ accepted: Bool) -> Void)? = nil) {
+                                                        onPeerVerification: (@Sendable (_ accepted: Bool) -> Void)? = nil,
+                                                        onPeerKey: (@Sendable (Data?) -> Void)? = nil) {
         sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv13)
         sec_protocol_options_set_max_tls_protocol_version(sec, .TLSv13) // min == max: downgrade-proof
         sec_protocol_options_set_local_identity(sec, identity)          // both roles present a cert
@@ -97,9 +102,11 @@ enum TLSConfigurator {
             // Self-signed world: pinning REPLACES chain trust — deliberately
             // no SecTrustEvaluateWithError.
             let trust = sec_trust_copy_ref(sec_trust).takeRetainedValue()
-            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-                  let leaf = chain.first,
-                  let spki = spkiDER(of: leaf) else {
+            let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
+            if let onPeerKey {
+                onPeerKey(leaf.flatMap { spkiDER(of: $0) ?? rawPublicKey(of: $0) })
+            }
+            guard let leaf, let spki = spkiDER(of: leaf) else {
                 onPeerVerification?(false)
                 complete(false)
                 return
@@ -112,6 +119,13 @@ enum TLSConfigurator {
             onPeerVerification?(accepted)
             complete(accepted)
         }, queue)
+    }
+
+    /// A certificate's public key as the system exports it, for a key that isn't P-256: only ever
+    /// reported as "someone else's key", never compared with a pin.
+    static func rawPublicKey(of certificate: SecCertificate) -> Data? {
+        guard let key = SecCertificateCopyKey(certificate) else { return nil }
+        return SecKeyCopyExternalRepresentation(key, nil) as Data?
     }
 
     /// The pinning representation of a certificate's public key — the same
