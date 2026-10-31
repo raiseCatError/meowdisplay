@@ -203,7 +203,12 @@ class ReceiverController(
     private var keyboardShown = false
 
     init {
-        media.controlEvents = { event -> main.post { onSessionEvent(event) } }
+        // Frames and audio packets go to the decoders (MediaPipeline) on the network thread;
+        // nothing here uses them, and posting each one to the main thread (a message per
+        // frame and per packet) only queued work in front of touch handling.
+        media.controlEvents = { event ->
+            if (event !is SessionEvent.Video && event !is SessionEvent.Audio) main.post { onSessionEvent(event) }
+        }
         keyboard.onEchoChanged = { echoState.value = it }
         store.onInputResetRequested = { releaseHeldInput() }
         refreshConfig()
