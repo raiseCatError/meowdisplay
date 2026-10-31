@@ -74,11 +74,11 @@ struct MirrorDisplayCandidate: Identifiable, Equatable {
     ///
     /// Through the app's shared broker: a display change notifies every Mirror
     /// session, often several times in a row, and each used to send its own
-    /// request to macOS's capture service. They now share one, and the broker
-    /// drops its cached answer whenever the displays change, so the list is
+    /// request to macOS's capture service. They now share one request started
+    /// after the call (never an answer from before the change), so the list is
     /// never stale.
     static func listCandidates() async -> [MirrorDisplayCandidate] {
-        guard let content = try? await ShareableContent.content(.cachedWithin(.seconds(2))) else { return [] }
+        guard let content = try? await ShareableContent.content(.startedAfterNow) else { return [] }
         let mainID = CGMainDisplayID()
         return content.displays.map { display in
             let screen = NSScreen.screens.first {
