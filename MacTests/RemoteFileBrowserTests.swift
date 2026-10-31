@@ -165,4 +165,70 @@ final class RemoteFileBrowserTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         XCTAssertEqual(all().count, 3, "a stopped session answers nothing")
     }
+
+    // MARK: Checked reads and the write policy
+
+    func testWritesNeverReachHiddenItems() throws {
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Projects/App/.git/hooks"), withIntermediateDirectories: true)
+        XCTAssertFalse(RemoteFilesPolicy.isWritableName(".zshenv"))
+        XCTAssertFalse(RemoteFilesPolicy.isWritableName(".profile"))
+        XCTAssertTrue(RemoteFilesPolicy.isWritableName("notes.txt"))
+        XCTAssertNotNil(RemoteFilesPolicy.resolveWritableFolder(root: home, components: ["Projects"], home: home))
+        XCTAssertNil(RemoteFilesPolicy.resolveWritableFolder(root: home, components: ["Projects", "App", ".git", "hooks"], home: home),
+                     "git hooks run code: never written, even when hidden files are shown")
+        XCTAssertNotNil(RemoteFilesPolicy.resolveFolder(root: home, components: ["Projects", "App", ".git", "hooks"], home: home, allowHidden: true),
+                        "still readable when shown")
+        XCTAssertNil(RemoteFilesPolicy.resolveWritable(root: home.appendingPathComponent("Projects"), components: [".env"], home: home))
+    }
+
+    func testCheckedReadsFollowNoSymlinkSwap() throws {
+        let fm = FileManager.default
+        let root = home.appendingPathComponent("Projects")
+        try fm.createDirectory(at: root.appendingPathComponent("A"), withIntermediateDirectories: true)
+        try "mine".write(to: root.appendingPathComponent("A/notes.txt"), atomically: true, encoding: .utf8)
+        let checked = try XCTUnwrap(RemoteFilesPolicy.resolve(root: root, components: ["A", "notes.txt"], home: home))
+        XCTAssertNotNil(RemoteFilesPolicy.openForReading(checked, root: root, home: home, allowHidden: false))
+
+        // Between the check and the read, the folder is swapped for a symlink to a secret folder.
+        try fm.moveItem(at: root.appendingPathComponent("A"), to: root.appendingPathComponent("A-old"))
+        try "secret".write(to: dir.appendingPathComponent("outside/notes.txt"), atomically: true, encoding: .utf8)
+        try fm.createSymbolicLink(at: root.appendingPathComponent("A"), withDestinationURL: dir.appendingPathComponent("outside"))
+        XCTAssertNil(RemoteFilesPolicy.openForReading(checked, root: root, home: home, allowHidden: false), "the real path is outside")
+        XCTAssertNil(RemoteFilesPolicy.checkedRealPath(checked, root: root, home: home, allowHidden: false))
+
+        // A symlink as the last component, and one into ~/Library, are refused too.
+        try fm.createSymbolicLink(at: root.appendingPathComponent("link.txt"), withDestinationURL: dir.appendingPathComponent("outside/secret.txt"))
+        XCTAssertNil(RemoteFilesPolicy.openForReading(root.appendingPathComponent("link.txt"), root: root, home: home, allowHidden: false))
+        try fm.createSymbolicLink(at: home.appendingPathComponent("kc"), withDestinationURL: home.appendingPathComponent("Library/Keychains/login.keychain-db"))
+        XCTAssertNil(RemoteFilesPolicy.openForReading(home.appendingPathComponent("kc"), root: home, home: home, allowHidden: false))
+        // A folder inside is fine for a path-only API.
+        XCTAssertNotNil(RemoteFilesPolicy.checkedRealPath(root.appendingPathComponent("App"), root: root, home: home, allowHidden: false))
+        XCTAssertNil(RemoteFilesPolicy.openForReading(root.appendingPathComponent("App"), root: root, home: home, allowHidden: false), "not a file")
+    }
+
+    func testSanitizingAnExpandedFolder() throws {
+        let fm = FileManager.default
+        let out = dir.appendingPathComponent("expanded")
+        try fm.createDirectory(at: out.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try "a".write(to: out.appendingPathComponent("sub/a.txt"), atomically: true, encoding: .utf8)
+        try "#!/bin/sh".write(to: out.appendingPathComponent("tool"), atomically: true, encoding: .utf8)
+        chmod(out.appendingPathComponent("tool").path, 0o4755)
+        try fm.createSymbolicLink(at: out.appendingPathComponent("sub/escape"), withDestinationURL: dir.appendingPathComponent("outside"))
+        var marked: [String] = []
+        XCTAssertEqual(RemoteFilesPolicy.sanitizeExpanded(out) { marked.append($0.lastPathComponent) }, 1)
+        XCTAssertFalse(fm.fileExists(atPath: out.appendingPathComponent("sub/escape").path))
+        var st = stat()
+        XCTAssertEqual(lstat(out.appendingPathComponent("tool").path, &st), 0)
+        XCTAssertEqual(st.st_mode & S_ISUID, 0, "setuid cleared")
+        XCTAssertTrue(marked.contains("a.txt") && marked.contains("tool"))
+        XCTAssertFalse(marked.contains("escape"))
+    }
+
+    func testPrivatePrefixIsOneSpelling() {
+        XCTAssertEqual(RemoteFilesPolicy.withoutPrivatePrefix("/private/var/folders/x"), "/var/folders/x")
+        XCTAssertEqual(RemoteFilesPolicy.withoutPrivatePrefix("/private/tmp"), "/tmp")
+        XCTAssertEqual(RemoteFilesPolicy.withoutPrivatePrefix("/private/Users/x"), "/private/Users/x")
+        XCTAssertEqual(RemoteFilesPolicy.withoutPrivatePrefix("/Users/x"), "/Users/x")
+    }
+
 }

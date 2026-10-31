@@ -1,3 +1,4 @@
+import CoreServices
 import CryptoKit
 import Foundation
 
@@ -94,14 +95,16 @@ final class RemoteFileTransfers: @unchecked Sendable {
 
     // MARK: Downloads
 
-    /// Opens a regular file for reading; returns its transfer id and size.
-    func openDownload(_ url: URL) throws -> (id: Int, size: Int64) {
+    /// Opens a regular file for reading; returns its transfer id and size. `handle`, when
+    /// given, is the file already opened and checked by the caller
+    /// (`RemoteFilesPolicy.openForReading`), and `url` its real path.
+    func openDownload(_ url: URL, handle opened: FileHandle? = nil) throws -> (id: Int, size: Int64) {
         expire()
-        guard downloads.count < Self.maxDownloads else { throw TransferError(code: "busy") }
+        guard downloads.count < Self.maxDownloads else { try? opened?.close(); throw TransferError(code: "busy") }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue,
-              let stamp = FileStamp(path: url.path) else { throw TransferError(code: "notFile") }
-        guard let handle = try? FileHandle(forReadingFrom: url) else { throw TransferError(code: "permission") }
+              let stamp = FileStamp(path: url.path) else { try? opened?.close(); throw TransferError(code: "notFile") }
+        guard let handle = opened ?? (try? FileHandle(forReadingFrom: url)) else { throw TransferError(code: "permission") }
         let id = newID()
         downloads[id] = Download(url: url, handle: handle, size: stamp.size, stamp: stamp, used: now())
         return (id, stamp.size)
@@ -159,6 +162,22 @@ final class RemoteFileTransfers: @unchecked Sendable {
         return (id, target)
     }
 
+    /// The folder a running upload will land in.
+    func uploadFolder(_ id: Int) -> URL? { uploads[id]?.folder }
+
+    /// Files written from another device carry the quarantine mark, like a download, so
+    /// Gatekeeper checks them before anything in them runs.
+    static func quarantine(_ url: URL) {
+        var v = URLResourceValues()
+        v.quarantineProperties = [kLSQuarantineAgentNameKey as String: "MeowDisplay",
+                                  kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String]
+        var u = url
+        try? u.setResourceValues(v)
+    }
+
+    /// Applied to every finished upload before it is put in place (tests may observe it).
+    var markQuarantined: (URL) -> Void = { RemoteFileTransfers.quarantine($0) }
+
     /// Appends the part at `offset` (which must be where the file ends now). Returns bytes written so far.
     func write(_ id: Int, offset: Int64, data: Data) throws -> Int64 {
         guard var u = uploads[id] else { throw TransferError(code: "noTransfer") }
@@ -188,6 +207,7 @@ final class RemoteFileTransfers: @unchecked Sendable {
             guard got.hasPrefix(want.lowercased()), want.count >= 16 else { discard(u); throw TransferError(code: "digest") }
         }
         if let m = u.modified { try? FileManager.default.setAttributes([.modificationDate: m], ofItemAtPath: u.temp.path) }
+        markQuarantined(u.temp)
         do {
             // Another item may have appeared with that name meanwhile: decide again.
             guard let name = try Self.targetName(in: u.folder, name: u.name, conflict: u.conflict == .replace ? .replace : .rename) else {
