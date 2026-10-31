@@ -1,5 +1,8 @@
 package com.raisecaterror.meowdisplay.core.session
 
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsOutbox
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsRateGate
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsWire
 import com.raisecaterror.meowdisplay.core.wire.ControlChunkAssembler
 import com.raisecaterror.meowdisplay.core.video.AccessUnit
 import com.raisecaterror.meowdisplay.core.video.DecodableSample
@@ -83,12 +86,26 @@ sealed interface SessionEvent {
  *
  * Thread-safe: socket readers, the liveness ticker and the UI all call in.
  */
+/**
+ * What [ReceiverSession] needs from the app for automatic Remote Access (PROTOCOL.md 6.17). Called
+ * under the session's lock: quick, no network.
+ */
+interface RemoteEndpointsHost {
+    /** This device's addresses, or an empty report when the person turned automatic Remote Access off. */
+    fun ownReport(): RemoteEndpointsWire.Report
+
+    /** The admitted, authenticated Mac [peerID] reported [report] about itself. */
+    fun received(peerID: String, report: RemoteEndpointsWire.Report)
+}
+
 class ReceiverSession(
     private val policies: SessionPolicyStore,
     private val pins: () -> Map<String, ByteArray>,
     private val helloFields: () -> HelloFields,
     private val events: (SessionEvent) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
+    /** Automatic Remote Access (PROTOCOL.md 6.17); null (demo, tests) never declares or sends it. */
+    private val remoteEndpoints: RemoteEndpointsHost? = null,
 ) : InputChannel {
     private val lifecycle = ReceiverSessionState()
     private val admission = ReceiverSessionAdmission()
@@ -193,7 +210,7 @@ class ReceiverSession(
         candidate = newLink
         candidateLastMs = t
         candidatePingMs = t
-        val fields = helloFields()
+        val fields = currentHelloFields()
         candidatePanel = fields
         newLink.send(ReceiverMessages.encode(ReceiverMessages.hello(fields)))
     }
@@ -243,6 +260,7 @@ class ReceiverSession(
         incompatible = false
         macPV = null
         macFeatures = emptySet()
+        remoteEndpointsConnection++
         streamModel.reset()
         publishStreamSettings()
         video.reset(StreamCodec.H264)
@@ -407,8 +425,11 @@ class ReceiverSession(
         if (link != null) announce(force = false)
     }
 
+    private fun currentHelloFields(): HelloFields =
+        helloFields().let { if (remoteEndpoints != null) it.copy(remoteEndpoints = true) else it }
+
     private fun announce(force: Boolean) {
-        val fields = helloFields()
+        val fields = currentHelloFields()
         if (!force && fields == announcedPanel) return
         announcedPanel = fields
         send(ReceiverMessages.hello(fields))
@@ -575,6 +596,7 @@ class ReceiverSession(
                 streamModel.peerVersion(message.pv)
                 publishStreamSettings()
                 deliver("features", SessionEvent.MacFeatures(message.features))
+                if (link === from) sendRemoteEndpointsIfSupported()
                 message.privacyShield?.let { deliver("privacyShield", SessionEvent.PrivacyShield(it)) }
                 deliver("macUser", SessionEvent.MacUser(from.peerID, message.user))
                 if (message.pv < WireProtocol.SESSION_INVITATION) admitLegacySenderOrClose(from)
@@ -592,6 +614,7 @@ class ReceiverSession(
             }
             is SenderMessage.Pong -> clock.record(message.t, message.mt, now().toDouble())
             SenderMessage.Ping -> Unit
+            is SenderMessage.RemoteEndpoints -> receiveRemoteEndpoints(from, message.frame)
             is SenderMessage.Invite -> handleInvitation(from, message.invitation)
             is SenderMessage.InviteCancel -> {
                 if (approvals.resolve(message.id) != null) emit(SessionEvent.ApprovalDismissed(message.id))
@@ -773,6 +796,30 @@ class ReceiverSession(
         heldState.clear()
         // Frames before admission were dropped: ask for a keyframe so a static screen appears at once.
         requestKeyframe()
+        sendRemoteEndpointsIfSupported()
+    }
+
+    // MARK: - Automatic Remote Access (PROTOCOL.md 6.17)
+
+    private var remoteEndpointsConnection = 0L
+    private val remoteEndpointsOutbox = RemoteEndpointsOutbox()
+    private val remoteEndpointsInbound = RemoteEndpointsRateGate()
+
+    /** Once admitted and offered: this device's Tailscale addresses, or an empty report when it's off here. */
+    private fun sendRemoteEndpointsIfSupported() {
+        val host = remoteEndpoints ?: return
+        if (link == null || !admission.admitted || RemoteEndpointsWire.WELCOME_FEATURE !in macFeatures) return
+        if (!remoteEndpointsOutbox.shouldSend(remoteEndpointsConnection, now())) return
+        send(RemoteEndpointsWire.message(host.ownReport()))
+    }
+
+    /** What the admitted Mac says about its own Tailscale addresses; the host keeps it for that Mac's pin. */
+    private fun receiveRemoteEndpoints(from: MediaLink, frame: ByteArray) {
+        val host = remoteEndpoints ?: return
+        if (from !== link || !admission.admitted) return
+        val report = RemoteEndpointsWire.decode(frame) ?: return
+        if (!remoteEndpointsInbound.admit(now())) return
+        host.received(from.peerID, report)
     }
 
     private fun mediaAdmitted() = link != null && admission.admitted && !incompatible

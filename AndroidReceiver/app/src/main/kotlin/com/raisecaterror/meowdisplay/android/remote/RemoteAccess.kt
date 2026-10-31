@@ -7,12 +7,16 @@ import com.raisecaterror.meowdisplay.android.discovery.Bonjour
 import com.raisecaterror.meowdisplay.android.identity.DeviceIdentity
 import com.raisecaterror.meowdisplay.android.session.MediaController
 import com.raisecaterror.meowdisplay.android.trust.PinStore
+import com.raisecaterror.meowdisplay.core.remote.AutomaticRemoteEndpointStore
 import com.raisecaterror.meowdisplay.core.remote.RemoteConnectCoordinator
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsWire
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnockClient
 import com.raisecaterror.meowdisplay.core.remote.RemoteKnocker
 import com.raisecaterror.meowdisplay.core.remote.RemoteMacStore
 import com.raisecaterror.meowdisplay.core.remote.RouteClassifier
 import com.raisecaterror.meowdisplay.core.remote.HomeRows
+import com.raisecaterror.meowdisplay.core.remote.TailnetInterfaces
+import com.raisecaterror.meowdisplay.core.session.RemoteEndpointsHost
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +40,19 @@ class RemoteAccess(
 ) {
     val store = RemoteMacStore(RemoteMacPrefs(context)).also { it.retainOnly(pins.paired.value.map { mac -> mac.peerID }.toSet()) }
     val routes = RouteMonitor(context)
+
+    /** Tailscale addresses paired Macs reported about themselves (PROTOCOL.md 6.17), apart from typed ones. */
+    val automaticEndpoints = AutomaticRemoteEndpointStore(AutomaticEndpointPrefs(context))
+        .also { it.prune(pins.paired.value.map { mac -> mac.peerID }.toSet(), System.currentTimeMillis()) }
+    private val automaticSwitch = AutomaticRemoteAccessPrefs(context)
+
+    /** Automatic Remote Access: on unless the person turned it off. Off forgets what Macs reported. */
+    var automaticEnabled: Boolean
+        get() = automaticSwitch.enabled
+        set(value) {
+            automaticSwitch.enabled = value
+            if (!value) automaticEndpoints.prune(emptySet(), System.currentTimeMillis())
+        }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -68,6 +85,20 @@ class RemoteAccess(
             }
         }
         routes.onDefaultNetworkChanged = { coordinator.onNetworkChanged() }
+        media.remoteEndpointsHost = object : RemoteEndpointsHost {
+            override fun ownReport() = if (automaticEnabled) {
+                RemoteEndpointsWire.Report(ips = TailnetInterfaces.fromNetworks(routes.snapshot()))
+            } else {
+                RemoteEndpointsWire.Report()
+            }
+
+            override fun received(peerID: String, report: RemoteEndpointsWire.Report) {
+                if (!automaticEnabled) return
+                val pin = pins.pin(peerID) ?: return
+                automaticEndpoints.record(report, peerID, pin, System.currentTimeMillis())
+                Log.i(TAG, "remoteEndpoints: Mac reported ${report.ips.size} address(es), ${report.names.size} name(s)")
+            }
+        }
         // A Mac that appears on Bonjour lets the normal local path take over.
         scope.launch { bonjour.nearbyMacs.drop(1).collect { coordinator.onNearbyChanged() } }
     }
@@ -115,6 +146,7 @@ class RemoteAccess(
     fun forget(peerID: String) {
         media.forget(peerID)
         coordinator.onForget(peerID)
+        automaticEndpoints.remove(peerID)
     }
 
     fun onForeground() {

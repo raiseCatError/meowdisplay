@@ -337,6 +337,9 @@ targets:
       - Shared/RemoteKnock.swift
       - Shared/RemoteRecoveryPolicy.swift
       - Shared/TailnetEndpointFilter.swift
+      - Shared/TailnetInterfaces.swift
+      - Shared/RemoteEndpointsWire.swift
+      - Shared/AutomaticRemoteEndpointStore.swift
       - Shared/PairingNetwork.swift
       - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift

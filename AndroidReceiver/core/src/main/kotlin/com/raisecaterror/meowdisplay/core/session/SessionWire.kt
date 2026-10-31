@@ -3,6 +3,7 @@ package com.raisecaterror.meowdisplay.core.session
 import com.raisecaterror.meowdisplay.core.wire.ControlChunkWire
 import com.raisecaterror.meowdisplay.core.crypto.utf8
 import com.raisecaterror.meowdisplay.core.pairing.PairingProtocol
+import com.raisecaterror.meowdisplay.core.remote.RemoteEndpointsWire
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -83,6 +84,8 @@ data class HelloFields(
     val maxEncodeHigh: Int? = null,
     val maxFPS: Int? = null,
     val codecs: List<StreamCodec> = listOf(StreamCodec.H264),
+    /** Takes the Mac's Tailscale addresses (hello `remoteEndpoints`, PROTOCOL.md 6.17). */
+    val remoteEndpoints: Boolean = false,
 )
 
 /** Receiver-to-sender control messages, each one JSON object in one frame. */
@@ -102,6 +105,7 @@ object ReceiverMessages {
         fields.windowWorkspace?.let { put("ws", it) }
         // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
         put(ControlChunkWire.HELLO_FIELD, ControlChunkWire.VERSION)
+        if (fields.remoteEndpoints) put(RemoteEndpointsWire.HELLO_FIELD, RemoteEndpointsWire.HELLO_VERSION)
         put("trayEnabled", fields.trayEnabled)
         put("keyboardButtonEnabled", fields.keyboardButtonEnabled)
         if (fields.maxEncodeWide != null && fields.maxEncodeHigh != null) {
@@ -187,6 +191,9 @@ sealed interface SenderMessage {
     /** One part of a message too long for one control frame (PROTOCOL.md 6.14). */
     class Chunk(val body: JsonObject) : SenderMessage
 
+    /** The Mac's own Tailscale addresses (PROTOCOL.md 6.17): the whole frame, decoded by [RemoteEndpointsWire]. */
+    class RemoteEndpoints(val frame: ByteArray) : SenderMessage
+
     /** A type this core leaves to the app (cursor sprite, UI preferences, ...). */
     data class Other(val type: String, val body: JsonObject) : SenderMessage
 
@@ -222,6 +229,7 @@ sealed interface SenderMessage {
                     Pong(t, mt)
                 }
                 "ping" -> Ping
+                RemoteEndpointsWire.TYPE -> RemoteEndpoints(text.encodeToByteArray())
                 "sessionInvite" -> SessionInvitation.parse(obj)?.let(::Invite)
                 "sessionInviteCancel" -> obj.string("id")?.let(::InviteCancel)
                 "allowInputState" -> {

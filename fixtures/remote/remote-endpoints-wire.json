@@ -1,0 +1,117 @@
+{
+ "comment": "Decoding a remoteEndpoints message (PROTOCOL.md 6.17). Run by MacTests/RemoteEndpointsWireTests.swift and core RemoteEndpointsWireTest.kt. `frame` is the control frame's JSON text; `expect` null means the whole message is dropped, otherwise the report after TailnetEndpointFilter (no tailnet given).",
+ "cases": [
+  {
+   "name": "both lists",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[\"mac.tail1234.ts.net\"],\"ips\":[\"100.64.0.7\",\"fd7a:115c:a1e0::7\"]}",
+   "expect": {
+    "names": [
+     "mac.tail1234.ts.net"
+    ],
+    "ips": [
+     "100.64.0.7",
+     "fd7a:115c:a1e0::7"
+    ]
+   }
+  },
+  {
+   "name": "missing lists are empty: the sender has nothing (or opted out)",
+   "frame": "{\"type\":\"remoteEndpoints\"}",
+   "expect": {
+    "names": [],
+    "ips": []
+   }
+  },
+  {
+   "name": "empty lists",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[],\"ips\":[]}",
+   "expect": {
+    "names": [],
+    "ips": []
+   }
+  },
+  {
+   "name": "values are filtered like any report",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[\"mac.local\"],\"ips\":[\"192.168.1.2\",\"100.64.0.9\"]}",
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.9"
+    ]
+   }
+  },
+  {
+   "name": "unknown fields are ignored",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":[\"100.64.0.9\"],\"port\":9001,\"peer\":\"x\"}",
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.9"
+    ]
+   }
+  },
+  {
+   "name": "names not an array",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":\"mac.tail1234.ts.net\"}",
+   "expect": null
+  },
+  {
+   "name": "ips not an array",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":{\"a\":\"100.64.0.1\"}}",
+   "expect": null
+  },
+  {
+   "name": "a non-string value",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":[\"100.64.0.1\",5]}",
+   "expect": null
+  },
+  {
+   "name": "a null value",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[null]}",
+   "expect": null
+  },
+  {
+   "name": "more than eight names",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[\"n0.t.ts.net\",\"n1.t.ts.net\",\"n2.t.ts.net\",\"n3.t.ts.net\",\"n4.t.ts.net\",\"n5.t.ts.net\",\"n6.t.ts.net\",\"n7.t.ts.net\",\"n8.t.ts.net\"]}",
+   "expect": null
+  },
+  {
+   "name": "more than eight ips",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":[\"100.64.0.0\",\"100.64.0.1\",\"100.64.0.2\",\"100.64.0.3\",\"100.64.0.4\",\"100.64.0.5\",\"100.64.0.6\",\"100.64.0.7\",\"100.64.0.8\"]}",
+   "expect": null
+  },
+  {
+   "name": "eight of each is fine (capped by the filter)",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":[\"100.64.0.1\",\"100.64.0.2\",\"100.64.0.3\",\"100.64.0.4\",\"100.64.0.5\",\"100.64.0.6\",\"100.64.0.7\",\"100.64.0.8\"]}",
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.1",
+     "100.64.0.2",
+     "100.64.0.3",
+     "100.64.0.4"
+    ]
+   }
+  },
+  {
+   "name": "a value longer than 253 characters",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}",
+   "expect": null
+  },
+  {
+   "name": "a frame over 1024 bytes",
+   "frame": "{\"type\":\"remoteEndpoints\",\"names\":[\"mac.t.ts.net\"],\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+   "expect": null
+  },
+  {
+   "name": "exactly 1024 bytes is fine",
+   "frame": "{\"type\":\"remoteEndpoints\",\"ips\":[\"100.64.0.1\"],\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.1"
+    ]
+   }
+  }
+ ]
+}
