@@ -68,7 +68,8 @@ final class DemoModeSmokeTests: XCTestCase {
             let back = app.buttons["BackButton"].firstMatch
             if !(cell.exists && cell.isHittable), back.exists {
                 back.tap()
-                XCTAssertTrue(app.buttons[categories[0]].firstMatch.waitForExistence(timeout: 3),
+                // The list's own bar, not a row: rows scrolled off a lazy list aren't in the tree.
+                XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3),
                               "the list is reachable again from \(category)")
             }
         }
