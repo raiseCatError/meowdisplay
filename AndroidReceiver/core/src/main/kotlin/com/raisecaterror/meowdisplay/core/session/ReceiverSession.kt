@@ -556,13 +556,18 @@ class ReceiverSession(
 
     private fun handle(from: MediaLink, message: SenderMessage) {
         when (message) {
-            is SenderMessage.Chunk -> when (val r = chunks.add(message.body, now())) {
-                is ControlChunkAssembler.Outcome.Complete ->
-                    // Never a chunk inside a chunk.
-                    SenderMessage.parse(r.text)?.takeIf { it !is SenderMessage.Chunk }?.let { handle(from, it) }
-                // Abandoned and forgotten; the feature waiting for it times out and offers Retry.
-                is ControlChunkAssembler.Outcome.Dropped -> Unit
-                ControlChunkAssembler.Outcome.Pending -> Unit
+            is SenderMessage.Chunk -> {
+                // Only the admitted session sends large messages (previews, stills): a Mac that
+                // isn't admitted can't make this device hold partial messages for it.
+                if (from !== link || !admission.admitted) return
+                when (val r = chunks.add(message.body, now())) {
+                    is ControlChunkAssembler.Outcome.Complete ->
+                        // Never a chunk inside a chunk.
+                        SenderMessage.parse(r.text)?.takeIf { it !is SenderMessage.Chunk }?.let { handle(from, it) }
+                    // Abandoned and forgotten; the feature waiting for it times out and offers Retry.
+                    is ControlChunkAssembler.Outcome.Dropped -> Unit
+                    ControlChunkAssembler.Outcome.Pending -> Unit
+                }
             }
             is SenderMessage.Welcome -> {
                 macPV = message.pv
