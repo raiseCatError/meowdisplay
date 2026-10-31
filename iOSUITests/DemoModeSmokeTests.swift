@@ -60,9 +60,11 @@ final class DemoModeSmokeTests: XCTestCase {
                 XCTAssertTrue(app.descendants(matching: .any)["Privacy Policy"].firstMatch.exists,
                               "About links the privacy policy in Demo Mode")
             }
-            let pushed = !(cell.exists && cell.isHittable)
-            if pushed, app.navigationBars[category].buttons.firstMatch.exists {
-                app.navigationBars[category].buttons.firstMatch.tap()
+            // Back to the list, when the page was pushed over it. The bar's back button is
+            // titled after the list; its first button may be another control (Done).
+            let back = app.navigationBars[category].buttons["Settings"]
+            if !(cell.exists && cell.isHittable), back.exists {
+                back.tap()
                 XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3), category)
             }
         }

@@ -27,6 +27,9 @@ final class AdaptiveLayoutTests: XCTestCase {
         for orientation in [UIDeviceOrientation.portrait, .landscapeLeft, .portrait] {
             XCUIDevice.shared.orientation = orientation
             sleep(1)   // let the layout and the announced panel settle
+            // The controls hide themselves after a few idle seconds; a touch brings them back.
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            sleep(1)
             let window = app.windows.firstMatch.frame
             XCTAssertFalse(window.isEmpty)
             print("AdaptiveLayout: orientation \(orientation.rawValue) window \(window)")
