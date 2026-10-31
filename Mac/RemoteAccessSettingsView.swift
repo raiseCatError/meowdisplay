@@ -37,6 +37,10 @@ struct RemoteAccessSettingsView: View {
                 RemoteEndpointEditorView(controller: controller)
             }
 
+            Section("Automatic") {
+                AutomaticRemoteAccessToggle(role: .sender, peers: .devices)
+            }
+
             Section("Tailscale") {
                 TailscaleThisMacView()
             }
@@ -75,6 +79,15 @@ struct RemoteEndpointEditorView: View {
         !peerID.isEmpty && RemoteEndpointStore.endpoint(forPeerID: peerID, role: .sender) != nil
     }
 
+    /// What the selected device reported about itself, when no address was typed and that address
+    /// is used (a verified path, automatic Remote Access on).
+    private var reportedHost: String? {
+        guard !peerID.isEmpty, !selectedPeerHasSavedEndpoint,
+              let hint = AutomaticRemoteRoutes.macMediaEndpoint(forPeerID: peerID, pin: TrustStore.shared.pin(peerID: peerID)),
+              hint.automatic else { return nil }
+        return hint.host
+    }
+
     private var statusText: String? {
         guard !peerID.isEmpty else { return nil }
         let target = ConnectionTarget.remote(peerID: peerID)
@@ -87,7 +100,7 @@ struct RemoteEndpointEditorView: View {
             }
             return String(localized: "Connecting…")
         }
-        return selectedPeerHasSavedEndpoint ? nil : String(localized: "Endpoint unavailable")
+        return selectedPeerHasSavedEndpoint || reportedHost != nil ? nil : String(localized: "Endpoint unavailable")
     }
 
     var body: some View {
@@ -122,6 +135,10 @@ struct RemoteEndpointEditorView: View {
                 if let statusText {
                     Text(statusText).font(.caption).foregroundStyle(.secondary)
                 }
+                if let reportedHost {
+                    Text("Found automatically: \(reportedHost). An address you save here is used instead.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
 
                 TailscaleSuggestionsView(deviceName: pairedPeers.first { $0.peerID == peerID }?.displayName ?? "") { suggested in
                     host = suggested
@@ -134,7 +151,7 @@ struct RemoteEndpointEditorView: View {
                     Button("Remove Remote Endpoint") { remove() }
                         .disabled(!selectedPeerHasSavedEndpoint)
                     Button("Connect") { connect() }
-                        .disabled(!selectedPeerHasSavedEndpoint)
+                        .disabled(!selectedPeerHasSavedEndpoint && reportedHost == nil)
                 }
                 .controlSize(.small)
             }
