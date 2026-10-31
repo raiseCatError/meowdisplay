@@ -141,7 +141,12 @@ final class RemoteFilesModelTests: XCTestCase {
         m.wantThumbnail(RemoteFileEntry(name: "a.png", isDirectory: false, kind: .image))
         m.wantThumbnail(RemoteFileEntry(name: "b.pdf", isDirectory: false, kind: .pdf))
         m.wantThumbnail(RemoteFileEntry(name: "c.zip", isDirectory: false, kind: .archive))
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // The batch waits 150 ms; a busy runner may take longer than that to run it.
+        let by = Date().addingTimeInterval(3)
+        while Date() < by, !sent.contains(where: { $0["op"] as? String == "thumbs" }) {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)   // and no second batch follows
         let thumbs = sent.filter { $0["op"] as? String == "thumbs" }
         XCTAssertEqual(thumbs.count, 1)
         XCTAssertEqual(thumbs[0]["names"] as? [String], ["a.png", "b.pdf"])
