@@ -374,7 +374,7 @@ final class WindowBrowserService: @unchecked Sendable {
                 cfg.height = max(Int(Double(width) * Double(d.height) / Double(max(d.width, 1))) & ~1, 2)
                 cfg.showsCursor = false
                 // MeowDisplay's own windows (prompts, privacy cover) never appear in a still.
-                let own = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true))?
+                let own = (try? await ShareableContent.content())?
                     .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
                 let filter = SCContentFilter(display: d, excludingApplications: own, exceptingWindows: [])
                 guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg),
