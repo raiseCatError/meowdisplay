@@ -190,8 +190,9 @@ on in the device's own Settings ▸ Clipboard. Details: PROTOCOL.md 6.15.
   port mapping; "Remote · Tailscale" on screen is a label drawn from the
   phone's own network facts, not a security claim. Logs name only the kind of
   address (IPv4, IPv6, DNS or Tailscale range). The Mac reads Tailscale's
-  status (its bundled or Homebrew CLI, `tailscale status --json`, bounded to
-  3 s) only when you press Check Tailscale or Find on Tailscale in Settings →
+  status (`tailscale status --json`, bounded to 3 s; only a CLI whose code
+  signature, after resolving links, belongs to Tailscale's team W5364U7YZB,
+  so an unsigned or Homebrew-built command is never run) only when you press Check Tailscale or Find on Tailscale in Settings →
   Remote Access: it shows the Mac's own name and suggests tailnet peers for a
   paired device's address. A suggestion only fills the field; nothing is
   saved, trusted or changed in Tailscale without you. Android's Add Remote Mac
