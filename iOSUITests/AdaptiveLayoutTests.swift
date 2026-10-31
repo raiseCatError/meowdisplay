@@ -46,7 +46,15 @@ final class AdaptiveLayoutTests: XCTestCase {
             keep(app, "demo-\(orientation.rawValue)")
         }
 
-        app.descendants(matching: .any)["Settings"].firstMatch.tap()
+        // The tray may have hidden itself while the orientations were checked: bring it back
+        // with a touch, as a person would, and wait until Settings can be tapped.
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        for _ in 0..<3 where !settings.isHittable {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            _ = XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: settings)],
+                               timeout: 2)
+        }
+        settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
         keep(app, "settings")
