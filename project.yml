@@ -334,6 +334,7 @@ targets:
       - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/RemoteKnock.swift
+      - Shared/RemoteRecoveryPolicy.swift
       - Shared/PairingNetwork.swift
       - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift
