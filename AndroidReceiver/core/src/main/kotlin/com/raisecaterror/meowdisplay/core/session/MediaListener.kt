@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
@@ -81,7 +82,14 @@ class MediaListener(
         runCatching { server?.close() }
         session.disconnect(sleeping)
         timers.shutdownNow()
-        workers.shutdownNow()
+        // Not shutdownNow: that interrupted the closing link's grace wait (it runs on these
+        // workers), so the socket was closed at once and the `sleeping`/`closing` goodbye
+        // could be lost, leaving the Mac to treat a sleeping device as a dropped one. Let the
+        // goodbye go out, then stop whatever is left.
+        workers.shutdown()
+        thread(isDaemon = true, name = "meow-media-close") {
+            if (!workers.awaitTermination(2 * CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)) workers.shutdownNow()
+        }
     }
 
     private fun acceptLoop(listener: SSLServerSocket) {

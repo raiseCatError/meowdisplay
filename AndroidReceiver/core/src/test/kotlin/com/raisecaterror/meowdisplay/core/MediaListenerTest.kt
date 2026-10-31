@@ -232,6 +232,17 @@ class MediaListenerTest {
         }
     }
 
+    /** Audit C6: stopping the listener (the app going to the background) still says goodbye. */
+    @Test
+    fun closingTheListenerStillDeliversSleepingBeforeTheSocketCloses() {
+        Mac(macA).use { mac ->
+            mac.admit()
+            listener.close(sleeping = true)
+            mac.expect("sleeping")
+            assertTrue(mac.closedByReceiver())
+        }
+    }
+
     @Test
     fun aNewConnectionReplacesTheOldOne() {
         Mac(macA).use { first ->
