@@ -13,7 +13,8 @@ right from it.
 [Features](https://meowdisplay.app/features.html) ·
 [Setup](https://meowdisplay.app/docs.html) ·
 [Support](https://meowdisplay.app/support.html) ·
-[Privacy](https://meowdisplay.app/privacy.html)
+[Privacy](https://meowdisplay.app/privacy.html) ·
+[Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
 **[Download for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
 
@@ -38,6 +39,13 @@ or server in the middle.
 notarized, from [GitHub Releases](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0)) and
 [MeowDisplay for iPhone and iPad on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) (iOS/iPadOS 16.4 or
 later). Both are free.
+
+**Release status:** The downloads above are the public **1.20.0** apps. This
+`dev` branch also documents features being prepared for **2.0**, including
+Window view, Stage Peek and Android support; these are **not all available in
+the current public release**. Android is currently available to a limited
+testing group, not yet as a public Play Store release. See the
+[downloads page](https://meowdisplay.app/downloads) for current availability.
 
 ## At a glance
 
