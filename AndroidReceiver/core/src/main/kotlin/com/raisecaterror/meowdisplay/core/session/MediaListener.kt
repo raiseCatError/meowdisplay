@@ -41,13 +41,16 @@ class MediaListener(
     private val session: ReceiverSession,
     private val port: Int = WireProtocol.MEDIA_PORT,
     private val handshakeTimeoutMs: Long = 8_000,
-    private val maxPendingHandshakes: Int = 4,
+    private val maxPendingHandshakes: Int = 8,
+    /** One address can hold only this many of them, so a single host can't lock out the Mac. */
+    private val maxPendingPerHost: Int = 2,
     private val tickIntervalMs: Long = 250,
     private val log: (String) -> Unit = {},
 ) : Closeable {
     private val workers: ExecutorService = Executors.newCachedThreadPool(daemon("meow-media"))
     private val timers: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(daemon("meow-media-timer"))
     private val pending = AtomicInteger()
+    private val pendingByHost = HashMap<java.net.InetAddress?, Int>()
 
     /** Connections still in their TLS handshake (for tests). */
     val pendingHandshakes: Int get() = pending.get()
@@ -88,20 +91,35 @@ class MediaListener(
             } catch (_: IOException) {
                 break
             }
-            if (pending.incrementAndGet() > maxPendingHandshakes) {
-                pending.decrementAndGet()
+            val host = socket.inetAddress
+            if (!reservePending(host)) {
                 closeQuietly(socket)
                 continue
             }
-            workers.execute { serve(socket) }
+            workers.execute { serve(socket, host) }
         }
     }
 
-    private fun serve(socket: SSLSocket) {
+    /** A handshake slot for [host], within both the overall and the per-address bound. */
+    private fun reservePending(host: java.net.InetAddress?): Boolean = synchronized(pendingByHost) {
+        val forHost = pendingByHost[host] ?: 0
+        if (pending.get() >= maxPendingHandshakes || forHost >= maxPendingPerHost) return false
+        pendingByHost[host] = forHost + 1
+        pending.incrementAndGet()
+        true
+    }
+
+    private fun releasePending(host: java.net.InetAddress?) = synchronized(pendingByHost) {
+        val left = (pendingByHost[host] ?: 1) - 1
+        if (left > 0) pendingByHost[host] = left else pendingByHost.remove(host)
+        pending.decrementAndGet()
+    }
+
+    private fun serve(socket: SSLSocket, host: java.net.InetAddress?) {
         val link = try {
             authenticate(socket)
         } finally {
-            pending.decrementAndGet()
+            releasePending(host)
         } ?: return
         // A Mac this device blocked is closed without touching the live session.
         if (!session.adopt(link)) return
