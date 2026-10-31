@@ -1,10 +1,29 @@
 # Receiver feature parity
 
 What each receiving app can do today: iPhone/iPad (iOS), Android, and Mac Receiver.
-Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code). Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and where each setting lives: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
+Implementation overview reconciled with the integrated `dev` branch and the 2026-10-31 follow-up PRs (#77, #81, #82 and #83). Physical-verification notes retain their original evidence unless explicitly updated. Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and settings: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
 
 **Yes** works · **Partial** works with a gap noted · **No** not built yet · **—** not applicable.
 "Verified" says where it was last seen working: physical device, simulator/emulator, or unit tests only.
+
+## Verification and scope
+
+- **Per-device Mirror/Extend with multiple receivers** is implemented
+  and has been physically verified according to the maintainer
+  ([#20](https://github.com/raiseCatError/meowdisplay/issues/20)).
+  This does not establish that every edge case in `MULTI_DEVICE.md` was individually retested.
+- **Mac-to-Mac keyboard/trackpad input** is implemented with automated
+  coverage but **has not been physically verified with two Macs**
+  ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
+- Android had earlier real-device testing, but **additional Android
+  physical QA for the current 2.0 release was waived by the owner**.
+  That decision is not evidence of a new Android hardware test.
+- **No Windows or Linux receiver/sender is implemented or planned**
+  ([Windows #84](https://github.com/raiseCatError/meowdisplay/issues/84),
+  [Linux #85](https://github.com/raiseCatError/meowdisplay/issues/85)).
+  Professional/commercial use is welcome, but an enterprise remote-desktop
+  service or hosted account/relay infrastructure is not a current product
+  target (#86, #87).
 
 ## Connecting
 
@@ -14,7 +33,7 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 | Connect from the device (Mac dials in) | Yes | Yes | Yes | Android: Connect, Connect with Extend/Mirror |
 | Same Wi-Fi discovery | Yes | Yes | Yes | |
 | USB cable | Yes | No | — | Android has no USB transport yet; Help says so. Mac Receiver connects over the network |
-| Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android seen on a phone over LTE + Tailscale. Every platform uses a typed address (Tailscale IP or MagicDNS name); none lists tailnet peers by itself |
+| Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android physically tested over LTE + Tailscale. Typed addresses are supported. Automatic sharing of a paired peer's reported Tailscale address is implemented (#77/#82); **automatic dialing of reported addresses is currently enabled only for verified Android ↔ Mac IPv4 routes** (#81), not for every receiver or address family. No automatic tailnet-wide peer directory is implemented. |
 | Add Remote Mac: Pair over Remote, and an address for a paired Mac | Yes | Yes | Yes | Android: one Address field; the Mac must have Pair over Remote open for new pairs |
 | Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac |
 | Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; seen working on a phone over LTE + Tailscale. A local Wi-Fi session that drops also falls back to Remote when the Mac has a saved address (knocks only once Bonjour no longer shows the Mac; unit-tested, not yet seen on a phone) |
@@ -92,5 +111,7 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 Small: Switched Out, Video on/off, Resync, a full Update Required screen. Medium: Streaming Profile and
 Maximum FPS, Mirror Display picker and Extend Shape, App Gesture Commands editing. Large: Custom Layout
 editor, Function Tray editor (actions, chords, sequences, names), a USB transport (Android has no usbmux;
-the planned design is Android Open Accessory, not started). Not planned: automatic tailnet peer listing on
-any platform (it would need Tailscale's local API or tokens).
+the planned design is Android Open Accessory, not started). Not planned: a tailnet-wide peer directory on any platform (it would
+need separate Tailscale discovery integration; automatically exchanging
+addresses with an **already-paired** device is a different, implemented
+feature, constrained to the verified routes described above).
