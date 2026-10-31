@@ -579,7 +579,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // gate it (see `functionGroups`). One frame per visual group (see
         // `ControlTrayGeometry.functionTrayLayout`), displaced only while a
         // temporary shortcut palette would actually collide with it.
-        let functionGroupSizes = functionGroups.map { calculatedFunctionGroupSize($0, portrait: portrait) }
+        // Landscape: every group after the first sits in a row along the bottom
+        // (`bottomRow`), so it is sized as a row too.
+        let functionGroupSizes = functionGroups.enumerated().map {
+            calculatedFunctionGroupSize($0.element, portrait: portrait || $0.offset > 0)
+        }
         // A SwiftUI stack keeps drawing at its intrinsic size when its
         // enclosing frame is smaller. Geometry clamps `layout.trayFrame`
         // to the visible screen, so reconstruct the actual rendered
@@ -611,7 +615,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             avoiding: renderedPaletteFrame,
             avoidNotch: store.preferences.avoidNotch,
             notchSide: notchSide,
-            reservedRegions: reservedRegions)
+            reservedRegions: reservedRegions,
+            bottomRow: true)
         #if DEBUG
         // Only computed when the overlay is actually on — a second,
         // avoidNotch:false pass purely for the debug visualization below.
@@ -626,7 +631,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             groupSizes: functionGroupSizes,
             avoiding: renderedPaletteFrame,
             avoidNotch: false,
-            reservedRegions: reservedRegions) : []
+            reservedRegions: reservedRegions,
+            bottomRow: true) : []
         #endif
         let occupiedFrames = [renderedMainTrayFrame]
             + functionFrames
@@ -664,7 +670,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
                 if index < functionFrames.count {
                     let frame = functionFrames[index]
-                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                    functionGroupCluster(group, axis: layout.axis == .horizontal || index > 0 ? .horizontal : .vertical)
                         .frame(width: frame.width, height: frame.height)
                         .position(x: frame.midX, y: frame.midY)
                         .opacity(autoHideOpacity)

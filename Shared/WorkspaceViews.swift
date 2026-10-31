@@ -340,10 +340,21 @@ struct WorkspaceChromeView: View {
                                 .font(.caption).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
                         }
                     }
+                    if let s = model.tileState(id)?.status, s == .offscreen || (s == .paused && model.tileState(id)?.inStageStrip != true),
+                       inputAllowed, !model.missionControlOpen {
+                        // Explicit only: un-minimizes or unhides the window on the Mac and brings it forward.
+                        Button { model.showOnMac(id) } label: {
+                            Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(workspaceChip, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("showOnMac")
+                    }
                     #if os(iOS)
                     // Showing it on the Mac (or reopening a closed window) needs control: ask in place.
                     if !inputAllowed, let s = model.tileState(id)?.status,
-                       (s == .paused && model.tileState(id)?.inStageStrip == true) || s == .closed {
+                       s == .closed || (!model.missionControlOpen && (s == .paused || s == .offscreen)) {
                         RequestControlInline()
                     }
                     #endif
@@ -530,7 +541,8 @@ struct WorkspaceChromeView: View {
                 menuRow("Minimize on Mac", "minus.rectangle", enabled: inputAllowed) { model.minimizeRemoteWindow(m.tile) }
                 menuRow("Close Window on Mac…", "xmark.square", destructive: true, enabled: inputAllowed) { confirmClose = m.tile }
                 if !inputAllowed {
-                    Text("Minimize and Close need control of the Mac.")
+                    Text(model.menus.available ? String(localized: "Request Control for more actions, like Minimize, Close and the Mac's menu bar.")
+                         : String(localized: "Request Control for more actions, like Minimize and Close."))
                         .font(.caption2).foregroundStyle(.white.opacity(0.65)).padding(.horizontal, 14).padding(.bottom, 4)
                     #if os(iOS)
                     RequestControlInline(compact: true).padding(.horizontal, 14).padding(.bottom, 6)
