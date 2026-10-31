@@ -253,6 +253,7 @@ targets:
       - Mac/DisplayModeAssignment.swift
       - Mac/DisplayHealth.swift
       - Mac/HiDPIEnforcementBackoff.swift
+      - Mac/ListenerRetryBackoff.swift
       - Mac/RouteArbitration.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
