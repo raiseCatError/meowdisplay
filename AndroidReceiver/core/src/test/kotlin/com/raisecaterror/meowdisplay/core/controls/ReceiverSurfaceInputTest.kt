@@ -39,6 +39,9 @@ class ReceiverSurfaceInputTest {
         }
         val resets = mutableListOf<CGPoint>()
         override fun workspaceViewReset(at: CGPoint) { resets += at }
+        var selectsPane = false
+        val paneTouches = mutableListOf<CGPoint>()
+        override fun workspaceTouch(at: CGPoint): Boolean { paneTouches += at; return selectsPane }
     }
 
     private val link = FakeLink()
@@ -273,6 +276,20 @@ class ReceiverSurfaceInputTest {
         assertFalse("moved: no overview", surface.threeFingerHoldDue(1.6))
         three(SurfaceTouchPhase.Ended, 1.2, dx = 240.0)
         assertTrue("the swipe went through", inputTypes().any { it.first == "gesture" })
+    }
+
+    /** Audit F9: in View Only, a tap that selects another pane is local; it never asks for control. */
+    @Test
+    fun aTapThatSelectsAPaneInViewOnlyNeverRequestsControl() {
+        surface.updateConfig(SurfaceInputConfig(allowsInput = false, senderPV = 22, smartTouchEnabled = false))
+        effects.selectsPane = true
+        tap(500.0, 300.0, 0.0)
+        assertTrue("selecting a pane is not an attempt to control the Mac", effects.blocked.isEmpty())
+        val p = effects.paneTouches.single()
+        assertTrue("normalized to the picture", p.x in 0.0..1.0 && p.y in 0.0..1.0)
+        effects.selectsPane = false
+        tap(500.0, 300.0, 1.0)
+        assertEquals("a tap in the already-selected pane still asks", 1, effects.blocked.size)
     }
 
     @Test

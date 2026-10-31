@@ -170,6 +170,10 @@ class ReceiverController(
             val ws = workspace ?: return
             if (ws.ui.value.windowMode == true) ws.resetView(WPoint(at.x, at.y))
         }
+        override fun workspaceTouch(at: CGPoint): Boolean {
+            val ws = workspace ?: return false
+            return ws.ui.value.windowMode == true && ws.selectTile(WPoint(at.x, at.y))
+        }
         override fun activityEnded() = store.scheduleAutoHide()
         override fun blockedAttempt(maximumTouchCount: Int) = noteBlockedAttempt()
     })
